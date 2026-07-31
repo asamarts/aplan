@@ -1,0 +1,24 @@
+APLAN020: a live task waiting on a `dropped` one can never legitimately start.
+The plan is deadlocked, and `check`, the gate, must say so rather than pass.
+
+```
+$ aplan check
+? 1
+error[APLAN020] C-002: is `todo` but blocker `C-001` is `dropped`: it can never legitimately start
+  --> aplan/tasks/C-002.md
+failed: 1 error(s), 0 warning(s) across 2 tasks
+
+```
+
+`ready` and `why` already knew: a dropped blocker does not satisfy a dependency.
+
+```
+$ aplan ready
+```
+
+```
+$ aplan why C-002
+C-002 is blocked by:
+  C-001 [dropped]  Abandoned approach
+
+```

@@ -1,0 +1,15 @@
+title: Graduate the widget API to stable
+kep-number: 3063
+authors:
+  - '@alice'
+  - '@bob'
+owning-sig: sig-node
+status: implemented
+creation-date: 2024-01-15
+approvers:
+  - '@dave'
+see-also:
+  - KEP-1234
+stage: beta
+metrics:
+  - widget_requests_total

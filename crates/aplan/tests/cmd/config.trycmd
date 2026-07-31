@@ -1,0 +1,9 @@
+`.aplan.yml` is read from the repo root. Here it sets `require_effort: false`, so
+the effort-less task below does *not* warn (`APLAN009` would fire without it).
+`--no-traces` keeps the sandbox self-contained.
+
+```
+$ aplan check --no-traces
+ok: 1 tasks, 0 warning(s), DAG acyclic
+
+```

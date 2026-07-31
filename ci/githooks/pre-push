@@ -1,0 +1,31 @@
+#!/usr/bin/env bash
+# Git pre-push hook: run ci/scripts/preflight.sh (the full CI gate bundle)
+# before a push reaches origin, so red never leaves the machine.
+#
+# Install (opt-in):
+#   git config core.hooksPath ci/githooks
+#
+# Skip for one push (a WIP branch):
+#   git push --no-verify
+#
+# Skip a specific gate inside the bundle:
+#   PREFLIGHT_SKIP=test git push
+
+set -euo pipefail
+
+# git passes one line per ref on stdin: <local-ref> <local-sha> <remote-ref>
+# <remote-sha>. A delete (push :branch) has the all-zero local-sha and needs no
+# checks; a create/update falls through to preflight.
+deletion_only=1
+while read -r _local_ref local_sha _remote_ref _remote_sha; do
+    if [[ "$local_sha" != "0000000000000000000000000000000000000000" ]]; then
+        deletion_only=0
+    fi
+done
+
+if [[ "$deletion_only" == "1" ]]; then
+    exit 0
+fi
+
+REPO_ROOT="$(git rev-parse --show-toplevel)"
+exec "$REPO_ROOT/ci/scripts/preflight.sh"

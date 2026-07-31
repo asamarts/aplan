@@ -1,0 +1,12 @@
+`aplan verify` opens the repository (unlike hermetic `check`). Its resolution
+behaviour, APLAN011/012/015 against real commits, is covered exhaustively by
+the git-backed corpus in `crates/aplan-e2e`; here we pin the CLI contract.
+
+A bad `--format` is rejected before anything else, so it needs no repository:
+
+```
+$ aplan verify --format bogus
+? 2
+aplan: unknown format `bogus` (expected human, json, agent, github)
+
+```

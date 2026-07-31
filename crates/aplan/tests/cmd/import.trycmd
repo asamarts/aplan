@@ -1,0 +1,97 @@
+`aplan import` is lossy by design, and says so (ADR-0012). Only non-writing
+invocations are exercised here: a writing command would leave task files inside
+this fixture directory and pollute its own input on the next run.
+
+`--dry-run` shows the whole result, including what could not be carried, and
+writes nothing. The source says `implemented`; it arrives as a `todo` tagged
+`kep:implemented`, because a claim is not proof.
+
+```
+$ aplan import kep.yaml --dry-run
+would import 1 task(s) from kep.yaml
+  KEP-3063  todo  [kep:implemented, kep:stage:beta, sig:node]  Graduate the widget API to stable
+    -> aplan/tasks/KEP-3063.md
+report:
+  provenance: KEP-3063 claims `implemented`; imported as `todo` (the claim is not proof). Close it with `aplan close KEP-3063 --evidence commit:<sha>` (kep.yaml)
+  dropped: `approvers` is not held by the task model (kep.yaml)
+  dropped: `creation-date` is not held by the task model (kep.yaml)
+  dropped: `metrics` is not held by the task model (kep.yaml)
+  dropped: `see-also` is not held by the task model (kep.yaml)
+  dropped: `authors` lists more than one; the task model holds a single `owner`, so only the first was kept (kep.yaml)
+  placement: imported tasks belong to no cut; where `require_cut_membership` is set, `check` reports APLAN022 until `--cut <milestone>` or a `cross-cutting` tag places them (kep.yaml)
+  placement: imported tasks carry no `effort_days`, because there is nothing to derive one from; `check` warns (APLAN009) until you estimate them (kep.yaml)
+(dry run: nothing was written)
+
+```
+
+Opting into `done` needs a date, because a `note` must carry the date it was
+captured (`APLAN010`) and aplan does not invent provenance. A usage error, not a
+half-written plan.
+
+```
+$ aplan import kep.yaml --implemented-as done
+? 2
+aplan: `--implemented-as done` needs `--as-of YYYY-MM-DD`: a `note` must carry the date it was captured (APLAN010), and aplan does not invent dates
+
+```
+
+The date is checked at the boundary, so a bad one cannot reach a task file.
+
+```
+$ aplan import kep.yaml --implemented-as done --as-of yesterday
+? 2
+aplan: `--as-of yesterday` is not an ISO-8601 date (YYYY-MM-DD)
+
+```
+
+An impossible calendar date is caught too, by the same predicate `APLAN010`
+judges with: a boundary check that were weaker than the rule would accept the
+date, write the file, and leave `check` to fail on it afterwards.
+
+```
+$ aplan import kep.yaml --implemented-as done --as-of 2025-02-29
+? 2
+aplan: `--as-of 2025-02-29` is not an ISO-8601 date (YYYY-MM-DD)
+
+```
+
+A flavor this build cannot read is refused by name.
+
+```
+$ aplan import kep.yaml --format backlog
+? 2
+aplan: unknown --format `backlog` (this build reads: kep)
+
+```
+
+A dry run validates the destination cut too, so a settled one is caught before
+anything is promised, let alone written. Placement guards that only ran at write
+time would leave freshly written tasks stranded in no cut behind an error saying
+nothing had happened.
+
+```
+$ aplan import kep.yaml --dry-run --cut M-done
+? 2
+aplan: `M-done` is `done`; adding an unfinished task to a settled cut would break it (APLAN007). Reopen it, or choose another cut.
+
+```
+
+An open cut previews the placement instead.
+
+```
+$ aplan import kep.yaml --dry-run --cut M-open
+would import 1 task(s) from kep.yaml
+  KEP-3063  todo  [kep:implemented, kep:stage:beta, sig:node]  Graduate the widget API to stable
+    -> aplan/tasks/KEP-3063.md
+report:
+  provenance: KEP-3063 claims `implemented`; imported as `todo` (the claim is not proof). Close it with `aplan close KEP-3063 --evidence commit:<sha>` (kep.yaml)
+  dropped: `approvers` is not held by the task model (kep.yaml)
+  dropped: `creation-date` is not held by the task model (kep.yaml)
+  dropped: `metrics` is not held by the task model (kep.yaml)
+  dropped: `see-also` is not held by the task model (kep.yaml)
+  dropped: `authors` lists more than one; the task model holds a single `owner`, so only the first was kept (kep.yaml)
+  placement: would add KEP-3063 to `M-open` (kep.yaml)
+  placement: imported tasks carry no `effort_days`, because there is nothing to derive one from; `check` warns (APLAN009) until you estimate them (kep.yaml)
+(dry run: nothing was written)
+
+```

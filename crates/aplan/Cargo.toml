@@ -1,0 +1,35 @@
+[package]
+name = "aplan"
+description = "Spec-driven plan validator: evidence-gated tasks and an acyclic dependency graph, enforceable in CI."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+homepage = "https://github.com/asamarts/aplan"
+readme = "../../README.md"
+keywords = ["planning", "tasks", "dependencies", "ci", "cli"]
+categories = ["development-tools", "command-line-utilities"]
+authors.workspace = true
+
+[[bin]]
+name = "aplan"
+path = "src/main.rs"
+
+[dependencies]
+aplan-core.workspace = true
+aplan-config.workspace = true
+aplan-output.workspace = true
+aplan-evidence.workspace = true
+aplan-interop.workspace = true
+anyhow.workspace = true
+clap.workspace = true
+serde_json.workspace = true
+
+[dev-dependencies]
+tempfile.workspace = true
+trycmd = "1.2"
+serde_json.workspace = true
+
+[lints]
+workspace = true

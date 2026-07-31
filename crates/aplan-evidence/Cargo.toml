@@ -1,0 +1,22 @@
+[package]
+name = "aplan-evidence"
+description = "The verification ladder: resolve task evidence (commit, file, test) against the git repository."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+authors.workspace = true
+
+[lints]
+workspace = true
+
+[dependencies]
+aplan-core.workspace = true
+aplan-config.workspace = true
+git2 = { version = "0.19", default-features = false }
+globset = "0.4"
+thiserror.workspace = true
+
+[dev-dependencies]
+tempfile.workspace = true

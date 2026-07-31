@@ -1,0 +1,49 @@
+`aplan critical-path` prints the longest `effort_days`-weighted chain of dependent
+tasks. Here `A -> B -> C` totals 6 days, beating the standalone `D` (5 days).
+
+```
+$ aplan critical-path
+critical path: 6.0 days across 3 task(s)
+  A           1.0d  Alpha
+  B           3.0d  Beta
+  C           2.0d  Gamma
+
+```
+
+```
+$ aplan critical-path --format json
+{
+  "schema": "aplan/critical-path/v1",
+  "tasks": [
+    {
+      "effort_days": 1.0,
+      "id": "A",
+      "status": "todo",
+      "title": "Alpha"
+    },
+    {
+      "effort_days": 3.0,
+      "id": "B",
+      "status": "todo",
+      "title": "Beta"
+    },
+    {
+      "effort_days": 2.0,
+      "id": "C",
+      "status": "todo",
+      "title": "Gamma"
+    }
+  ],
+  "total_effort_days": 6.0
+}
+
+```
+
+The diagnostic formats do not apply to a rollup; they are rejected, not collapsed:
+
+```
+$ aplan critical-path --format agent
+? 2
+aplan: `aplan critical-path` supports only `--format human` or `--format json`
+
+```

@@ -1,0 +1,10 @@
+`aplan init` scaffolds a starter `.aplan.yml`. Writing it is covered by the
+`aplan-config` unit tests (the scaffold loads as the default); here we pin the guard
+that makes it safe to run, it refuses to overwrite a policy the repo already has.
+
+```
+$ aplan init
+? 2
+aplan: .aplan.yml already exists at ./.aplan.yml; refusing to overwrite
+
+```

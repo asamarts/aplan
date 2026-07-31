@@ -1,0 +1,165 @@
+{
+  "$defs": {
+    "EvidenceConfig": {
+      "additionalProperties": false,
+      "description": "How strong a `done` task's evidence must be (`APLAN017`), and which tasks are\nexempt because nothing stronger exists.",
+      "properties": {
+        "exempt_tags": {
+          "default": null,
+          "description": "Tags that exempt a task from the requirement (a phone call, a regulator\nletter, where a dated `note` is genuinely the best evidence there is).",
+          "items": {
+            "type": "string"
+          },
+          "type": [
+            "array",
+            "null"
+          ]
+        },
+        "require_min_strength": {
+          "default": null,
+          "description": "Evidence kinds strong enough to close a task. A `done` task must carry at\nleast one of these; otherwise `APLAN017` fires. Absent leaves the rule off.",
+          "items": {
+            "$ref": "#/$defs/EvidenceKind"
+          },
+          "type": [
+            "array",
+            "null"
+          ]
+        }
+      },
+      "type": "object"
+    },
+    "EvidenceKind": {
+      "description": "What kind of proof closes a task.\n\nThe point of typing this is that \"I finished it\" is not evidence. A commit,\na URL, a committed artefact, a named test, or a dated note is.",
+      "oneOf": [
+        {
+          "const": "commit",
+          "description": "A git commit SHA in this repository.",
+          "type": "string"
+        },
+        {
+          "const": "url",
+          "description": "An external URL (a filing receipt, a regulator page, a vendor quote).",
+          "type": "string"
+        },
+        {
+          "const": "file",
+          "description": "A repo-relative path to a committed artefact (a saved PDF, a transcript).",
+          "type": "string"
+        },
+        {
+          "const": "test",
+          "description": "A named test that must pass.",
+          "type": "string"
+        },
+        {
+          "const": "note",
+          "description": "A dated human note, the weakest kind. Use when nothing better exists,\ne.g. the outcome of a phone call.",
+          "type": "string"
+        }
+      ]
+    },
+    "TestRunner": {
+      "additionalProperties": false,
+      "description": "How to list and run tests, for `aplan verify`. Both are argv vectors, spawned\nwithout a shell (HLD §5.5).",
+      "properties": {
+        "list": {
+          "description": "argv that prints the available test names to stdout, one per line. A\ntrailing `: test` / `: benchmark` (cargo's `--list` format) is stripped.",
+          "items": {
+            "type": "string"
+          },
+          "type": "array"
+        },
+        "run": {
+          "description": "argv that runs one test. Exactly one element must be [`PLACEHOLDER`]; it\nis replaced, whole, by the test name.",
+          "items": {
+            "type": "string"
+          },
+          "type": "array"
+        }
+      },
+      "required": [
+        "list",
+        "run"
+      ],
+      "type": "object"
+    }
+  },
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "additionalProperties": false,
+  "description": "The parsed `.aplan.yml`. Every field is optional: an absent key means \"use\nthe built-in default\", and a CLI flag overrides whatever is here (the CLI\nowns precedence). Unknown keys are rejected, not ignored.",
+  "properties": {
+    "detect_drift": {
+      "default": null,
+      "description": "Turn on stale-`done` drift detection (`APLAN018`): `aplan close` stamps a\ncontent fingerprint of each traced section, and `check` warns when a closed\ntask's traced section changes afterward. Off unless set.",
+      "type": [
+        "boolean",
+        "null"
+      ]
+    },
+    "evidence": {
+      "anyOf": [
+        {
+          "$ref": "#/$defs/EvidenceConfig"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "description": "Evidence-strength policy (`APLAN017`)."
+    },
+    "no_traces": {
+      "default": null,
+      "description": "Skip `traces` checking entirely. Default: `false`. The `--no-traces` flag\noverrides it.",
+      "type": [
+        "boolean",
+        "null"
+      ]
+    },
+    "require_cut_membership": {
+      "default": null,
+      "description": "Require every non-milestone task to be a member of exactly one cut\n(`APLAN022`): in exactly one milestone's `blocked_by`, unless the task is\ntagged `cross-cutting`. This makes a milestone's `done` prove the cut is\n*exhaustively* complete, not just that its listed members are. Off unless\nset; only meaningful once the plan uses milestone meta-tasks (ADR-0008).",
+      "type": [
+        "boolean",
+        "null"
+      ]
+    },
+    "require_effort": {
+      "default": null,
+      "description": "Require an `effort_days` estimate on active tasks (`APLAN009`). Default:\n`true`. The `--no-require-effort` flag overrides this to `false`.",
+      "type": [
+        "boolean",
+        "null"
+      ]
+    },
+    "root": {
+      "default": null,
+      "description": "Directory holding the plan's task files. Default: `aplan`. A relative value\nis resolved against this config file's directory, so `root: plan` means\n`<repo>/plan` wherever the command runs. The `--root` flag overrides it.",
+      "type": [
+        "string",
+        "null"
+      ]
+    },
+    "test": {
+      "anyOf": [
+        {
+          "$ref": "#/$defs/TestRunner"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "description": "The test runner for `aplan verify --execute`."
+    },
+    "traces_root": {
+      "default": null,
+      "description": "Resolve `traces` anchors (`APLAN008`) against this root. Default: the\ncurrent directory. The `--traces-root` flag overrides it.",
+      "type": [
+        "string",
+        "null"
+      ]
+    }
+  },
+  "title": "Config",
+  "type": "object"
+}

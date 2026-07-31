@@ -1,0 +1,185 @@
+{
+  "commands": [
+    {
+      "about": "Validate the plan. Fails on any error. Reads `.aplan.yml` if present; flags below override it",
+      "name": "check"
+    },
+    {
+      "about": "Resolve evidence against the git repository (L1/L2, and L3 with `--execute`). Unlike `check`, this opens the repo: a `commit` must exist and touch the task's `paths`, a `file` must exist at the cited rev, a `test` must be one the configured runner lists",
+      "name": "verify"
+    },
+    {
+      "about": "List tasks whose blockers are all `done`",
+      "name": "ready"
+    },
+    {
+      "about": "Explain what is blocking a task, transitively",
+      "name": "why"
+    },
+    {
+      "about": "Print the dependency graph as Mermaid",
+      "name": "graph"
+    },
+    {
+      "about": "Roll the plan up by phase: tasks, effort, and how many are ready",
+      "name": "summary"
+    },
+    {
+      "about": "Show the critical path: the longest `effort_days`-weighted chain of dependent tasks. Advisory, never a gate",
+      "name": "critical-path"
+    },
+    {
+      "about": "Render the plan grouped by cut (the milestones): per-cut rollups, the critical path, and cross-cutting tasks. Advisory (ADR-0009)",
+      "name": "roadmap"
+    },
+    {
+      "about": "Close a task: set it `done` and attach evidence, in place. With no `--evidence`, records the current `HEAD` commit",
+      "name": "close"
+    },
+    {
+      "about": "Import proposals from another tool's format into `aplan` tasks. Lossy by design, and says so: every field the task model cannot hold is reported (ADR-0012)",
+      "name": "import"
+    },
+    {
+      "about": "Scaffold a starter `.aplan.yml`, refusing to overwrite an existing one",
+      "name": "init"
+    },
+    {
+      "about": "Print this tool's facts as JSON: its rules, output formats, commands, and evidence kinds, generated from the code (the source for `facts.json`)",
+      "name": "facts"
+    },
+    {
+      "about": "Print the JSON Schema derived from the Rust types",
+      "name": "schema"
+    }
+  ],
+  "counts": {
+    "commands": 13,
+    "evidence_kinds": 5,
+    "formats": 4,
+    "rules": 20
+  },
+  "evidence_kinds": [
+    "commit",
+    "url",
+    "file",
+    "test",
+    "note"
+  ],
+  "exit_codes": {
+    "clean": 0,
+    "error": 1,
+    "internal": 3,
+    "usage": 2
+  },
+  "formats": [
+    "human",
+    "json",
+    "agent",
+    "github"
+  ],
+  "rules": [
+    {
+      "code": "APLAN001",
+      "severity": "error",
+      "title": "frontmatter parses and satisfies the schema"
+    },
+    {
+      "code": "APLAN002",
+      "severity": "error",
+      "title": "task ids are unique"
+    },
+    {
+      "code": "APLAN003",
+      "severity": "error",
+      "title": "blocked_by references a task that exists"
+    },
+    {
+      "code": "APLAN004",
+      "severity": "error",
+      "title": "the dependency graph is acyclic"
+    },
+    {
+      "code": "APLAN005",
+      "severity": "error",
+      "title": "done carries at least one piece of evidence"
+    },
+    {
+      "code": "APLAN006",
+      "severity": "error",
+      "title": "no task blocks itself"
+    },
+    {
+      "code": "APLAN007",
+      "severity": "error",
+      "title": "a done task does not depend on an unfinished one"
+    },
+    {
+      "code": "APLAN008",
+      "severity": "error",
+      "title": "traces anchors resolve to real headings"
+    },
+    {
+      "code": "APLAN009",
+      "severity": "warning",
+      "title": "active tasks carry an effort estimate"
+    },
+    {
+      "code": "APLAN010",
+      "severity": "error",
+      "title": "a note used as evidence carries a date"
+    },
+    {
+      "code": "APLAN011",
+      "severity": "error",
+      "title": "commit evidence resolves to a commit in this repository"
+    },
+    {
+      "code": "APLAN012",
+      "severity": "error",
+      "title": "commit evidence touches at least one of the task's paths"
+    },
+    {
+      "code": "APLAN013",
+      "severity": "error",
+      "title": "test evidence names a test the runner can find"
+    },
+    {
+      "code": "APLAN014",
+      "severity": "error",
+      "title": "test evidence names a test that passes"
+    },
+    {
+      "code": "APLAN015",
+      "severity": "error",
+      "title": "file evidence resolves at the cited rev"
+    },
+    {
+      "code": "APLAN017",
+      "severity": "error",
+      "title": "done evidence meets the configured minimum strength"
+    },
+    {
+      "code": "APLAN018",
+      "severity": "warning",
+      "title": "a closed task's traced section is unchanged since closure"
+    },
+    {
+      "code": "APLAN020",
+      "severity": "error",
+      "title": "a live task is not blocked by a dropped one"
+    },
+    {
+      "code": "APLAN021",
+      "severity": "warning",
+      "title": "a milestone has members and carries no effort or paths"
+    },
+    {
+      "code": "APLAN022",
+      "severity": "error",
+      "title": "every task is a member of exactly one cut, or is tagged cross-cutting"
+    }
+  ],
+  "schema_version": "v1",
+  "version": "0.1.0"
+}

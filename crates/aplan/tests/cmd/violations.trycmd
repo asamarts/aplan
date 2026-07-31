@@ -1,0 +1,82 @@
+`done` with no evidence, and a blocker that does not exist. Exit code 1.
+
+```
+$ aplan check
+? 1
+error[APLAN003] B-001: `blocked_by` references unknown task `GHOST`
+  --> aplan/tasks/B-001.md
+error[APLAN005] B-001: `status: done` with no `evidence`: a status is a claim, not a proof
+  --> aplan/tasks/B-001.md
+failed: 2 error(s), 0 warning(s) across 1 tasks
+
+```
+
+Every diagnostic carries an `agent_instruction` in the agent format.
+
+```
+$ aplan check --format agent
+? 1
+{
+  "diagnostics": [
+    {
+      "agent_instruction": "Either create task `GHOST` or remove it from `B-001`'s `blocked_by`.",
+      "code": "APLAN003",
+      "file": "aplan/tasks/B-001.md",
+      "message": "`blocked_by` references unknown task `GHOST`",
+      "severity": "error",
+      "task": "B-001"
+    },
+    {
+      "agent_instruction": "Add at least one evidence entry (commit, url, file, test, or a dated note), or move the task back to `in_progress`.",
+      "code": "APLAN005",
+      "file": "aplan/tasks/B-001.md",
+      "message": "`status: done` with no `evidence`: a status is a claim, not a proof",
+      "severity": "error",
+      "task": "B-001"
+    }
+  ],
+  "errors": 2,
+  "schema": "aplan/agent-report/v1",
+  "tasks_checked": 1,
+  "warnings": 0
+}
+
+```
+
+```
+$ aplan check --format json
+? 1
+{
+  "diagnostics": [
+    {
+      "code": "APLAN003",
+      "file": "aplan/tasks/B-001.md",
+      "message": "`blocked_by` references unknown task `GHOST`",
+      "severity": "error",
+      "task": "B-001"
+    },
+    {
+      "code": "APLAN005",
+      "file": "aplan/tasks/B-001.md",
+      "message": "`status: done` with no `evidence`: a status is a claim, not a proof",
+      "severity": "error",
+      "task": "B-001"
+    }
+  ],
+  "errors": 2,
+  "schema": "aplan/check-report/v1",
+  "tasks_checked": 1,
+  "warnings": 0
+}
+
+```
+
+Workflow-command annotations for inline PR review.
+
+```
+$ aplan check --format github
+? 1
+::error file=aplan/tasks/B-001.md,title=APLAN003 B-001::`blocked_by` references unknown task `GHOST`
+::error file=aplan/tasks/B-001.md,title=APLAN005 B-001::`status: done` with no `evidence`: a status is a claim, not a proof
+
+```

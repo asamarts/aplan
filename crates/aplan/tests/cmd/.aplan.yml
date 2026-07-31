@@ -1,0 +1,6 @@
+# Isolates the trycmd fixture plans below from this repo's own `.aplan.yml`.
+# `find_config` walks up the ancestors and stops at the first `.aplan.yml`, so
+# this one is found before the repo root's: a sandboxed test plan is validated
+# with default policy, not aplan's own, and opt-in rules (e.g. APLAN022,
+# `require_cut_membership`) do not leak into fixtures that never opted in.
+require_cut_membership: false

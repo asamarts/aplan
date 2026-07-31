@@ -1,0 +1,34 @@
+Exit code 2 is reserved for usage and internal failure, as distinct from a plan
+that fails to validate (1).
+
+A plan root that does not exist used to load as an empty, *clean* plan, so a
+renamed directory left CI green forever while checking nothing.
+
+```
+$ aplan --root nope check
+? 2
+aplan: plan root `nope` is not a directory, nothing would be checked. Pass `--root <dir>` to point at your plan.
+
+```
+
+```
+$ aplan check --format toml
+? 2
+aplan: unknown format `toml` (expected human, json, agent, github)
+
+```
+
+```
+$ aplan why NOT-A-TASK
+? 2
+aplan: unknown task `NOT-A-TASK`
+
+```
+
+A clean plan still validates, so the fixture itself is sound.
+
+```
+$ aplan check
+ok: 1 tasks, 0 warning(s), DAG acyclic
+
+```

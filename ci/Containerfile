@@ -1,0 +1,87 @@
+# Self-hosted GitHub Actions runner image for aplan CI (the pre-public repository-boundary decision).
+# Minimal on purpose: aplan's gates are pure cargo, so this carries only the
+# Rust toolchain, git, a C toolchain (for git2's vendored libgit2, which aplan
+# builds with default-features = false, so no OpenSSL), and the runner agent.
+FROM debian:bookworm-slim
+
+ARG RUNNER_VERSION=2.334.0
+ARG RUST_VERSION=stable
+ARG GH_VERSION=2.63.2
+
+# System packages. libicu72 + zlib1g are what the runner agent's .NET host and
+# ./bin/installdependencies.sh need; build-essential + git + pkg-config + zlib1g-dev
+# cover aplan's only -sys deps (libgit2-sys vendors libgit2 via cc; libz-sys links
+# zlib). No Node, jq, or OpenSSL: aplan's git2 is default-features = false, so the
+# dependency tree pulls no openssl-sys.
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    build-essential \
+    ca-certificates \
+    curl \
+    git \
+    pkg-config \
+    libicu72 \
+    zlib1g \
+    zlib1g-dev \
+    musl-tools \
+    && rm -rf /var/lib/apt/lists/*
+
+# Rust toolchain. Baked into the image so it is the single source of truth for
+# the version (the pre-public repository-boundary decision): a Rust bump is a deliberate image rebuild, never a
+# silent per-job download. CARGO_HOME/registry and CARGO_TARGET_DIR are mounted
+# as persistent volumes at runtime (ci/runner/setup.sh); both directories are
+# created and owned by `runner` here so podman's first-use copy-up hands the
+# volume that ownership.
+ENV RUSTUP_HOME=/usr/local/rustup \
+    CARGO_HOME=/usr/local/cargo \
+    CARGO_TARGET_DIR=/home/runner/cargo-target \
+    PATH="/usr/local/cargo/bin:${PATH}"
+
+# The musl target builds the release artifact (`ci/scripts/release.sh`, A1-028).
+# It is statically linked, so the published binary runs on a consumer's runner
+# whatever glibc that image ships, rather than on this image's alone; `musl-tools`
+# above provides the linker it needs.
+RUN curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs \
+    | sh -s -- -y --default-toolchain ${RUST_VERSION} \
+    && rustup component add clippy rustfmt \
+    && rustup target add x86_64-unknown-linux-musl
+
+# The GitHub CLI, used by the release workflow to publish a release and upload its
+# assets. Pinned and downloaded the same way the runner agent below is, rather
+# than added as an apt source, so the image has one fewer moving repository and
+# the version is visible here.
+RUN DPKG_ARCH=$(dpkg --print-architecture) \
+    && curl -fsSL -o gh.tar.gz \
+       "https://github.com/cli/cli/releases/download/v${GH_VERSION}/gh_${GH_VERSION}_linux_${DPKG_ARCH}.tar.gz" \
+    && tar -xzf gh.tar.gz \
+    && install -m 0755 "gh_${GH_VERSION}_linux_${DPKG_ARCH}/bin/gh" /usr/local/bin/gh \
+    && rm -rf gh.tar.gz "gh_${GH_VERSION}_linux_${DPKG_ARCH}"
+
+# Non-root runner user. Pre-create every path a persistent volume mounts on
+# (config, cargo registry, CARGO_TARGET_DIR) and chown them to `runner`, so
+# podman's first-use copy-up hands each fresh volume that ownership. Without this
+# the registry/target volumes mount as root-owned and every cargo step fails with
+# a permission error (aplan runs no `cargo install`, so nothing else creates the
+# registry directory in the image first).
+RUN useradd -m -d /home/runner -s /bin/bash runner \
+    && mkdir -p /home/runner/cargo-target /home/runner/_config /usr/local/cargo/registry \
+    && chown -R runner:runner /home/runner /usr/local/cargo
+
+# GitHub Actions runner agent.
+WORKDIR /home/runner/actions-runner
+RUN DPKG_ARCH=$(dpkg --print-architecture) \
+    && case "$DPKG_ARCH" in amd64) ARCH=x64 ;; arm64) ARCH=arm64 ;; *) ARCH="$DPKG_ARCH" ;; esac \
+    && curl -fsSL -o runner.tar.gz \
+       "https://github.com/actions/runner/releases/download/v${RUNNER_VERSION}/actions-runner-linux-${ARCH}-${RUNNER_VERSION}.tar.gz" \
+    && tar xzf runner.tar.gz \
+    && rm runner.tar.gz \
+    && ./bin/installdependencies.sh \
+    && chown -R runner:runner /home/runner \
+    && chown -R runner:runner /usr/local/cargo /usr/local/rustup
+
+COPY runner/entrypoint.sh /home/runner/entrypoint.sh
+RUN chmod +x /home/runner/entrypoint.sh
+
+USER runner
+WORKDIR /home/runner/actions-runner
+
+ENTRYPOINT ["/home/runner/entrypoint.sh"]

@@ -1,0 +1,63 @@
+A plan that satisfies every invariant: `check` is clean, and the other
+commands answer from it.
+
+```
+$ aplan check
+ok: 2 tasks, 0 warning(s), DAG acyclic
+
+```
+
+```
+$ aplan ready
+A-002  Ship the validator (3d)
+
+```
+
+```
+$ aplan why A-002
+A-002 is ready: nothing blocks it
+
+```
+
+```
+$ aplan graph
+graph TD
+    A-001(["A-001: Ship the loader"])
+    A-002["A-002: Ship the validator"]
+    A-001 --> A-002
+
+```
+
+The schema is derived from the Rust types, so pin only its shape here; drift
+is caught by `cargo xtask gen-schema --check`, not by a snapshot.
+
+```
+$ aplan schema
+{
+  "$defs": {
+...
+  "required": [
+    "id",
+    "title",
+    "phase",
+    "status"
+  ],
+  "title": "Task",
+  "type": "object"
+}
+
+```
+
+`aplan facts` prints the tool's generated facts as JSON. Its contents (the rule,
+format, and command lists, and their counts) are pinned by `tests/facts.rs`
+against `facts.json`; here we only confirm the command runs and emits an object,
+so this case never needs updating when a rule is added.
+
+```
+$ aplan facts
+{
+  "commands": [
+...
+}
+
+```

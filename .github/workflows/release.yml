@@ -1,0 +1,63 @@
+name: Release
+
+on:
+  push:
+    tags: ["v*"]
+  workflow_dispatch:
+
+# Runs on the self-hosted runner like every other job (the pre-public repository-boundary decision), so cutting a
+# release consumes no GitHub-hosted minutes. That is also why this publishes one
+# Linux x86_64 binary rather than the multi-platform set `dist` would build:
+# macOS and Windows cannot be built here, and adding them would mean hosted
+# runners and the billing that decision removed. Multi-platform packaging waits
+# for a real distribution task (HLD Section 17).
+env:
+  CARGO_TERM_COLOR: always
+  RUSTFLAGS: -D warnings
+
+permissions:
+  contents: write # create the release and upload its asset
+
+jobs:
+  release:
+    name: build + publish
+    runs-on: [self-hosted, linux, aplan]
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v7
+
+      # The artifact is statically linked (musl), so it runs on a consumer's
+      # runner whatever glibc that image ships. `release.sh` refuses a tag that
+      # disagrees with `[workspace.package].version`, checks the binary is really
+      # static, and confirms it reports the version it was built for, so a bad
+      # release fails here rather than in someone else's CI.
+      - name: build the release artifact
+        env:
+          TAG: ${{ github.ref_type == 'tag' && github.ref_name || '' }}
+        run: ci/scripts/release.sh
+
+      # A release is a claim about a commit, so publish the checksum beside the
+      # archive: it is what lets the GitHub Action (A1-003) pin an exact artifact
+      # rather than trusting whatever the URL serves.
+      - name: publish the release
+        if: github.ref_type == 'tag'
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TAG: ${{ github.ref_name }}
+        run: |
+          # Re-runnable on purpose: a re-dispatched release should replace its
+          # assets rather than fail with "already exists", which tells the
+          # operator nothing about whether the artifact is current.
+          if gh release view "$TAG" --repo "$GITHUB_REPOSITORY" >/dev/null 2>&1; then
+            echo "==> Release $TAG exists; replacing its assets"
+            gh release upload "$TAG" \
+              --repo "$GITHUB_REPOSITORY" \
+              --clobber \
+              dist/*.tar.gz dist/*.sha256
+          else
+            gh release create "$TAG" \
+              --repo "$GITHUB_REPOSITORY" \
+              --title "$TAG" \
+              --generate-notes \
+              dist/*.tar.gz dist/*.sha256
+          fi

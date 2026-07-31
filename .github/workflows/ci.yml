@@ -1,0 +1,82 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+  workflow_dispatch:
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+# Every job runs on the self-hosted runner (the pre-public repository-boundary decision): zero GitHub-hosted
+# minutes, so no Actions billing. The runner image bakes the Rust toolchain and
+# the caches live in persistent volumes, so there is no `dtolnay/rust-toolchain`
+# and no `Swatinem/rust-cache` step; the checks are `ci/scripts/*.sh`, the same
+# scripts the local pre-push hook runs. If the runner is offline, jobs queue as
+# pending (unbilled) until it returns.
+env:
+  CARGO_TERM_COLOR: always
+  RUSTFLAGS: -D warnings
+
+# Least privilege: the jobs only read the repo and post annotations via workflow
+# commands (no API writes), so the token needs nothing beyond contents: read. On a
+# self-hosted runner the token is exposed to the box, so keep its scope minimal.
+permissions:
+  contents: read
+
+jobs:
+  test:
+    name: build + test
+    runs-on: [self-hosted, linux, aplan]
+    timeout-minutes: 30  # bound a hang: one runner, so a stuck job blocks all CI
+    steps:
+      - uses: actions/checkout@v7
+      - name: fmt
+        run: ci/scripts/fmt.sh
+      - name: clippy
+        run: ci/scripts/clippy.sh
+      - name: test
+        run: ci/scripts/test.sh
+
+  spec:
+    name: spec drift
+    runs-on: [self-hosted, linux, aplan]
+    timeout-minutes: 30  # bound a hang: one runner, so a stuck job blocks all CI
+    steps:
+      - uses: actions/checkout@v7
+      # The keystones. If the Rust types and the committed JSON Schema disagree,
+      # or the committed ROADMAP.status.md and the plan disagree, the artifact is
+      # documentation that lies. Fail rather than warn.
+      - name: schema + roadmap are generated, not hand-written
+        run: ci/scripts/spec.sh
+
+  style:
+    name: house style
+    runs-on: [self-hosted, linux, aplan]
+    timeout-minutes: 30  # bound a hang: one runner, so a stuck job blocks all CI
+    steps:
+      - uses: actions/checkout@v7
+      # No typographic tells: the repo stays plain-ASCII so its prose does not
+      # read as machine-generated. Functional Unicode is left alone.
+      - name: no typographic tells
+        run: ci/scripts/style.sh
+
+  dogfood:
+    name: aplan lints its own plan
+    runs-on: [self-hosted, linux, aplan]
+    timeout-minutes: 30  # bound a hang: one runner, so a stuck job blocks all CI
+    steps:
+      # `fetch-depth: 0` gives `aplan verify` the full history it needs to
+      # resolve `commit`/`file` evidence to real objects; a shallow clone would
+      # make a valid old SHA look unresolvable.
+      - uses: actions/checkout@v7
+        with:
+          fetch-depth: 0
+      # `aplan check` (annotations + human summary) and `aplan verify`, on this
+      # repo's own plan, exercising the defaults users get. A plan tool whose own
+      # plan does not validate has no business shipping.
+      - name: aplan check + verify
+        run: ci/scripts/dogfood.sh

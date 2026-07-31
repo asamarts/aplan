@@ -1,0 +1,21 @@
+A task with `status: blocked` is explicitly parked. It has no unmet *graph*
+blockers, so it used to be announced as ready, the tool contradicting its own
+plan. Only the genuinely workable task is listed.
+
+```
+$ aplan ready
+D-002  Actually workable (2d)
+
+```
+
+```
+$ aplan why D-001
+D-001 is `blocked`: explicitly parked, not waiting on the graph
+
+```
+
+```
+$ aplan check
+ok: 2 tasks, 0 warning(s), DAG acyclic
+
+```

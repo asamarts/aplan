@@ -1,0 +1,37 @@
+`aplan close` sets a task `done` and attaches evidence, in place. Its write path
+(surgical, body-preserving) is covered by the `aplan-core` unit tests; here we pin
+the CLI guards, none of which write.
+
+An unknown task is refused:
+
+```
+$ aplan close MISSING --evidence commit:abc1234
+? 2
+aplan: unknown task `MISSING`
+
+```
+
+`note` needs a dated `captured`, so `close` refuses it (add notes by hand):
+
+```
+$ aplan close A-001 --evidence note:phonecall
+? 2
+aplan: `note` evidence needs a `captured` date; add it by hand rather than via `close`
+
+```
+
+An unknown evidence kind, or a malformed argument, is refused:
+
+```
+$ aplan close A-001 --evidence bogus:x
+? 2
+aplan: unknown evidence kind `bogus` (commit, test, file, url)
+
+```
+
+```
+$ aplan close A-001 --evidence notacolon
+? 2
+aplan: evidence must be `kind:ref` (got `notacolon`)
+
+```

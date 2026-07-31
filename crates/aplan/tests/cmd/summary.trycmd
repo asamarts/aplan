@@ -1,0 +1,41 @@
+`aplan summary` rolls the plan up by phase: tasks, how many are done, total
+estimated effort, and how many tasks are ready to pick up now.
+
+```
+$ aplan summary
+phase  tasks  done  effort
+    0      2     1    3.0d
+    1      1     0    3.0d
+total      3     1    6.0d
+
+ready: 1
+
+```
+
+The same data machine-readable (sorted keys, so it is stable):
+
+```
+$ aplan summary --format json
+{
+  "phases": [
+    {
+      "done": 1,
+      "effort_days": 3.0,
+      "phase": 0,
+      "tasks": 2
+    },
+    {
+      "done": 0,
+      "effort_days": 3.0,
+      "phase": 1,
+      "tasks": 1
+    }
+  ],
+  "ready": 1,
+  "schema": "aplan/summary/v1",
+  "total_done": 1,
+  "total_effort_days": 6.0,
+  "total_tasks": 3
+}
+
+```

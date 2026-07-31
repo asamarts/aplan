@@ -1,0 +1,28 @@
+One task file does not parse. `check` reports it, and so must the commands
+that merely *answer questions about* the plan: a partial answer that looks
+whole is the quiet lie this tool exists to prevent.
+
+```
+$ aplan check
+? 1
+error[APLAN001]: invalid YAML frontmatter: did not find expected ',' or ']' at line 3 column 6, while parsing a flow sequence at line 2 column 8
+  --> aplan/tasks/E-002.md
+failed: 1 error(s), 0 warning(s) across 1 tasks
+
+```
+
+```
+$ aplan ready
+? 1
+aplan: 1 task file(s) failed to load, any answer would be incomplete. Run `aplan check` for details:
+  APLAN001: invalid YAML frontmatter: did not find expected ',' or ']' at line 3 column 6, while parsing a flow sequence at line 2 column 8 (aplan/tasks/E-002.md)
+
+```
+
+```
+$ aplan graph
+? 1
+aplan: 1 task file(s) failed to load, any answer would be incomplete. Run `aplan check` for details:
+  APLAN001: invalid YAML frontmatter: did not find expected ',' or ']' at line 3 column 6, while parsing a flow sequence at line 2 column 8 (aplan/tasks/E-002.md)
+
+```

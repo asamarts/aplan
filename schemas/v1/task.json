@@ -1,0 +1,179 @@
+{
+  "$defs": {
+    "Evidence": {
+      "additionalProperties": false,
+      "description": "A single piece of proof attached to a task.",
+      "properties": {
+        "captured": {
+          "description": "ISO-8601 date the evidence was captured. Required for `note`, because an\nundated note is a rumour.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "kind": {
+          "$ref": "#/$defs/EvidenceKind",
+          "description": "How to interpret `reference`."
+        },
+        "ref": {
+          "description": "The pointer: a commit SHA, a URL, a repo-relative path, a test name, or\nthe note text itself.",
+          "type": "string"
+        }
+      },
+      "required": [
+        "kind",
+        "ref"
+      ],
+      "type": "object"
+    },
+    "EvidenceKind": {
+      "description": "What kind of proof closes a task.\n\nThe point of typing this is that \"I finished it\" is not evidence. A commit,\na URL, a committed artefact, a named test, or a dated note is.",
+      "oneOf": [
+        {
+          "const": "commit",
+          "description": "A git commit SHA in this repository.",
+          "type": "string"
+        },
+        {
+          "const": "url",
+          "description": "An external URL (a filing receipt, a regulator page, a vendor quote).",
+          "type": "string"
+        },
+        {
+          "const": "file",
+          "description": "A repo-relative path to a committed artefact (a saved PDF, a transcript).",
+          "type": "string"
+        },
+        {
+          "const": "test",
+          "description": "A named test that must pass.",
+          "type": "string"
+        },
+        {
+          "const": "note",
+          "description": "A dated human note, the weakest kind. Use when nothing better exists,\ne.g. the outcome of a phone call.",
+          "type": "string"
+        }
+      ]
+    },
+    "Status": {
+      "description": "Lifecycle of a task. `Done` is the only status that requires evidence.",
+      "oneOf": [
+        {
+          "const": "todo",
+          "description": "Not started. Eligible to be worked once its blockers clear.",
+          "type": "string"
+        },
+        {
+          "const": "in_progress",
+          "description": "Actively being worked.",
+          "type": "string"
+        },
+        {
+          "const": "blocked",
+          "description": "Explicitly parked for a reason outside the dependency graph.",
+          "type": "string"
+        },
+        {
+          "const": "done",
+          "description": "Complete. Requires at least one `evidence` entry.",
+          "type": "string"
+        },
+        {
+          "const": "dropped",
+          "description": "Abandoned. Kept for the record rather than deleted.",
+          "type": "string"
+        }
+      ]
+    }
+  },
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "additionalProperties": false,
+  "description": "One unit of work. Serialised as YAML frontmatter in a markdown file under\nthe configured tasks glob; the markdown body is free prose and is not parsed.",
+  "properties": {
+    "blocked_by": {
+      "description": "Task IDs that must be `done` before this one can start.",
+      "items": {
+        "type": "string"
+      },
+      "type": "array"
+    },
+    "effort_days": {
+      "description": "Estimated effort in days. Typed so phases can be rolled up. Non-negative:\na negative estimate is meaningless and would corrupt a rollup.",
+      "format": "double",
+      "minimum": 0.0,
+      "type": [
+        "number",
+        "null"
+      ]
+    },
+    "evidence": {
+      "description": "Proof of completion. Must be non-empty when `status: done`.",
+      "items": {
+        "$ref": "#/$defs/Evidence"
+      },
+      "type": "array"
+    },
+    "id": {
+      "description": "Stable identifier, unique across the plan. Convention: `P<phase>-<nnn>`.",
+      "type": "string"
+    },
+    "owner": {
+      "description": "Who owns it. Absent means unassigned.",
+      "type": [
+        "string",
+        "null"
+      ]
+    },
+    "paths": {
+      "description": "Repo-relative globs naming the files this task is responsible for.\n\nThis is what lets `aplan verify` ask whether a cited `commit` actually\ntouches anything the task claims (`APLAN012`, L2 \"Relevant\"), without it,\na commit SHA is a citation no one can bind to the task (HLD §5.2). Empty\nmeans relevance is unverifiable, not that everything is fair game.",
+      "items": {
+        "type": "string"
+      },
+      "type": "array"
+    },
+    "phase": {
+      "description": "Phase number. Used for rollups and ordering, not for gating.",
+      "format": "uint32",
+      "minimum": 0,
+      "type": "integer"
+    },
+    "status": {
+      "$ref": "#/$defs/Status",
+      "description": "Lifecycle status."
+    },
+    "tags": {
+      "description": "Free-form labels.",
+      "items": {
+        "type": "string"
+      },
+      "type": "array"
+    },
+    "title": {
+      "description": "One line. What done looks like, not what the work is.",
+      "type": "string"
+    },
+    "trace_fingerprints": {
+      "additionalProperties": {
+        "type": "string"
+      },
+      "description": "Content fingerprints of `traces` anchors, captured when the task was closed\n(`aplan close`, with `detect_drift` on). Keyed by the full trace string.\n`APLAN018` fires when a `done` task's traced section no longer matches its\nstamp. Absent means unverifiable, not a violation (zero false positives).",
+      "type": "object"
+    },
+    "traces": {
+      "description": "Anchors this task resolves, as `path/to/doc.md#anchor`. Closing the task\nobliges you to update that anchor, this is the link that stops a\nresearch document and a plan from silently diverging.",
+      "items": {
+        "type": "string"
+      },
+      "type": "array"
+    }
+  },
+  "required": [
+    "id",
+    "title",
+    "phase",
+    "status"
+  ],
+  "title": "Task",
+  "type": "object"
+}

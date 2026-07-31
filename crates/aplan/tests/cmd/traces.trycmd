@@ -1,0 +1,21 @@
+APLAN008 resolves `traces` anchors against the repo root by default. It used to
+default to *off*, so `check` printed `ok` while silently skipping one of the ten
+invariants it advertises.
+
+```
+$ aplan check
+? 1
+error[APLAN008] F-002: `traces` target `NOPE.md` does not exist
+  --> aplan/tasks/F-002.md
+failed: 1 error(s), 0 warning(s) across 2 tasks
+
+```
+
+Skipping the check is now something you ask for, not something that happens to
+you.
+
+```
+$ aplan check --no-traces
+ok: 2 tasks, 0 warning(s), DAG acyclic
+
+```
