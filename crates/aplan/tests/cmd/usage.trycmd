@@ -14,7 +14,7 @@ aplan: plan root `nope` is not a directory, nothing would be checked. Pass `--ro
 ```
 $ aplan check --format toml
 ? 2
-aplan: unknown format `toml` (expected human, json, agent, github)
+aplan: unknown format `toml` (expected human, json, agent, github, sarif)
 
 ```
 

@@ -7,6 +7,7 @@
 //! - **agent**, every diagnostic carries an `agent_instruction` a coding agent
 //!   can act on without reading the source;
 //! - **github**, workflow-command annotations, so a PR shows the failure inline;
+//! - **sarif**, SARIF 2.1.0, so code-scanning dashboards ingest the same report;
 //! - **mermaid**, a *generated* dependency graph. Never hand-edit a view.
 
 use std::borrow::Cow;
@@ -14,7 +15,7 @@ use std::fmt::Write as _;
 use std::io::Write as _;
 
 use aplan_core::{
-    CriticalPath, Cut, Diagnostic, Graph, Report, Roadmap, RoadmapTask, Severity, Summary,
+    CriticalPath, Cut, Diagnostic, Graph, Report, Roadmap, RoadmapTask, Rule, Severity, Summary,
 };
 
 aplan_core::str_enum! {
@@ -27,6 +28,7 @@ aplan_core::str_enum! {
         Json = "json",
         Agent = "agent",
         Github = "github",
+        Sarif = "sarif",
     }
 }
 
@@ -95,6 +97,127 @@ fn render_kind(report: &Report, format: Format, kind: Kind) -> std::io::Result<(
         Format::Json => render_json(report, false, kind.json_schema()),
         Format::Agent => render_json(report, true, "aplan/agent-report/v1"),
         Format::Github => render_github(report),
+        Format::Sarif => render_sarif(report),
+    }
+}
+
+/// SARIF 2.1.0, the interchange format static-analysis dashboards already read
+/// (GitHub code scanning above all).
+///
+/// A pure formatter over the same [`Report`]: it adds no rule and no evidence,
+/// only a consumer. The rule catalog is built from [`Rule::ALL`] rather than
+/// from the diagnostics present in this run, so a result's `ruleId` always
+/// resolves to a described rule, and a clean run still tells a dashboard what
+/// this tool checks.
+fn render_sarif(report: &Report) -> std::io::Result<()> {
+    let mut out = std::io::stdout().lock();
+    writeln!(
+        out,
+        "{}",
+        serde_json::to_string_pretty(&sarif_document(report))?
+    )
+}
+
+/// The SARIF document for a report, split from the writer so a test can assert
+/// against the value rather than scrape stdout.
+fn sarif_document(report: &Report) -> serde_json::Value {
+    let rules: Vec<serde_json::Value> = Rule::ALL
+        .iter()
+        .map(|r| {
+            serde_json::json!({
+                "id": r.code(),
+                "name": r.code(),
+                "shortDescription": { "text": r.title() },
+                "defaultConfiguration": { "level": sarif_level(r.severity()) },
+                "properties": { "tags": ["plan", "evidence"] },
+            })
+        })
+        .collect();
+
+    let results: Vec<serde_json::Value> = report
+        .diagnostics
+        .iter()
+        .map(|d| {
+            let mut result = serde_json::json!({
+                "ruleId": d.code,
+                "level": sarif_level(d.severity),
+                "message": { "text": sarif_message(d) },
+            });
+            // A result without a location is legal SARIF, and honest: some
+            // diagnostics are about the plan as a whole, not one file.
+            if let Some(file) = &d.file {
+                result["locations"] = serde_json::json!([{
+                    "physicalLocation": {
+                        // SARIF URIs are forward-slash separated and
+                        // repo-relative, whatever the host's separator is.
+                        "artifactLocation": { "uri": sarif_uri(file) },
+                        // aplan reports whole files, not spans; line 1 is the
+                        // convention for "this file", and claiming a precise
+                        // line the tool did not compute would be a lie a
+                        // dashboard would render as fact.
+                        "region": { "startLine": 1 },
+                    }
+                }]);
+            }
+            result
+        })
+        .collect();
+
+    serde_json::json!({
+        "$schema": "https://raw.githubusercontent.com/oasis-tcs/sarif-spec/main/sarif-2.1/schema/sarif-schema-2.1.0.json",
+        "version": "2.1.0",
+        "runs": [{
+            "tool": {
+                "driver": {
+                    "name": "aplan",
+                    "informationUri": "https://github.com/asamarts/aplan",
+                    "semanticVersion": env!("CARGO_PKG_VERSION"),
+                    "version": env!("CARGO_PKG_VERSION"),
+                    "rules": rules,
+                }
+            },
+            "results": results,
+        }],
+    })
+}
+
+/// SARIF's level vocabulary. `note` and `none` exist but aplan has only two
+/// severities, so mapping is total and needs no fallback.
+fn sarif_level(severity: Severity) -> &'static str {
+    match severity {
+        Severity::Error => "error",
+        Severity::Warning => "warning",
+    }
+}
+
+/// The message a dashboard shows: the diagnostic, prefixed by the task it
+/// concerns, since a SARIF result carries no `task` field of its own.
+fn sarif_message(d: &Diagnostic) -> String {
+    match &d.task {
+        Some(task) => format!("{task}: {}", d.message),
+        None => d.message.clone(),
+    }
+}
+
+/// A SARIF artifact URI: forward slashes on every platform.
+///
+/// A relative path stays a relative URI reference, which is what a code-scanning
+/// dashboard wants, because it maps results onto the repository by that path.
+/// An absolute path becomes a proper `file://` URI rather than a bare path:
+/// joining its components naively produced `//tmp/...`, a malformed URI that a
+/// consumer would either reject or mis-locate.
+fn sarif_uri(path: &std::path::Path) -> String {
+    let joined = path
+        .components()
+        .filter(|c| !matches!(c, std::path::Component::RootDir))
+        .map(|c| c.as_os_str().to_string_lossy())
+        .collect::<Vec<_>>()
+        .join("/");
+
+    if path.is_absolute() {
+        format!("file:///{joined}")
+    } else {
+        joined
     }
 }
 
@@ -743,5 +866,130 @@ mod tests {
             "versionless cut shows `?` in the overview"
         );
         assert!(md.contains("## ? Loose"), "and in the heading");
+    }
+}
+
+#[cfg(test)]
+mod sarif_tests {
+    use super::*;
+    use aplan_core::code;
+
+    fn report() -> Report {
+        Report {
+            tasks_checked: 2,
+            diagnostics: vec![
+                Diagnostic::error(
+                    code::DONE_WITHOUT_EVIDENCE,
+                    "`status: done` with no `evidence`",
+                )
+                .with_task("S-1")
+                .with_file(std::path::Path::new("plan/tasks/S-1.md")),
+                Diagnostic::warning(code::MISSING_EFFORT, "no `effort_days` estimate")
+                    .with_task("S-2"),
+            ],
+        }
+    }
+
+    /// The acceptance criterion, machine-checked rather than asserted: the
+    /// document really is SARIF 2.1.0. The schema is vendored under
+    /// `tests/data/` so this stays hermetic; a gate that needs the network is a
+    /// gate that fails when the network does.
+    #[test]
+    fn the_document_validates_against_the_official_sarif_schema() {
+        let schema_path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("tests/data/sarif-2.1.0.schema.json");
+        let schema: serde_json::Value =
+            serde_json::from_str(&std::fs::read_to_string(&schema_path).expect("vendored schema"))
+                .expect("schema is JSON");
+        let validator = jsonschema::validator_for(&schema).expect("schema compiles");
+
+        let doc = sarif_document(&report());
+        let errors: Vec<String> = validator.iter_errors(&doc).map(|e| e.to_string()).collect();
+        assert!(
+            errors.is_empty(),
+            "not valid SARIF 2.1.0:\n{}",
+            errors.join("\n")
+        );
+    }
+
+    /// An empty run is the common case in a healthy repository, and it must
+    /// still be a valid document that tells a dashboard what this tool checks.
+    #[test]
+    fn a_clean_report_is_still_valid_and_still_carries_the_rule_catalog() {
+        let clean = Report {
+            diagnostics: vec![],
+            tasks_checked: 5,
+        };
+        let doc = sarif_document(&clean);
+        assert_eq!(doc["runs"][0]["results"].as_array().unwrap().len(), 0);
+        assert_eq!(
+            doc["runs"][0]["tool"]["driver"]["rules"]
+                .as_array()
+                .unwrap()
+                .len(),
+            Rule::ALL.len(),
+            "the catalog is every rule, not just the ones that fired"
+        );
+    }
+
+    #[test]
+    fn every_result_rule_id_resolves_to_a_catalogued_rule() {
+        // A `ruleId` with no matching rule renders in a dashboard as an
+        // unexplained code, which is worse than no result at all.
+        let doc = sarif_document(&report());
+        let ids: Vec<&str> = doc["runs"][0]["tool"]["driver"]["rules"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|r| r["id"].as_str().unwrap())
+            .collect();
+        for result in doc["runs"][0]["results"].as_array().unwrap() {
+            let id = result["ruleId"].as_str().unwrap();
+            assert!(ids.contains(&id), "ruleId {id} is not in the catalog");
+        }
+    }
+
+    #[test]
+    fn a_relative_path_stays_a_relative_uri_and_an_absolute_one_becomes_file() {
+        // A dashboard maps a result onto the repository by a relative URI, so a
+        // relative path must stay one. An absolute path is not repo-relative and
+        // cannot be faked into one, so it is emitted as a well-formed `file://`
+        // URI instead of the malformed `//tmp/...` a naive join produced.
+        assert_eq!(
+            sarif_uri(std::path::Path::new("aplan/tasks/A-1.md")),
+            "aplan/tasks/A-1.md"
+        );
+        assert_eq!(
+            sarif_uri(std::path::Path::new("/tmp/plan/tasks/A-1.md")),
+            "file:///tmp/plan/tasks/A-1.md"
+        );
+        // The original bug: a bare `//tmp/...`, which is a network-path URI
+        // reference, not the file location meant.
+        assert!(!sarif_uri(std::path::Path::new("/tmp/a.md")).starts_with("//"));
+    }
+
+    #[test]
+    fn severity_and_location_survive_the_mapping() {
+        let doc = sarif_document(&report());
+        let results = doc["runs"][0]["results"].as_array().unwrap();
+
+        assert_eq!(results[0]["level"], "error");
+        assert_eq!(results[0]["ruleId"], code::DONE_WITHOUT_EVIDENCE);
+        assert_eq!(
+            results[0]["locations"][0]["physicalLocation"]["artifactLocation"]["uri"],
+            "plan/tasks/S-1.md"
+        );
+        // The task id leads the message, because a SARIF result has no field for it.
+        assert!(
+            results[0]["message"]["text"]
+                .as_str()
+                .unwrap()
+                .starts_with("S-1: ")
+        );
+
+        assert_eq!(results[1]["level"], "warning");
+        // A diagnostic with no file is legal SARIF and honest: it is about the
+        // plan, not a location in it.
+        assert!(results[1].get("locations").is_none());
     }
 }

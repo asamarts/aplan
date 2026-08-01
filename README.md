@@ -183,6 +183,7 @@ It is the load-bearing assumption of the entire US build.
 aplan check                    # validate structure, hermetically; exit 1 on any error
 aplan check --format agent     # every diagnostic carries an agent_instruction
 aplan check --format github    # inline PR annotations
+aplan check --format sarif     # SARIF 2.1.0, for code-scanning dashboards
 aplan check --no-traces        # skip APLAN008 (opt out; never silent)
 aplan verify                   # resolve evidence against the git repo (L1/L2)
 aplan verify --execute         # also run cited tests (L3; off by default)
@@ -197,6 +198,7 @@ aplan close P1-003             # set done + attach the HEAD commit, in place
 aplan close P1-003 --evidence commit:d213c9a --evidence test:mod::name
 aplan import kep.yaml          # read a Kubernetes KEP into a task (lossy, and says so)
 aplan import kep.yaml --dry-run --cut M-v0.6   # preview, and place it in a release cut
+aplan mcp                      # MCP server over stdio: ready, why, check, close
 aplan init                     # scaffold a starter .aplan.yml (never overwrites)
 aplan graph                    # generated Mermaid dependency graph
 aplan schema                   # the JSON Schema, derived from the Rust types
@@ -239,7 +241,13 @@ answer that looks whole is the failure this tool exists to prevent.
 ## Three consumers, one report
 
 - **Humans** get coloured terminal output with file paths.
-- **CI** gets `--format github` annotations, or a `1` exit code and nothing else.
+- **CI** gets `--format github` annotations, `--format sarif` for a code-scanning
+  dashboard, or a `1` exit code and nothing else.
+- **Agents** get `--format agent`, or `aplan mcp`, an MCP server over stdio with a
+  deliberately small four-tool surface (`ready`, `why`, `check`, `close`). Its `close`
+  goes through the same evidence gate as the CLI's, and takes no score, confidence, or
+  completeness input: an agent supplies a *citation*, never an assessment of its own
+  work. Refusing that is the point, and it is pinned by a test.
 - **Agents** get `--format agent`, where every diagnostic carries an
   `agent_instruction` string that can be acted on without reading the source.
 
@@ -291,13 +299,33 @@ that is not a directory is a usage error (exit 2), not an empty plan that passes
 
 ## Install
 
-Not yet published. Build from source:
+Build from source:
 
 ```sh
 cargo build --release        # binary at target/release/aplan
 ```
 
-`cargo install aplan` will work once the crate is released.
+Or take the released binary, a statically linked Linux x86_64 build published with
+its `sha256` (`v0.1.0` onward), so it runs whatever glibc the host ships. `cargo
+install aplan` will work once the crate is released.
+
+### In CI
+
+```yaml
+- uses: actions/checkout@v7
+- uses: asamarts/aplan@v0.1.0    # pinning the action pins the binary
+```
+
+That installs the release matching the tag you pinned, verifies it against the
+published checksum, and runs `aplan check` with `--format github`, so a violation
+becomes an inline annotation on the pull request. Policy comes from your
+`.aplan.yml`, not from flags threaded through the workflow; `command: verify`
+resolves evidence against git instead (check out with `fetch-depth: 0` for that).
+
+The action deliberately has no `latest`: an install that resolves at run time is
+not pinned, and a gate whose version changes between runs is the drift this tool
+exists to reject. Linux x86_64 only, which it says up front rather than failing
+obscurely.
 
 ## Self-hosting
 

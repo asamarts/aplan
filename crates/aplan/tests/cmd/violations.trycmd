@@ -80,3 +80,66 @@ $ aplan check --format github
 ::error file=aplan/tasks/B-001.md,title=APLAN005 B-001::`status: done` with no `evidence`: a status is a claim, not a proof
 
 ```
+
+SARIF 2.1.0, so the same report lands in a code-scanning dashboard. The rule
+catalog is every rule aplan has, not just the ones that fired, so a `ruleId`
+always resolves to something a dashboard can explain.
+
+```
+$ aplan check --format sarif
+? 1
+{
+  "$schema": "https://raw.githubusercontent.com/oasis-tcs/sarif-spec/main/sarif-2.1/schema/sarif-schema-2.1.0.json",
+  "runs": [
+    {
+      "results": [
+        {
+          "level": "error",
+          "locations": [
+            {
+              "physicalLocation": {
+                "artifactLocation": {
+                  "uri": "aplan/tasks/B-001.md"
+                },
+                "region": {
+                  "startLine": 1
+                }
+              }
+            }
+          ],
+          "message": {
+            "text": "B-001: `blocked_by` references unknown task `GHOST`"
+          },
+          "ruleId": "APLAN003"
+        },
+        {
+          "level": "error",
+          "locations": [
+            {
+              "physicalLocation": {
+                "artifactLocation": {
+...
+          ],
+          "message": {
+            "text": "B-001: `status: done` with no `evidence`: a status is a claim, not a proof"
+          },
+          "ruleId": "APLAN005"
+        }
+      ],
+      "tool": {
+        "driver": {
+          "informationUri": "https://github.com/asamarts/aplan",
+          "name": "aplan",
+          "rules": [
+...
+          ],
+          "semanticVersion": "[..]",
+          "version": "[..]"
+        }
+      }
+    }
+  ],
+  "version": "[..]"
+}
+
+```

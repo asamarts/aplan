@@ -41,6 +41,10 @@
       "name": "import"
     },
     {
+      "about": "Run an MCP server over stdio, exposing a deliberately small tool set (`ready`, `why`, `check`, `close`) to an agent. `close` goes through the same evidence gate as the CLI: an agent cannot close through MCP what it could not close here",
+      "name": "mcp"
+    },
+    {
       "about": "Scaffold a starter `.aplan.yml`, refusing to overwrite an existing one",
       "name": "init"
     },
@@ -54,9 +58,9 @@
     }
   ],
   "counts": {
-    "commands": 13,
+    "commands": 14,
     "evidence_kinds": 5,
-    "formats": 4,
+    "formats": 5,
     "rules": 20
   },
   "evidence_kinds": [
@@ -76,7 +80,8 @@
     "human",
     "json",
     "agent",
-    "github"
+    "github",
+    "sarif"
   ],
   "rules": [
     {
@@ -181,5 +186,5 @@
     }
   ],
   "schema_version": "v1",
-  "version": "0.1.0"
+  "version": "0.2.0"
 }

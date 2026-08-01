@@ -1,0 +1,65 @@
+name: Action self-test
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - action.yml
+      - .github/workflows/action-selftest.yml
+  pull_request:
+    branches: [main]
+    paths:
+      - action.yml
+      - .github/workflows/action-selftest.yml
+  workflow_dispatch:
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+# Dogfoods `action.yml` against this repository's own plan, which is the only way
+# to know the adoption path works: the unit of value is "a consumer adds four
+# lines to a workflow and gets annotations", and nothing but running it proves
+# that. Runs on the self-hosted runner like every other job (the pre-public repository-boundary decision), so the
+# adoption surface is proven without a billed minute.
+permissions:
+  contents: read
+
+jobs:
+  selftest:
+    name: the action checks aplan's own plan
+    runs-on: [self-hosted, linux, aplan]
+    timeout-minutes: 15
+    steps:
+      # `fetch-depth: 0` because the `verify` case below resolves evidence
+      # against real git objects; a shallow clone would make a valid old SHA
+      # look unresolvable.
+      - uses: actions/checkout@v7
+        with:
+          fetch-depth: 0
+
+      # `uses: ./` runs the action from the checkout, so a change to action.yml
+      # is tested by this workflow before it is tagged. That path has no
+      # `action_ref`, which is exactly why the action refuses to guess a version
+      # and why this passes one explicitly.
+      - name: check, with the plan root from .aplan.yml
+        id: check
+        uses: ./
+        with:
+          version: v0.1.0
+          command: check
+
+      - name: the installed version is the one that was asked for
+        run: |
+          test "${{ steps.check.outputs.version }}" = "v0.1.0" \
+            || { echo "installed '${{ steps.check.outputs.version }}', expected v0.1.0" >&2; exit 1; }
+
+      # A second run exercising the other command and an explicit root, so the
+      # inputs are covered rather than assumed.
+      - name: verify, with an explicit root
+        uses: ./
+        with:
+          version: v0.1.0
+          command: verify
+          root: aplan
+          format: human

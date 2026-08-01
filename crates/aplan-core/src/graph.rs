@@ -76,6 +76,25 @@ impl<'a> Graph<'a> {
     /// Tasks that are not terminal, not milestones, and whose blockers are all
     /// `done`. Milestones are checkpoints, never workable, so advertising one as
     /// ready would offer a checkpoint as if it were work.
+    /// The blockers of `id` that are not `done`.
+    ///
+    /// Shared rather than reimplemented per surface: `close` must refuse a task
+    /// whose blockers are unfinished, and that refusal lives outside
+    /// [`crate::close`] because it needs the whole graph, not one file. A second
+    /// copy in another surface is a copy that can be weaker than this one, which
+    /// is how an agent ends up able to close through MCP what the CLI refuses.
+    pub fn unmet_blockers(&self, id: &str) -> Vec<&'a str> {
+        self.get(id)
+            .map(|t| {
+                t.blocked_by
+                    .iter()
+                    .filter(|b| !self.is_done(b))
+                    .map(String::as_str)
+                    .collect()
+            })
+            .unwrap_or_default()
+    }
+
     pub fn ready(&self) -> Vec<&'a Task> {
         self.by_id
             .values()

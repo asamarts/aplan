@@ -15,5 +15,9 @@ serde_json.workspace = true
 anstream.workspace = true
 anstyle.workspace = true
 
+[dev-dependencies]
+jsonschema.workspace = true
+serde_json.workspace = true
+
 [lints]
 workspace = true

@@ -153,6 +153,11 @@ enum Command {
     /// design, and says so: every field the task model cannot hold is reported
     /// (ADR-0012).
     Import(ImportArgs),
+    /// Run an MCP server over stdio, exposing a deliberately small tool set
+    /// (`ready`, `why`, `check`, `close`) to an agent. `close` goes through the
+    /// same evidence gate as the CLI: an agent cannot close through MCP what it
+    /// could not close here.
+    Mcp,
     /// Scaffold a starter `.aplan.yml`, refusing to overwrite an existing one.
     Init {
         /// Directory to write `.aplan.yml` into (default: the current directory).
@@ -548,6 +553,7 @@ fn run() -> Result<u8> {
         } => cmd_close(&resolve_root(cli_root)?, &id, &evidence, &repo, restamp),
 
         Command::Import(args) => cmd_import(&resolve_root(cli_root)?, &args),
+        Command::Mcp => cmd_mcp(&resolve_root(cli_root)?),
         Command::Init { dir } => cmd_init(&dir),
 
         Command::Facts => cmd_facts(),
@@ -579,6 +585,27 @@ fn parse_evidence(arg: &str) -> Result<aplan_core::Evidence> {
 }
 
 /// `aplan close`, set a task `done` and attach evidence, in place.
+/// Serve MCP over stdio.
+///
+/// The policy comes from `.aplan.yml` through the same resolution `check` uses,
+/// so a plan judged over MCP is judged the way the CLI judges it. Nothing is
+/// printed to stdout: that is the protocol channel, and a stray line would
+/// corrupt the stream.
+fn cmd_mcp(root: &std::path::Path) -> Result<u8> {
+    let (config, _dir) =
+        aplan_config::load_config_located(std::path::Path::new(".")).map_err(config_err)?;
+    let options = resolve_check_options(&config, None, false, None, false);
+
+    let runtime = tokio::runtime::Builder::new_multi_thread()
+        .enable_all()
+        .build()
+        .context("starting the MCP runtime")?;
+    runtime
+        .block_on(aplan_mcp::serve(root.to_path_buf(), options))
+        .context("serving MCP over stdio")?;
+    Ok(EXIT_OK)
+}
+
 /// Everything `aplan import` was asked to do, as one `clap` group so the
 /// dispatch stays a single line and the flags live beside the command that owns
 /// them.
@@ -857,13 +884,7 @@ fn cmd_close(
     // would create the `APLAN007` this tool exists to catch.
     let tasks: Vec<_> = plan.tasks.iter().map(|lt| &lt.task).collect();
     let graph = Graph::new(tasks.iter().copied());
-    let unmet: Vec<&str> = lt
-        .task
-        .blocked_by
-        .iter()
-        .filter(|b| !graph.is_done(b))
-        .map(String::as_str)
-        .collect();
+    let unmet = graph.unmet_blockers(id);
     if !unmet.is_empty() {
         anyhow::bail!(
             "cannot close `{id}`: blocker(s) not done: {}",

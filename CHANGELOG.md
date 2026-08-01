@@ -8,6 +8,26 @@ to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Added
 
+- **MCP server** (`A1-024`, `aplan mcp`), a deliberately small four-tool surface (`ready`,
+  `why`, `check`, `close`) over stdio. `aplan_close` takes a task id and evidence
+  citations and nothing else: its schema declares `additionalProperties: false`, so a score
+  cannot even be transmitted, and a test fails if `score`, `confidence`, `completeness` or
+  `percent` ever appears in the close path. Building it caught a real weakening: MCP `close`
+  did not refuse a task with unfinished blockers, because that refusal lives in the CLI's
+  command over the graph rather than in `aplan_core::close`, which only sees one file. Fixed
+  with one shared predicate (`Graph::unmet_blockers`) rather than a second copy that could
+  drift weaker. The tool surface is small on purpose so discovery and context remain bounded.
+- **SARIF output** (`A1-023`), `aplan check --format sarif`: SARIF 2.1.0, the interchange
+  format static-analysis dashboards already read, so a plan violation lands where a team
+  already looks instead of only in a CI log. It is a pure formatter over the
+  existing `Report`, adding no rule and no evidence, only a consumer. The rule catalog is
+  built from `Rule::ALL` rather than from whatever fired in this run, so a result's `ruleId`
+  always resolves to a described rule and a clean run still tells a dashboard what aplan
+  checks. Validity is machine-checked, not asserted: the official SARIF 2.1.0 schema is
+  vendored under `crates/aplan-output/tests/data/` and a hermetic test validates the document
+  against it, because a gate that needs the network is a gate that fails when the network
+  does. Deferred and recorded rather than dropped: a code-scanning *ingestion* self-test needs
+  GitHub Advanced Security on a private repository, so it waits for the go-public decision.
 - **`aplan import`, and the `aplan-interop` crate** (`A1-019`, ADR-0012), the first import
   path: `--format kep` reads a Kubernetes `kep.yaml` into tasks. Proposal formats distinguish an accepted design from an implemented result. A `todo` task already represents accepted but unfinished work, so a proposal's stage becomes a **tag**
   (`kep:implementable`, `kep:stage:beta`, `sig:node`), never a new `Status` variant.

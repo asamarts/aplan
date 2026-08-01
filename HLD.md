@@ -350,7 +350,7 @@ otherwise for a published dependent.
 | Crate | Responsibility | Publish | Status |
 |---|---|---|---|
 | `aplan-core` | task model, loader, graph, validate, diagnostic | yes | **exists** |
-| `aplan-output` | formatters: human, json, agent, github, gitlab, sarif, junit, markdown, mermaid, dot | yes (internal) | **exists** (5 of 10) |
+| `aplan-output` | formatters: human, json, agent, github, gitlab, sarif, junit, markdown, mermaid, dot | yes (internal) | **exists** (6 of 10) |
 | `aplan` | library + thin binary; clap CLI; `facts()` introspection | yes | **exists** |
 | `xtask` | `gen-schema` (exists); `gen-facts` shipped as `aplan facts` + `tests/facts.rs`; `gen-roadmap` (exists, `A1-016`) | no | **exists** |
 | `aplan-evidence` | the verification ladder; git/test/url/file resolvers | yes (internal) | **exists** (commit + file + test resolvers; url/note next) |
@@ -417,7 +417,8 @@ them from one place, and the version is the single source of truth (HLD §17).
 | `aplan import <source>` | read another tool's plan; `--format kep` exists (`A1-019`), Backlog.md / task-master / spec-kit / beads planned | partial (`A1-019`) |
 | `aplan mirror` | one-way push to a forge | planned |
 | `aplan export-agents-md` | render the plan's contract into `AGENTS.md` | planned |
-| `aplan lsp` / `aplan mcp` | editor and agent servers | planned |
+| `aplan lsp` | editor server | planned |
+| `aplan mcp` | agent server: `ready`, `why`, `check`, `close` over stdio | exists (`A1-024`) |
 | `aplan tui` | the terminal UI | planned |
 | `aplan roadmap` | render the plan grouped by cut: rollups, per-cut critical path, `--format markdown` companion (ADR-0009) | exists (`A1-015`) |
 | `aplan attest` | signed provenance / audit export of the verified plan | planned |
@@ -497,7 +498,7 @@ One report, many consumers. `alint` ships eight formatters; we should converge.
 | `json` | deterministic automation; `aplan/check-report/v1` | exists |
 | `agent` | every diagnostic carries `agent_instruction`; `aplan/agent-report/v1` | exists |
 | `github` | workflow-command annotations, inline on the PR | exists |
-| `sarif` | GitHub code scanning, and the lingua franca of static analysis | planned |
+| `sarif` | GitHub code scanning, and the lingua franca of static analysis | exists (`A1-023`) |
 | `gitlab` | Code Quality report | planned |
 | `junit` | generic CI test-report ingestion | planned |
 | `markdown` | a PR comment / job summary | planned |

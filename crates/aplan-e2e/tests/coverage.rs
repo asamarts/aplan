@@ -935,7 +935,13 @@ fn every_rule_has_a_fires_and_a_silent_scenario() {
 /// `crates/aplan/tests/cmd/` (`violations.trycmd` renders all four).
 #[test]
 fn every_format_is_exercised() {
-    let exercised = [Format::Human, Format::Json, Format::Agent, Format::Github];
+    let exercised = [
+        Format::Human,
+        Format::Json,
+        Format::Agent,
+        Format::Github,
+        Format::Sarif,
+    ];
     for f in Format::ALL {
         assert!(
             exercised.contains(f),
