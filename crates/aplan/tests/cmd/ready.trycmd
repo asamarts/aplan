@@ -1,0 +1,83 @@
+`ready` answers "what should I do next", and until `A1-125` it answered in id
+order: `A1-020` above `A1-113`, because twenty sorts before a hundred and
+thirteen. A list presented as an answer, in an order that means nothing, teaches
+a reader that the order means nothing, and then a real order is not believed
+either.
+
+The order is **derived** (ADR-0017), so it carries no claim the tool could not
+check. Here it disagrees with id order at every position.
+
+```
+$ aplan ready
+Z-9  Unblocks the one behind it (1d)
+B-1  The long chain's second half (5d)
+C-1  Off the spine, three days (3d)
+C-2  Off the spine, three days as well (3d)
+D-1  Unestimated, so nothing ranks it
+
+```
+
+`--explain` says why, because an order nobody can interrogate is one people learn
+to distrust. `Z-9` is first for the only reason that is about the *plan* rather
+than the task: finishing it makes `A-1` workable. `B-1` is next because it is on
+the critical path, where slack is zero by construction. `C-1` and `C-2` are
+ordered by effort, largest first: a cut cannot finish sooner than its largest
+remaining task. `D-1` says outright that nothing ranks it, rather than sitting
+somewhere unexplained.
+
+```
+$ aplan ready --explain
+Z-9  Unblocks the one behind it (1d)
+    releases 1, a chain of 1 behind it, 1d
+B-1  The long chain's second half (5d)
+    on the critical path, 5d
+C-1  Off the spine, three days (3d)
+    3d
+C-2  Off the spine, three days as well (3d)
+    3d
+D-1  Unestimated, so nothing ranks it
+    nothing to rank it by; ordered by id
+
+```
+
+The rank is the same answer the machine surface gives, so a rollup asking for
+"the next three" cannot derive a different order than the command.
+
+```
+$ aplan tasks --format json
+...
+      "id": "Z-9",
+...
+      "ready": true,
+      "milestone_task": false,
+      "rank": 1,
+...
+```
+
+`tree` answers "what is in my way", and most of what it printed was work already
+finished. A `done` task cannot block anything, which is exactly what `ready`
+computes, so `--live` shows the part that can still block and counts the rest
+(`A1-217`). The default is unchanged; `A1-235` announces the runway for moving
+it.
+
+```
+$ aplan tree B-1
+B-1  todo  The long chain's second half
+  rank: on the critical path, 5d
+  waits on:
+    B-0  done  The long chain's first half
+  releases: nothing
+
+```
+
+```
+$ aplan tree B-1 --live
+B-1  todo  The long chain's second half
+  rank: on the critical path, 5d
+  waits on:
+    ... 1 satisfied task not shown, past --live
+  releases: nothing
+
+```
+
+The view says what it withheld, which is the same instinct `--depth` already had.

@@ -1,0 +1,170 @@
+`aplan check-docs` answers one question: does this document name tasks that
+exist? An item reading "handled in `Delta`" when no such task exists reads as
+*handled*, which is worse than an item with no disposition at all (`A1-148`).
+
+Ids come from the plan rather than from a pattern. The prefixes this plan's own
+ids use are what a word must carry to be read as a reference, so the same command
+works on `A1-042`, `WH2-06`, `K0-3` and `M-phase-2` without this tool owning an
+id format. `M-v0.N`, which is how prose writes "a milestone", is not a reference
+to `M-v0`: a reference ends at a word boundary as well as starting at one.
+
+```
+$ aplan check-docs NOTES.md
+? 1
+NOTES.md:5: `D1-09` is not a task in this plan (did you mean D1-01, D1-02?)
+NOTES.md:10: `D1-07` is not a task in this plan (did you mean D1-01, D1-02?)
+NOTES.md:10: `D1-08` is not a task in this plan (did you mean D1-01, D1-02?)
+NOTES.md:13: `D2-01` is not a task in this plan, whose ids use `D1-` (did you mean D1-01?)
+failed: 1 document(s), 4 reference(s) naming no task
+
+```
+
+The same, machine-readable, for a gate that reports rather than fails:
+
+```
+$ aplan check-docs NOTES.md --format json
+? 1
+{
+  "documents": 1,
+  "findings": [
+    {
+      "did_you_mean": [
+        "D1-01",
+        "D1-02"
+      ],
+      "file": "NOTES.md",
+      "id": "D1-09",
+      "line": 5,
+      "mistyped_prefix": []
+    },
+    {
+      "did_you_mean": [
+        "D1-01",
+        "D1-02"
+      ],
+      "file": "NOTES.md",
+      "id": "D1-07",
+      "line": 10,
+      "mistyped_prefix": []
+    },
+    {
+      "did_you_mean": [
+        "D1-01",
+        "D1-02"
+      ],
+      "file": "NOTES.md",
+      "id": "D1-08",
+      "line": 10,
+      "mistyped_prefix": []
+    },
+    {
+      "did_you_mean": [
+        "D1-01"
+      ],
+      "file": "NOTES.md",
+      "id": "D2-01",
+      "line": 13,
+      "mistyped_prefix": [
+        "D1-"
+      ]
+    }
+  ],
+  "membership": [],
+  "schema": "aplan/check-docs/v1"
+}
+
+```
+
+A plan document listing a cut's tasks beside its milestone holds two copies of one
+fact, and until something reads both, one of them is ungated. `docs.membership`
+in `.aplan.yml` says where the document declares it, and the check is silent for
+a repository that declares nothing.
+
+Only the marked line declares. A mention in the same section is prose, which is
+the distinction the whole check rests on: reading a cut's section instead of its
+declaration calls an ordinary forward reference a false declaration. So is a
+fenced example, even one that is a marked line verbatim: the document below shows
+its own format inside a fence, naming both tasks, and the finding stands.
+
+```
+$ aplan check-docs PLAN.md
+? 1
+PLAN.md: `M-v0.1` includes `D1-02`, which this document does not declare
+failed: 1 document(s), 0 reference(s) naming no task, 1 cut(s) whose membership disagrees
+
+```
+
+The other shape a plan document takes: a task table per cut, the member in the
+row's first cell (ADR-0015) and prose in the rest. `M-v0.1` sits in a second cell
+here and is not read as a member, which is why this run is clean.
+
+```
+$ aplan check-docs TABLE.md
+ok: 1 document(s), 0 reference(s) naming no task
+
+```
+
+The same, machine-readable. A membership row carries both directions and the two
+findings that are about the declaration itself rather than about its contents.
+
+```
+$ aplan check-docs PLAN.md --format json
+? 1
+{
+  "documents": 1,
+  "findings": [],
+  "membership": [
+    {
+      "file": "PLAN.md",
+      "milestone": "M-v0.1",
+      "no_declaration": false,
+      "repeated_section": false,
+      "undeclared": [
+        "D1-02"
+      ],
+      "unplanned": []
+    }
+  ],
+  "schema": "aplan/check-docs/v1"
+}
+
+```
+
+Two headings naming one cut is the author's ambiguity, and the gate says so rather
+than picking one. Taking the first is how a document whose *second* section
+disagreed with the plan used to pass.
+
+```
+$ aplan check-docs DUPLICATE.md
+? 1
+DUPLICATE.md: more than one heading here names `M-v0.1`, so which one declares its membership is ambiguous
+failed: 1 document(s), 0 reference(s) naming no task, 1 cut(s) whose membership disagrees
+
+```
+
+A document the config does not name is checked for references alone: the two runs
+over `NOTES.md` above are made under this same config and report no cut, so a run
+over one file never reports the membership of another.
+
+The diagnostic formats belong to the rules, and a document naming a task is not a
+plan violating an invariant, so it carries no `APLAN0xx` code and those formats
+are refused rather than collapsed to JSON.
+
+```
+$ aplan check-docs NOTES.md --format github
+? 2
+aplan: `aplan check-docs` renders a report, so it takes --format `human` or `json`, not `github`; `github` renders a set of findings, which `check` and `verify` do
+
+```
+
+A plan whose ids teach no prefix -- words, or the ULIDs `id_strategy: ulid` mints
+-- gives this nothing to recognise, and every document would come back clean. A
+gate that cannot fire says so instead: reporting `ok` here would be the same
+"reads as handled" failure, arriving from the tool.
+
+```
+$ aplan --root wordy check-docs wordy/NOTES.md
+? 2
+aplan: this plan's ids teach no prefix (an id ending in digits, like `T-042`, teaches `T-`), so nothing in a document can be told from an ordinary word; `check-docs` checked nothing
+
+```

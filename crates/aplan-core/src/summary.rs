@@ -16,22 +16,100 @@ pub struct Summary {
     pub phases: Vec<PhaseSummary>,
     /// Tasks that can be worked now: workable status, every blocker `done`.
     pub ready: usize,
+    /// Effort days a week absorbs, if the repository declared one (`A1-147`,
+    /// ADR-0023). `None` means it did not, and nothing about duration is
+    /// reported.
+    pub effort_days_per_week: Option<f64>,
 }
 
 /// The rollup for a single phase.
 #[derive(Debug, Clone, PartialEq)]
 pub struct PhaseSummary {
     pub phase: u32,
-    /// Tasks in this phase, all statuses.
+    /// Tasks in this phase that can still happen: every status but `dropped`.
+    ///
+    /// `dropped` is excluded so this agrees with `roadmap`, which has always
+    /// counted live work. The two disagreeing was the finding: on a plan whose
+    /// headline feature is a kill criterion, `summary` reported the
+    /// pre-cancellation scope forever, and the plan's most consequential
+    /// decision was invisible in the place people look (`A1-074`).
     pub tasks: usize,
     /// Of those, how many are `done`.
     pub done: usize,
-    /// Sum of `effort_days` over the tasks that carry an estimate. Tasks without
-    /// one contribute nothing here (and are flagged by `APLAN009`).
+    /// Sum of `effort_days` over the live tasks that carry an estimate. Tasks
+    /// without one contribute nothing here (and are flagged by `APLAN009`).
     pub effort_days: f64,
+    /// Tasks in this phase that were `dropped`.
+    ///
+    /// Reported rather than merely excluded: cancelling work is a decision, and
+    /// a total that silently omits it is how this defect happened the first
+    /// time. `dropped` is chosen over deletion precisely so the measurement that
+    /// rejected the work stays findable.
+    pub dropped: usize,
+    /// Sum of `effort_days` over those dropped tasks.
+    pub dropped_effort_days: f64,
+    /// Of `effort_days`, the part already claimed `done` (`A1-147`).
+    ///
+    /// Carried so a duration can be reported for the work that is *left* as well
+    /// as for the whole plan. Both are derived from it; neither is stored.
+    pub done_effort_days: f64,
+}
+
+/// Weeks of work `effort` represents at `per_week`, or `None` when the
+/// repository declared no throughput (`A1-147`, ADR-0023).
+///
+/// **Derived, never declared**, which is the whole decision: a duration written
+/// down beside the effort it summarises is a second copy of a number, and the
+/// sixth pilot's schedule drifted from its plan three times in nine audits.
+/// Deriving it means the two cannot disagree, which is stronger than a rule that
+/// notices when they do -- and it is ADR-0017's argument applied to a second
+/// quantity.
+///
+/// It says nothing about dates. A week here is a unit of capacity, not a
+/// position in a calendar: "eleven weeks of work at your declared throughput" is
+/// checkable arithmetic, where "week 46" is a claim about the future that
+/// nothing can verify until it arrives.
+#[must_use]
+pub fn weeks_of_work(effort: f64, per_week: Option<f64>) -> Option<f64> {
+    // A non-positive or non-finite ratio divides into nonsense; a repository
+    // that wrote one gets nothing rather than an infinity rendered as a
+    // duration.
+    let per_week = per_week.filter(|w| w.is_finite() && *w > 0.0)?;
+    Some(effort / per_week)
 }
 
 impl Summary {
+    /// The whole plan as weeks of work, at the declared throughput. Live work
+    /// only: `dropped` is not time (`A1-074`).
+    #[must_use]
+    pub fn total_weeks(&self) -> Option<f64> {
+        weeks_of_work(self.total_effort_days(), self.effort_days_per_week)
+    }
+
+    /// The same for the work not yet claimed `done`.
+    #[must_use]
+    pub fn remaining_weeks(&self) -> Option<f64> {
+        weeks_of_work(
+            self.total_effort_days() - self.total_done_effort_days(),
+            self.effort_days_per_week,
+        )
+    }
+
+    /// Sum of `effort_days` over live tasks already claimed `done`.
+    #[must_use]
+    pub fn total_done_effort_days(&self) -> f64 {
+        self.phases.iter().map(|p| p.done_effort_days).sum::<f64>() + 0.0
+    }
+
+    /// Attach the repository's declared throughput, so the derived durations can
+    /// be reported. Absent, every duration is `None` and no surface says
+    /// anything about time.
+    #[must_use]
+    pub fn with_throughput(mut self, effort_days_per_week: Option<f64>) -> Self {
+        self.effort_days_per_week = effort_days_per_week;
+        self
+    }
+
     pub fn total_tasks(&self) -> usize {
         self.phases.iter().map(|p| p.tasks).sum()
     }
@@ -40,8 +118,25 @@ impl Summary {
         self.phases.iter().map(|p| p.done).sum()
     }
 
+    /// `+ 0.0` normalises negative zero, here and below. `Sum` for floats folds
+    /// from `-0.0`, the identity that preserves signed-zero semantics, so a plan
+    /// with no phases totals `-0.0` and an empty plan reported `-0.0d`. Every
+    /// float sum in this crate needs it; the one in `critical_path_within` was
+    /// fixed first and these two were missed (`A1-074`).
     pub fn total_effort_days(&self) -> f64 {
-        self.phases.iter().map(|p| p.effort_days).sum()
+        self.phases.iter().map(|p| p.effort_days).sum::<f64>() + 0.0
+    }
+
+    pub fn total_dropped(&self) -> usize {
+        self.phases.iter().map(|p| p.dropped).sum()
+    }
+
+    pub fn total_dropped_effort_days(&self) -> f64 {
+        self.phases
+            .iter()
+            .map(|p| p.dropped_effort_days)
+            .sum::<f64>()
+            + 0.0
     }
 }
 
@@ -49,8 +144,20 @@ impl Graph<'_> {
     /// Roll the plan up by phase, with the count of ready tasks. Phases come out
     /// in ascending order (`BTreeMap`), so the output is deterministic.
     pub fn summary(&self) -> Summary {
+        self.summary_of(&|_| true)
+    }
+
+    /// The same rollup over the tasks `keep` admits.
+    ///
+    /// **`ready` is still counted over the whole graph**, intersected with the
+    /// subset. Rolling up a filtered *graph* would recompute readiness inside
+    /// it, and a task whose blocker sits outside the subset would be reported as
+    /// ready when it is not: a false answer rather than a narrow one. Selection
+    /// narrows what is shown, never what is computed (`A1-214`).
+    #[must_use]
+    pub fn summary_of(&self, keep: &dyn Fn(&str) -> bool) -> Summary {
         let mut by_phase: BTreeMap<u32, PhaseSummary> = BTreeMap::new();
-        for t in self.by_id.values() {
+        for t in self.by_id.values().filter(|t| keep(t.id.as_str())) {
             // Milestones are checkpoints, not work: they carry no effort and
             // would inflate a phase's task count, so they are not rolled up.
             if t.is_milestone() {
@@ -61,18 +168,32 @@ impl Graph<'_> {
                 tasks: 0,
                 done: 0,
                 effort_days: 0.0,
+                dropped: 0,
+                dropped_effort_days: 0.0,
+                done_effort_days: 0.0,
             });
+            if t.status == Status::Dropped {
+                entry.dropped += 1;
+                entry.dropped_effort_days += t.effort_days.unwrap_or(0.0);
+                continue;
+            }
             entry.tasks += 1;
             if t.status == Status::Done {
                 entry.done += 1;
             }
             if let Some(days) = t.effort_days {
                 entry.effort_days += days;
+                if t.status == Status::Done {
+                    entry.done_effort_days += days;
+                }
             }
         }
         Summary {
             phases: by_phase.into_values().collect(),
-            ready: self.ready().len(),
+            ready: self.ready().iter().filter(|t| keep(t.id.as_str())).count(),
+            // Filled in by `with_throughput`: the graph knows the plan, not the
+            // repository's configuration.
+            effort_days_per_week: None,
         }
     }
 }
@@ -97,11 +218,15 @@ mod tests {
             owner: None,
             effort_days: effort,
             blocked_by: blocked_by.iter().map(|s| (*s).to_string()).collect(),
+            prefer_after: Vec::new(),
             evidence: Vec::new(),
             paths: Vec::new(),
             traces: Vec::new(),
             trace_fingerprints: std::collections::BTreeMap::new(),
             tags: Vec::new(),
+            revisit_at: None,
+            version_impact: None,
+            version_impact_reason: None,
         }
     }
 
@@ -121,7 +246,10 @@ mod tests {
                 phase: 0,
                 tasks: 2,
                 done: 1,
-                effort_days: 1.5
+                effort_days: 1.5,
+                dropped: 0,
+                dropped_effort_days: 0.0,
+                done_effort_days: 1.0
             }
         );
         assert_eq!(
@@ -130,7 +258,10 @@ mod tests {
                 phase: 1,
                 tasks: 2,
                 done: 0,
-                effort_days: 2.0
+                effort_days: 2.0,
+                dropped: 0,
+                dropped_effort_days: 0.0,
+                done_effort_days: 0.0
             }
         );
         assert_eq!(summary.total_tasks(), 4);
@@ -138,6 +269,57 @@ mod tests {
         assert!((summary.total_effort_days() - 3.5).abs() < 1e-9);
         // B (blocker A done) and D (no blockers) are ready; C is not (B not done).
         assert_eq!(summary.ready, 2);
+    }
+
+    #[test]
+    fn an_empty_plan_totals_positive_zero() {
+        // `Sum` for floats folds from `-0.0`, so a plan with no phases reported
+        // `total 0 0 -0.0d` and emitted `-0.0` in JSON. The same bug as the
+        // critical path's, in the two places the first fix did not reach.
+        let tasks: [Task; 0] = [];
+        let g = Graph::new(tasks.iter());
+        let s = g.summary();
+        assert!(s.total_effort_days().is_sign_positive(), "effort");
+        assert!(
+            s.total_dropped_effort_days().is_sign_positive(),
+            "dropped effort"
+        );
+    }
+
+    #[test]
+    fn cancelled_work_is_named_rather_than_counted_as_scope() {
+        // `roadmap` counted live tasks and `summary` counted every task, so on a
+        // plan whose headline feature is a kill criterion the command an
+        // operator reaches for first reported pre-cancellation scope forever
+        // (`A1-074`).
+        let tasks = [
+            task("L1", 0, Status::Todo, Some(2.0), &[]),
+            task("D1", 1, Status::Dropped, Some(3.0), &[]),
+            task("D2", 1, Status::Dropped, Some(3.0), &[]),
+        ];
+        let g = Graph::new(tasks.iter());
+        let s = g.summary();
+        assert_eq!(s.total_tasks(), 1, "only live work is scope");
+        assert!((s.total_effort_days() - 2.0).abs() < f64::EPSILON);
+        // ... and the cancellation is visible, not merely absent.
+        assert_eq!(s.total_dropped(), 2);
+        assert!((s.total_dropped_effort_days() - 6.0).abs() < f64::EPSILON);
+    }
+
+    #[test]
+    fn a_phase_of_only_dropped_work_still_reports_it() {
+        // The phase must not vanish: a cut cancelled in full is the case worth
+        // seeing, and an absent row reads as work that never existed.
+        let tasks = [task("D1", 3, Status::Dropped, Some(4.0), &[])];
+        let g = Graph::new(tasks.iter());
+        let s = g.summary();
+        let p = s
+            .phases
+            .iter()
+            .find(|p| p.phase == 3)
+            .expect("phase 3 present");
+        assert_eq!((p.tasks, p.dropped), (0, 1));
+        assert!((p.dropped_effort_days - 4.0).abs() < f64::EPSILON);
     }
 
     #[test]
@@ -156,7 +338,10 @@ mod tests {
                 phase: 1,
                 tasks: 1,
                 done: 1,
-                effort_days: 2.0
+                effort_days: 2.0,
+                dropped: 0,
+                dropped_effort_days: 0.0,
+                done_effort_days: 2.0
             }
         );
         assert_eq!(summary.ready, 0);
@@ -168,5 +353,95 @@ mod tests {
         assert!(summary.phases.is_empty());
         assert_eq!(summary.ready, 0);
         assert!(summary.total_effort_days().abs() < 1e-9);
+    }
+}
+
+#[cfg(test)]
+mod duration_tests {
+    use super::*;
+    use crate::task::Task;
+
+    fn t(id: &str, status: Status, effort: f64) -> Task {
+        Task {
+            id: id.to_string(),
+            title: id.to_string(),
+            phase: 1,
+            status,
+            owner: None,
+            effort_days: Some(effort),
+            blocked_by: Vec::new(),
+            prefer_after: Vec::new(),
+            evidence: Vec::new(),
+            paths: Vec::new(),
+            traces: Vec::new(),
+            trace_fingerprints: std::collections::BTreeMap::new(),
+            tags: Vec::new(),
+            revisit_at: None,
+            version_impact: None,
+            version_impact_reason: None,
+        }
+    }
+
+    /// The division, and the four inputs that are not one (`A1-147`).
+    #[test]
+    fn a_duration_is_effort_divided_by_a_declared_throughput() {
+        assert_eq!(weeks_of_work(15.0, Some(7.5)), Some(2.0));
+        // Undeclared is silence, not zero: a repository that never said what a
+        // week absorbs gets no duration at all.
+        assert_eq!(weeks_of_work(15.0, None), None);
+        // The three unusable declarations. `validate_throughput` refuses these at
+        // load, and this is the second line of defence: a duration rendered
+        // `inf`, `-2.1` or `NaN` is worse than none.
+        assert_eq!(weeks_of_work(15.0, Some(0.0)), None);
+        assert_eq!(weeks_of_work(15.0, Some(-7.5)), None);
+        assert_eq!(weeks_of_work(15.0, Some(f64::INFINITY)), None);
+        assert_eq!(weeks_of_work(15.0, Some(f64::NAN)), None);
+    }
+
+    /// The whole plan and the part of it that is left, from the same numbers.
+    #[test]
+    fn the_remainder_counts_only_work_not_yet_done() {
+        let a = t("A", Status::Done, 10.0);
+        let b = t("B", Status::Todo, 5.0);
+        let s = Graph::new([&a, &b]).summary().with_throughput(Some(5.0));
+        assert!((s.total_effort_days() - 15.0).abs() < 1e-9);
+        assert!((s.total_done_effort_days() - 10.0).abs() < 1e-9);
+        assert_eq!(s.total_weeks(), Some(3.0));
+        assert_eq!(s.remaining_weeks(), Some(1.0));
+    }
+
+    /// The sixth pilot's third drift: a calendar never rescaled after scope grew
+    /// by 20% (pre-public adoption evidence item 2).
+    ///
+    /// It cannot happen to a derived duration, and that is the claim this test
+    /// exists to hold: nothing is written down to go stale, so growing the plan
+    /// moves the number by exactly the growth. A tool that *checked* a declared
+    /// duration would instead report a finding here and wait for someone to edit
+    /// the declaration, which is the same maintenance the pilot was doing by
+    /// hand.
+    #[test]
+    fn growing_the_plan_rescales_the_duration_with_no_edit() {
+        let a = t("A", Status::Todo, 100.0);
+        let before = Graph::new([&a])
+            .summary()
+            .with_throughput(Some(10.0))
+            .total_weeks();
+        assert_eq!(before, Some(10.0));
+
+        let grown = t("B", Status::Todo, 20.0);
+        let after = Graph::new([&a, &grown])
+            .summary()
+            .with_throughput(Some(10.0))
+            .total_weeks();
+        assert_eq!(after, Some(12.0), "20% more scope, 20% longer, unattended");
+    }
+
+    /// Cancelled work is not work, on this surface as on every other (`A1-074`).
+    #[test]
+    fn a_dropped_task_is_not_in_the_duration() {
+        let a = t("A", Status::Todo, 10.0);
+        let gone = t("B", Status::Dropped, 90.0);
+        let s = Graph::new([&a, &gone]).summary().with_throughput(Some(5.0));
+        assert_eq!(s.total_weeks(), Some(2.0), "the dropped task is not time");
     }
 }

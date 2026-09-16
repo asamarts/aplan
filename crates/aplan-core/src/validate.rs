@@ -5,25 +5,217 @@
 //! checked.
 
 use std::collections::{BTreeMap, BTreeSet};
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
 use crate::diagnostic::{Diagnostic, Report, code};
 use crate::graph::Graph;
 use crate::load::{LoadedTask, Plan};
 use crate::task::{EvidenceKind, Status};
 
+/// A declared tag vocabulary as the rules see it.
+///
+/// The config's two shapes, a bare list and a mapping, arrive here as one type:
+/// a list is `Optional` over every task, which is what it has always meant.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct TagFamily {
+    /// The tags this family contains, as whole tags.
+    pub members: Vec<String>,
+    /// How many of them a task in scope carries.
+    pub require: Cardinality,
+    /// Which statuses the requirement applies to.
+    pub status: StatusScope,
+    /// Whether milestone tasks are subject to it.
+    pub milestones: MilestoneScope,
+}
+
+impl TagFamily {
+    /// A family with no cardinality, which is what a bare list declares.
+    #[must_use]
+    pub fn members(members: Vec<String>) -> Self {
+        Self {
+            members,
+            require: Cardinality::Optional,
+            status: StatusScope::Any,
+            milestones: MilestoneScope::Include,
+        }
+    }
+
+    /// The declared members this task carries, deduplicated by the declaration.
+    ///
+    /// Only declared members: a tag that merely looks like one is `APLAN026`'s
+    /// finding and is not evidence the requirement was met, or the rule would
+    /// accept a typo as proof.
+    #[must_use]
+    pub fn carried<'a>(&'a self, task: &crate::task::Task) -> Vec<&'a str> {
+        self.members
+            .iter()
+            .filter(|m| task.tags.iter().any(|t| t == *m))
+            .map(String::as_str)
+            .collect()
+    }
+
+    /// Whether this task meets the requirement, which it trivially does when the
+    /// family does not judge it.
+    ///
+    /// One implementation, because there were two: the rule counted here and
+    /// `aplan add` counted again to refuse before writing, and the MCP `add`
+    /// counted nowhere at all, so an agent could write through one surface what
+    /// the other refused (`A1-133`).
+    #[must_use]
+    pub fn satisfied_by(&self, task: &crate::task::Task) -> bool {
+        if !self.in_scope(task) {
+            return true;
+        }
+        let n = self.carried(task).len();
+        match self.require {
+            Cardinality::Optional => true,
+            Cardinality::AtMostOne => n <= 1,
+            Cardinality::AtLeastOne => n >= 1,
+            Cardinality::ExactlyOne => n == 1,
+        }
+    }
+
+    /// Whether this family's cardinality judges the given task.
+    #[must_use]
+    pub fn judges(&self, task: &crate::task::Task) -> bool {
+        self.require != Cardinality::Optional && self.in_scope(task)
+    }
+
+    /// Whether this task is one the family's scope covers, cardinality aside.
+    ///
+    /// Split from [`judges`](Self::judges) so `satisfied_by`'s `Optional` arm is
+    /// reachable: with the requirement folded into the scope test, that arm was
+    /// dead code the compiler still demanded, which is the shape these audits
+    /// keep deleting (`A1-113`).
+    fn in_scope(&self, task: &crate::task::Task) -> bool {
+        let by_status = match self.status {
+            StatusScope::Any => true,
+            StatusScope::Live => !matches!(task.status, Status::Done | Status::Dropped),
+            StatusScope::Done => task.status == Status::Done,
+            StatusScope::Dropped => task.status == Status::Dropped,
+            StatusScope::Terminal => matches!(task.status, Status::Done | Status::Dropped),
+        };
+        let milestone = task.is_milestone();
+        let by_kind = match self.milestones {
+            MilestoneScope::Include => true,
+            MilestoneScope::Exclude => !milestone,
+            MilestoneScope::Only => milestone,
+        };
+        by_status && by_kind
+    }
+}
+
+/// How many members of a family a task in scope must carry (`APLAN030`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Cardinality {
+    /// Any number, including none.
+    Optional,
+    /// At most one.
+    AtMostOne,
+    /// At least one.
+    AtLeastOne,
+    /// Exactly one.
+    ExactlyOne,
+}
+
+impl Cardinality {
+    /// How the requirement reads in a message.
+    #[must_use]
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Cardinality::Optional => "optional",
+            Cardinality::AtMostOne => "at-most-one",
+            Cardinality::AtLeastOne => "at-least-one",
+            Cardinality::ExactlyOne => "exactly-one",
+        }
+    }
+}
+
+/// Which statuses a cardinality applies to.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum StatusScope {
+    /// Every status.
+    Any,
+    /// Work that has not finished: `todo`, `in_progress`, `blocked`.
+    Live,
+    /// `done` only.
+    Done,
+    /// `dropped` only.
+    Dropped,
+    /// `done` or `dropped`.
+    Terminal,
+}
+
+impl StatusScope {
+    /// How the scope reads in a message.
+    #[must_use]
+    pub fn as_str(self) -> &'static str {
+        match self {
+            StatusScope::Any => "every",
+            StatusScope::Live => "live",
+            StatusScope::Done => "done",
+            StatusScope::Dropped => "dropped",
+            StatusScope::Terminal => "terminal",
+        }
+    }
+}
+
+/// Whether milestone tasks are subject to a cardinality.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum MilestoneScope {
+    /// Milestones are judged like any other task.
+    Include,
+    /// Milestones are exempt.
+    Exclude,
+    /// Only milestones.
+    Only,
+}
+
+/// A generated agent contract, and the file that is meant to carry it.
+///
+/// Two halves of one fact, so a caller cannot supply a block without saying
+/// where it belongs, or a path without what should be in it.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct AgentsBlock {
+    /// The document carrying the markers, as a reader would name it.
+    pub path: std::path::PathBuf,
+    /// What `export-agents-md` would write between them now.
+    pub current: String,
+}
+
 /// Options that soften rules for early-stage plans.
-#[derive(Debug, Clone)]
+///
+/// `PartialEq` so a caller can ask whether a switch it was about to flip is
+/// already on: `vacuity` runs the rules once per switch to measure what each is
+/// stopping, and a run that could reveal nothing is pure cost (`A1-269`).
+#[derive(Debug, Clone, PartialEq)]
 pub struct Options {
     /// Require an `effort_days` estimate on non-terminal, non-milestone tasks.
     pub require_effort: bool,
+    /// Whether a closed task has to account for what it does to the released
+    /// version, and the per-level floors it is held to (`A1-312`, ADR-0034).
+    ///
+    /// `None` is the requirement switched off, which is the default: a plan that
+    /// has not asked for version discipline sees `APLAN044` never. `Some`
+    /// carries the floors already resolved, so this crate never learns what
+    /// `.aplan.yml` looks like. Named for the key rather than for what it holds,
+    /// because `vacuity` reports the key an adopter would set.
+    pub require_impact: Option<crate::task::VersionFloors>,
     /// Root against which `traces` paths are resolved. `None` disables
     /// [`code::DANGLING_TRACE`] entirely.
     pub traces_root: Option<std::path::PathBuf>,
+    /// Roots outside [`Self::traces_root`] that a `traces` target may name
+    /// (`APLAN034`, `A1-143`). Empty means a trace may not leave the repository,
+    /// which is the default.
+    pub traces_external: Vec<std::path::PathBuf>,
     /// Evidence kinds strong enough to close a task. `Some(kinds)` turns on
     /// [`code::WEAK_EVIDENCE`] (`APLAN017`): a `done` task must carry at least one
     /// evidence of one of these kinds. `None` disables the rule.
     pub require_min_strength: Option<Vec<EvidenceKind>>,
+    /// Evidence policy scoped to part of the plan, narrowest match winning
+    /// (`A1-183`). Empty means every dial here is whole-plan, which is what it
+    /// was before scoping existed.
+    pub evidence_scopes: Vec<EvidenceScope>,
     /// Tags that exempt a task from [`code::WEAK_EVIDENCE`], for work where
     /// nothing stronger than a note exists (a phone call, a regulator letter).
     pub exempt_tags: Vec<String>,
@@ -35,22 +227,208 @@ pub struct Options {
     /// every non-milestone task must be a member of exactly one cut, unless
     /// tagged `cross-cutting`. Off by default.
     pub require_cut_membership: bool,
+    /// Declared tag vocabularies, family name to declaration (`APLAN026`,
+    /// `APLAN029`, `APLAN030`). Empty means the repository declared none, and
+    /// every tag stays legal.
+    pub tag_families: BTreeMap<String, TagFamily>,
+    /// The generated agent-contract block, for [`code::STALE_AGENT_CONTRACT`]
+    /// (`APLAN041`). `None` disables the rule, and is what a caller that cannot
+    /// render one passes.
+    ///
+    /// The *rendered block* rather than the inputs it came from, because
+    /// rendering it needs the config, the plan and the MCP tool list, and a
+    /// validator that assembled those would be a second implementation of
+    /// `export-agents-md` -- which is the defect this rule exists to catch,
+    /// rebuilt inside the rule (`A1-273`).
+    pub agents_block: Option<AgentsBlock>,
+    /// The `.aplan.yml` the options came from, when there was one.
+    ///
+    /// Only `APLAN029` reads it, and only to point at the file its finding is
+    /// about. Every other rule concerns a task and names that task's file; this
+    /// one concerns a declaration, and without the path it was the one rule in
+    /// twenty-nine that could point nowhere, so a second unused family rendered
+    /// as a bare sentence with no location and no fix line, `check` printing that
+    /// once per rule (`A1-085`, `A1-086`).
+    pub config_file: Option<std::path::PathBuf>,
 }
 
 impl Default for Options {
     fn default() -> Self {
         Self {
             require_effort: true,
+            require_impact: None,
             traces_root: None,
+            traces_external: Vec::new(),
             require_min_strength: None,
+            evidence_scopes: Vec::new(),
             exempt_tags: Vec::new(),
             detect_drift: false,
             require_cut_membership: false,
+            tag_families: BTreeMap::new(),
+            agents_block: None,
+            config_file: None,
         }
     }
 }
 
 /// Run every invariant over a loaded plan.
+/// Give each finding the line of the field its rule is about.
+///
+/// Public because `verify` needs it too. The evidence half builds its own
+/// diagnostics from its own resolvers, and without this a single `verify` run
+/// answered two ways about one file: `APLAN023`, raised by the structural half,
+/// named the `evidence:` line, while `APLAN011` about that same field named
+/// nothing. "One tool, one run, two answers" is the complaint `A1-202` was
+/// filed about, and it was reproducible inside the task's own fix.
+///
+/// One pass at the end, rather than at each of the sixty-odd sites that build a
+/// diagnostic. A finding already carries the code and the task, which is
+/// everything the answer needs, and a location added at fifty sites and
+/// forgotten at ten would be worse than none: a reader cannot tell "this rule
+/// has no line" from "this rule was missed".
+///
+/// Three things stop a finding from getting one, and each is a real answer:
+/// the rule is about no single field ([`crate::diagnostic::Rule::points_at`] is `None`), the task
+/// has no source text (it was built in memory by a mutating command), or the
+/// field is simply absent from the frontmatter -- `APLAN005` is *about* missing
+/// evidence, so there is no `evidence:` line to point at.
+pub fn locate_findings(diagnostics: &mut [Diagnostic], plan: &Plan) {
+    // Keyed by *path*, not by task id. An id is not unique in exactly the plan
+    // that reports `APLAN002`, and collecting by id keeps the last of a
+    // collision: with three files claiming one id, the finding about the second
+    // took the third file's line number and pointed a reader at a line that is
+    // not in the file the finding names.
+    let fields_of: BTreeMap<&Path, &crate::load::FieldLines> = plan
+        .tasks
+        .iter()
+        .map(|lt| (lt.path.as_path(), &lt.fields))
+        .collect();
+
+    for d in diagnostics.iter_mut() {
+        // The loader already placed a parse failure at the line the parser
+        // named, which is better than any field could be: the file did not
+        // parse, so it has no fields.
+        if d.location.is_some() {
+            continue;
+        }
+        // The file, not the task: a location is a place in a file, and a
+        // finding that names no file has nowhere to put one.
+        let (Some(file), Some(rule)) = (
+            d.file.as_deref(),
+            crate::diagnostic::Rule::from_code(d.code),
+        ) else {
+            continue;
+        };
+        let Some(field) = rule.points_at() else {
+            continue;
+        };
+        if let Some(location) = fields_of.get(file).and_then(|f| f.get(field)) {
+            d.location = Some(*location);
+        }
+    }
+}
+
+/// Evidence policy that applies to a subset of the plan (`A1-183`).
+///
+/// Built from `.aplan.yml`'s `policy` list. The selector is the one the command
+/// line uses (`A1-214`, ADR-0026), so a subset means the same thing whether it is
+/// written in a file or typed as flags.
+#[derive(Debug, Clone, PartialEq)]
+pub struct EvidenceScope {
+    /// The subset this applies to.
+    pub selector: crate::select::Selector,
+    /// How many dimensions the scope names, which is what decides precedence: the
+    /// narrowest match wins, and the whole-plan settings name none.
+    pub named_dimensions: usize,
+    /// The kinds strong enough to close a task here. `Some(vec![])` is a real
+    /// answer -- "nothing is required in this subset" -- and is how
+    /// `evidence.exempt_tags` is expressible in this form.
+    pub require_min_strength: Option<Vec<EvidenceKind>>,
+    /// Tags exempt from the requirement here.
+    pub exempt_tags: Option<Vec<String>>,
+}
+
+impl Options {
+    /// The evidence policy that applies to `task`, narrowest scope first.
+    ///
+    /// **Narrowest wins; among equals, the first entry in the file.** Both halves
+    /// are stated because both are guesses a reader would otherwise have to make.
+    /// Counting dimensions is the usual reading of "more specific", and taking
+    /// the earlier entry when two are equally specific is the rule that needs no
+    /// merge: a reader resolves it by reading down the list, and nothing depends
+    /// on the order a map happened to iterate in.
+    #[must_use]
+    pub fn evidence_for(
+        &self,
+        task: &crate::task::Task,
+        cut: Option<&str>,
+        milestone: Option<&str>,
+    ) -> (Option<&[EvidenceKind]>, &[String]) {
+        // **Per key, not per scope.** A scope that adjusts one dial must not
+        // silently reset the other to the whole-plan value: each key comes from
+        // the narrowest matching scope that *sets* it, and only falls to the
+        // whole-plan value when no matching scope does. Resolving the winning
+        // scope as a whole was the first version, and it made a scope setting
+        // only `exempt_tags` quietly discard a wider scope's requirement
+        // (`A1-183`'s audit).
+        //
+        // Not `max_by_key` either: it returns the *last* of several equal
+        // maxima, which would resolve a tie by the opposite of the documented
+        // rule.
+        fn narrowest<'a, T>(
+            scopes: &'a [EvidenceScope],
+            task: &crate::task::Task,
+            cut: Option<&str>,
+            milestone: Option<&str>,
+            get: impl Fn(&'a EvidenceScope) -> Option<&'a T>,
+        ) -> Option<&'a T> {
+            let mut best: Option<(usize, &T)> = None;
+            for scope in scopes {
+                if let Some(value) = get(scope)
+                    && scope.selector.matches(task, cut, milestone)
+                    && best.is_none_or(|(dims, _)| scope.named_dimensions > dims)
+                {
+                    best = Some((scope.named_dimensions, value));
+                }
+            }
+            best.map(|(_, v)| v)
+        }
+
+        let strength = narrowest(&self.evidence_scopes, task, cut, milestone, |s| {
+            s.require_min_strength.as_ref()
+        })
+        .map(Vec::as_slice)
+        .or(self.require_min_strength.as_deref());
+        let exempt = narrowest(&self.evidence_scopes, task, cut, milestone, |s| {
+            s.exempt_tags.as_ref()
+        })
+        .map_or(self.exempt_tags.as_slice(), Vec::as_slice);
+        (strength, exempt)
+    }
+}
+
+/// Which cut each task is in, keyed by task id, built once.
+///
+/// A scoped policy asks this per task (`A1-183`), and asking the graph each time
+/// is the shape `A1-125` and `A1-227` both had to undo.
+fn cut_index(plan: &Plan) -> BTreeMap<&str, (&str, &str)> {
+    let mut out: BTreeMap<&str, (&str, &str)> = BTreeMap::new();
+    for m in plan
+        .tasks
+        .iter()
+        .map(|lt| &lt.task)
+        .filter(|t| t.is_milestone())
+    {
+        for member in &m.blocked_by {
+            out.insert(
+                member.as_str(),
+                (m.id.as_str(), crate::roadmap::cut_label(m)),
+            );
+        }
+    }
+    out
+}
+
 pub fn validate(plan: &Plan, opts: &Options) -> Report {
     let mut report = Report {
         diagnostics: plan.load_diagnostics.clone(),
@@ -81,8 +459,10 @@ pub fn validate(plan: &Plan, opts: &Options) -> Report {
         .map(|lt| (lt.task.id.as_str(), lt.path.as_path()))
         .collect();
 
+    let cut_of = cut_index(plan);
+
     for lt in &plan.tasks {
-        check_task(lt, &graph, opts, &mut report.diagnostics);
+        check_task(lt, plan, &graph, opts, &cut_of, &mut report.diagnostics);
     }
 
     // Cycles. Reported once for the whole graph, not once per member.
@@ -138,6 +518,17 @@ pub fn validate(plan: &Plan, opts: &Options) -> Report {
         }
     }
 
+    for lt in &plan.tasks {
+        check_revisit(lt, &mut report.diagnostics);
+    }
+    check_tag_families(plan, opts, &mut report.diagnostics);
+    check_agents_block(opts, &mut report.diagnostics);
+    check_cancelled_cuts(plan, &graph, &mut report.diagnostics);
+    check_preference_cycles(plan, &graph, &mut report.diagnostics);
+
+    // A finding names the line it is about, not only the file (`A1-202`).
+    locate_findings(&mut report.diagnostics, plan);
+
     // Stable output: a *total* order, so two diagnostics that tie on
     // (code, task) can't reorder with the filesystem walk across CI runners.
     report.diagnostics.sort_by(|a, b| {
@@ -155,11 +546,25 @@ pub fn validate(plan: &Plan, opts: &Options) -> Report {
 /// Split out of [`validate`] so each function stays readable: the graph-wide
 /// checks (duplicate ids, cycles) belong to the caller, which owns the whole
 /// plan; everything here needs only one task plus the graph to look blockers up.
-fn check_task(lt: &LoadedTask, graph: &Graph<'_>, opts: &Options, out: &mut Vec<Diagnostic>) {
+fn check_task(
+    lt: &LoadedTask,
+    plan: &Plan,
+    graph: &Graph<'_>,
+    opts: &Options,
+    cut_of: &BTreeMap<&str, (&str, &str)>,
+    out: &mut Vec<Diagnostic>,
+) {
     let t = &lt.task;
 
-    check_edges(lt, graph, out);
-    check_evidence(lt, opts, out);
+    check_edges(lt, graph, &plan.unloadable, out);
+    check_evidence(lt, opts, cut_of, out);
+    check_path_globs(lt, out);
+    check_duplicate_paths(lt, out);
+    check_preferences(lt, graph, out);
+    check_criteria(lt, out);
+    check_scaffold(lt, out);
+    check_scaffold_leftover(lt, out);
+    check_version_impact(lt, opts, out);
 
     // Effort, for phase rollups. Milestones are checkpoints, not work: they
     // carry no effort by design (and are excluded from every rollup), so asking
@@ -177,37 +582,7 @@ fn check_task(lt: &LoadedTask, graph: &Graph<'_>, opts: &Options, out: &mut Vec<
         );
     }
 
-    // A task tagged `milestone` must be shaped like one (ADR-0008): it scopes
-    // work via `blocked_by`, and carries no effort or paths, because a checkpoint
-    // is not work and owns no files. The tag silently excludes it from every
-    // work-view, so this warning is what makes a mis-tag, or an empty cut,
-    // visible instead of a quiet reclassification.
-    if t.is_milestone() {
-        let mut problems = Vec::new();
-        if t.blocked_by.is_empty() {
-            problems.push("has no members (`blocked_by` is empty)");
-        }
-        if t.effort_days.is_some() {
-            problems.push("carries `effort_days`");
-        }
-        if !t.paths.is_empty() {
-            problems.push("declares `paths`");
-        }
-        if !problems.is_empty() {
-            out.push(
-                Diagnostic::warning(
-                    code::MILESTONE_HYGIENE,
-                    format!("is tagged `milestone` but {}", problems.join(" and ")),
-                )
-                .with_task(&t.id)
-                .with_file(&lt.path)
-                .with_agent_instruction(
-                    "Remove the `milestone` tag if this is work, or make it a checkpoint: \
-                     give it its cut's tasks as `blocked_by`, and drop `effort_days` and `paths`.",
-                ),
-            );
-        }
-    }
+    check_milestone_shape(lt, graph, out);
 
     // Traces must resolve. This is the link that stops a research document
     // and a plan from silently diverging.
@@ -216,7 +591,21 @@ fn check_task(lt: &LoadedTask, graph: &Graph<'_>, opts: &Options, out: &mut Vec<
         // listed twice is one relationship, and two identical diagnostics is just
         // noise (two identical annotations under `--format github`).
         let traces: BTreeSet<&str> = t.traces.iter().map(String::as_str).collect();
+
+        // APLAN028: a closed task that stamped *some* of its traces. Checked
+        // before the drift loop, because the loop is precisely what goes quiet.
+        if let Some(d) = check_partial_stamp(t, &traces, opts) {
+            out.push(d.with_task(&t.id).with_file(&lt.path));
+        }
+
         for tr in traces {
+            // Leaving the repository is asked first: a target outside it
+            // resolves perfectly whenever the sibling is checked out, so
+            // `check_trace` would say nothing at all (`A1-143`).
+            if let Some(diag) = check_external_trace(root, opts, tr) {
+                out.push(diag.with_task(&t.id).with_file(&lt.path));
+                continue;
+            }
             if let Some(diag) = check_trace(root, tr) {
                 out.push(diag.with_task(&t.id).with_file(&lt.path));
             }
@@ -226,7 +615,7 @@ fn check_task(lt: &LoadedTask, graph: &Graph<'_>, opts: &Options, out: &mut Vec<
             if opts.detect_drift
                 && t.status == Status::Done
                 && let Some(stamp) = t.trace_fingerprints.get(tr)
-                && let Some(diag) = check_drift(root, tr, stamp)
+                && let Some(diag) = check_drift(root, tr, stamp, sole_commit(t))
             {
                 out.push(diag.with_task(&t.id).with_file(&lt.path));
             }
@@ -234,31 +623,745 @@ fn check_task(lt: &LoadedTask, graph: &Graph<'_>, opts: &Options, out: &mut Vec<
     }
 }
 
+/// `APLAN041`: the generated block in `AGENTS.md` no longer says what the policy
+/// says.
+///
+/// The comparison is on the text between the markers, trimmed at both ends, so a
+/// trailing newline the writer does or does not leave is not a finding: what an
+/// agent reads is the block, and whitespace around it is the file's.
+fn check_agents_block(opts: &Options, out: &mut Vec<Diagnostic>) {
+    let Some(want) = &opts.agents_block else {
+        return;
+    };
+    // A file that is not there, or that cannot be read, carries no block -- the
+    // same silence as one carrying no markers, through the same branch. Written
+    // as one path deliberately: an early return here would guarantee that
+    // silence twice, and a guarantee with two implementations is one no single
+    // change can be shown to break (`A1-273`, found by mutating it).
+    let text = std::fs::read_to_string(&want.path).unwrap_or_default();
+    let file = want.path.display();
+    let diag = match crate::contract::block_in(&text) {
+        crate::contract::Block::Malformed { begins, ends } => Diagnostic::warning(
+            code::STALE_AGENT_CONTRACT,
+            format!(
+                "{begins} `aplan:begin` and {ends} `aplan:end` marker(s), so the generated \
+                 block cannot be read and nothing can say whether it is current"
+            ),
+        )
+        .with_agent_instruction(format!(
+            "Leave one `aplan:begin` and one `aplan:end`, in that order, then run `aplan \
+             export-agents-md --write {file}`."
+        )),
+        crate::contract::Block::Present(found) if found.trim() != want.current.trim() => {
+            Diagnostic::warning(
+                code::STALE_AGENT_CONTRACT,
+                "the generated block is not what this repository's policy produces now: it is \
+                 what an agent reads before touching the plan, so a stale one teaches a rule \
+                 the tool would refuse",
+            )
+            .with_agent_instruction(format!("Run `aplan export-agents-md --write {file}`."))
+        }
+        // `Absent`: the markers are the request, and this file makes none, so
+        // nothing here has standing. `Present`: it already says what the policy
+        // says. Both variants named rather than a wildcard, so a new one is a
+        // compile error and not a silent third silence.
+        crate::contract::Block::Absent | crate::contract::Block::Present(_) => return,
+    };
+    out.push(diag.with_file(&want.path));
+}
+
+/// `APLAN042`: a `revisit_at` is usable, and on a task it can mean anything for.
+fn check_revisit(lt: &LoadedTask, out: &mut Vec<Diagnostic>) {
+    let t = &lt.task;
+    let Some(at) = &t.revisit_at else {
+        return;
+    };
+    if rfc3339_to_epoch(at).is_none() {
+        out.push(
+            Diagnostic::warning(
+                code::REVISIT_UNUSABLE,
+                format!("`revisit_at: {at}` is not an RFC 3339 instant, so nothing can act on it"),
+            )
+            .with_agent_instruction(
+                concat!(
+                    "Write the instant as `YYYY-MM-DDTHH:MM:SSZ`, or with an offset ",
+                    "(`YYYY-MM-DDTHH:MM:SS+02:00`). A date alone is not an instant: a ",
+                    "scheduler has to know which moment of the day to return at.",
+                )
+                .to_string(),
+            )
+            .with_task(&t.id)
+            .with_file(&lt.path),
+        );
+        return;
+    }
+    // Parked is the only status it means anything for. `ready` already offers a
+    // `todo` task, `done` and `dropped` are over, and `due` reports parked work:
+    // a revisit anywhere else is a note to nobody.
+    if t.status != Status::Blocked {
+        out.push(
+            Diagnostic::warning(
+                code::REVISIT_UNUSABLE,
+                format!(
+                    "carries `revisit_at` and is `{}`: a revisit says when to look at *parked* \
+                     work again, and nothing reads it here",
+                    t.status
+                ),
+            )
+            .with_agent_instruction(
+                concat!(
+                    "Park the task (`status: blocked`) if it is waiting on something outside ",
+                    "the plan, or drop the `revisit_at`. Reaching the instant never changes a ",
+                    "status, so it cannot be what makes this task start.",
+                )
+                .to_string(),
+            )
+            .with_task(&t.id)
+            .with_file(&lt.path),
+        );
+    }
+}
+
+/// `APLAN021`: a task tagged `milestone` is shaped like one (ADR-0008), and a
+/// release like a release (ADR-0022).
+///
+/// Its own function since `A1-146`, because the checks it holds outgrew the
+/// length this workspace lints for -- membership counted as live work
+/// (`A1-134`), the two exemptions its audit added, and the release cases.
+fn check_milestone_shape(lt: &LoadedTask, graph: &Graph<'_>, out: &mut Vec<Diagnostic>) {
+    let t = &lt.task;
+    // A task tagged `milestone` must be shaped like one (ADR-0008): it scopes
+    // work via `blocked_by`, and carries no effort or paths, because a checkpoint
+    // is not work and owns no files. The tag silently excludes it from every
+    // work-view, so this warning is what makes a mis-tag, or an empty cut,
+    // visible instead of a quiet reclassification.
+    if t.is_milestone() {
+        let mut problems = Vec::new();
+        // Members, counted as *live work* rather than as entries (`A1-134`).
+        //
+        // The empty test was the wrong one for what this rule means. ADR-0013
+        // reuses `blocked_by` to sequence cuts, so a cut emptied of all its work
+        // still lists its predecessor and looked healthy; and `A1-081`
+        // deliberately exempts a cut's cancelled member from `APLAN020`, so a cut
+        // whose work was all dropped looked healthy too. Both are a cut with
+        // nothing in it, which is the thing this rule is named for, and both were
+        // silent. `roadmap` has excluded dropped members from a cut's rollup all
+        // along, so this is the gate agreeing with the view rather than a new
+        // opinion.
+        let members: Vec<&crate::task::Task> =
+            t.blocked_by.iter().filter_map(|b| graph.get(b)).collect();
+        let live_work = members
+            .iter()
+            .filter(|m| !m.is_milestone() && m.status != Status::Dropped)
+            .count();
+        // A *cancelled* cut is supposed to hold cancelled work, and `APLAN027`
+        // owns the mirror -- a cancelled cut still holding live members. Reporting
+        // it here would fire on every `aplan drop --cut` and tell the author to
+        // cancel a cut they have just cancelled (`A1-134`, found by its audit).
+        let cancelled_cut = t.status == Status::Dropped;
+        // A *release* holds cuts on purpose (`A1-146`, ADR-0022). Without this it
+        // reads as a cut emptied of work, which is the same state and the
+        // opposite intent: the tag is how an author says which they meant.
+        let release = t.is_release();
+        // A `blocked_by` naming nothing that exists is `APLAN003`'s finding. Left
+        // to it, because "every member of this cut is unknown" is one defect and
+        // two sentences about it is noise -- and because `all()` over no members
+        // is vacuously true, which made this rule say the members were cuts.
+        let members_exist = !members.is_empty();
+        if t.blocked_by.is_empty() {
+            problems.push("has no members (`blocked_by` is empty)".to_string());
+        } else if live_work == 0 && members_exist && !cancelled_cut && !release {
+            // Which of the two it is, because the remedies differ: a cut that
+            // only sequences needs work moved in, and a cut whose work was all
+            // cancelled needs cancelling too.
+            let only_cuts = members.iter().all(|m| m.is_milestone());
+            problems.push(if only_cuts {
+                "has no work in it: its `blocked_by` names only other cuts".to_string()
+            } else {
+                "has no live work in it: every task it lists is `dropped`".to_string()
+            });
+        }
+        if t.effort_days.is_some() {
+            problems.push("carries `effort_days`".to_string());
+        }
+        if !t.paths.is_empty() {
+            problems.push("declares `paths`".to_string());
+        }
+        // A release's members must be cuts. One holding work directly is the
+        // second grouping axis ADR-0014 refused, and `APLAN022` reports it from
+        // the other end (a task in two cuts); this names the release rather than
+        // every task caught by it. Its own finding, because the sentence and the
+        // remedy are its own (`A1-146`).
+        if release && let Some(work) = members.iter().find(|m| !m.is_milestone()) {
+            out.push(
+                Diagnostic::warning(
+                    code::MILESTONE_HYGIENE,
+                    format!(
+                        "is tagged `release` and holds `{}` directly: a release closes cuts, so \
+                         a task in it is a task in two cuts",
+                        work.id
+                    ),
+                )
+                .with_task(&t.id)
+                .with_file(&lt.path)
+                .with_agent_instruction(
+                    "List the cuts this release closes in its `blocked_by`, and leave the work \
+                     in them. A release is a checkpoint over cuts, not a second cut.",
+                ),
+            );
+        }
+
+        if !problems.is_empty() {
+            // The remedy differs by case, and a fix line that does not fit is
+            // one an author learns to skip: a cut emptied of work does not need
+            // its tag removed, it needs work moved into it or cancelling
+            // (`A1-134`).
+            let emptied = t.blocked_by.is_empty() || (live_work == 0 && members_exist);
+            let instruction = if emptied && problems.len() == 1 {
+                "Move the work that belongs to this cut into its `blocked_by` (`aplan mv <id>... \
+                 --cut <this>`), or cancel the cut too (`aplan drop --cut <this>`) if it is not \
+                 going to happen."
+            } else {
+                "Remove the `milestone` tag if this is work, or make it a checkpoint: give it \
+                 its cut's tasks as `blocked_by`, and drop `effort_days` and `paths`."
+            };
+            out.push(
+                Diagnostic::warning(
+                    code::MILESTONE_HYGIENE,
+                    format!("is tagged `milestone` but {}", problems.join(" and ")),
+                )
+                .with_task(&t.id)
+                .with_file(&lt.path)
+                .with_agent_instruction(instruction),
+            );
+        }
+    }
+}
+
+/// `APLAN028`: a `done` task that stamped some of its traces and not others.
+///
+/// Checked before the drift loop, because that loop is precisely what goes quiet:
+/// `trace_fingerprints` is keyed by the trace string, so editing a `traces` entry
+/// on a closed task orphans the old key and leaves the new trace unstamped, and
+/// `APLAN018` then has nothing to compare (`A1-098`).
+fn check_partial_stamp(
+    t: &crate::task::Task,
+    traces: &BTreeSet<&str>,
+    opts: &Options,
+) -> Option<Diagnostic> {
+    if !opts.detect_drift || t.status != Status::Done || t.trace_fingerprints.is_empty() {
+        return None;
+    }
+    let unstamped: Vec<&str> = traces
+        .iter()
+        .copied()
+        .filter(|tr| !t.trace_fingerprints.contains_key(*tr))
+        .collect();
+    if unstamped.is_empty() {
+        return None;
+    }
+    let orphans: Vec<&str> = t
+        .trace_fingerprints
+        .keys()
+        .map(String::as_str)
+        .filter(|k| !traces.contains(k))
+        .collect();
+    // Name the retarget when the evidence for it is there: an orphaned key is the
+    // only surviving record of what the task was closed against, and "you changed
+    // this trace" is a better sentence than "this trace is unstamped".
+    let how = match orphans.as_slice() {
+        [was] => format!(", and stamps `{was}`, which it no longer traces"),
+        [] => String::new(),
+        many => format!(", and stamps {} keys it no longer traces", many.len()),
+    };
+    // Every unstamped trace, not the first. Naming one would read as the only one,
+    // and an author repairing them one at a time is the slow version of what
+    // `--restamp` does in a single pass.
+    let named = unstamped
+        .iter()
+        .map(|tr| format!("`{tr}`"))
+        .collect::<Vec<_>>()
+        .join(", ");
+    let (them, sections) = if unstamped.len() == 1 {
+        ("it", "this section")
+    } else {
+        ("them", "these sections")
+    };
+    Some(
+        Diagnostic::error(
+            code::PARTIAL_TRACE_STAMP,
+            format!(
+                "is `done` and does not stamp {named}{how}: drift is not checked for \
+                 {them}, so {sections} can change and nothing will say so"
+            ),
+        )
+        .with_agent_instruction(format!(
+            "Re-review {named}, then `aplan close {} --restamp`, which stamps every \
+             trace and drops keys no trace names.",
+            t.id
+        )),
+    )
+}
+
 /// Compare a stored trace fingerprint against the live traced section. `None`
 /// when they match, the document or anchor cannot be read (that is `APLAN008`'s
 /// job, not a drift), or the trace names no anchor (only sections are stamped).
-fn check_drift(root: &Path, trace: &str, stamp: &str) -> Option<Diagnostic> {
+fn check_drift(
+    root: &Path,
+    trace: &str,
+    stamp: &str,
+    closed_at: Option<&str>,
+) -> Option<Diagnostic> {
     let (rel, anchor) = trace.split_once('#')?;
     let text = std::fs::read_to_string(root.join(rel)).ok()?;
-    let current = crate::anchor::anchor_fingerprint(&text, anchor)?;
-    if current == *stamp {
+    // Accepts the pre-`A1-122` form as well as the current one, so a plan whose
+    // stamps predate the trailing-blank fix is not re-flagged wholesale.
+    crate::anchor::anchor_fingerprint(&text, anchor)?;
+    if crate::anchor::fingerprint_holds(&text, anchor, stamp) {
         return None;
     }
+    // Where to look, when the task cites a commit to look *from*. The reader is
+    // otherwise told a section moved and left to work out which of its lines did,
+    // often for a closure somebody else made (pre-public adoption evidence, item 14).
+    //
+    // A command, not a diff: `trace_fingerprints` stores a hash and not the
+    // content, so there is nothing here to compare against, and storing the text
+    // to make one possible would put a copy of every traced section in every task
+    // file. Printing the command costs nothing and keeps the rule hermetic.
+    // The path in the command is joined onto the traces root, not the trace's own
+    // spelling. `traces_root` is configurable, so with `traces_root: docs` a trace
+    // of `d.md#intro` is `docs/d.md` from the repository, and `git diff <sha> --
+    // d.md` matches nothing and exits *zero*: a command that looks like it worked
+    // and shows an empty diff is worse than one that fails.
+    let shown = command_path(root, rel);
+    let where_to_look = closed_at.map_or_else(
+        || format!("Re-review the task against `{shown}`"),
+        |sha| format!("See what moved with `git diff {sha} -- {shown}`, then re-review the task"),
+    );
     Some(
         Diagnostic::warning(
             code::TRACE_DRIFT,
             format!("traced section `{trace}` has changed since this task was closed"),
         )
         .with_agent_instruction(format!(
-            "Re-review the task against `{rel}`; if it still holds, re-stamp with \
-             `aplan close --restamp`, otherwise reopen the task."
+            "{where_to_look}; if it still holds, re-stamp with \
+             `aplan close --restamp`, otherwise `aplan supersede` it with the task that now \
+             needs doing."
         )),
     )
 }
 
+/// The traced document as a reader would name it from the repository.
+///
+/// Joined onto the traces root rather than taken from the trace's own spelling.
+/// `traces_root` is configurable, so under `traces_root: docs` a trace of
+/// `d.md#intro` is `docs/d.md` from the repository, and `git diff <sha> -- d.md`
+/// would match nothing and exit *zero*: a command that looks like it worked and
+/// shows an empty diff is worse than one that fails.
+///
+/// The default root is `.`, so the common case is the plain relative path and the
+/// leading `./` is dropped. A root the user made absolute stays absolute, which
+/// git accepts and which they chose.
+fn command_path(root: &Path, rel: &str) -> String {
+    let joined = root.join(rel);
+    joined
+        .strip_prefix(".")
+        .unwrap_or(&joined)
+        .display()
+        .to_string()
+}
+
+/// The one commit a task cites, or `None` when it cites none or several.
+///
+/// Deliberately silent at "several" rather than picking. `aplan close` refuses a
+/// task that already carries evidence, so every citation arrives in one block and
+/// nothing distinguishes which of them the stamp was taken at. Naming one anyway
+/// would put a specific SHA in a sentence that cannot justify it, which is the
+/// defect `APLAN024` shipped and `AGENTS.md` now forbids: a diagnostic may name
+/// only what the predicate returned.
+fn sole_commit(t: &crate::task::Task) -> Option<&str> {
+    let mut commits = t
+        .evidence
+        .iter()
+        .filter(|e| e.kind == EvidenceKind::Commit)
+        .map(|e| e.reference.trim())
+        .filter(|r| !is_vacuous_ref(r));
+    let first = commits.next()?;
+    commits.next().is_none().then_some(first)
+}
+
+/// `APLAN027`: a cancelled cut's members are cancelled too.
+///
+/// A `dropped` milestone whose members are live says the cut is cancelled and
+/// the work in it is going ahead. A bug produced exactly that and nothing
+/// reported it (`A1-084`); a hand-edit reaches it too, as does dropping a
+/// milestone without `--cut`.
+fn check_cancelled_cuts(plan: &Plan, graph: &Graph<'_>, out: &mut Vec<Diagnostic>) {
+    for lt in &plan.tasks {
+        let t = &lt.task;
+        if !t.is_milestone() || t.status != Status::Dropped {
+            continue;
+        }
+        // Members only. A cut this one follows is a sequencing edge, and a live
+        // predecessor of a cancelled cut is ordinary.
+        let live: Vec<&str> = t
+            .blocked_by
+            .iter()
+            .filter_map(|b| graph.get(b))
+            .filter(|m| !m.is_milestone() && !m.status.is_terminal())
+            .map(|m| m.id.as_str())
+            .collect();
+        if live.is_empty() {
+            continue;
+        }
+        out.push(
+            Diagnostic::warning(
+                code::CANCELLED_CUT_LIVE_WORK,
+                format!(
+                    "is `dropped` but {} member(s) are still live ({}): the plan says this cut \
+                     is cancelled and that its work is going ahead",
+                    live.len(),
+                    live.join(", ")
+                ),
+            )
+            .with_task(&t.id)
+            .with_file(&lt.path)
+            .with_agent_instruction(
+                "Cancel the work too (`aplan drop <id>...`), or move it to a cut that is still \
+                 live, or revive the cut.",
+            ),
+        );
+    }
+}
+
+/// `APLAN026`: a tag that looks like a member of a declared family is one.
+///
+/// A tag is judged to belong to a family when it carries the family's `name-`
+/// prefix, or when it is one edit from a declared member. The prefix catches
+/// `epic-x`, an epic nobody declared; the edit distance catches `epci-k`, which
+/// carries no recognisable prefix at all. Both were named by the pilot that
+/// produced this (`A1-076`).
+fn check_tag_families(plan: &Plan, opts: &Options, out: &mut Vec<Diagnostic>) {
+    if opts.tag_families.is_empty() {
+        return;
+    }
+    // Which families the plan touches at all, gathered while judging the tags so
+    // there is one pass and one definition of "touches" (`APLAN029`, below).
+    let mut used: BTreeSet<&str> = BTreeSet::new();
+    for lt in &plan.tasks {
+        // Deduplicated, as `blocked_by` is: a tag listed twice is one mistake,
+        // and the identical diagnostic twice is noise, especially as two
+        // identical annotations under `--format github`.
+        let tags: BTreeSet<&str> = lt.task.tags.iter().map(String::as_str).collect();
+        for tag in tags {
+            // A declared member of any family is correct by definition, and a
+            // family's own name is not a member of itself.
+            if let Some((family, _)) = opts
+                .tag_families
+                .iter()
+                .find(|(_, family)| family.members.iter().any(|m| m == tag))
+            {
+                used.insert(family.as_str());
+                continue;
+            }
+            let Some((family, near)) = claimed_by(&opts.tag_families, tag) else {
+                continue; // Outside every declared vocabulary, and so not judged.
+            };
+            // A tag in a family's shape counts as using it even though it is
+            // wrong, so one mistake produces one finding: `APLAN026` already
+            // names this tag, and adding "and nothing uses `epic`" underneath
+            // would be the same situation reported twice.
+            used.insert(family);
+            let message = match &near {
+                Some(member) => format!(
+                    "tag `{tag}` is one edit from `{member}` in the `{family}` family: did you \
+                     mean `{member}`?"
+                ),
+                None => format!(
+                    "tag `{tag}` carries the `{family}-` prefix, but `{family}` does not list it"
+                ),
+            };
+            out.push(
+                Diagnostic::warning(code::UNKNOWN_TAG, message)
+                .with_task(&lt.task.id)
+                .with_file(&lt.path)
+                .with_agent_instruction(format!(
+                    "Correct the tag, or add it to `tag_families.{family}` in `.aplan.yml` if it \
+                     is a real member."
+                )),
+            );
+        }
+    }
+    report_unused_families(opts, &used, out);
+    report_cardinality(plan, opts, &used, out);
+}
+
+/// `APLAN030`: a task carries the number of members a declared family requires.
+///
+/// Counted over *declared members only*. A tag that merely looks like one is
+/// `APLAN026`'s finding and is not evidence that the requirement was met: a task
+/// tagged `priority-p9` under `exactly-one` has no priority this repository
+/// declared, and reporting that it does would be the rule taking a typo as proof.
+///
+/// Silent on a family nothing in the plan carries, which is `APLAN029`'s finding
+/// and is why that rule is this one's dependency. A requirement over a
+/// vocabulary no tag matches is unbindable, not unmet: `exactly-one` would fail
+/// every task in the plan and `at-most-one` would pass every one, and both would
+/// be confident verdicts about a declaration that was never bound. One
+/// mis-declaration is one finding, not one per task plus one (`A1-133`).
+fn report_cardinality(
+    plan: &Plan,
+    opts: &Options,
+    used: &BTreeSet<&str>,
+    out: &mut Vec<Diagnostic>,
+) {
+    for lt in &plan.tasks {
+        let task = &lt.task;
+        for (name, family) in &opts.tag_families {
+            if !used.contains(name.as_str()) || !family.judges(task) {
+                continue;
+            }
+            if family.satisfied_by(task) {
+                continue;
+            }
+            // Deduplicated by the declaration: a member listed twice on one task
+            // is one tag, and `exactly-one` must not be failed by writing it out
+            // twice.
+            let carried = family.carried(task);
+            let found = if carried.is_empty() {
+                "none".to_string()
+            } else {
+                carried
+                    .iter()
+                    .map(|t| format!("`{t}`"))
+                    .collect::<Vec<_>>()
+                    .join(", ")
+            };
+            let scope = if family.status == StatusScope::Any {
+                String::new()
+            } else {
+                format!(" on {} tasks", family.status.as_str())
+            };
+            out.push(
+                Diagnostic::error(
+                    code::TAG_CARDINALITY,
+                    format!(
+                        "`{name}` is declared {}{scope} and this task carries {found}",
+                        family.require.as_str()
+                    ),
+                )
+                .with_task(&task.id)
+                .with_file(&lt.path)
+                .with_agent_instruction(format!(
+                    "Carry {} of `tag_families.{name}` on this task, or change what \
+                     `.aplan.yml` requires of it.",
+                    match family.require {
+                        Cardinality::AtMostOne => "at most one",
+                        Cardinality::AtLeastOne => "at least one",
+                        _ => "exactly one",
+                    }
+                )),
+            );
+        }
+    }
+}
+
+/// `APLAN029`: a declared tag family is carried by at least one task.
+///
+/// Reported as an observation, not a diagnosis. A family nothing carries is as
+/// likely to be a vocabulary declared before its first use as the fourth pilot's
+/// mis-declaration, and the two have different remedies, so the message names
+/// what it saw and the fix line names both (`A1-070`'s lesson, `A1-085`).
+fn report_unused_families(opts: &Options, used: &BTreeSet<&str>, out: &mut Vec<Diagnostic>) {
+    for (family, declared) in &opts.tag_families {
+        if used.contains(family.as_str()) {
+            continue;
+        }
+        let members = &declared.members;
+        let listed = members
+            .iter()
+            .map(|m| format!("`{m}`"))
+            .collect::<Vec<_>>()
+            .join(", ");
+        let mut d = Diagnostic::warning(
+            code::UNUSED_TAG_FAMILY,
+            format!(
+                "no task carries the `{family}` family: it declares {} member(s), {listed}, \
+                     and a task joins by carrying one of them as a whole tag",
+                members.len()
+            ),
+        )
+        .with_agent_instruction(format!(
+            "Tag a task with one of them, or correct `tag_families.{family}` in `.aplan.yml` \
+                 if the members are not the tags your tasks actually carry."
+        ));
+        // The declaration's own file, so the finding has a location like every
+        // other one: an annotation lands on `.aplan.yml` in the diff, and a
+        // second unused family is not a locationless sentence.
+        if let Some(path) = &opts.config_file {
+            d = d.with_file(path);
+        }
+        out.push(d);
+    }
+}
+
+/// The family a tag appears to belong to, and the member it is nearest to.
+fn claimed_by<'a>(
+    families: &'a BTreeMap<String, TagFamily>,
+    tag: &str,
+) -> Option<(&'a str, Option<&'a String>)> {
+    // The prefix first. A tag carrying the family's own prefix is an undeclared
+    // member, and saying so beats suggesting the nearest declared one:
+    // `epic-x` is one substitution from `epic-a`, and "did you mean `epic-a`?"
+    // is a worse answer than "`epic` does not list it".
+    //
+    // Longest match wins, because one family's name can be a prefix of
+    // another's: `epic-sub-y` belongs to `epic-sub`, and naming `epic` would
+    // send the author to add it to the wrong list.
+    if let Some(family) = families
+        .keys()
+        .filter(|family| tag.starts_with(&format!("{family}-")))
+        .max_by_key(|family| family.len())
+    {
+        return Some((family, None));
+    }
+    // Otherwise the nearest member, which is what catches a tag whose prefix is
+    // itself the typo (`epci-b`, `kimd-m`).
+    for (family, declared) in families {
+        if let Some(member) = declared.members.iter().find(|m| is_one_edit_apart(m, tag)) {
+            return Some((family, Some(member)));
+        }
+    }
+    None
+}
+
+/// Whether two strings are within one insertion, deletion, substitution, or
+/// transposition of adjacent characters.
+///
+/// Damerau-Levenshtein bounded at one, written out rather than pulled in: the
+/// bound makes it a handful of comparisons, and a transposition is exactly the
+/// case a prefix rule cannot see (`epci-k` for `epic-k`).
+pub fn is_one_edit_apart(member: &str, tag: &str) -> bool {
+    if member == tag {
+        return false; // Identical is a match, not a near miss.
+    }
+    let left: Vec<char> = member.chars().collect();
+    let right: Vec<char> = tag.chars().collect();
+    match left.len().abs_diff(right.len()) {
+        0 => {
+            let diffs: Vec<usize> = (0..left.len()).filter(|&i| left[i] != right[i]).collect();
+            match diffs.as_slice() {
+                [_] => true,
+                // Adjacent transposition: `epic` -> `epci`.
+                [first, second] if *second == first + 1 => {
+                    left[*first] == right[*second] && left[*second] == right[*first]
+                }
+                _ => false,
+            }
+        }
+        1 => {
+            // One insertion or deletion: the longer string with one character
+            // skipped must equal the shorter.
+            let (long, short) = if left.len() > right.len() {
+                (&left, &right)
+            } else {
+                (&right, &left)
+            };
+            let mut skipped = false;
+            let mut matched = 0usize;
+            for &c in long {
+                if matched < short.len() && short[matched] == c {
+                    matched += 1;
+                } else if skipped {
+                    return false;
+                } else {
+                    skipped = true;
+                }
+            }
+            matched == short.len()
+        }
+        _ => false,
+    }
+}
+
 /// The invariants that read the `blocked_by` edges: `APLAN003`, `APLAN006`,
 /// `APLAN007`, `APLAN020`.
-fn check_edges(lt: &LoadedTask, graph: &Graph<'_>, out: &mut Vec<Diagnostic>) {
+fn check_edges(
+    lt: &LoadedTask,
+    graph: &Graph<'_>,
+    unloadable: &BTreeMap<String, PathBuf>,
+    out: &mut Vec<Diagnostic>,
+) {
+    check_declared_edges(lt, graph, unloadable, out);
+    check_inherited_cut_edges(lt, graph, out);
+}
+
+/// The status rules on the cut-sequencing edges a task inherits (ADR-0013).
+///
+/// `close` refuses a task whose cut predecessor is unfinished, because it reads
+/// the same blocker set the graph does. `check` read only the declared edges, so
+/// a status hand-edited to `done` passed the gate that the write path would have
+/// refused: the tool enforcing a rule at write time and not at check time is the
+/// gap this project exists to close (`A1-073`).
+///
+/// The message says the edge comes from the cut, because an author who looks for
+/// `M-s0` in their own `blocked_by` will not find it there.
+fn check_inherited_cut_edges(lt: &LoadedTask, graph: &Graph<'_>, out: &mut Vec<Diagnostic>) {
+    let t = &lt.task;
+    let declared: BTreeSet<&str> = t.blocked_by.iter().map(String::as_str).collect();
+
+    for b in graph.blockers_of(&t.id) {
+        if declared.contains(b) {
+            continue; // already judged above, and one edge must not report twice
+        }
+        let Some(dep) = graph.get(b) else { continue };
+
+        if t.status == Status::Done && !dep.status.satisfies_dependency() {
+            out.push(
+                Diagnostic::error(
+                    code::DONE_BEFORE_BLOCKER,
+                    format!(
+                        "is `done` but its cut follows `{b}`, which is `{}`",
+                        dep.status
+                    ),
+                )
+                .with_task(&t.id)
+                .with_file(&lt.path)
+                .with_agent_instruction(format!(
+                    "Either close `{b}` first, or drop the cut-sequencing edge if this task \
+                     does not really wait for it."
+                )),
+            );
+        }
+
+        if !t.status.is_terminal() && dep.status == Status::Dropped {
+            out.push(
+                Diagnostic::error(
+                    code::DROPPED_BLOCKER,
+                    format!(
+                        "is `{}` but its cut follows `{b}`, which is `dropped`: it can never \
+                         legitimately start",
+                        t.status
+                    ),
+                )
+                .with_task(&t.id)
+                .with_file(&lt.path)
+                .with_agent_instruction(format!(
+                    "Either drop `{}` too, revive `{b}`, or remove the cut-sequencing edge.",
+                    t.id
+                )),
+            );
+        }
+    }
+}
+
+/// The invariants on the edges a task writes down itself.
+fn check_declared_edges(
+    lt: &LoadedTask,
+    graph: &Graph<'_>,
+    unloadable: &BTreeMap<String, PathBuf>,
+    out: &mut Vec<Diagnostic>,
+) {
     let t = &lt.task;
 
     // Self-dependency. A cycle of one, reported specifically because the
@@ -283,6 +1386,22 @@ fn check_edges(lt: &LoadedTask, graph: &Graph<'_>, out: &mut Vec<Diagnostic>) {
             continue; // already `SELF_DEP`
         }
         let Some(dep) = graph.get(b) else {
+            // A task whose file is present but did not load is not unknown, and
+            // this edge is not the fault. Reporting it anyway buries the real
+            // error under a cascade proportional to how well connected the plan
+            // is: one unquoted colon in three files produced sixteen of these in
+            // the fourth pilot's shape, and fifty-two in its real plan
+            // (`A1-072`).
+            //
+            // Suppressed rather than reworded, because the count is the first
+            // thing an adopter reads and "19 errors" for three faults is the
+            // wrong number however carefully each line is phrased. This is what
+            // a compiler does with a module that failed to parse, and it is safe
+            // because only edges into *this* id are dropped: a reference to
+            // something genuinely absent still reports below.
+            if unloadable.contains_key(b) {
+                continue;
+            }
             out.push(
                 Diagnostic::error(
                     code::UNKNOWN_DEP,
@@ -298,8 +1417,15 @@ fn check_edges(lt: &LoadedTask, graph: &Graph<'_>, out: &mut Vec<Diagnostic>) {
             continue;
         };
 
-        // A done task whose blocker is not done means one of the two is lying.
-        if t.status == Status::Done && !dep.status.satisfies_dependency() {
+        // A done task whose blocker is not done means one of the two is lying,
+        // unless a cut's own member was cancelled: a cut is complete when its
+        // live members are (`A1-081`). A cancelled predecessor cut still counts,
+        // for the reason below.
+        let cancelled_member = crate::edge_kind(dep, t) == crate::EdgeKind::Membership;
+        if t.status == Status::Done
+            && !dep.status.satisfies_dependency()
+            && !(cancelled_member && dep.status == Status::Dropped)
+        {
             out.push(
                 Diagnostic::error(
                     code::DONE_BEFORE_BLOCKER,
@@ -325,7 +1451,24 @@ fn check_edges(lt: &LoadedTask, graph: &Graph<'_>, out: &mut Vec<Diagnostic>) {
         // Live only: a `done` dependent is `APLAN007` above (the two must not
         // double-report one edge), and a dropped task waiting on a dropped task
         // is just two abandoned things.
-        if !t.status.is_terminal() && dep.status == Status::Dropped {
+        //
+        // Not when a cut's own *member* was cancelled. A cut is a checkpoint over
+        // its members, and one that will never be done should not stop the
+        // checkpoint being reached; `roadmap` has excluded dropped members from a
+        // cut's rollup all along, so reporting here made the gate disagree with
+        // the view. Without this a task in a cut could not be cancelled at all:
+        // leaving it in was this error and taking it out was `APLAN022`
+        // (`A1-081`).
+        //
+        // A cancelled *predecessor cut* is a different fact and still reported: a
+        // milestone in another milestone's `blocked_by` is a sequencing edge
+        // (ADR-0013), and a cut whose stated prerequisite was abandoned is a plan
+        // its author has to resolve, by dropping this cut too or by dropping the
+        // edge. Exempting it would also contradict the members, who inherit that
+        // edge and are told about it.
+        let cancelled_member_of_this_cut = crate::edge_kind(dep, t) == crate::EdgeKind::Membership;
+        if !t.status.is_terminal() && !cancelled_member_of_this_cut && dep.status == Status::Dropped
+        {
             out.push(
                 Diagnostic::error(
                     code::DROPPED_BLOCKER,
@@ -346,8 +1489,326 @@ fn check_edges(lt: &LoadedTask, graph: &Graph<'_>, out: &mut Vec<Diagnostic>) {
     }
 }
 
+/// `APLAN023`: a `done` task's `commit`/`file` citation can be path-checked.
+///
+/// Split out of [`check_evidence`] to keep that function readable, not because it
+/// is a different concern.
+/// `APLAN032`: every `paths` entry is a glob this tool can compile (`A1-066`).
+///
+/// Hermetic, and that is the repair rather than an implementation detail. The
+/// ladder compiled these globs and returned an error that aborted the whole run:
+/// one task's `paths: ['src/[']` hid `APLAN005` in a *different* task and exited
+/// `2`, which ADR-0007 reserves for the invocation or `.aplan.yml`. Asking the
+/// question here means `check` and `verify` give the same answer about the same
+/// plan, and the rest of the plan is still judged.
+///
+/// The same builder the ladder uses, with the same options, so "compiles here"
+/// and "compiles there" cannot drift: a glob this accepts and `globset` later
+/// rejects would put the abort back.
+/// `APLAN033`: every `prefer_after` entry is a preference that can be honoured
+/// (`A1-150`).
+///
+/// Hermetic, like the edge checks beside it: all four shapes are answerable from
+/// the plan alone. The cycle case needs the whole plan, so it is checked once in
+/// [`check_preference_cycles`] rather than per task.
+fn check_preferences(lt: &LoadedTask, graph: &Graph<'_>, out: &mut Vec<Diagnostic>) {
+    let t = &lt.task;
+    for id in &t.prefer_after {
+        let finding = if id == &t.id {
+            Some((
+                "`prefer_after` names this task itself, which orders nothing".to_string(),
+                "Remove the self-reference. A preference orders this task against another one."
+                    .to_string(),
+            ))
+        } else if graph.get(id).is_none() {
+            Some((
+                format!("`prefer_after` names unknown task `{id}`"),
+                format!(
+                    "Either create task `{id}` or remove it from `{}`'s `prefer_after`.",
+                    t.id
+                ),
+            ))
+        } else if t.blocked_by.iter().any(|b| b == id) {
+            Some((
+                format!(
+                    "`prefer_after` repeats `{id}`, which is already a `blocked_by` edge: the \
+                     plan says both that this task cannot start until `{id}` is done and that it \
+                     would merely rather follow it"
+                ),
+                format!(
+                    "Remove `{id}` from `prefer_after`. A mandatory edge already orders the two, \
+                     and states it more strongly."
+                ),
+            ))
+        } else {
+            None
+        };
+        if let Some((message, fix)) = finding {
+            out.push(
+                Diagnostic::error(code::UNUSABLE_PREFERENCE, message)
+                    .with_task(&t.id)
+                    .with_file(&lt.path)
+                    .with_agent_instruction(fix),
+            );
+        }
+    }
+}
+
+/// `APLAN033`'s whole-plan half: a cycle of preferences has no order to honour.
+///
+/// Reported once, on the task whose id sorts first in the cycle, because a cycle
+/// reported N times is one defect wearing N hats -- the same choice `APLAN004`
+/// makes for a dependency cycle, and the message names the ring the way that one
+/// does.
+fn check_preference_cycles(plan: &Plan, graph: &Graph<'_>, out: &mut Vec<Diagnostic>) {
+    let mut seen: BTreeSet<String> = BTreeSet::new();
+    for lt in &plan.tasks {
+        if seen.contains(&lt.task.id) {
+            continue;
+        }
+        // Walk preferences from this task; a revisit inside one walk is a ring.
+        let mut path: Vec<String> = Vec::new();
+        let mut on_path: BTreeSet<String> = BTreeSet::new();
+        let mut cursor = lt.task.id.clone();
+        loop {
+            if on_path.contains(&cursor) {
+                let start = path.iter().position(|p| *p == cursor).unwrap_or(0);
+                let mut ring: Vec<String> = path[start..].to_vec();
+                ring.push(cursor.clone());
+                // Once per ring: every member is marked seen.
+                for member in &ring {
+                    seen.insert(member.clone());
+                }
+                let owner = ring.iter().min().cloned().unwrap_or_default();
+                let file = plan
+                    .tasks
+                    .iter()
+                    .find(|l| l.task.id == owner)
+                    .map_or_else(|| lt.path.clone(), |l| l.path.clone());
+                out.push(
+                    Diagnostic::error(
+                        code::UNUSABLE_PREFERENCE,
+                        format!("preference cycle: {}", ring.join(" -> ")),
+                    )
+                    .with_task(&owner)
+                    .with_file(&file)
+                    .with_agent_instruction(
+                        "Remove one `prefer_after` entry from the ring. A cycle of preferences \
+                         has no order to offer them in.",
+                    ),
+                );
+                break;
+            }
+            on_path.insert(cursor.clone());
+            path.push(cursor.clone());
+            let Some(task) = graph.get(&cursor) else {
+                break;
+            };
+            // One outgoing edge is enough to find a ring reachable from here;
+            // the others are walked from their own tasks.
+            let Some(next) = task.prefer_after.first() else {
+                break;
+            };
+            cursor = next.clone();
+        }
+    }
+}
+
+fn check_path_globs(lt: &LoadedTask, out: &mut Vec<Diagnostic>) {
+    let t = &lt.task;
+    // Once per distinct entry: a task that writes `src/[` twice has one typo,
+    // and saying the same sentence about it twice is noise `APLAN040` already
+    // reports as a duplicate (`A1-267`'s audit).
+    let mut said: std::collections::BTreeSet<&String> = std::collections::BTreeSet::new();
+    for p in &t.paths {
+        if !said.insert(p) {
+            continue;
+        }
+        // A blank entry is `APLAN023`'s business (it names nothing), and it
+        // compiles, so it never reaches here.
+        let Err(err) = crate::glob::compile(p) else {
+            continue;
+        };
+        // `globset`'s own words, which name the position and the character, are
+        // more use than any sentence this rule could invent: "unclosed character
+        // class; missing ']'" is the whole diagnosis.
+        out.push(
+            Diagnostic::error(
+                code::BAD_PATH_GLOB,
+                format!(
+                    "`paths` entry `{p}` is not a glob this tool can compile: {err}, so this \
+                     task's evidence cannot be bound to its `paths` at all"
+                ),
+            )
+            .with_task(&t.id)
+            .with_file(&lt.path)
+            .with_agent_instruction(
+                "Correct the `paths` entry so it is a valid glob. `*` matches within one path \
+                 segment, `**` crosses directories, and `[` opens a character class that has \
+                 to be closed.",
+            ),
+        );
+    }
+}
+
+/// `APLAN040`: the same `paths` entry, twice.
+///
+/// Walks the list once and reports each spelling that appears more than once,
+/// naming the entry as the author wrote it -- because that is the text they have
+/// to find in their own file -- while comparing the normalised form, so two
+/// writings of one path are one entry (`A1-254`, `A1-267`).
+fn check_duplicate_paths(lt: &LoadedTask, out: &mut Vec<Diagnostic>) {
+    let t = &lt.task;
+    // Spelling -> (how many, the writings the author used, in order).
+    let mut seen: std::collections::BTreeMap<String, Vec<&String>> =
+        std::collections::BTreeMap::new();
+    for p in &t.paths {
+        // An entry that does not compile is `APLAN032`'s, and "you wrote it
+        // twice" is not the useful thing to say about `src/[`. The same line
+        // this rule declines to cross for containment: it speaks about entries
+        // that name files, not about ones that name nothing at all
+        // (`A1-267`'s audit).
+        if crate::glob::compile(p).is_err() {
+            continue;
+        }
+        seen.entry(crate::glob::spelling(p)).or_default().push(p);
+    }
+    for (_, written) in seen {
+        if written.len() < 2 {
+            continue;
+        }
+        let count = written.len();
+        // Named as the author wrote them, because that is the text they have to
+        // find in their own file. Where the writings differ, both are named:
+        // saying `src/**` twice at somebody who wrote `./src/**` once sends them
+        // looking for a line their file does not contain.
+        let distinct: std::collections::BTreeSet<&&String> = written.iter().collect();
+        // An entry nobody filled in renders as empty backticks otherwise, which
+        // reads as a bug in the message rather than a fact about the file. A
+        // single blank is nobody's finding today; two of them are still an edit
+        // that went wrong (`A1-267`'s audit).
+        let name = |w: &str| {
+            if w.trim().is_empty() {
+                "an empty entry".to_string()
+            } else {
+                format!("`{w}`")
+            }
+        };
+        let how = if distinct.len() == 1 {
+            format!("{} {count} times", name(written[0]))
+        } else {
+            let list: Vec<String> = distinct.iter().map(|w| name(w)).collect();
+            // With the count: three entries written two ways is not the same
+            // fact as two, and the branch above says how many while this one
+            // said only which (`A1-267`'s audit).
+            // Not "`./x` and `x` resolve alike", which names one of the two
+            // shapes `A1-254` normalises and would be the wrong sentence for the
+            // other: `a/../b` reduces to `b` as well.
+            format!(
+                "{} -- {count} entries, and one path once `.` and `..` segments are resolved",
+                list.join(" and ")
+            )
+        };
+        out.push(
+            Diagnostic::warning(
+                code::DUPLICATE_PATH,
+                format!(
+                    "`paths` lists {how}. The copies match the same files, so nothing is \
+                     weakened -- but a repeated entry is usually an edit that went wrong"
+                ),
+            )
+            .with_task(&t.id)
+            .with_file(&lt.path)
+            .with_agent_instruction(
+                "Delete the repeated entry. If the two were meant to name different trees, one \
+                 of them is not the path you meant.",
+            ),
+        );
+    }
+}
+
+fn check_uncheckable_evidence(lt: &LoadedTask, out: &mut Vec<Diagnostic>) {
+    let t = &lt.task;
+    // A `done` task whose evidence cannot be bound to it. `APLAN012` makes a
+    // `commit` citation mean "a commit that touched this work" by checking the
+    // diff against `paths`; with no `paths` there is nothing to check, so the
+    // same citation degrades to "a commit exists" with no diagnostic anywhere.
+    // `file` is included for the same reason: without `paths` there is nothing
+    // tying the cited artefact to this task.
+    //
+    // Deliberately scoped to `done`. A `todo` task often cannot know its paths
+    // yet, and warning there would train people to add `paths: ["**"]` to quiet
+    // it, which is the bypass this rule must not encourage. Milestones are exempt
+    // because `APLAN007` already refuses to mark one `done` while a member is
+    // undone, which proves more than a path check could (`APLAN021` also forbids
+    // them carrying `paths` at all).
+    //
+    // A blank entry counts as no entry, by the same predicate that decides an
+    // evidence `ref` cites nothing. `paths: [""]` binds no commit that `paths: []`
+    // would not, and a single zero-width space would otherwise silence this rule
+    // while looking, in every editor, like a declared path. How *broad* a real
+    // glob is stays a review question (see the task): this only asks whether
+    // anything was named at all.
+    let names_nothing = t.paths.iter().all(|p| is_vacuous_ref(p));
+    if t.status == Status::Done && names_nothing && !t.is_milestone() {
+        let mut kinds: Vec<&str> = t
+            .evidence
+            .iter()
+            .filter(|e| !is_vacuous_ref(&e.reference))
+            .filter_map(|e| match e.kind {
+                EvidenceKind::Commit => Some("commit"),
+                EvidenceKind::File => Some("file"),
+                _ => None,
+            })
+            .collect();
+        kinds.sort_unstable();
+        kinds.dedup();
+
+        if !kinds.is_empty() {
+            let cited = kinds.join(" and ");
+            let exists = if kinds.len() > 1 { "exist" } else { "exists" };
+            // Say which it is: told "no `paths`" when the key is right there, a
+            // reader looks for a bug in the rule rather than at their blank entry.
+            let missing = if t.paths.is_empty() {
+                "no `paths`"
+            } else {
+                "no `paths` that name anything"
+            };
+            out.push(
+                Diagnostic::warning(
+                    code::UNCHECKABLE_EVIDENCE,
+                    format!(
+                        "`done` with {cited} evidence but {missing}: the citation resolves, \
+                         but nothing binds it to this task, so it proves only that the \
+                         {cited} {exists}"
+                    ),
+                )
+                .with_task(&t.id)
+                .with_file(&lt.path)
+                // Only promise the `APLAN012` check when a `commit` is actually
+                // cited. An instruction is the field a coding agent acts on
+                // without reading the rest, so telling it `verify` will check "the
+                // cited commit" of a task citing only a `file` is a plain untruth,
+                // and nothing binds a `file` to `paths` yet (`A1-045`).
+                .with_agent_instruction(if kinds.contains(&"commit") {
+                    "Add `paths` naming the files this task is responsible for, so `verify` \
+                     can check the cited commit actually touches them (APLAN012)."
+                } else {
+                    "Add `paths` naming the files this task is responsible for, so the \
+                     citation is bound to this task rather than only proving the file exists."
+                }),
+            );
+        }
+    }
+}
+
 /// The invariants that read `evidence`: `APLAN005`, `APLAN010`.
-fn check_evidence(lt: &LoadedTask, opts: &Options, out: &mut Vec<Diagnostic>) {
+fn check_evidence(
+    lt: &LoadedTask,
+    opts: &Options,
+    cut_of: &BTreeMap<&str, (&str, &str)>,
+    out: &mut Vec<Diagnostic>,
+) {
     let t = &lt.task;
 
     // Evidence with a blank `ref` is vacuous, a citation pointing at nothing, so
@@ -411,15 +1872,26 @@ fn check_evidence(lt: &LoadedTask, opts: &Options, out: &mut Vec<Diagnostic>) {
         }
     }
 
+    check_uncheckable_evidence(lt, out);
+
     // Configured minimum evidence strength. A `done` task must carry at least one
     // piece of an accepted kind *with a real reference*, unless a tag exempts it.
     // Vacuous evidence is `APLAN005`'s business, so this only speaks when there is
     // substantive evidence but none of it is strong enough, which is the
     // shallow-`done` this rule exists to catch.
-    if let Some(required) = &opts.require_min_strength
+    // The policy that applies *here*, which is the whole-plan one unless a scope
+    // names a narrower subset this task is in (`A1-183`).
+    let (milestone, cut) = cut_of
+        .get(t.id.as_str())
+        .map_or((None, None), |(m, c)| (Some(*m), Some(*c)));
+    let (required, exempt) = opts.evidence_for(t, cut, milestone);
+    // An empty list is a real answer: "nothing is required in this subset". It is
+    // how `evidence.exempt_tags` is expressible as a scope (`A1-183`), and
+    // without this the rule fired asking for one of nothing.
+    if let Some(required) = required.filter(|r| !r.is_empty())
         && t.status == Status::Done
         && has_substantive_evidence
-        && !t.tags.iter().any(|tag| opts.exempt_tags.contains(tag))
+        && !t.tags.iter().any(|tag| exempt.contains(tag))
         && !t
             .evidence
             .iter()
@@ -445,12 +1917,196 @@ fn check_evidence(lt: &LoadedTask, opts: &Options, out: &mut Vec<Diagnostic>) {
     }
 }
 
+/// `APLAN038`: a `done` task has answered the criteria its own body states
+/// (`A1-224`).
+///
+/// Reads the loader's count rather than the body: the model does not carry
+/// prose, and one fact out of it is all a rule needs.
+///
+/// Silent where the body states none. Ten of this plan's closed tasks do, and a
+/// rule about a markdown convention must not demand the convention.
+/// `APLAN039`: the scaffold, ticked as though somebody had answered it.
+///
+/// Independent of `APLAN038` and deliberately so: a task may tick the scaffold
+/// *and* write real criteria beside it, in which case the count is honest and
+/// the false claim is still recorded. Both can fire on one task, saying
+/// different things.
+fn check_scaffold(lt: &crate::load::LoadedTask, out: &mut Vec<Diagnostic>) {
+    let t = &lt.task;
+    let (Status::Done, Some(line)) = (t.status, lt.criteria.scaffold_ticked) else {
+        return;
+    };
+    // The second half of one finding rather than a second rule: a task carrying
+    // both has answered neither of the two questions `add` asked it.
+    let and_why = if lt.criteria.why_untouched {
+        ", and its `## Why` is still the prompt too"
+    } else {
+        ""
+    };
+    out.push(
+        Diagnostic::warning(
+            code::SCAFFOLD_TICKED,
+            format!(
+                "is `done` and ticks a prompt this tool wrote{and_why}: `{}` asks for a \
+                 criterion, and is not one",
+                lt.criteria.scaffold_prompt.unwrap_or_default()
+            ),
+        )
+        .with_task(&t.id)
+        .with_file(&lt.path)
+        .at(crate::diagnostic::Location { line, column: 1 })
+        .with_agent_instruction(
+            "Replace that line with what done means for this task, in this repository's terms, \
+             and tick it only when it is met. If the task is finished and nobody wrote the \
+             criterion, say what was delivered instead. Do not delete the line to silence this.",
+        ),
+    );
+}
+
+/// `APLAN043`: the scaffold left behind beside the criteria somebody wrote
+/// (`A1-299`).
+///
+/// There is no command that edits a task's body, so the real criteria go in by
+/// hand -- and appending a `## Acceptance criteria` of your own to a scaffolded
+/// file leaves two of them, with the prompt still under the first. The sixth
+/// pilot did that on its first day and a human found it, not the tool.
+///
+/// **Live tasks only.** On a `done` task the same leftover is already reported:
+/// unticked by `APLAN038`, ticked by `APLAN039`. The window this covers is
+/// between authoring and closing, where the author is still in the file.
+///
+/// **Beside other criteria, never alone.** A task whose only criterion is the
+/// prompt has not answered what `add` asked, which is a different thing and
+/// `APLAN038`'s at close. This one is about the scaffold *surviving* an answer.
+fn check_scaffold_leftover(lt: &crate::load::LoadedTask, out: &mut Vec<Diagnostic>) {
+    let t = &lt.task;
+    // **Ticked or not.** The rule is about the scaffold *surviving* an answer,
+    // and a tick does not make it survive less -- it makes the line assert that
+    // the instruction was met, which is worse. `APLAN039` owns the ticked case on
+    // a *closed* task, so widening here reports nothing twice; it closes the same
+    // window this rule exists for. Zero tasks on this host carry the shape today,
+    // so the widening costs no finding and removes a hole an author reaches by
+    // ticking a box (`A1-299`, audit).
+    let Some(line) = lt
+        .criteria
+        .scaffold_unticked
+        .or(lt.criteria.scaffold_ticked)
+    else {
+        return;
+    };
+    let own = lt.criteria.total.saturating_sub(lt.criteria.prompts);
+    if t.status.is_terminal() || own == 0 {
+        return;
+    }
+    out.push(
+        Diagnostic::warning(
+            code::SCAFFOLD_LEFTOVER,
+            format!(
+                "carries the scaffold's own prompt beside {own} criteri{} of its own: `{}` is \
+                 the line `aplan add` writes to be replaced, not kept",
+                if own == 1 { "on" } else { "a" },
+                lt.criteria.scaffold_prompt.unwrap_or_default()
+            ),
+        )
+        .with_task(&t.id)
+        .with_file(&lt.path)
+        .at(crate::diagnostic::Location { line, column: 1 })
+        .with_agent_instruction(
+            "Delete that line, and the `## Acceptance criteria` heading it was written under if \
+             that heading now has nothing else beneath it. Keep the criteria you wrote. A body \
+             with two of that heading is the scaffold left beside the answer.",
+        ),
+    );
+}
+
+/// `APLAN044`: a closed task claims less than its level implies and says why
+/// nowhere (`A1-312`, ADR-0034).
+///
+/// **Declaring nothing is not a finding.** A task's level supplies a floor, so
+/// the ordinary task writes no impact at all and the plan still knows what it
+/// owes -- which is what makes this adoptable on a plan of three hundred tasks
+/// rather than a demand that every one of them be annotated.
+///
+/// What is reported is the author overriding that floor *downwards* in silence.
+/// Overriding it is legitimate -- a pilot log really does change nothing that
+/// ships -- and a reviewer should be told, because the claim is the one thing
+/// nothing else can check: no hermetic rule knows whether a task broke an API.
+///
+/// Closed tasks only, and `done` rather than terminal: a `dropped` task ships
+/// nothing, so what it would have done to the version is not a question anyone
+/// needs answered.
+fn check_version_impact(lt: &crate::load::LoadedTask, opts: &Options, out: &mut Vec<Diagnostic>) {
+    let Some(floors) = opts.require_impact else {
+        return;
+    };
+    let t = &lt.task;
+    if t.status != Status::Done {
+        return;
+    }
+    let Some(claimed) = t.version_impact else {
+        return;
+    };
+    let floor = floors.of(t);
+    if claimed >= floor || t.version_impact_reason.is_some() {
+        return;
+    }
+    let mut d = Diagnostic::warning(
+        code::VERSION_IMPACT_UNEXPLAINED,
+        format!(
+            "claims `{claimed}` of the released version where its level implies `{floor}`, and \
+             says nowhere why"
+        ),
+    )
+    .with_task(&t.id)
+    .with_file(&lt.path)
+    .with_agent_instruction(
+        "Add `version_impact_reason` saying what this task changed that the level's floor gets \
+         wrong -- a plan edit or a pilot log really does change nothing that ships. If it did \
+         change the artifact after all, raise `version_impact` instead.",
+    );
+    if let Some(at) = lt.fields.get("version_impact") {
+        d = d.at(*at);
+    }
+    out.push(d);
+}
+
+fn check_criteria(lt: &crate::load::LoadedTask, out: &mut Vec<Diagnostic>) {
+    let t = &lt.task;
+    if t.status != Status::Done || !lt.criteria.unanswered() {
+        return;
+    }
+    let (ticked, total) = (lt.criteria.ticked, lt.criteria.total);
+    let mut d = Diagnostic::warning(
+        code::CRITERIA_UNANSWERED,
+        format!("is `done` with {ticked} of {total} criteria in its body ticked"),
+    )
+    .with_task(&t.id)
+    .with_file(&lt.path)
+    .with_agent_instruction(
+        "Re-read the criteria and tick the ones that are met. If one is not met, the task is \
+         not done: say what is left, supersede it, or hand that criterion to the task that will \
+         do it and tick it as a decision, naming where it went. Nothing ticks them for you.",
+    );
+    // *In its body*, not "acceptance criteria": nine of this plan's own
+    // milestones head that section `## Exit criteria`, and an adopter's
+    // convention is theirs to choose. Naming a heading this rule never read
+    // would be a message describing a file it is not looking at, and the line
+    // below takes the reader to the box itself anyway.
+    //
+    // The first unticked box, so a reader opens the file at the line rather than
+    // at the top of it (`A1-202`).
+    if let Some(line) = lt.criteria.first_unticked {
+        d = d.at(crate::diagnostic::Location { line, column: 1 });
+    }
+    out.push(d);
+}
+
 /// Whether an evidence `ref` cites nothing: empty, or made up entirely of
 /// whitespace, control, and zero-width / bidi format characters. `str::trim` only
 /// strips `White_Space`, so a `ref` of a single U+200B (zero-width space) would
 /// otherwise count as real proof, the same invisible class the house-style gate
 /// forbids, letting `status: done` pass with no citation.
-fn is_vacuous_ref(reference: &str) -> bool {
+pub(crate) fn is_vacuous_ref(reference: &str) -> bool {
     reference
         .chars()
         .all(|c| c.is_whitespace() || c.is_control() || is_zero_width(c))
@@ -471,6 +2127,99 @@ fn is_zero_width(c: char) -> bool {
             | '\u{200F}'
             | '\u{061C}'
     )
+}
+
+/// An RFC 3339 instant as seconds since the epoch, or `None` if it is not one.
+///
+/// Strict and dependency-free, for the reason [`is_iso_date`] gives: this is a
+/// validation gate rather than a date library. It accepts
+/// `YYYY-MM-DDTHH:MM:SSZ` and `YYYY-MM-DDTHH:MM:SS+HH:MM` (or `-HH:MM`), in
+/// upper case, and nothing else.
+///
+/// Fractional seconds are refused deliberately. A revisit instant is a hand-off
+/// to a scheduler that will not run to the millisecond anyway, and accepting a
+/// form nobody needs is a second spelling of one value for every consumer to
+/// handle (`A1-264`).
+#[must_use]
+pub fn rfc3339_to_epoch(s: &str) -> Option<i64> {
+    // ASCII first, and this is not a nicety: everything below slices by byte
+    // offset, and a multi-byte character straddling one of them panics. An
+    // instant is ASCII by definition, so anything else is a `None` -- but this
+    // reads a *task file*, and a validator that crashes on the plan it was
+    // asked to judge is the worst answer available (`A1-264`, audit: measured
+    // as `aplan check` exiting 101 on `revisit_at: 2026-09-10T05:00:0é`).
+    if !s.is_ascii() {
+        return None;
+    }
+    let bytes = s.as_bytes();
+    if bytes.len() < 20 || bytes[10] != b'T' {
+        return None;
+    }
+    let day = iso_date_to_epoch(&s[0..10])?;
+    let time = &s[11..19];
+    let digits = |r: std::ops::Range<usize>| -> Option<i64> {
+        let part = time.get(r)?;
+        part.bytes().all(|b| b.is_ascii_digit()).then_some(())?;
+        part.parse().ok()
+    };
+    if time.as_bytes().get(2) != Some(&b':') || time.as_bytes().get(5) != Some(&b':') {
+        return None;
+    }
+    let (h, m, sec) = (digits(0..2)?, digits(3..5)?, digits(6..8)?);
+    // A leap second is a real RFC 3339 value and is not a real instant to a
+    // scheduler; 60 is refused rather than silently folded into the next minute.
+    if h > 23 || m > 59 || sec > 59 {
+        return None;
+    }
+    let offset = match &s[19..] {
+        "Z" => 0,
+        rest => {
+            let sign = match rest.as_bytes().first() {
+                Some(b'+') => 1,
+                Some(b'-') => -1,
+                _ => return None,
+            };
+            if rest.len() != 6 || rest.as_bytes()[3] != b':' {
+                return None;
+            }
+            let oh: i64 = rest[1..3].parse().ok()?;
+            let om: i64 = rest[4..6].parse().ok()?;
+            if oh > 23 || om > 59 {
+                return None;
+            }
+            sign * (oh * 3600 + om * 60)
+        }
+    };
+    // The offset is *removed* to reach UTC: `12:00+02:00` is 10:00 UTC.
+    Some(day + h * 3600 + m * 60 + sec - offset)
+}
+
+/// An ISO-8601 date as seconds since the Unix epoch, at midnight UTC.
+///
+/// `None` for anything [`is_iso_date`] rejects. Hand-rolled rather than pulling
+/// in a date library for one conversion: the civil-to-days algorithm is short,
+/// exact for every date this tool will meet, and has no timezone opinion to get
+/// wrong -- which matters, because the value it produces is compared against a
+/// git commit time (`A1-162`).
+#[must_use]
+pub fn iso_date_to_epoch(s: &str) -> Option<i64> {
+    if !is_iso_date(s) {
+        return None;
+    }
+    let y: i64 = s[0..4].parse().ok()?;
+    let m: i64 = s[5..7].parse().ok()?;
+    let d: i64 = s[8..10].parse().ok()?;
+    // Howard Hinnant's `days_from_civil`: shift the year so March is month 1,
+    // which makes the leap day the last day of the year and the arithmetic
+    // branch-free.
+    let y = if m <= 2 { y - 1 } else { y };
+    let era = if y >= 0 { y } else { y - 399 } / 400;
+    let yoe = y - era * 400;
+    let mp = (m + 9) % 12;
+    let doy = (153 * mp + 2) / 5 + d - 1;
+    let doe = yoe * 365 + yoe / 4 - yoe / 100 + doy;
+    let days = era * 146_097 + doe - 719_468;
+    Some(days * 86_400)
 }
 
 /// Whether `s` is an ISO-8601 calendar date (`YYYY-MM-DD`) with a real month and
@@ -509,6 +2258,90 @@ pub fn is_iso_date(s: &str) -> bool {
 
 /// Verify that `trace` (`path/to/doc.md#anchor`) resolves to a real file, and,
 /// when an anchor is given, that a heading slugifying to it exists.
+/// Whether `target` lies under `base`, both already absolute and normalised.
+fn is_inside(base: &Path, target: &Path) -> bool {
+    target.starts_with(base)
+}
+
+/// A path made absolute and lexically normalised, for comparing one against
+/// another (`A1-143`).
+///
+/// `std::path::absolute` is lexical -- it consults the current directory for a
+/// relative path and touches nothing else -- and it keeps `..` components, so
+/// the normalisation still has to run afterwards.
+fn comparable(path: &Path) -> std::path::PathBuf {
+    let absolute = std::path::absolute(path).unwrap_or_else(|_| path.to_path_buf());
+    crate::anchor::normalise(&absolute)
+}
+
+/// `APLAN034`: a `traces` target that leaves the repository must be declared
+/// (`A1-143`, ADR-0021).
+///
+/// Two tests, and both have to pass. **Lexically**, because the question has to
+/// be answerable from the plan and the config alone: resolving on the filesystem
+/// would make the answer depend on whether the sibling happens to be checked
+/// out, which is the dependency this rule exists to surface. And **through
+/// symlinks when the target exists**, because a link committed inside the
+/// repository is lexically inside it and reads whatever it points at -- and a
+/// task file and a symlink can arrive in the same fork pull request (`A1-143`,
+/// found by its audit).
+fn check_external_trace(root: &Path, opts: &Options, trace: &str) -> Option<Diagnostic> {
+    let (rel, _) = trace.split_once('#').unwrap_or((trace, ""));
+    let joined = root.join(rel);
+    // The boundary is the *repository*, which is where `.aplan.yml` sits, not
+    // `traces_root`: under `traces_root: docs` a trace of `../README.md` climbs
+    // out of the root and stays inside the repository, and refusing it would be
+    // this rule answering a different question from the one it is named for
+    // (`A1-143`, found by its audit). With no config to locate, the root is the
+    // only boundary there is.
+    let boundary = opts
+        .config_file
+        .as_deref()
+        .and_then(Path::parent)
+        .unwrap_or(root);
+    let declared = &opts.traces_external;
+    let bases: Vec<std::path::PathBuf> = std::iter::once(comparable(boundary))
+        .chain(declared.iter().map(|d| comparable(d)))
+        .collect();
+
+    let target = comparable(&joined);
+    let inside_lexically = bases.iter().any(|b| is_inside(b, &target));
+    // The link test only runs where the file is there to follow. A path that
+    // does not exist cannot be a link, and a *declared* root that is absent is
+    // reported as a configuration error rather than here.
+    let inside_really = joined.canonicalize().is_ok_and(|real| {
+        let bases: Vec<std::path::PathBuf> = std::iter::once(boundary.to_path_buf())
+            .chain(declared.iter().cloned())
+            .filter_map(|b| b.canonicalize().ok())
+            .collect();
+        bases.is_empty() || bases.iter().any(|b| real.starts_with(b))
+    }) || joined.canonicalize().is_err();
+    if inside_lexically && inside_really {
+        return None;
+    }
+
+    let how = if inside_lexically {
+        "resolves outside this repository through a symbolic link"
+    } else {
+        "is outside this repository"
+    };
+    Some(
+        Diagnostic::error(
+            code::EXTERNAL_TRACE,
+            format!(
+                "`traces` target `{rel}` {how}, and no `traces_external` declares it: a plan \
+                 that reads another repository's files passes only where that repository \
+                 happens to be checked out"
+            ),
+        )
+        .with_agent_instruction(
+            "Trace a document in this repository, or declare the sibling root in \
+             `traces_external` so its absence is a configuration error rather than a surprise \
+             in one CI job.",
+        ),
+    )
+}
+
 fn check_trace(root: &Path, trace: &str) -> Option<Diagnostic> {
     let (rel, anchor) = match trace.split_once('#') {
         Some((r, a)) => (r, Some(a)),
@@ -525,6 +2358,21 @@ fn check_trace(root: &Path, trace: &str) -> Option<Diagnostic> {
         );
     }
     let anchor = anchor?;
+    // `DOC.md#` is a typo, not a trace of the whole document: the author meant to
+    // name a section and stopped. Saying "add a heading whose text slugifies to
+    // ``" sends them to fix the document rather than the trace (`A1-116`).
+    if anchor.trim().is_empty() {
+        return Some(
+            Diagnostic::error(
+                code::DANGLING_TRACE,
+                format!("`traces` entry `{rel}#` ends in an empty anchor"),
+            )
+            .with_agent_instruction(format!(
+                "Name the section after the `#`, or write `{rel}` on its own to trace the \
+                 whole document."
+            )),
+        );
+    }
     let Ok(text) = std::fs::read_to_string(&path) else {
         return None;
     };
@@ -532,16 +2380,20 @@ fn check_trace(root: &Path, trace: &str) -> Option<Diagnostic> {
     // repeats with a `-N` suffix. Reproduce that set exactly, then test
     // membership against the anchor a human copied from the rendered document's
     // URL. GitHub ids are always lowercase, so fold the anchor's case too.
-    if crate::anchor::heading_anchors(&text).contains(anchor.to_lowercase().as_str()) {
+    if crate::anchor::resolvable_anchors(&text).contains(anchor.to_lowercase().as_str()) {
         None
     } else {
         Some(
             Diagnostic::error(
                 code::DANGLING_TRACE,
-                format!("`traces` anchor `#{anchor}` not found as a heading in `{rel}`"),
+                format!("`traces` anchor `#{anchor}` matches no heading or table row in `{rel}`"),
             )
             .with_agent_instruction(format!(
-                "Add a heading matching `{anchor}` to `{rel}`, or correct the anchor."
+                "Add to `{rel}` a heading, or a table row, whose text slugifies to \
+                 `{anchor}`; or correct the anchor to one the document already has. A **list \
+                 item is not an anchor**, deliberately: a bullet's identity would be its whole \
+                 text, so rewording it would break the reference rather than report drift. Give the item a heading or a table row, which is what an author \
+                 tracking items one by one wants anyway."
             )),
         )
     }
@@ -554,6 +2406,147 @@ mod tests {
     use crate::task::{Evidence, Task};
     use std::path::PathBuf;
 
+    fn scope(
+        dims: usize,
+        sel: crate::select::Selector,
+        kinds: Option<Vec<EvidenceKind>>,
+    ) -> EvidenceScope {
+        EvidenceScope {
+            selector: sel,
+            named_dimensions: dims,
+            require_min_strength: kinds,
+            exempt_tags: None,
+        }
+    }
+
+    /// **The narrowest matching scope wins, and the whole-plan setting is the one
+    /// that names nothing** (`A1-183`).
+    #[test]
+    fn a_narrower_scope_beats_a_wider_one_and_both_beat_the_global() {
+        let mut task = t("T-1", Status::Done);
+        task.tags = vec!["spike".into()];
+        task.owner = Some("kim".into());
+        let opts = Options {
+            require_min_strength: Some(vec![EvidenceKind::Test]),
+            evidence_scopes: vec![
+                // One dimension: every spike.
+                scope(
+                    1,
+                    crate::select::Selector {
+                        tags: vec!["spike".into()],
+                        ..Default::default()
+                    },
+                    Some(vec![EvidenceKind::Commit]),
+                ),
+                // Two: this owner's spikes, which is narrower and must win.
+                scope(
+                    2,
+                    crate::select::Selector {
+                        tags: vec!["spike".into()],
+                        owners: vec!["kim".into()],
+                        ..Default::default()
+                    },
+                    Some(vec![EvidenceKind::File]),
+                ),
+            ],
+            ..Options::default()
+        };
+        let (required, _) = opts.evidence_for(&task, None, None);
+        assert_eq!(
+            required,
+            Some([EvidenceKind::File].as_slice()),
+            "the two-dimension scope did not win"
+        );
+
+        // A task in neither scope falls through to the whole-plan setting.
+        let other = t("T-2", Status::Done);
+        let (required, _) = opts.evidence_for(&other, None, None);
+        assert_eq!(required, Some([EvidenceKind::Test].as_slice()));
+    }
+
+    /// **A scope that sets one dial does not reset the other**, which is what
+    /// resolving the winning scope as a whole did (`A1-183`'s audit).
+    ///
+    /// Each key comes from the narrowest matching scope that *sets* it. Here the
+    /// narrow scope sets only the exemption, so the requirement must still come
+    /// from the wider scope that sets one, not from the whole-plan value.
+    #[test]
+    fn a_scope_setting_one_dial_does_not_discard_a_wider_scopes_other_one() {
+        let mut task = t("T-1", Status::Done);
+        task.tags = vec!["spike".into()];
+        task.owner = Some("kim".into());
+        let opts = Options {
+            require_min_strength: Some(vec![EvidenceKind::Note]),
+            evidence_scopes: vec![
+                scope(
+                    1,
+                    crate::select::Selector {
+                        tags: vec!["spike".into()],
+                        ..Default::default()
+                    },
+                    Some(vec![EvidenceKind::Test]),
+                ),
+                EvidenceScope {
+                    selector: crate::select::Selector {
+                        tags: vec!["spike".into()],
+                        owners: vec!["kim".into()],
+                        ..Default::default()
+                    },
+                    named_dimensions: 2,
+                    require_min_strength: None,
+                    exempt_tags: Some(vec!["waived".into()]),
+                },
+            ],
+            ..Options::default()
+        };
+        let (required, exempt) = opts.evidence_for(&task, None, None);
+        assert_eq!(
+            required,
+            Some([EvidenceKind::Test].as_slice()),
+            "the narrow scope set no requirement, so the wider scope's must stand \
+             rather than falling all the way to the whole-plan value"
+        );
+        assert_eq!(exempt, ["waived".to_string()], "and its own dial applies");
+    }
+
+    /// And among scopes of equal narrowness, the **first in the file** wins,
+    /// which is the half of the rule a reader would otherwise have to guess
+    /// (`A1-183`).
+    #[test]
+    fn two_equally_narrow_scopes_are_resolved_by_reading_down_the_list() {
+        let mut task = t("T-1", Status::Done);
+        task.tags = vec!["spike".into(), "research".into()];
+        let opts = Options {
+            require_min_strength: Some(vec![EvidenceKind::Test]),
+            evidence_scopes: vec![
+                scope(
+                    1,
+                    crate::select::Selector {
+                        tags: vec!["spike".into()],
+                        ..Default::default()
+                    },
+                    Some(vec![EvidenceKind::Commit]),
+                ),
+                scope(
+                    1,
+                    crate::select::Selector {
+                        tags: vec!["research".into()],
+                        ..Default::default()
+                    },
+                    Some(vec![EvidenceKind::File]),
+                ),
+            ],
+            ..Options::default()
+        };
+        let (required, _) = opts.evidence_for(&task, None, None);
+        assert_eq!(
+            required,
+            Some([EvidenceKind::Commit].as_slice()),
+            "the later entry won, so the tie is being resolved by iteration order \
+             rather than by the documented rule"
+        );
+    }
+
     fn t(id: &str, status: Status) -> Task {
         Task {
             id: id.to_string(),
@@ -563,11 +2556,15 @@ mod tests {
             owner: None,
             effort_days: Some(1.0),
             blocked_by: Vec::new(),
+            prefer_after: Vec::new(),
             evidence: Vec::new(),
             paths: Vec::new(),
             traces: Vec::new(),
             trace_fingerprints: std::collections::BTreeMap::new(),
             tags: Vec::new(),
+            revisit_at: None,
+            version_impact: None,
+            version_impact_reason: None,
         }
     }
 
@@ -578,9 +2575,12 @@ mod tests {
                 .map(|task| LoadedTask {
                     task,
                     path: PathBuf::from("plan/tasks/x.md"),
+                    fields: crate::load::FieldLines::new(),
+                    criteria: crate::load::Criteria::default(),
                 })
                 .collect(),
             load_diagnostics: Vec::new(),
+            unloadable: BTreeMap::new(),
         }
     }
 
@@ -592,6 +2592,833 @@ mod tests {
         }
     }
 
+    /// The diagnostic with this code, so a test can assert on what it *says*.
+    ///
+    /// `A1-090`: proving a rule fired is half a test. The message and the
+    /// `agent_instruction` are what an adopter and an agent act on, and they
+    /// change without any code-only assertion noticing.
+    fn pick<'a>(r: &'a Report, code: &str) -> &'a Diagnostic {
+        r.diagnostics
+            .iter()
+            .find(|d| d.code == code)
+            .unwrap_or_else(|| panic!("expected {code}, got {:?}", r.diagnostics))
+    }
+
+    /// A plan of one `done` task whose body was counted as `criteria` says.
+    ///
+    /// `criteria` is on `LoadedTask` rather than on `Task` (`A1-224`), so it is
+    /// set here rather than reached through the task, which is the whole point:
+    /// the model has no field for it and importers have nothing to map.
+    fn plan_with_criteria(criteria: crate::load::Criteria) -> Plan {
+        let mut task = t("A-1", Status::Done);
+        task.evidence = vec![Evidence {
+            kind: crate::task::EvidenceKind::Commit,
+            reference: "abc1234".to_string(),
+            captured: None,
+        }];
+        let mut plan = plan_of(vec![task]);
+        plan.tasks[0].criteria = criteria;
+        plan
+    }
+
+    #[test]
+    fn a_done_task_over_an_unanswered_criterion_says_how_far_it_got() {
+        let r = validate(
+            &plan_with_criteria(crate::load::Criteria {
+                total: 3,
+                ticked: 1,
+                first_unticked: Some(24),
+                ..crate::load::Criteria::default()
+            }),
+            &opts(),
+        );
+        let d = pick(&r, code::CRITERIA_UNANSWERED);
+        assert_eq!(d.severity, crate::diagnostic::Severity::Warning);
+        assert_eq!(
+            d.message,
+            "is `done` with 1 of 3 criteria in its body ticked"
+        );
+        // Not "acceptance criteria": nine of this plan's own milestones head
+        // that section `## Exit criteria`, and the rule counts boxes without
+        // reading a heading, so naming one would name a file it never read.
+        assert!(
+            !d.message.contains("acceptance"),
+            "the message names no heading: {}",
+            d.message
+        );
+        assert_eq!(
+            d.location.as_ref().map(|l| l.line),
+            Some(24),
+            "at the first unticked box, so a reader opens the file at it"
+        );
+        assert!(
+            d.agent_instruction
+                .as_deref()
+                .is_some_and(|i| i.contains("Nothing ticks them for you")),
+            "and an agent is told the one thing it must not do: {:?}",
+            d.agent_instruction
+        );
+    }
+
+    /// `APLAN043`: the scaffold left beside the answer, and the two shapes that
+    /// are not it (`A1-299`).
+    #[test]
+    fn the_scaffold_left_beside_real_criteria_is_reported() {
+        let leftover = || crate::load::Criteria {
+            total: 3,
+            ticked: 0,
+            first_unticked: Some(20),
+            scaffold_ticked: None,
+            scaffold_unticked: Some(24),
+            prompts: 1,
+            scaffold_prompt: Some(crate::scaffold::criterion_prompt()),
+            why_untouched: false,
+        };
+        // `plan_with_criteria` builds a closed task, and this rule is live-only.
+        let mut live = plan_with_criteria(leftover());
+        live.tasks[0].task.status = Status::Todo;
+        let r = validate(&live, &opts());
+        let d = r
+            .diagnostics
+            .iter()
+            .find(|d| d.code == code::SCAFFOLD_LEFTOVER)
+            .expect("the leftover prompt is reported");
+        assert!(d.message.contains("2 criteria of its own"), "{}", d.message);
+        assert_eq!(d.location.map(|l| l.line), Some(24));
+
+        // The prompt alone: `add` wrote it and nobody has answered yet, which is
+        // `APLAN038`'s at close and not a finding here.
+        let mut alone = plan_with_criteria(leftover());
+        alone.tasks[0].task.status = Status::Todo;
+        alone.tasks[0].criteria.total = 1;
+        assert!(
+            !validate(&alone, &opts())
+                .diagnostics
+                .iter()
+                .any(|d| d.code == code::SCAFFOLD_LEFTOVER),
+            "a task with only the prompt was reported"
+        );
+
+        // And a closed task, where the same leftover is `APLAN038`'s or
+        // `APLAN039`'s already.
+        let mut closed = plan_with_criteria(leftover());
+        closed.tasks[0].task.status = Status::Done;
+        assert!(
+            !validate(&closed, &opts())
+                .diagnostics
+                .iter()
+                .any(|d| d.code == code::SCAFFOLD_LEFTOVER),
+            "a closed task was reported twice over"
+        );
+
+        // Ticked on a live task: still the scaffold surviving an answer, and
+        // `APLAN039` does not reach it because that rule is closed-tasks-only.
+        let mut ticked = plan_with_criteria(crate::load::Criteria {
+            ticked: 1,
+            first_unticked: Some(20),
+            scaffold_ticked: Some(24),
+            scaffold_unticked: None,
+            ..leftover()
+        });
+        ticked.tasks[0].task.status = Status::InProgress;
+        let r = validate(&ticked, &opts());
+        assert!(
+            r.diagnostics
+                .iter()
+                .any(|d| d.code == code::SCAFFOLD_LEFTOVER),
+            "a ticked prompt on a live task is reported by nothing"
+        );
+        assert!(
+            !r.diagnostics
+                .iter()
+                .any(|d| d.code == code::SCAFFOLD_TICKED),
+            "`APLAN039` reached a live task"
+        );
+    }
+
+    /// `APLAN044`: a closed task claiming less of the version than its level
+    /// implies, and the five shapes that are not it (`A1-312`, ADR-0034).
+    #[test]
+    fn a_closed_task_claiming_under_its_level_is_reported_unless_it_says_why() {
+        use crate::task::{VersionFloors, VersionImpact};
+
+        fn plan_claiming(impact: Option<VersionImpact>, reason: Option<&str>) -> Plan {
+            let mut task = t("A-1", Status::Done);
+            task.evidence = vec![Evidence {
+                kind: crate::task::EvidenceKind::Commit,
+                reference: "abc1234".to_string(),
+                captured: None,
+            }];
+            task.version_impact = impact;
+            task.version_impact_reason = reason.map(str::to_string);
+            let mut plan = plan_of(vec![task]);
+            plan.tasks[0].fields.insert(
+                "version_impact".to_string(),
+                crate::diagnostic::Location { line: 9, column: 1 },
+            );
+            plan
+        }
+        let on = || Options {
+            require_impact: Some(VersionFloors::default()),
+            ..opts()
+        };
+
+        let r = validate(&plan_claiming(Some(VersionImpact::None), None), &on());
+        let d = pick(&r, code::VERSION_IMPACT_UNEXPLAINED);
+        assert_eq!(d.severity, crate::diagnostic::Severity::Warning);
+        assert_eq!(
+            d.message,
+            "claims `none` of the released version where its level implies `fix`, and says \
+             nowhere why",
+            "both numbers are named: which claim, and what it is being held to"
+        );
+        assert_eq!(
+            d.location.map(|l| l.line),
+            Some(9),
+            "at the claim, which is the line an author edits"
+        );
+        assert!(
+            d.agent_instruction
+                .as_deref()
+                .is_some_and(|i| i.contains("version_impact_reason")),
+            "the instruction names the field that settles it: {:?}",
+            d.agent_instruction
+        );
+
+        let quiet = |plan: &Plan, o: &Options, why: &str| {
+            assert!(
+                !validate(plan, o)
+                    .diagnostics
+                    .iter()
+                    .any(|d| d.code == code::VERSION_IMPACT_UNEXPLAINED),
+                "{why}"
+            );
+        };
+
+        // Said why: the override is the author's to make, and this rule only
+        // ever asked for the sentence.
+        quiet(
+            &plan_claiming(
+                Some(VersionImpact::None),
+                Some("a pilot log, nothing ships"),
+            ),
+            &on(),
+            "a claim with a reason was still reported",
+        );
+        // Declared nothing, which is the ordinary task and the reason this is
+        // adoptable at three hundred of them.
+        quiet(
+            &plan_claiming(None, None),
+            &on(),
+            "a task that declared nothing was reported",
+        );
+        // Claimed more than the floor: nothing here polices generosity.
+        quiet(
+            &plan_claiming(Some(VersionImpact::Breaking), None),
+            &on(),
+            "a task claiming more than its level implies was reported",
+        );
+        // Not asked for, which is the default.
+        quiet(
+            &plan_claiming(Some(VersionImpact::None), None),
+            &opts(),
+            "the rule spoke without `version.require_impact`",
+        );
+        // `dropped` ships nothing, so what it would have done is nobody's
+        // question -- and `done` rather than terminal is what the rule reads.
+        let mut dropped = plan_claiming(Some(VersionImpact::None), None);
+        dropped.tasks[0].task.status = Status::Dropped;
+        quiet(&dropped, &on(), "a dropped task was held to a floor");
+
+        // The level is what moves the floor, and a cut's is higher.
+        let mut cut = plan_claiming(Some(VersionImpact::Fix), None);
+        cut.tasks[0].task.tags = vec![crate::task::MILESTONE_TAG.to_string()];
+        cut.tasks[0].task.effort_days = None;
+        let r = validate(&cut, &on());
+        assert_eq!(
+            pick(&r, code::VERSION_IMPACT_UNEXPLAINED).message,
+            "claims `fix` of the released version where its level implies `feature`, and says \
+             nowhere why",
+            "a cut is held to the cut floor, not the task floor"
+        );
+    }
+
+    #[test]
+    fn ticking_the_scaffold_is_reported_and_a_lookalike_is_not() {
+        let mut plan = plan_with_criteria(crate::load::Criteria {
+            total: 1,
+            ticked: 1,
+            first_unticked: None,
+            scaffold_ticked: Some(21),
+            scaffold_prompt: Some(crate::scaffold::criterion_prompt()),
+            why_untouched: false,
+            scaffold_unticked: None,
+            prompts: 0,
+        });
+        let r = validate(&plan, &opts());
+        let d = pick(&r, code::SCAFFOLD_TICKED);
+        assert_eq!(d.severity, crate::diagnostic::Severity::Warning);
+        assert!(
+            d.message.contains(crate::scaffold::criterion_prompt()),
+            "the finding quotes the line, so a reader can find it: {}",
+            d.message
+        );
+        assert!(
+            !d.message.contains("`## Why`"),
+            "and says nothing about a `Why` that was written: {}",
+            d.message
+        );
+        assert_eq!(d.location.as_ref().map(|l| l.line), Some(21));
+
+        // The same task with a real criterion instead: silent. The counting
+        // fields are identical, so only `scaffold_ticked` can be driving it.
+        plan.tasks[0].criteria.scaffold_ticked = None;
+        let r = validate(&plan, &opts());
+        assert!(
+            !r.diagnostics
+                .iter()
+                .any(|d| d.code == code::SCAFFOLD_TICKED),
+            "{:?}",
+            r.diagnostics
+        );
+    }
+
+    #[test]
+    fn an_untouched_why_is_the_second_sentence_and_not_a_second_finding() {
+        let r = validate(
+            &plan_with_criteria(crate::load::Criteria {
+                total: 1,
+                ticked: 1,
+                first_unticked: None,
+                scaffold_ticked: Some(21),
+                scaffold_prompt: Some(crate::scaffold::criterion_prompt()),
+                why_untouched: true,
+                scaffold_unticked: None,
+                prompts: 1,
+            }),
+            &opts(),
+        );
+        assert_eq!(
+            r.diagnostics
+                .iter()
+                .filter(|d| d.code == code::SCAFFOLD_TICKED)
+                .count(),
+            1,
+            "one finding, not two"
+        );
+        assert!(
+            pick(&r, code::SCAFFOLD_TICKED)
+                .message
+                .contains("`## Why` is still the prompt too")
+        );
+    }
+
+    #[test]
+    fn a_live_task_may_carry_the_scaffold_it_was_created_with() {
+        let mut plan = plan_with_criteria(crate::load::Criteria {
+            total: 1,
+            ticked: 1,
+            first_unticked: None,
+            scaffold_ticked: Some(21),
+            scaffold_prompt: Some(crate::scaffold::criterion_prompt()),
+            why_untouched: true,
+            scaffold_unticked: None,
+            prompts: 1,
+        });
+        plan.tasks[0].task.status = Status::InProgress;
+        let r = validate(&plan, &opts());
+        assert!(
+            !r.diagnostics
+                .iter()
+                .any(|d| d.code == code::SCAFFOLD_TICKED),
+            "every task `add` creates carries it, so this must speak only about `done`: {:?}",
+            r.diagnostics
+        );
+    }
+
+    #[test]
+    fn a_task_stating_no_criteria_is_not_unanswered() {
+        // Silence, not a demand for the convention: two of this plan's closed
+        // tasks state none, and `APLAN005` is what asks for evidence.
+        let r = validate(
+            &plan_with_criteria(crate::load::Criteria::default()),
+            &opts(),
+        );
+        assert!(
+            !r.diagnostics
+                .iter()
+                .any(|d| d.code == code::CRITERIA_UNANSWERED),
+            "{:?}",
+            r.diagnostics
+        );
+    }
+
+    #[test]
+    fn a_live_task_is_not_asked_to_have_answered_them() {
+        let mut plan = plan_with_criteria(crate::load::Criteria {
+            total: 2,
+            ticked: 0,
+            first_unticked: Some(9),
+            ..crate::load::Criteria::default()
+        });
+        plan.tasks[0].task.status = Status::InProgress;
+        let r = validate(&plan, &opts());
+        assert!(
+            !r.diagnostics
+                .iter()
+                .any(|d| d.code == code::CRITERIA_UNANSWERED),
+            "an unticked criterion on live work is the normal state of a plan: {:?}",
+            r.diagnostics
+        );
+    }
+
+    /// A task carrying `paths`, for the duplicate rule.
+    fn plan_with_paths(paths: &[&str]) -> Plan {
+        let mut task = t("A-1", Status::Todo);
+        task.paths = paths.iter().map(|p| (*p).to_string()).collect();
+        plan_of(vec![task])
+    }
+
+    #[test]
+    fn the_same_path_twice_is_reported_and_once_is_not() {
+        let r = validate(&plan_with_paths(&["src/**", "src/**", "ci/**"]), &opts());
+        let d = pick(&r, code::DUPLICATE_PATH);
+        assert_eq!(d.severity, crate::diagnostic::Severity::Warning);
+        assert!(
+            d.message.contains("`src/**` 2 times"),
+            "names the entry and how many: {}",
+            d.message
+        );
+        assert!(
+            !d.message.contains("ci/**"),
+            "and only the one that repeats: {}",
+            d.message
+        );
+
+        let clean = validate(&plan_with_paths(&["src/**", "ci/**"]), &opts());
+        assert!(
+            !clean
+                .diagnostics
+                .iter()
+                .any(|d| d.code == code::DUPLICATE_PATH),
+            "{:?}",
+            clean.diagnostics
+        );
+    }
+
+    #[test]
+    fn two_spellings_of_one_path_are_one_entry() {
+        // `A1-254` made these the same path to a citation and to a glob, so a
+        // rule that called them different would be the one disagreeing.
+        let r = validate(&plan_with_paths(&["src/**", "./src/**"]), &opts());
+        let d = pick(&r, code::DUPLICATE_PATH);
+        assert!(
+            d.message.contains("`./src/**`") && d.message.contains("`src/**`"),
+            "both writings are named, since the author has to find one of them: {}",
+            d.message
+        );
+    }
+
+    #[test]
+    fn a_task_with_no_paths_or_one_is_silent() {
+        for paths in [&[][..], &["src/**"][..]] {
+            let r = validate(&plan_with_paths(paths), &opts());
+            assert!(
+                !r.diagnostics.iter().any(|d| d.code == code::DUPLICATE_PATH),
+                "{paths:?} reported a duplicate: {:?}",
+                r.diagnostics
+            );
+        }
+    }
+
+    /// The shapes `A1-254`'s normalisation folds together, and the one it does
+    /// not (`A1-267`'s audit, which found the message wrong for two of these).
+    #[test]
+    fn the_spellings_that_are_one_entry_and_the_one_that_is_not() {
+        // A trailing slash, and `..` walked back: both reduce to the same path,
+        // and the explanation must fit both -- it named only the `./x` case.
+        for pair in [["src/", "src"], ["src/../src/**", "src/**"]] {
+            let r = validate(&plan_with_paths(&pair), &opts());
+            let d = pick(&r, code::DUPLICATE_PATH);
+            assert!(
+                d.message.contains("`.` and `..` segments are resolved"),
+                "{pair:?} needs the reason that covers both shapes: {}",
+                d.message
+            );
+        }
+
+        // A trailing *space* is not the same entry: `src/** ` is a glob that
+        // matches a path ending in a space, so calling it a duplicate would be
+        // this rule guessing that the author did not mean what they typed.
+        let spaced = validate(&plan_with_paths(&["src/** ", "src/**"]), &opts());
+        assert!(
+            !spaced
+                .diagnostics
+                .iter()
+                .any(|d| d.code == code::DUPLICATE_PATH),
+            "{:?}",
+            spaced.diagnostics
+        );
+    }
+
+    /// Counting, and an entry with nothing in it.
+    #[test]
+    fn it_counts_the_copies_and_names_a_blank_in_words() {
+        let three = validate(&plan_with_paths(&["src/**", "src/**", "src/**"]), &opts());
+        assert!(
+            pick(&three, code::DUPLICATE_PATH)
+                .message
+                .contains("3 times")
+        );
+
+        // Two duplicated entries in one task are two findings, not one.
+        let two = validate(
+            &plan_with_paths(&["src/**", "src/**", "ci/**", "ci/**"]),
+            &opts(),
+        );
+        assert_eq!(
+            two.diagnostics
+                .iter()
+                .filter(|d| d.code == code::DUPLICATE_PATH)
+                .count(),
+            2
+        );
+
+        // An entry nobody filled in renders as empty backticks otherwise, which
+        // reads as a defect in the message rather than a fact about the file.
+        let blank = validate(&plan_with_paths(&["", ""]), &opts());
+        let d = pick(&blank, code::DUPLICATE_PATH);
+        assert!(
+            d.message.contains("an empty entry 2 times") && !d.message.contains("`` "),
+            "{}",
+            d.message
+        );
+    }
+
+    /// `APLAN041`, the second copy of the policy going stale (`A1-273`).
+    ///
+    /// The block `export-agents-md` writes is what an agent reads before
+    /// touching the plan, and `p00002`'s said `commit` was acceptable evidence
+    /// for a day after `require_min_strength` had dropped it. Each case here is
+    /// a state a real file can be in, and the silent ones matter as much as the
+    /// loud one: this rule reads a document the plan does not own, so getting
+    /// its scope wrong means nagging repositories that never asked.
+    mod agents_block {
+        use super::*;
+
+        /// Write `body` between the markers, with prose either side, and return
+        /// the options pointing at it. The directory is returned too, because
+        /// dropping it deletes the file before the rule can read it.
+        fn repo(body: &str, current: &str) -> (tempfile::TempDir, Options) {
+            let dir = tempfile::Builder::new()
+                .tempdir_in(crate::fixture::fixture_root())
+                .expect("tempdir");
+            let path = dir.path().join("AGENTS.md");
+            std::fs::write(&path, body).expect("write");
+            let o = Options {
+                agents_block: Some(AgentsBlock {
+                    path,
+                    current: current.to_string(),
+                }),
+                ..opts()
+            };
+            (dir, o)
+        }
+
+        fn fenced(body: &str) -> String {
+            format!(
+                "# A repository\n\nits own prose\n\n{}\n{body}\n{}\n\nmore prose\n",
+                crate::contract::BEGIN,
+                crate::contract::END
+            )
+        }
+
+        fn codes(r: &Report) -> Vec<String> {
+            r.diagnostics.iter().map(|d| d.code.to_string()).collect()
+        }
+
+        /// The measured case, in the shape it was found in.
+        #[test]
+        fn a_block_that_no_longer_matches_the_policy_is_reported() {
+            let (_d, o) = repo(
+                &fenced("- A `done` task must cite `commit`, `file` or `test` evidence."),
+                "- A `done` task must cite `file` or `test` evidence.",
+            );
+            let r = validate(&plan_of(vec![]), &o);
+            let d = pick(&r, code::STALE_AGENT_CONTRACT);
+            assert!(
+                d.message.contains("what an agent reads"),
+                "says why it matters: {}",
+                d.message
+            );
+            // The remedy is the command, with the file it was given: the
+            // caller decides how that path is spelled, and the CLI hands over
+            // one relative to the invocation so the line can be pasted.
+            let fix = d.agent_instruction.clone().unwrap_or_default();
+            assert!(
+                fix.starts_with("Run `aplan export-agents-md --write ")
+                    && fix.ends_with("AGENTS.md`."),
+                "not a command a reader can paste: {fix}"
+            );
+        }
+
+        /// Whitespace around the block is the file's, not the contract's.
+        #[test]
+        fn a_matching_block_is_silent_through_the_padding() {
+            let (_d, o) = repo(&fenced("\n  - one rule\n\n"), "- one rule");
+            assert!(
+                codes(&validate(&plan_of(vec![]), &o)).is_empty(),
+                "reported a newline"
+            );
+        }
+
+        /// The markers are the repository asking for the block to stay current.
+        /// Without them it never asked, and this rule has no standing.
+        #[test]
+        fn a_file_without_the_markers_is_silent() {
+            let (_d, o) = repo("# A repository\n\nhand-written prose only\n", "- one rule");
+            assert!(codes(&validate(&plan_of(vec![]), &o)).is_empty());
+        }
+
+        /// An adopter who has never run `export-agents-md` is not being nagged
+        /// about a feature they did not ask for.
+        #[test]
+        fn a_file_that_is_not_there_is_silent() {
+            let dir = tempfile::Builder::new()
+                .tempdir_in(crate::fixture::fixture_root())
+                .expect("tempdir");
+            let o = Options {
+                agents_block: Some(AgentsBlock {
+                    path: dir.path().join("AGENTS.md"),
+                    current: "- one rule".into(),
+                }),
+                ..opts()
+            };
+            assert!(codes(&validate(&plan_of(vec![]), &o)).is_empty());
+        }
+
+        /// And a caller that cannot render a block turns the rule off entirely,
+        /// rather than comparing against nothing and calling every file stale.
+        ///
+        /// Structural rather than conditional, and said here because a mutation
+        /// pass will not kill this one: `None` carries no path, so there is no
+        /// file to read and no block to compare, whatever the code does next.
+        /// It pins the meaning of the field for a caller reading the type.
+        #[test]
+        fn no_block_supplied_is_the_rule_switched_off() {
+            let dir = tempfile::Builder::new()
+                .tempdir_in(crate::fixture::fixture_root())
+                .expect("tempdir");
+            std::fs::write(dir.path().join("AGENTS.md"), fenced("- stale")).expect("write");
+            let o = Options {
+                agents_block: None,
+                ..opts()
+            };
+            assert!(codes(&validate(&plan_of(vec![]), &o)).is_empty());
+        }
+
+        /// **The rule cannot be switched off by hand without that being the
+        /// visible thing that happened.** Deleting one comment line is the
+        /// quietest edit that would silence a marker-scoped rule, so a
+        /// half-pair is a finding.
+        #[test]
+        fn deleting_one_marker_is_a_finding_and_not_a_silence() {
+            let half = format!(
+                "prose\n\n{}\n- a rule\n\nmore prose\n",
+                crate::contract::BEGIN
+            );
+            let (_d, o) = repo(&half, "- a rule");
+            let r = validate(&plan_of(vec![]), &o);
+            let d = pick(&r, code::STALE_AGENT_CONTRACT);
+            assert!(
+                d.message.contains("1 `aplan:begin` and 0 `aplan:end`"),
+                "names what it found: {}",
+                d.message
+            );
+            assert!(
+                d.agent_instruction
+                    .as_deref()
+                    .is_some_and(|f| f.contains("Leave one")),
+                "the remedy repairs the markers first: {:?}",
+                d.agent_instruction
+            );
+        }
+
+        /// Two blocks is the case the writer refuses: one would be updated and
+        /// the other left telling agents the old policy.
+        #[test]
+        fn two_blocks_are_reported_even_when_one_of_them_matches() {
+            let both = format!("{}\n{}", fenced("- a rule"), fenced("- an old rule"));
+            let (_d, o) = repo(&both, "- a rule");
+            let r = validate(&plan_of(vec![]), &o);
+            let d = pick(&r, code::STALE_AGENT_CONTRACT);
+            assert!(d.message.contains("2 `aplan:begin`"), "{}", d.message);
+        }
+    }
+
+    /// `APLAN042`, the revisit hand-off (`A1-264`).
+    ///
+    /// The field says *when to look again*, never that the wait is over, so the
+    /// rule's whole job is to keep it usable and keep it where something reads
+    /// it.
+    mod revisit {
+        use super::*;
+
+        fn task_with(status: Status, revisit: Option<&str>) -> Plan {
+            let mut t = t("A-1", status);
+            t.revisit_at = revisit.map(str::to_string);
+            plan_of(vec![t])
+        }
+
+        #[test]
+        fn an_instant_nothing_can_parse_is_reported() {
+            let r = validate(&task_with(Status::Blocked, Some("next tuesday")), &opts());
+            let d = pick(&r, code::REVISIT_UNUSABLE);
+            assert!(
+                d.message.contains("not an RFC 3339 instant"),
+                "{}",
+                d.message
+            );
+            assert!(
+                d.agent_instruction
+                    .as_deref()
+                    .is_some_and(|f| f.contains("YYYY-MM-DDTHH:MM:SSZ")),
+                "the remedy shows the shape: {:?}",
+                d.agent_instruction
+            );
+        }
+
+        /// A date is not an instant: a scheduler has to know which moment.
+        #[test]
+        fn a_date_alone_is_not_an_instant() {
+            let r = validate(&task_with(Status::Blocked, Some("2026-09-10")), &opts());
+            assert_eq!(
+                pick(&r, code::REVISIT_UNUSABLE).code,
+                code::REVISIT_UNUSABLE
+            );
+        }
+
+        /// `ready` already offers a `todo` task, and `due` reports parked work:
+        /// a revisit anywhere else is a note to nobody.
+        #[test]
+        fn a_revisit_on_a_task_that_is_not_parked_is_reported() {
+            for status in [Status::Todo, Status::InProgress, Status::Done] {
+                let r = validate(&task_with(status, Some("2026-09-10T05:00:00Z")), &opts());
+                let d = pick(&r, code::REVISIT_UNUSABLE);
+                assert!(
+                    d.message.contains("nothing reads it here"),
+                    "{status}: {}",
+                    d.message
+                );
+            }
+        }
+
+        #[test]
+        fn a_real_instant_on_a_parked_task_is_silent() {
+            for at in [
+                "2026-09-10T05:00:00Z",
+                "2026-09-10T05:00:00+02:00",
+                "2026-09-10T05:00:00-05:30",
+            ] {
+                let r = validate(&task_with(Status::Blocked, Some(at)), &opts());
+                assert!(
+                    !r.diagnostics
+                        .iter()
+                        .any(|d| d.code == code::REVISIT_UNUSABLE),
+                    "{at}: {:?}",
+                    r.diagnostics
+                );
+            }
+        }
+
+        #[test]
+        fn no_revisit_is_silent_in_every_status() {
+            for status in [Status::Todo, Status::Blocked, Status::Done] {
+                let r = validate(&task_with(status, None), &opts());
+                assert!(
+                    !r.diagnostics
+                        .iter()
+                        .any(|d| d.code == code::REVISIT_UNUSABLE),
+                    "{status}: {:?}",
+                    r.diagnostics
+                );
+            }
+        }
+
+        /// The offset is removed to reach UTC, and a leap second is refused: a
+        /// scheduler does not run at 23:59:60 (`A1-264`).
+        #[test]
+        fn the_parser_reads_offsets_and_refuses_what_is_not_an_instant() {
+            assert_eq!(rfc3339_to_epoch("1970-01-01T00:00:00Z"), Some(0));
+            assert_eq!(rfc3339_to_epoch("1970-01-01T02:00:00+02:00"), Some(0));
+            assert_eq!(rfc3339_to_epoch("1969-12-31T22:00:00-02:00"), Some(0));
+            for bad in [
+                "1970-01-01",
+                "1970-01-01T00:00:00",
+                "1970-01-01 00:00:00Z",
+                "1970-01-01T00:00:60Z",
+                "1970-01-01T24:00:00Z",
+                "1970-01-01T00:00:00.500Z",
+                "1970-01-01T00:00:00+2:00",
+                "1970-13-01T00:00:00Z",
+            ] {
+                assert_eq!(rfc3339_to_epoch(bad), None, "accepted `{bad}`");
+            }
+        }
+    }
+
+    /// How the `paths` rules divide one badly-edited list between them
+    /// (`A1-267`'s audit, which found all three of these).
+    #[test]
+    fn a_broken_entry_written_twice_is_one_finding_from_each_rule() {
+        let r = validate(&plan_with_paths(&["src/[", "src/["]), &opts());
+
+        // `APLAN032` once, not once per copy: one typo is one sentence.
+        assert_eq!(
+            r.diagnostics
+                .iter()
+                .filter(|d| d.code == code::BAD_PATH_GLOB)
+                .count(),
+            1,
+            "{:?}",
+            r.diagnostics
+        );
+        // And `APLAN040` says nothing: an entry that names no files is the
+        // other rule's, and "you wrote it twice" is not the useful thing to say
+        // about `src/[`.
+        assert!(
+            !r.diagnostics.iter().any(|d| d.code == code::DUPLICATE_PATH),
+            "{:?}",
+            r.diagnostics
+        );
+    }
+
+    /// Three entries written two ways is not the same fact as two, and the
+    /// two-spelling branch said only *which* and not *how many*.
+    #[test]
+    fn the_count_survives_a_second_spelling() {
+        let r = validate(&plan_with_paths(&["src/**", "./src/**", "src/**"]), &opts());
+        let d = pick(&r, code::DUPLICATE_PATH);
+        assert!(
+            d.message.contains("3 entries"),
+            "a reader deleting one copy would still have two: {}",
+            d.message
+        );
+    }
+
+    /// Containment is not duplication, and is deliberately out of scope: a glob
+    /// that *subsumes* another is a much larger claim than two writings of one
+    /// entry, and a rule making it would be guessing at intent.
+    #[test]
+    fn a_glob_that_subsumes_another_is_not_a_duplicate() {
+        let r = validate(&plan_with_paths(&["src/**", "src/a.rs"]), &opts());
+        assert!(
+            !r.diagnostics.iter().any(|d| d.code == code::DUPLICATE_PATH),
+            "{:?}",
+            r.diagnostics
+        );
+    }
+
     #[test]
     fn done_without_evidence_is_an_error() {
         let p = plan_of(vec![t("A", Status::Done)]);
@@ -600,6 +3427,20 @@ mod tests {
             r.diagnostics
                 .iter()
                 .any(|d| d.code == code::DONE_WITHOUT_EVIDENCE)
+        );
+        let d = pick(&r, code::DONE_WITHOUT_EVIDENCE);
+        assert!(
+            d.message.contains("`status: done`") && d.message.contains("`evidence`"),
+            "the message must name the claim and the field that would back it: {}",
+            d.message
+        );
+        assert!(
+            d.agent_instruction
+                .as_deref()
+                .is_some_and(|i| i.contains("commit") && i.contains("note")),
+            "the fix must enumerate what would satisfy it, since the whole rule is \
+             about what counts as proof: {:?}",
+            d.agent_instruction
         );
         assert!(!r.is_clean());
     }
@@ -790,6 +3631,13 @@ mod tests {
             "a blank-ref commit must not count as strong evidence: {:?}",
             r.diagnostics
         );
+        let d = pick(&r, code::WEAK_EVIDENCE);
+        assert!(
+            d.message.contains("commit"),
+            "the message must name the kinds this repository configured, or the \
+             reader cannot tell what would satisfy it: {}",
+            d.message
+        );
     }
 
     #[test]
@@ -812,6 +3660,14 @@ mod tests {
                 r.diagnostics.iter().any(|d| d.code == code::UNDATED_NOTE),
                 "captured {bad:?} is not an ISO date and must fire APLAN010"
             );
+            let d = pick(&r, code::UNDATED_NOTE);
+            assert!(
+                d.message.contains(bad),
+                "the message must quote the value it rejected: told only that a \
+                 date is invalid, an author with several notes cannot tell which \
+                 one to fix: {}",
+                d.message
+            );
         }
         // A real date is clean.
         assert!(is_iso_date("2026-07-18"));
@@ -823,7 +3679,9 @@ mod tests {
     /// identical PR annotations (matching how `blocked_by` is deduplicated).
     #[test]
     fn a_repeated_trace_is_reported_once() {
-        let dir = tempfile::tempdir().expect("tempdir");
+        let dir = tempfile::Builder::new()
+            .tempdir_in(crate::fixture::fixture_root())
+            .expect("tempdir");
         let mut a = t("A", Status::Todo);
         a.traces = vec!["NOPE.md#x".into(), "NOPE.md#x".into()];
         let o = Options {
@@ -849,11 +3707,951 @@ mod tests {
     }
 
     #[test]
+    fn an_edge_into_a_file_that_did_not_load_is_not_a_second_error() {
+        // The fourth pilot's shape: a file that fails to parse is absent from
+        // the graph, so every edge into it looks dangling. It is not, and
+        // reporting it buries the real fault under a cascade proportional to how
+        // well connected the plan is (`A1-072`).
+        let mut a = t("A", Status::Todo);
+        a.blocked_by = vec!["BROKEN".into(), "GHOST".into()];
+        let mut plan = plan_of(vec![a]);
+        plan.unloadable
+            .insert("BROKEN".into(), PathBuf::from("plan/tasks/BROKEN.md"));
+
+        let r = validate(&plan, &opts());
+        let unknown: Vec<&str> = r
+            .diagnostics
+            .iter()
+            .filter(|d| d.code == code::UNKNOWN_DEP)
+            .map(|d| d.message.as_str())
+            .collect();
+        assert_eq!(
+            unknown.len(),
+            1,
+            "only the genuinely absent id is unknown: {unknown:?}"
+        );
+        assert!(unknown[0].contains("GHOST"), "{unknown:?}");
+    }
+
+    #[test]
+    fn suppression_is_limited_to_the_ids_that_failed_to_load() {
+        // The risk the task named: hiding a real dangling reference behind an
+        // unrelated parse error. Only edges into *that* id are dropped.
+        let mut a = t("A", Status::Todo);
+        a.blocked_by = vec!["GHOST".into()];
+        let mut plan = plan_of(vec![a]);
+        plan.unloadable
+            .insert("SOMETHING_ELSE".into(), PathBuf::from("plan/tasks/x.md"));
+
+        let r = validate(&plan, &opts());
+        assert!(
+            r.diagnostics.iter().any(|d| d.code == code::UNKNOWN_DEP),
+            "an unrelated parse failure must not silence a real dangling edge"
+        );
+    }
+
+    #[test]
+    fn a_cancelled_cut_with_live_work_is_reported() {
+        // The state a bug produced and nothing reported: `drop --cut` followed a
+        // sequencing edge, cancelled the predecessor cut and left its work live
+        // (`A1-084`). A hand-edit reaches it too, as does dropping a milestone
+        // without `--cut`.
+        let mut m = t("M-s0", Status::Dropped);
+        m.tags = vec!["milestone".into(), "s0".into()];
+        m.effort_days = None;
+        m.blocked_by = vec!["A-01".into()];
+        let mut live = t("A-01", Status::Todo);
+        live.effort_days = Some(1.0);
+
+        let r = validate(&plan_of(vec![m, live]), &opts());
+        let d = r
+            .diagnostics
+            .iter()
+            .find(|d| d.code == code::CANCELLED_CUT_LIVE_WORK)
+            .expect("a cancelled cut whose work is going ahead");
+        assert!(d.message.contains("A-01"), "it names them: {}", d.message);
+    }
+
+    #[test]
+    fn a_cancelled_cut_whose_work_is_cancelled_is_silent() {
+        // Coherent: the cut and its work were cancelled together, which is what
+        // `drop --cut` does. The live cut it follows is a sequencing edge and
+        // ordinary.
+        let mut prev = t("M-prev", Status::Todo);
+        prev.tags = vec!["milestone".into(), "prev".into()];
+        prev.effort_days = None;
+        let mut m = t("M-s0", Status::Dropped);
+        m.tags = vec!["milestone".into(), "s0".into()];
+        m.effort_days = None;
+        m.blocked_by = vec!["A-01".into(), "M-prev".into()];
+
+        let r = validate(&plan_of(vec![prev, m, t("A-01", Status::Dropped)]), &opts());
+        assert!(
+            !r.diagnostics
+                .iter()
+                .any(|d| d.code == code::CANCELLED_CUT_LIVE_WORK),
+            "{:?}",
+            r.diagnostics
+        );
+    }
+
+    #[test]
+    fn a_cancelled_member_does_not_block_its_cut() {
+        // Leaving a cancelled task in its cut was `APLAN020` and taking it out
+        // was `APLAN022`, so a task in a cut could not be cancelled at all. The
+        // rollup has excluded dropped members all along; the gate now agrees
+        // (`A1-081`).
+        let mut m = t("M-s0", Status::Todo);
+        m.tags = vec!["milestone".into(), "s0".into()];
+        m.blocked_by = vec!["A-01".into(), "A-02".into()];
+        let mut dropped = t("A-01", Status::Dropped);
+        dropped.effort_days = Some(1.0);
+        let mut live = t("A-02", Status::Todo);
+        live.effort_days = Some(1.0);
+
+        let r = validate(&plan_of(vec![m, dropped, live]), &opts());
+        assert!(
+            !r.diagnostics
+                .iter()
+                .any(|d| d.code == code::DROPPED_BLOCKER),
+            "{:?}",
+            r.diagnostics
+        );
+    }
+
+    #[test]
+    fn a_cancelled_predecessor_cut_is_still_reported() {
+        // The exemption is for a cut's own *members*. A milestone in another
+        // milestone's `blocked_by` is a sequencing edge (ADR-0013), and a cut
+        // whose stated prerequisite was abandoned is a plan its author has to
+        // resolve. Exempting it would also contradict the members, who inherit
+        // that edge and are told about it (`A1-081`).
+        let mut dropped_cut = t("M-s0", Status::Dropped);
+        dropped_cut.tags = vec!["milestone".into(), "s0".into()];
+        let mut live_cut = t("M-s1", Status::Todo);
+        live_cut.tags = vec!["milestone".into(), "s1".into()];
+        live_cut.blocked_by = vec!["B-01".into(), "M-s0".into()];
+        let mut member = t("B-01", Status::Todo);
+        member.effort_days = Some(1.0);
+
+        let r = validate(&plan_of(vec![dropped_cut, live_cut, member]), &opts());
+        let reported: Vec<&str> = r
+            .diagnostics
+            .iter()
+            .filter(|d| d.code == code::DROPPED_BLOCKER)
+            .filter_map(|d| d.task.as_deref())
+            .collect();
+        assert!(reported.contains(&"M-s1"), "the cut itself: {reported:?}");
+        let d = pick(&r, code::DROPPED_BLOCKER);
+        assert!(
+            d.message.contains("M-s0"),
+            "the message must name the *dropped* blocker, not just the task that \
+             waits on it: with several blockers the reader cannot otherwise tell \
+             which edge is dead: {}",
+            d.message
+        );
+        assert!(
+            reported.contains(&"B-01"),
+            "and its members, who inherit the edge: {reported:?}"
+        );
+    }
+
+    #[test]
+    fn the_rollup_and_the_validator_agree_about_a_cancelled_member() {
+        // The gap this fix closed was the two disagreeing: `roadmap` excluded a
+        // dropped member from a cut's rollup while the gate treated it as a
+        // permanent blocker. Asserted rather than assumed.
+        let mut m = t("M-s0", Status::Todo);
+        m.tags = vec!["milestone".into(), "s0".into()];
+        m.blocked_by = vec!["A-01".into(), "A-02".into()];
+        m.effort_days = None; // a checkpoint weighs nothing (`APLAN021`)
+        let mut dropped = t("A-01", Status::Dropped);
+        dropped.effort_days = Some(1.0);
+        let mut live = t("A-02", Status::Todo);
+        live.effort_days = Some(1.0);
+        let tasks = vec![m, dropped, live];
+
+        let r = validate(&plan_of(tasks.clone()), &opts());
+        assert!(r.diagnostics.is_empty(), "{:?}", r.diagnostics);
+
+        let graph = crate::graph::Graph::new(tasks.iter());
+        let cut = &graph.roadmap().cuts[0];
+        assert_eq!(cut.total, 1, "the cancelled member is not scope");
+        assert_eq!(cut.done + cut.ready + cut.blocked, cut.total);
+    }
+
+    #[test]
+    fn a_live_task_blocked_by_a_cancelled_one_is_still_reported() {
+        // The exemption is for milestones only. An ordinary task waiting on
+        // cancelled work genuinely cannot start, which is the whole point of the
+        // rule and must not move.
+        let mut a = t("A", Status::Todo);
+        a.blocked_by = vec!["B".into()];
+        let r = validate(&plan_of(vec![a, t("B", Status::Dropped)]), &opts());
+        assert!(
+            r.diagnostics
+                .iter()
+                .any(|d| d.code == code::DROPPED_BLOCKER),
+            "{:?}",
+            r.diagnostics
+        );
+    }
+
+    #[test]
+    fn a_cut_can_be_done_once_its_live_members_are() {
+        // ... and not before: the cancelled member is excused, the unfinished
+        // one is not.
+        let mut m = t("M-s0", Status::Todo);
+        m.tags = vec!["milestone".into(), "s0".into()];
+        m.blocked_by = vec!["A-01".into(), "A-02".into()];
+        m.status = Status::Done;
+        let mut done_member = t("A-02", Status::Done);
+        done_member.evidence = vec![Evidence {
+            kind: EvidenceKind::Note,
+            reference: "done".into(),
+            captured: None,
+        }];
+
+        let complete = validate(
+            &plan_of(vec![m.clone(), t("A-01", Status::Dropped), done_member]),
+            &opts(),
+        );
+        assert!(
+            !complete
+                .diagnostics
+                .iter()
+                .any(|d| d.code == code::DONE_BEFORE_BLOCKER),
+            "a cancelled member must not hold the cut open: {:?}",
+            complete.diagnostics
+        );
+
+        let premature = validate(
+            &plan_of(vec![m, t("A-01", Status::Dropped), t("A-02", Status::Todo)]),
+            &opts(),
+        );
+        assert!(
+            premature
+                .diagnostics
+                .iter()
+                .any(|d| d.code == code::DONE_BEFORE_BLOCKER),
+            "an unfinished live member still holds it open: {:?}",
+            premature.diagnostics
+        );
+    }
+
+    #[test]
+    fn check_enforces_the_cut_sequencing_that_close_enforces() {
+        // `close` refuses a task whose cut predecessor is unfinished, because it
+        // reads the graph's blocker set. `check` read only the declared edges,
+        // so a status hand-edited to `done` passed the gate the write path would
+        // have refused (`A1-073`).
+        let mut a0 = t("A0", Status::Todo);
+        a0.effort_days = Some(1.0);
+        let mut b1 = t("B1", Status::Done);
+        b1.evidence = vec![Evidence {
+            kind: EvidenceKind::Note,
+            reference: "done by hand".into(),
+            captured: None,
+        }];
+        let mut m0 = t("M-s0", Status::Todo);
+        m0.tags = vec!["milestone".into(), "s0".into()];
+        m0.blocked_by = vec!["A0".into()];
+        let mut m1 = t("M-s1", Status::Todo);
+        m1.tags = vec!["milestone".into(), "s1".into()];
+        m1.blocked_by = vec!["B1".into(), "M-s0".into()];
+
+        let r = validate(&plan_of(vec![a0, b1, m0, m1]), &opts());
+        let d = r
+            .diagnostics
+            .iter()
+            .find(|d| d.code == code::DONE_BEFORE_BLOCKER)
+            .expect("a done task whose cut predecessor is unfinished");
+        // The author will not find `M-s0` in this task's own `blocked_by`, so
+        // the message has to say where the edge came from.
+        assert!(d.message.contains("its cut follows"), "{}", d.message);
+    }
+
+    #[test]
+    fn an_inherited_edge_is_not_reported_twice_when_also_declared() {
+        // A plan that declares the cross-cut edge by hand, as the pilot did
+        // before this shipped, must not now get two errors for one edge.
+        let a0 = t("A0", Status::Todo);
+        let mut b1 = t("B1", Status::Done);
+        b1.blocked_by = vec!["M-s0".into()];
+        b1.evidence = vec![Evidence {
+            kind: EvidenceKind::Note,
+            reference: "done by hand".into(),
+            captured: None,
+        }];
+        let mut m0 = t("M-s0", Status::Todo);
+        m0.tags = vec!["milestone".into(), "s0".into()];
+        m0.blocked_by = vec!["A0".into()];
+        let mut m1 = t("M-s1", Status::Todo);
+        m1.tags = vec!["milestone".into(), "s1".into()];
+        m1.blocked_by = vec!["B1".into(), "M-s0".into()];
+
+        let r = validate(&plan_of(vec![a0, b1, m0, m1]), &opts());
+        let n = r
+            .diagnostics
+            .iter()
+            .filter(|d| d.code == code::DONE_BEFORE_BLOCKER && d.task.as_deref() == Some("B1"))
+            .count();
+        assert_eq!(n, 1, "one edge, one finding: {:?}", r.diagnostics);
+    }
+
+    fn families() -> BTreeMap<String, TagFamily> {
+        let mut f = BTreeMap::new();
+        f.insert(
+            "epic".to_string(),
+            TagFamily::members(vec!["epic-a".to_string(), "epic-b".to_string()]),
+        );
+        f.insert(
+            "kind".to_string(),
+            TagFamily::members(vec!["kind-b".to_string(), "kind-m".to_string()]),
+        );
+        f
+    }
+
+    fn tagged(id: &str, tags: &[&str]) -> Task {
+        let mut t = t(id, Status::Todo);
+        t.effort_days = Some(1.0);
+        t.tags = tags.iter().map(|s| (*s).to_string()).collect();
+        t
+    }
+
+    fn tag_opts() -> Options {
+        Options {
+            tag_families: families(),
+            ..opts()
+        }
+    }
+
+    /// A family with a cardinality, for the `APLAN030` cases below.
+    fn required(require: Cardinality, status: StatusScope, milestones: MilestoneScope) -> Options {
+        let mut f = BTreeMap::new();
+        f.insert(
+            "priority".to_string(),
+            TagFamily {
+                members: vec!["priority-p0".to_string(), "priority-p1".to_string()],
+                require,
+                status,
+                milestones,
+            },
+        );
+        Options {
+            tag_families: f,
+            ..opts()
+        }
+    }
+
+    /// The tasks under test plus one that carries a declared member.
+    ///
+    /// Without the binder the family is one no tag in the plan matches, which is
+    /// `APLAN029`'s finding and silences this rule deliberately, so every case
+    /// below would pass for the wrong reason: not "the requirement holds" but
+    /// "the vocabulary was never bound".
+    fn bound_plan(tasks: Vec<Task>) -> Plan {
+        let mut all = tasks;
+        all.push(tagged("BIND", &["priority-p0"]));
+        plan_of(all)
+    }
+
+    fn cardinality_findings(r: &Report) -> Vec<&Diagnostic> {
+        r.diagnostics
+            .iter()
+            .filter(|d| d.code == code::TAG_CARDINALITY)
+            .collect()
+    }
+
+    /// `judges` on its own, because it is public API and the rule's own use of it
+    /// would pass without it: the count arm answers `true` for `Optional` too, so
+    /// deleting the guard changes no diagnostic. What it changes is what the
+    /// predicate means to anyone else who asks it, and `add` is already someone
+    /// else.
+    #[test]
+    fn a_family_with_no_requirement_judges_nothing() {
+        let family = TagFamily::members(vec!["epic-a".to_string()]);
+        assert!(!family.judges(&tagged("A", &["epic-a"])));
+        assert!(!family.judges(&tagged("B", &[])));
+        // And one with a requirement does judge, or the assertion above would
+        // hold for a predicate that always answered `false`.
+        let required = TagFamily {
+            require: Cardinality::ExactlyOne,
+            ..TagFamily::members(vec!["epic-a".to_string()])
+        };
+        assert!(required.judges(&tagged("A", &["epic-a"])));
+
+        // And `satisfied_by` answers for both: a family with no requirement is
+        // met by anything, and one with a requirement is met by meeting it.
+        assert!(family.satisfied_by(&tagged("B", &[])));
+        assert!(required.satisfied_by(&tagged("A", &["epic-a"])));
+        assert!(!required.satisfied_by(&tagged("B", &[])));
+        // Out of scope is met too, whatever the task carries.
+        let done_only = TagFamily {
+            require: Cardinality::ExactlyOne,
+            status: StatusScope::Done,
+            ..TagFamily::members(vec!["epic-a".to_string()])
+        };
+        assert!(done_only.satisfied_by(&tagged("B", &[])));
+    }
+
+    /// The counts, in both directions, over every declared cardinality.
+    #[test]
+    fn each_cardinality_fires_on_the_counts_it_forbids_and_is_silent_on_the_rest() {
+        let none: &[&str] = &[];
+        let one: &[&str] = &["priority-p0"];
+        let two: &[&str] = &["priority-p0", "priority-p1"];
+        for (require, fires_on) in [
+            (Cardinality::Optional, vec![]),
+            (Cardinality::AtMostOne, vec![2usize]),
+            (Cardinality::AtLeastOne, vec![0]),
+            (Cardinality::ExactlyOne, vec![0, 2]),
+        ] {
+            for (count, tags) in [(0usize, none), (1, one), (2, two)] {
+                let opts = required(require, StatusScope::Any, MilestoneScope::Include);
+                let r = validate(&bound_plan(vec![tagged("A", tags)]), &opts);
+                let fired = !cardinality_findings(&r).is_empty();
+                assert_eq!(
+                    fired,
+                    fires_on.contains(&count),
+                    "{:?} with {count} member(s): {:?}",
+                    require,
+                    r.diagnostics
+                );
+            }
+        }
+    }
+
+    /// The message has to name the requirement and what it found, or the author
+    /// cannot tell "you have two" from "you have none".
+    #[test]
+    fn the_message_names_the_requirement_and_what_the_task_carries() {
+        let opts = required(
+            Cardinality::ExactlyOne,
+            StatusScope::Live,
+            MilestoneScope::Include,
+        );
+        let r = validate(
+            &bound_plan(vec![tagged("A", &["priority-p0", "priority-p1"])]),
+            &opts,
+        );
+        let d = r
+            .diagnostics
+            .iter()
+            .find(|d| d.code == code::TAG_CARDINALITY)
+            .expect("reported");
+        assert!(
+            d.message.contains("`priority` is declared exactly-one"),
+            "{}",
+            d.message
+        );
+        assert!(d.message.contains("on live tasks"), "{}", d.message);
+        assert!(
+            d.message.contains("carries `priority-p0`, `priority-p1`"),
+            "{}",
+            d.message
+        );
+
+        // And the other direction says `none` rather than listing nothing.
+        let r = validate(&bound_plan(vec![tagged("A", &["unrelated"])]), &opts);
+        let d = r
+            .diagnostics
+            .iter()
+            .find(|d| d.code == code::TAG_CARDINALITY && d.task.as_deref() == Some("A"))
+            .expect("reported");
+        assert!(d.message.ends_with("carries none"), "{}", d.message);
+        // The fix names the count, not just the family.
+        let fix = d.agent_instruction.as_deref().expect("a fix line");
+        assert!(
+            fix.contains("Carry exactly one of `tag_families.priority`"),
+            "{fix}"
+        );
+    }
+
+    /// Scope by status: the case the fifth pilot needs, where a priority is
+    /// required while the work is live and meaningless once it is not.
+    #[test]
+    fn a_status_scope_judges_only_the_statuses_it_names() {
+        let opts = required(
+            Cardinality::ExactlyOne,
+            StatusScope::Live,
+            MilestoneScope::Include,
+        );
+        for (status, judged) in [
+            (Status::Todo, true),
+            (Status::InProgress, true),
+            (Status::Blocked, true),
+            (Status::Done, false),
+            (Status::Dropped, false),
+        ] {
+            let mut t = tagged("A", &["unrelated"]);
+            t.status = status;
+            let r = validate(&bound_plan(vec![t]), &opts);
+            assert_eq!(
+                !cardinality_findings(&r).is_empty(),
+                judged,
+                "{status:?}: {:?}",
+                r.diagnostics
+            );
+        }
+    }
+
+    /// The remaining status scopes, and the words each puts in a message. The
+    /// fifth pilot needs `dropped` for a disposition tag, and `terminal` is the
+    /// pair, so neither can be left to a scope test that only covers `live`.
+    #[test]
+    fn the_terminal_scopes_judge_and_read_as_they_say() {
+        for (scope, judges) in [
+            (
+                StatusScope::Done,
+                vec![
+                    (Status::Done, true),
+                    (Status::Dropped, false),
+                    (Status::Todo, false),
+                ],
+            ),
+            (
+                StatusScope::Dropped,
+                vec![
+                    (Status::Done, false),
+                    (Status::Dropped, true),
+                    (Status::Todo, false),
+                ],
+            ),
+            (
+                StatusScope::Terminal,
+                vec![
+                    (Status::Done, true),
+                    (Status::Dropped, true),
+                    (Status::Todo, false),
+                ],
+            ),
+            (
+                StatusScope::Any,
+                vec![
+                    (Status::Done, true),
+                    (Status::Dropped, true),
+                    (Status::Todo, true),
+                ],
+            ),
+        ] {
+            let opts = required(Cardinality::AtLeastOne, scope, MilestoneScope::Include);
+            for (status, judged) in judges {
+                let mut t = tagged("A", &["unrelated"]);
+                t.status = status;
+                let r = validate(&bound_plan(vec![t]), &opts);
+                assert_eq!(
+                    r.diagnostics
+                        .iter()
+                        .any(|d| d.code == code::TAG_CARDINALITY && d.task.as_deref() == Some("A")),
+                    judged,
+                    "{scope:?} on {status:?}: {:?}",
+                    r.diagnostics
+                );
+            }
+        }
+        // And the word each contributes to the message, since a scope that reads
+        // as another is a message naming the wrong tasks.
+        assert_eq!(StatusScope::Any.as_str(), "every");
+        assert_eq!(StatusScope::Live.as_str(), "live");
+        assert_eq!(StatusScope::Done.as_str(), "done");
+        assert_eq!(StatusScope::Dropped.as_str(), "dropped");
+        assert_eq!(StatusScope::Terminal.as_str(), "terminal");
+        assert_eq!(Cardinality::Optional.as_str(), "optional");
+        assert_eq!(Cardinality::AtMostOne.as_str(), "at-most-one");
+        assert_eq!(Cardinality::AtLeastOne.as_str(), "at-least-one");
+        assert_eq!(Cardinality::ExactlyOne.as_str(), "exactly-one");
+    }
+
+    /// Scope by kind: a vocabulary that classifies work should not be demanded of
+    /// a milestone, and one that classifies cuts should be demanded of nothing
+    /// else.
+    #[test]
+    fn a_milestone_scope_judges_only_the_kind_it_names() {
+        for (scope, milestone_judged, task_judged) in [
+            (MilestoneScope::Include, true, true),
+            (MilestoneScope::Exclude, false, true),
+            (MilestoneScope::Only, true, false),
+        ] {
+            let opts = required(Cardinality::AtLeastOne, StatusScope::Any, scope);
+            let m = tagged("M-1", &["milestone"]);
+            let r = validate(&bound_plan(vec![m]), &opts);
+            assert_eq!(
+                !cardinality_findings(&r).is_empty(),
+                milestone_judged,
+                "milestone under {scope:?}: {:?}",
+                r.diagnostics
+            );
+            let r = validate(&bound_plan(vec![tagged("A", &["unrelated"])]), &opts);
+            assert_eq!(
+                cardinality_findings(&r)
+                    .iter()
+                    .any(|d| d.task.as_deref() == Some("A")),
+                task_judged,
+                "task under {scope:?}: {:?}",
+                r.diagnostics
+            );
+        }
+    }
+
+    /// Only declared members count. A tag that merely looks like one is
+    /// `APLAN026`'s finding, and treating it as proof the requirement was met
+    /// would be the rule accepting a typo as evidence.
+    #[test]
+    fn a_near_miss_tag_does_not_satisfy_a_requirement() {
+        let opts = required(
+            Cardinality::ExactlyOne,
+            StatusScope::Any,
+            MilestoneScope::Include,
+        );
+        let r = validate(&bound_plan(vec![tagged("A", &["priority-p9"])]), &opts);
+        assert!(
+            !cardinality_findings(&r).is_empty(),
+            "a typo satisfied the requirement: {:?}",
+            r.diagnostics
+        );
+        // Both findings, because they are two different things to fix.
+        assert!(
+            r.diagnostics.iter().any(|d| d.code == code::UNKNOWN_TAG),
+            "{:?}",
+            r.diagnostics
+        );
+    }
+
+    /// A member written twice on one task is one tag, and must not fail
+    /// `exactly-one`: the plan says the same thing twice, which `APLAN026`'s own
+    /// deduplication already treats as one mistake.
+    #[test]
+    fn a_member_repeated_on_one_task_counts_once() {
+        let opts = required(
+            Cardinality::ExactlyOne,
+            StatusScope::Any,
+            MilestoneScope::Include,
+        );
+        let r = validate(
+            &bound_plan(vec![tagged("A", &["priority-p0", "priority-p0"])]),
+            &opts,
+        );
+        assert!(
+            cardinality_findings(&r).is_empty(),
+            "a repeated tag was counted twice: {:?}",
+            r.diagnostics
+        );
+    }
+
+    /// Two families with different requirements are judged independently, and an
+    /// overlapping member counts for whichever families declare it.
+    #[test]
+    fn overlapping_families_are_judged_independently() {
+        let mut f = BTreeMap::new();
+        f.insert(
+            "priority".to_string(),
+            TagFamily {
+                members: vec!["shared".to_string()],
+                require: Cardinality::ExactlyOne,
+                status: StatusScope::Any,
+                milestones: MilestoneScope::Include,
+            },
+        );
+        f.insert(
+            "kind".to_string(),
+            TagFamily {
+                members: vec!["shared".to_string(), "kind-b".to_string()],
+                require: Cardinality::AtMostOne,
+                status: StatusScope::Any,
+                milestones: MilestoneScope::Include,
+            },
+        );
+        let opts = Options {
+            tag_families: f,
+            ..opts()
+        };
+        // `shared` satisfies `priority` and is one of `kind`: both hold.
+        let r = validate(&plan_of(vec![tagged("A", &["shared"])]), &opts);
+        assert!(cardinality_findings(&r).is_empty(), "{:?}", r.diagnostics);
+        // Adding `kind-b` breaks `kind` alone, and the message says which.
+        let r = validate(&plan_of(vec![tagged("A", &["shared", "kind-b"])]), &opts);
+        let found = cardinality_findings(&r);
+        assert_eq!(found.len(), 1, "{:?}", r.diagnostics);
+        let message = found[0].message.clone();
+        assert!(message.starts_with("`kind` is declared"), "{message}");
+    }
+
+    /// The fourth pilot's exact configuration, which every layer accepted.
+    #[test]
+    fn a_family_no_task_carries_is_reported_with_what_it_would_take_to_join() {
+        // `epic: [a, b]` with a task tagged `epic:a`: the family name read as a
+        // prefix and the members as suffixes, where the documented shape is the
+        // whole tag (pre-public adoption evidence, item 9).
+        let mut mis: BTreeMap<String, TagFamily> = BTreeMap::new();
+        mis.insert(
+            "epic".to_string(),
+            TagFamily::members(vec!["a".to_string(), "b".to_string()]),
+        );
+        let opts = Options {
+            tag_families: mis,
+            ..opts()
+        };
+        let r = validate(&plan_of(vec![tagged("A", &["epic:a"])]), &opts);
+        let d = r
+            .diagnostics
+            .iter()
+            .find(|d| d.code == code::UNUSED_TAG_FAMILY)
+            .expect("reported");
+        // The family, and what a task would have to carry: without the members
+        // the reader cannot see that `epic:a` is not one of them.
+        assert!(d.message.contains("`epic` family"), "{}", d.message);
+        assert!(d.message.contains("`a`, `b`"), "{}", d.message);
+        assert!(d.message.contains("as a whole tag"), "{}", d.message);
+        // An observation, not a diagnosis: a vocabulary declared before its
+        // first use is as likely as a mis-declaration, and the two remedies
+        // differ, so the fix line carries both (`A1-070`'s lesson).
+        let fix = d.agent_instruction.as_deref().expect("a fix line");
+        assert!(fix.contains("Tag a task with one of them"), "{fix}");
+        assert!(fix.contains("correct `tag_families.epic`"), "{fix}");
+        // Advisory, on `APLAN026`'s reasoning.
+        assert!(r.is_clean(), "{:?}", r.diagnostics);
+    }
+
+    /// The finding is about a declaration, so it points at the file the
+    /// declaration is in. Without that it was the one rule in twenty-nine that
+    /// could point nowhere, and a second unused family rendered as a bare
+    /// sentence with no location and no fix line, since `check` prints the fix
+    /// once per rule.
+    #[test]
+    fn the_finding_points_at_the_config_it_is_about() {
+        let mut fams: BTreeMap<String, TagFamily> = BTreeMap::new();
+        fams.insert(
+            "epic".to_string(),
+            TagFamily::members(vec!["a".to_string()]),
+        );
+        fams.insert(
+            "kind".to_string(),
+            TagFamily::members(vec!["x".to_string()]),
+        );
+        let opts = Options {
+            tag_families: fams,
+            config_file: Some(std::path::PathBuf::from("/repo/.aplan.yml")),
+            ..opts()
+        };
+        let r = validate(&plan_of(vec![tagged("A", &["unrelated"])]), &opts);
+        let found: Vec<&Diagnostic> = r
+            .diagnostics
+            .iter()
+            .filter(|d| d.code == code::UNUSED_TAG_FAMILY)
+            .collect();
+        assert_eq!(found.len(), 2, "{:?}", r.diagnostics);
+        for d in found {
+            assert_eq!(
+                d.file.as_deref(),
+                Some(std::path::Path::new("/repo/.aplan.yml")),
+                "{}",
+                d.message
+            );
+        }
+    }
+
+    /// One family used and one not: exactly one finding, naming the right
+    /// family. A rule that reported both, or neither, would be indistinguishable
+    /// from this one on a plan that uses every family it declares.
+    #[test]
+    fn only_the_unused_family_of_several_is_reported() {
+        let r = validate(&plan_of(vec![tagged("A", &["epic-a"])]), &tag_opts());
+        let found: Vec<&Diagnostic> = r
+            .diagnostics
+            .iter()
+            .filter(|d| d.code == code::UNUSED_TAG_FAMILY)
+            .collect();
+        assert_eq!(found.len(), 1, "{:?}", r.diagnostics);
+        let message = found[0].message.clone();
+        assert!(message.contains("`kind` family"), "{message}");
+    }
+
+    #[test]
+    fn a_family_carried_by_any_task_is_silent_and_so_is_declaring_none() {
+        // One task carrying one declared member is all it takes, for each family.
+        let plan = plan_of(vec![tagged("A", &["epic-a", "kind-b"])]);
+        let used = validate(&plan, &tag_opts());
+        let fired = used
+            .diagnostics
+            .iter()
+            .any(|d| d.code == code::UNUSED_TAG_FAMILY);
+        assert!(!fired, "a used family was reported: {:?}", used.diagnostics);
+        // And a plan declaring no family is untouched, or the rule would be a
+        // migration for every repository that has never opened `.aplan.yml`.
+        let undeclared = validate(&plan, &opts());
+        let fired = undeclared
+            .diagnostics
+            .iter()
+            .any(|d| d.code == code::UNUSED_TAG_FAMILY);
+        assert!(
+            !fired,
+            "a plan with no families was reported: {:?}",
+            undeclared.diagnostics
+        );
+    }
+
+    /// One mistake, one finding. A tag in a family's shape counts as using it
+    /// even though `APLAN026` is about to reject it, or a single typo would be
+    /// reported twice: once as an unknown tag and once as an unused vocabulary.
+    #[test]
+    fn a_family_whose_only_tag_is_a_typo_is_not_reported_as_unused_as_well() {
+        for tag in ["epic-x", "epci-b"] {
+            let r = validate(&plan_of(vec![tagged("A", &[tag])]), &tag_opts());
+            assert!(
+                r.diagnostics.iter().any(|d| d.code == code::UNKNOWN_TAG),
+                "{tag}: {:?}",
+                r.diagnostics
+            );
+            assert!(
+                !r.diagnostics
+                    .iter()
+                    .any(|d| d.code == code::UNUSED_TAG_FAMILY
+                        && d.message.contains("`epic` family")),
+                "{tag} was reported as a typo and as an unused family: {:?}",
+                r.diagnostics
+            );
+        }
+    }
+
+    #[test]
+    fn an_undeclared_member_of_a_declared_family_is_reported() {
+        // The case a prefix catches: an epic nobody wrote down. Saying the
+        // family does not list it beats suggesting the nearest declared one,
+        // which `epic-x` is also one substitution from.
+        let r = validate(&plan_of(vec![tagged("A", &["epic-x"])]), &tag_opts());
+        let d = r
+            .diagnostics
+            .iter()
+            .find(|d| d.code == code::UNKNOWN_TAG)
+            .expect("reported");
+        assert!(d.message.contains("does not list it"), "{}", d.message);
+        assert!(!d.message.contains("did you mean"), "{}", d.message);
+    }
+
+    #[test]
+    fn a_transposition_the_prefix_cannot_see_is_reported_with_the_fix() {
+        // `epci-b` carries no recognisable prefix, which is exactly why a
+        // prefix-only rule would miss the most common kind of typo.
+        let r = validate(&plan_of(vec![tagged("A", &["epci-b"])]), &tag_opts());
+        let d = r
+            .diagnostics
+            .iter()
+            .find(|d| d.code == code::UNKNOWN_TAG)
+            .expect("reported");
+        assert!(d.message.contains("did you mean `epic-b`"), "{}", d.message);
+    }
+
+    #[test]
+    fn declared_members_and_unrelated_tags_stay_silent() {
+        // Tags outside every declared family must stay legal, or declaring one
+        // family would be a migration of every tag in the plan.
+        let plan = plan_of(vec![
+            tagged("A", &["epic-a", "kind-b"]),
+            tagged("B", &["core", "cross-cutting", "milestone"]),
+        ]);
+        let r = validate(&plan, &tag_opts());
+        assert!(
+            !r.diagnostics.iter().any(|d| d.code == code::UNKNOWN_TAG),
+            "{:?}",
+            r.diagnostics
+        );
+    }
+
+    #[test]
+    fn a_plan_declaring_nothing_is_untouched() {
+        // The default, and this repository's own plan: no families, no findings,
+        // whatever the tags say.
+        let plan = plan_of(vec![tagged("A", &["epci-b", "epic-x", "anything"])]);
+        let r = validate(&plan, &opts());
+        assert!(
+            !r.diagnostics.iter().any(|d| d.code == code::UNKNOWN_TAG),
+            "{:?}",
+            r.diagnostics
+        );
+    }
+
+    #[test]
+    fn a_tag_listed_twice_is_reported_once() {
+        // A tag repeated in one task is one mistake. `blocked_by` deduplicates
+        // for the same reason: two identical annotations under `--format github`
+        // is noise, not thoroughness.
+        let r = validate(
+            &plan_of(vec![tagged("A", &["epic-x", "epic-x"])]),
+            &tag_opts(),
+        );
+        let n = r
+            .diagnostics
+            .iter()
+            .filter(|d| d.code == code::UNKNOWN_TAG)
+            .count();
+        assert_eq!(n, 1, "{:?}", r.diagnostics);
+    }
+
+    #[test]
+    fn the_longest_matching_family_is_the_one_named() {
+        // One family's name can be a prefix of another's. Naming `epic` for a
+        // tag that belongs to `epic-sub` sends the author to the wrong list,
+        // which is worse than saying nothing.
+        let mut f = BTreeMap::new();
+        f.insert(
+            "epic".to_string(),
+            TagFamily::members(vec!["epic-a".to_string()]),
+        );
+        f.insert(
+            "epic-sub".to_string(),
+            TagFamily::members(vec!["epic-sub-x".to_string()]),
+        );
+        let opts = Options {
+            tag_families: f,
+            ..opts()
+        };
+        let r = validate(&plan_of(vec![tagged("A", &["epic-sub-y"])]), &opts);
+        let d = r
+            .diagnostics
+            .iter()
+            .find(|d| d.code == code::UNKNOWN_TAG)
+            .expect("reported");
+        assert!(d.message.contains("`epic-sub`"), "{}", d.message);
+        assert!(
+            d.agent_instruction
+                .as_deref()
+                .is_some_and(|i| i.contains("tag_families.epic-sub")),
+            "the instruction must name the list to edit: {:?}",
+            d.agent_instruction
+        );
+    }
+
+    #[test]
+    fn one_edit_apart_is_the_edits_it_claims() {
+        // A hand-rolled distance, so the boundary is pinned rather than assumed.
+        assert!(is_one_edit_apart("epic-b", "epci-b"), "transposition");
+        assert!(is_one_edit_apart("kind-m", "kimd-m"), "substitution");
+        assert!(is_one_edit_apart("epic-a", "epic-"), "deletion");
+        assert!(is_one_edit_apart("epic-a", "epic-ab"), "insertion");
+        assert!(
+            !is_one_edit_apart("epic-a", "epic-a"),
+            "identical is not near"
+        );
+        assert!(!is_one_edit_apart("epic-a", "kind-m"), "two edits or more");
+        assert!(!is_one_edit_apart("a", "abc"), "length gap of two");
+    }
+
+    #[test]
     fn self_dependency_is_an_error() {
         let mut a = t("A", Status::Todo);
         a.blocked_by = vec!["A".into()];
         let r = validate(&plan_of(vec![a]), &opts());
         assert!(r.diagnostics.iter().any(|d| d.code == code::SELF_DEP));
+        let d = pick(&r, code::SELF_DEP);
+        assert!(d.message.contains("`blocked_by`"), "{}", d.message);
+        assert!(
+            d.agent_instruction
+                .as_deref()
+                .is_some_and(|i| i.contains("`A`")),
+            "the fix must name the task whose edge to remove: {:?}",
+            d.agent_instruction
+        );
     }
 
     /// Regression: a self-loop fired both `SELF_DEP` and `CYCLE`, though the
@@ -875,7 +4673,9 @@ mod tests {
     /// deterministically, the sort key is now total (..., file, message).
     #[test]
     fn tied_diagnostics_sort_deterministically() {
-        let dir = tempfile::tempdir().expect("tempdir");
+        let dir = tempfile::Builder::new()
+            .tempdir_in(crate::fixture::fixture_root())
+            .expect("tempdir");
         let mut a = t("A", Status::Todo);
         a.traces = vec!["ZZZ.md#x".into(), "AAA.md#y".into()];
         let o = Options {
@@ -1000,11 +4800,37 @@ mod tests {
 
     #[test]
     fn duplicate_id_is_an_error() {
-        let r = validate(
-            &plan_of(vec![t("A", Status::Todo), t("A", Status::Todo)]),
-            &opts(),
-        );
+        // Two *distinct* paths on purpose. With both tasks at the same file the
+        // message names it either way, so the fixture cannot tell "names the
+        // first definition" from "names whichever it happened to hold", which is
+        // the shape of defect AGENTS.md's naming convention is about.
+        let plan = Plan {
+            tasks: vec![
+                LoadedTask {
+                    task: t("A", Status::Todo),
+                    path: PathBuf::from("plan/tasks/first.md"),
+                    fields: crate::load::FieldLines::new(),
+                    criteria: crate::load::Criteria::default(),
+                },
+                LoadedTask {
+                    task: t("A", Status::Todo),
+                    path: PathBuf::from("plan/tasks/second.md"),
+                    fields: crate::load::FieldLines::new(),
+                    criteria: crate::load::Criteria::default(),
+                },
+            ],
+            load_diagnostics: Vec::new(),
+            unloadable: BTreeMap::new(),
+        };
+        let r = validate(&plan, &opts());
         assert!(r.diagnostics.iter().any(|d| d.code == code::DUPLICATE_ID));
+        let d = pick(&r, code::DUPLICATE_ID);
+        assert!(
+            d.message.contains("duplicate task id") && d.message.contains("first.md"),
+            "the message must name where the *first* definition was, or the reader \
+             has two files and no idea which to open: {}",
+            d.message
+        );
     }
 
     /// Regression: the `DONE_BEFORE_BLOCKER` message once lowercased the whole
@@ -1063,13 +4889,643 @@ mod tests {
         }
     }
 
+    /// `APLAN032`: an unusable `paths` glob is this task's finding (`A1-066`).
+    ///
+    /// Hermetic on purpose. The ladder used to compile these and return an error
+    /// that aborted the run, so a second task's `APLAN005` went unreported and
+    /// the exit code said "configuration error" about a task file.
+    #[test]
+    fn a_paths_glob_that_will_not_compile_is_reported_against_its_task() {
+        let mut a = t("A", Status::Todo);
+        a.paths = vec!["src/[".into()];
+        let r = validate(&plan_of(vec![a]), &opts());
+        let d = pick(&r, code::BAD_PATH_GLOB);
+        assert_eq!(d.task.as_deref(), Some("A"), "attributed to its own task");
+        assert!(
+            d.message.contains("src/["),
+            "the message must name the entry that does not compile: {}",
+            d.message
+        );
+        assert!(
+            d.message.contains("unclosed character class"),
+            "and why, in the compiler's own words: {}",
+            d.message
+        );
+        assert!(
+            !r.is_clean(),
+            "a task no path-based rule can judge must fail the build"
+        );
+    }
+
+    /// The near-miss, so the rule is about compilation and not about `[`.
+    #[test]
+    fn a_closed_character_class_is_a_glob_this_tool_can_use() {
+        let mut a = t("A", Status::Todo);
+        a.paths = vec!["src/[a-z]*.rs".into(), "src/**".into()];
+        let r = validate(&plan_of(vec![a]), &opts());
+        assert!(
+            !r.diagnostics.iter().any(|d| d.code == code::BAD_PATH_GLOB),
+            "a valid glob was reported: {:?}",
+            r.diagnostics
+        );
+    }
+
+    /// One task's typo must not cost another task its finding, which is the
+    /// whole of `A1-066` stated as a property.
+    #[test]
+    fn a_bad_glob_in_one_task_does_not_hide_a_finding_in_another() {
+        let mut a = t("A", Status::Todo);
+        a.paths = vec!["src/[".into()];
+        let b = t("B", Status::Done); // `done` with no evidence: APLAN005.
+        let r = validate(&plan_of(vec![a, b]), &opts());
+        assert!(
+            r.diagnostics
+                .iter()
+                .any(|d| d.code == code::DONE_WITHOUT_EVIDENCE && d.task.as_deref() == Some("B")),
+            "the other task's finding went missing: {:?}",
+            r.diagnostics
+        );
+    }
+
+    /// `APLAN033`: the four shapes of a preference that cannot be honoured
+    /// (`A1-150`).
+    #[test]
+    fn a_preference_that_cannot_be_honoured_is_reported() {
+        // Unknown id.
+        let mut a = t("A", Status::Todo);
+        a.prefer_after = vec!["GHOST".into()];
+        let r = validate(&plan_of(vec![a]), &opts());
+        let d = pick(&r, code::UNUSABLE_PREFERENCE);
+        assert!(d.message.contains("GHOST"), "{}", d.message);
+
+        // Itself.
+        let mut a = t("A", Status::Todo);
+        a.prefer_after = vec!["A".into()];
+        let r = validate(&plan_of(vec![a]), &opts());
+        assert!(
+            pick(&r, code::UNUSABLE_PREFERENCE)
+                .message
+                .contains("itself")
+        );
+
+        // A pair that is already a dependency: the plan would say two things.
+        let mut a = t("A", Status::Todo);
+        a.blocked_by = vec!["B".into()];
+        a.prefer_after = vec!["B".into()];
+        let b = t("B", Status::Todo);
+        let r = validate(&plan_of(vec![a, b]), &opts());
+        assert!(
+            pick(&r, code::UNUSABLE_PREFERENCE)
+                .message
+                .contains("already a `blocked_by` edge")
+        );
+
+        // A cycle, reported once, naming the ring.
+        let mut a = t("A", Status::Todo);
+        a.prefer_after = vec!["B".into()];
+        let mut b = t("B", Status::Todo);
+        b.prefer_after = vec!["A".into()];
+        let r = validate(&plan_of(vec![a, b]), &opts());
+        let rings: Vec<&Diagnostic> = r
+            .diagnostics
+            .iter()
+            .filter(|d| d.code == code::UNUSABLE_PREFERENCE)
+            .collect();
+        assert_eq!(rings.len(), 1, "one defect, one finding: {rings:?}");
+        assert!(rings[0].message.contains("preference cycle"), "{rings:?}");
+        assert!(!r.is_clean(), "an order nobody can act on must fail");
+    }
+
+    /// And the shape that is fine, so the rule is about *unusable* preferences
+    /// rather than about the field existing.
+    #[test]
+    fn an_ordinary_preference_is_silent() {
+        let mut a = t("A", Status::Todo);
+        a.prefer_after = vec!["B".into()];
+        let b = t("B", Status::Todo);
+        let r = validate(&plan_of(vec![a, b]), &opts());
+        assert!(
+            !r.diagnostics
+                .iter()
+                .any(|d| d.code == code::UNUSABLE_PREFERENCE),
+            "{:?}",
+            r.diagnostics
+        );
+        assert!(r.is_clean());
+    }
+
+    /// `APLAN034`: a trace that leaves the repository is refused unless the
+    /// repository declares the root (`A1-143`).
+    #[test]
+    fn a_trace_that_leaves_the_repository_is_refused_unless_declared() {
+        let dir = tempfile::Builder::new()
+            .tempdir_in(crate::fixture::fixture_root())
+            .expect("tempdir");
+        let repo = dir.path().join("repo");
+        let sibling = dir.path().join("sibling");
+        std::fs::create_dir_all(&repo).expect("repo");
+        std::fs::create_dir_all(&sibling).expect("sibling");
+        std::fs::write(sibling.join("DOC.md"), "# Doc\n\n## A section\n\ntext\n").expect("doc");
+
+        let mut a = t("A", Status::Todo);
+        a.traces = vec!["../sibling/DOC.md#a-section".to_string()];
+        let plan = plan_of(vec![a]);
+
+        let mut undeclared = opts();
+        undeclared.traces_root = Some(repo.clone());
+        let r = validate(&plan, &undeclared);
+        let d = pick(&r, code::EXTERNAL_TRACE);
+        assert!(
+            d.message.contains("../sibling/DOC.md") && d.message.contains("traces_external"),
+            "the message must name the target and the way to declare it: {}",
+            d.message
+        );
+        // And `APLAN008` is not also raised: the target resolves perfectly, which
+        // is the whole point of this rule existing beside that one.
+        assert!(
+            !r.diagnostics.iter().any(|x| x.code == code::DANGLING_TRACE),
+            "{:?}",
+            r.diagnostics
+        );
+
+        // Declared: it resolves, and nothing is reported.
+        let mut declared = opts();
+        declared.traces_root = Some(repo.clone());
+        declared.traces_external = vec![sibling.clone()];
+        let r = validate(&plan, &declared);
+        assert!(r.is_clean(), "a declared root was still refused: {r:?}");
+
+        // Declared, and the anchor is wrong: `APLAN008` speaks again, so
+        // declaring a root buys resolution rather than silence.
+        let mut bad = t("B", Status::Todo);
+        bad.traces = vec!["../sibling/DOC.md#no-such-heading".to_string()];
+        let r = validate(&plan_of(vec![bad]), &declared);
+        assert_eq!(pick(&r, code::DANGLING_TRACE).task.as_deref(), Some("B"));
+    }
+
+    /// A symbolic link inside the repository pointing out of it (`A1-143`, found
+    /// by its audit).
+    ///
+    /// The lexical test says this is inside, because lexically it is. A task file
+    /// and the link it follows can arrive in the same fork pull request, so the
+    /// rule follows the link where the target exists.
+    #[test]
+    fn a_link_out_of_the_repository_is_outside_it() {
+        let dir = tempfile::Builder::new()
+            .tempdir_in(crate::fixture::fixture_root())
+            .expect("tempdir");
+        let repo = dir.path().join("repo");
+        let secret = dir.path().join("secret");
+        std::fs::create_dir_all(repo.join("docs")).expect("repo");
+        std::fs::create_dir_all(&secret).expect("secret");
+        std::fs::write(secret.join("DOC.md"), "# D\n\n## A section\n\nx\n").expect("doc");
+        #[cfg(unix)]
+        std::os::unix::fs::symlink(&secret, repo.join("docs/link")).expect("link");
+        #[cfg(not(unix))]
+        return;
+
+        let mut o = opts();
+        o.traces_root = Some(repo.clone());
+        o.config_file = Some(repo.join(".aplan.yml"));
+        let mut a = t("A", Status::Todo);
+        a.traces = vec!["docs/link/DOC.md#a-section".to_string()];
+        let r = validate(&plan_of(vec![a]), &o);
+        let d = pick(&r, code::EXTERNAL_TRACE);
+        assert!(
+            d.message.contains("symbolic link"),
+            "the message must say which of the two tests refused it: {}",
+            d.message
+        );
+    }
+
+    /// The boundary is the repository, not `traces_root` (`A1-143`, audit).
+    ///
+    /// Under `traces_root: docs`, a trace of `../README.md` climbs out of the
+    /// root and stays inside the repository. Refusing it would be this rule
+    /// answering a different question from the one it is named for.
+    #[test]
+    fn a_trace_that_climbs_out_of_the_traces_root_stays_inside_the_repository() {
+        let dir = tempfile::Builder::new()
+            .tempdir_in(crate::fixture::fixture_root())
+            .expect("tempdir");
+        let docs = dir.path().join("docs");
+        std::fs::create_dir_all(&docs).expect("docs");
+        std::fs::write(dir.path().join("README.md"), "# R\n\n## A section\n\nx\n").expect("doc");
+
+        let mut o = opts();
+        o.traces_root = Some(docs);
+        o.config_file = Some(dir.path().join(".aplan.yml"));
+        let mut a = t("A", Status::Todo);
+        a.traces = vec!["../README.md#a-section".to_string()];
+        let r = validate(&plan_of(vec![a]), &o);
+        assert!(
+            !r.diagnostics.iter().any(|d| d.code == code::EXTERNAL_TRACE),
+            "a trace inside the repository was called external: {:?}",
+            r.diagnostics
+        );
+    }
+
+    /// The near-miss that decides whether the rule is worth having: an ordinary
+    /// in-repository trace, including one that climbs and comes back.
+    #[test]
+    fn an_in_repository_trace_is_untouched_however_it_is_spelled() {
+        let dir = tempfile::Builder::new()
+            .tempdir_in(crate::fixture::fixture_root())
+            .expect("tempdir");
+        let docs = dir.path().join("docs");
+        std::fs::create_dir_all(&docs).expect("docs");
+        std::fs::write(docs.join("DOC.md"), "# Doc\n\n## A section\n\ntext\n").expect("doc");
+
+        let mut o = opts();
+        o.traces_root = Some(dir.path().to_path_buf());
+        for spelling in [
+            "docs/DOC.md#a-section",
+            "./docs/DOC.md#a-section",
+            "docs/../docs/DOC.md#a-section",
+        ] {
+            let mut a = t("A", Status::Todo);
+            a.traces = vec![spelling.to_string()];
+            let r = validate(&plan_of(vec![a]), &o);
+            assert!(
+                !r.diagnostics.iter().any(|d| d.code == code::EXTERNAL_TRACE),
+                "`{spelling}` was read as leaving the repository: {:?}",
+                r.diagnostics
+            );
+        }
+    }
+
+    /// An absolute target is outside by construction, and this is the half that
+    /// is about a task file arriving from a fork rather than about a fleet.
+    #[test]
+    fn an_absolute_trace_target_is_outside_the_repository() {
+        let dir = tempfile::Builder::new()
+            .tempdir_in(crate::fixture::fixture_root())
+            .expect("tempdir");
+        let mut o = opts();
+        o.traces_root = Some(dir.path().to_path_buf());
+        let mut a = t("A", Status::Todo);
+        a.traces = vec!["/etc/passwd#anything".to_string()];
+        let r = validate(&plan_of(vec![a]), &o);
+        assert_eq!(pick(&r, code::EXTERNAL_TRACE).task.as_deref(), Some("A"));
+    }
+
+    /// `APLAN021` counts live work, not entries (`A1-134`).
+    /// Proves the named behaviour `milestone.members_are_live_work` (`A1-211`).
+    #[test]
+    fn a_cut_emptied_of_work_is_reported_and_says_which_case_it_is() {
+        // Sequenced: the later cut keeps its predecessor in `blocked_by`, which
+        // is why the empty test was silent here.
+        let mut m0 = t("M-s0", Status::Todo);
+        m0.tags = vec!["milestone".into()];
+        m0.blocked_by = vec!["A-1".into()];
+        m0.effort_days = None;
+        let mut m1 = t("M-s1", Status::Todo);
+        m1.tags = vec!["milestone".into()];
+        m1.blocked_by = vec!["M-s0".into()];
+        m1.effort_days = None;
+        let a = t("A-1", Status::Todo);
+        let r = validate(&plan_of(vec![m0.clone(), m1.clone(), a.clone()]), &opts());
+        let d = r
+            .diagnostics
+            .iter()
+            .find(|d| d.code == code::MILESTONE_HYGIENE && d.task.as_deref() == Some("M-s1"))
+            .expect("the emptied cut is reported");
+        assert!(d.message.contains("only other cuts"), "{}", d.message);
+        assert!(
+            d.agent_instruction
+                .as_deref()
+                .is_some_and(|f| f.contains("aplan mv")),
+            "the fix must fit the case: {:?}",
+            d.agent_instruction
+        );
+
+        // The other way to empty a cut: every task in it is cancelled. `A1-081`
+        // exempts that from `APLAN020` deliberately, so this is the only rule
+        // that can say it.
+        let mut m2 = t("M-s2", Status::Todo);
+        m2.tags = vec!["milestone".into()];
+        m2.blocked_by = vec!["A-2".into()];
+        m2.effort_days = None;
+        let mut dropped = t("A-2", Status::Dropped);
+        dropped.effort_days = None;
+        let r = validate(&plan_of(vec![m2, dropped]), &opts());
+        let d = pick(&r, code::MILESTONE_HYGIENE);
+        assert!(
+            d.message.contains("every task it lists is `dropped`"),
+            "{}",
+            d.message
+        );
+
+        // And the near-miss: the same sequenced pair with work in it is silent.
+        let mut m1_with_work = m1;
+        m1_with_work.blocked_by = vec!["M-s0".into(), "A-3".into()];
+        let a3 = t("A-3", Status::Todo);
+        let r = validate(&plan_of(vec![m0, m1_with_work, a, a3]), &opts());
+        assert!(
+            !r.diagnostics
+                .iter()
+                .any(|d| d.code == code::MILESTONE_HYGIENE),
+            "a cut with work in it was reported: {:?}",
+            r.diagnostics
+        );
+    }
+
+    /// The two exemptions the audit found (`A1-134`).
+    #[test]
+    fn a_cancelled_cut_and_an_unknown_member_are_not_this_rules_business() {
+        // A cancelled cut holding cancelled work is what `aplan drop --cut`
+        // produces, and `APLAN027` owns the mirror. Reporting it would advise
+        // cancelling a cut that is already cancelled.
+        let mut cut = t("M-s0", Status::Dropped);
+        cut.tags = vec!["milestone".into()];
+        cut.blocked_by = vec!["A-1".into()];
+        cut.effort_days = None;
+        let mut member = t("A-1", Status::Dropped);
+        member.effort_days = None;
+        let r = validate(&plan_of(vec![cut, member]), &opts());
+        assert!(
+            !r.diagnostics
+                .iter()
+                .any(|d| d.code == code::MILESTONE_HYGIENE),
+            "a cancelled cut was told to cancel itself: {:?}",
+            r.diagnostics
+        );
+
+        // A member that does not exist is `APLAN003`'s finding. Before this,
+        // `all()` over no known members was vacuously true and this rule
+        // announced that the cut named only other cuts.
+        let mut ghosts = t("M-s9", Status::Todo);
+        ghosts.tags = vec!["milestone".into()];
+        ghosts.blocked_by = vec!["GHOST".into()];
+        ghosts.effort_days = None;
+        let r = validate(&plan_of(vec![ghosts]), &opts());
+        assert!(
+            r.diagnostics.iter().any(|d| d.code == code::UNKNOWN_DEP),
+            "the unknown member must still be reported: {:?}",
+            r.diagnostics
+        );
+        assert!(
+            !r.diagnostics
+                .iter()
+                .any(|d| d.code == code::MILESTONE_HYGIENE),
+            "one defect, two sentences: {:?}",
+            r.diagnostics
+        );
+    }
+
+    /// A release is a checkpoint over cuts, and the rule knows the difference
+    /// (`A1-146`, ADR-0022).
+    ///
+    /// The state is identical to a cut emptied of work -- a milestone whose
+    /// `blocked_by` names only milestones -- and the intent is the opposite, so
+    /// the tag is how an author says which they meant.
+    /// Proves the named behaviour `milestone.release_holds_cuts` (`A1-211`).
+    #[test]
+    fn a_release_holds_cuts_and_an_emptied_cut_still_reports() {
+        let cut = |id: &str, members: &[&str], tags: &[&str]| {
+            let mut m = t(id, Status::Todo);
+            m.tags = tags.iter().map(|s| (*s).to_string()).collect();
+            m.blocked_by = members.iter().map(|s| (*s).to_string()).collect();
+            m.effort_days = None;
+            m
+        };
+        let work = t("A-1", Status::Todo);
+        let s0 = cut("M-s0", &["A-1"], &["milestone", "s0"]);
+        let release = cut("R-v0.1", &["M-s0"], &["milestone", "release", "v0.1"]);
+        let r = validate(&plan_of(vec![work.clone(), s0.clone(), release]), &opts());
+        assert!(
+            !r.diagnostics
+                .iter()
+                .any(|d| d.code == code::MILESTONE_HYGIENE),
+            "a release was reported as a cut with no work: {:?}",
+            r.diagnostics
+        );
+
+        // The same shape without the tag is still the emptied cut `A1-134`
+        // reports: the marker is the whole difference.
+        let untagged = cut("M-s1", &["M-s0"], &["milestone", "s1"]);
+        let r = validate(&plan_of(vec![work.clone(), s0.clone(), untagged]), &opts());
+        assert_eq!(
+            pick(&r, code::MILESTONE_HYGIENE).task.as_deref(),
+            Some("M-s1")
+        );
+
+        // A release holding work directly is the second grouping axis ADR-0014
+        // refused, and it says so in its own words.
+        let holds_work = cut("R-bad", &["A-1"], &["milestone", "release", "vbad"]);
+        let r = validate(&plan_of(vec![work, s0, holds_work]), &opts());
+        let d = r
+            .diagnostics
+            .iter()
+            .find(|d| d.code == code::MILESTONE_HYGIENE && d.task.as_deref() == Some("R-bad"))
+            .expect("reported");
+        assert!(d.message.contains("holds `A-1` directly"), "{}", d.message);
+        assert!(
+            d.agent_instruction
+                .as_deref()
+                .is_some_and(|f| f.contains("checkpoint over cuts")),
+            "the fix must be the release's own: {:?}",
+            d.agent_instruction
+        );
+    }
+
+    /// A finished cut is not an empty one: `done` members are members
+    /// (`A1-134`).
+    #[test]
+    fn a_cut_whose_work_is_finished_is_not_reported_as_empty() {
+        let mut m = t("M-s0", Status::Todo);
+        m.tags = vec!["milestone".into()];
+        m.blocked_by = vec!["A-1".into()];
+        m.effort_days = None;
+        let mut done_task = t("A-1", Status::Done);
+        done_task.evidence = vec![commit_ev()];
+        done_task.paths = vec!["src/**".into()];
+        let r = validate(&plan_of(vec![m, done_task]), &opts());
+        assert!(
+            !r.diagnostics
+                .iter()
+                .any(|d| d.code == code::MILESTONE_HYGIENE),
+            "a finished cut was called empty: {:?}",
+            r.diagnostics
+        );
+    }
+
     #[test]
     fn missing_effort_is_only_a_warning() {
         let mut a = t("A", Status::Todo);
         a.effort_days = None;
         let r = validate(&plan_of(vec![a]), &opts());
         assert!(r.diagnostics.iter().any(|d| d.code == code::MISSING_EFFORT));
+        let d = pick(&r, code::MISSING_EFFORT);
+        assert!(d.message.contains("`effort_days`"), "{}", d.message);
         assert!(r.is_clean(), "missing effort must not fail the build");
+    }
+
+    /// APLAN023: a `done` task's `commit`/`file` citation can be path-checked.
+    fn uncheckable(tasks: Vec<Task>) -> Vec<Diagnostic> {
+        validate(&plan_of(tasks), &opts())
+            .diagnostics
+            .into_iter()
+            .filter(|d| d.code == code::UNCHECKABLE_EVIDENCE)
+            .collect()
+    }
+
+    #[test]
+    fn uncheckable_evidence_is_only_a_warning() {
+        let mut a = t("A", Status::Done);
+        a.evidence = vec![commit_ev()];
+        let r = validate(&plan_of(vec![a]), &opts());
+        assert!(
+            r.diagnostics
+                .iter()
+                .any(|d| d.code == code::UNCHECKABLE_EVIDENCE)
+        );
+        let d = pick(&r, code::UNCHECKABLE_EVIDENCE);
+        assert!(
+            d.message.contains("commit") && d.message.contains("`paths`"),
+            "the message must name the kind cited and the field that is missing: {}",
+            d.message
+        );
+        assert!(
+            r.is_clean(),
+            "an unbindable citation must not fail the build"
+        );
+    }
+
+    #[test]
+    fn uncheckable_evidence_names_both_kinds_and_agrees_with_itself() {
+        let mut a = t("A", Status::Done);
+        a.evidence = vec![
+            Evidence {
+                kind: EvidenceKind::File,
+                reference: "README.md".into(),
+                captured: None,
+            },
+            commit_ev(),
+            // A second commit must not make it "commit and commit".
+            commit_ev(),
+        ];
+        let d = uncheckable(vec![a]);
+        assert_eq!(d.len(), 1, "{d:?}");
+        assert!(
+            d[0].message.contains("commit and file evidence"),
+            "{}",
+            d[0].message
+        );
+        assert!(
+            d[0].message.ends_with("commit and file exist"),
+            "two kinds take a plural verb: {}",
+            d[0].message
+        );
+    }
+
+    #[test]
+    fn a_blank_path_entry_does_not_silence_uncheckable_evidence() {
+        // `paths: [""]` binds no commit that `paths: []` would not, and a lone
+        // zero-width space looks in every editor exactly like a declared path.
+        for blank in ["", "   ", "\u{200B}"] {
+            let mut a = t("A", Status::Done);
+            a.evidence = vec![commit_ev()];
+            a.paths = vec![blank.to_string()];
+            let d = uncheckable(vec![a]);
+            assert_eq!(
+                d.len(),
+                1,
+                "a blank path must not count as a binding: {blank:?}"
+            );
+            assert!(
+                d[0].message.contains("no `paths` that name anything"),
+                "the message must not claim `paths` is absent when it is blank: {}",
+                d[0].message
+            );
+        }
+    }
+
+    #[test]
+    fn uncheckable_evidence_only_promises_the_commit_check_when_a_commit_is_cited() {
+        // The instruction is what an agent acts on without reading the message,
+        // so it must not tell a task citing only a `file` that `verify` will check
+        // "the cited commit" against the paths it is being asked to add.
+        let file_ev = Evidence {
+            kind: EvidenceKind::File,
+            reference: "README.md".into(),
+            captured: None,
+        };
+        let mut file_only = t("A", Status::Done);
+        file_only.evidence = vec![file_ev.clone()];
+        let d = uncheckable(vec![file_only]);
+        let instruction = d[0].agent_instruction.as_deref().unwrap_or_default();
+        assert!(
+            !instruction.contains("commit"),
+            "no commit is cited here: {instruction}"
+        );
+
+        let mut both = t("A", Status::Done);
+        both.evidence = vec![file_ev, commit_ev()];
+        let d = uncheckable(vec![both]);
+        assert!(
+            d[0].agent_instruction
+                .as_deref()
+                .unwrap_or_default()
+                .contains("APLAN012"),
+            "a cited commit is checkable, and the instruction should say so"
+        );
+    }
+
+    #[test]
+    fn uncheckable_evidence_is_silent_where_it_should_be() {
+        let bound = {
+            let mut a = t("A", Status::Done);
+            a.evidence = vec![commit_ev()];
+            a.paths = vec!["src/**".into()];
+            a
+        };
+        let unfinished = {
+            // Not `done`: a task that has not claimed anything yet is not lying,
+            // and warning here would teach `paths: ["**"]` as the way to quiet it.
+            let mut a = t("B", Status::InProgress);
+            a.evidence = vec![commit_ev()];
+            a
+        };
+        let not_path_checkable = {
+            // `note` and `url` are not checked against `paths` by anything, so
+            // their being unbindable is not this rule's finding.
+            let mut a = t("C", Status::Done);
+            a.evidence = vec![note_ev()];
+            a
+        };
+        let vacuous = {
+            // An empty `ref` is `APLAN005`'s business; two diagnostics for one
+            // defect would just be noise.
+            let mut a = t("D", Status::Done);
+            a.evidence = vec![
+                Evidence {
+                    kind: EvidenceKind::Commit,
+                    reference: "  ".into(),
+                    captured: None,
+                },
+                note_ev(),
+            ];
+            a
+        };
+        let milestone = {
+            // `APLAN007` refuses to mark a milestone `done` while a member is
+            // undone, which proves more than a path check could, and `APLAN021`
+            // forbids it carrying `paths` at all: warning would be unsatisfiable.
+            let mut m = t("M", Status::Done);
+            m.tags = vec!["milestone".into()];
+            m.blocked_by = vec!["A".into()];
+            m.evidence = vec![commit_ev()];
+            m
+        };
+        let d = uncheckable(vec![
+            bound,
+            unfinished,
+            not_path_checkable,
+            vacuous,
+            milestone,
+        ]);
+        assert!(d.is_empty(), "{d:?}");
     }
 
     #[test]
@@ -1117,6 +5573,12 @@ mod tests {
                 .any(|d| d.code == code::MILESTONE_HYGIENE),
             "an empty cut must fire APLAN021"
         );
+        let d = pick(&r, code::MILESTONE_HYGIENE);
+        assert!(
+            d.message.contains("no members"),
+            "the rule has two reasons and the message must say which: {}",
+            d.message
+        );
 
         // Work carrying effort but tagged `milestone`: the mis-tag would otherwise
         // silently delete it from every work-view.
@@ -1129,6 +5591,12 @@ mod tests {
                 .iter()
                 .any(|d| d.code == code::MILESTONE_HYGIENE),
             "work carrying effort but tagged `milestone` must fire APLAN021"
+        );
+        let d = pick(&r, code::MILESTONE_HYGIENE);
+        assert!(
+            d.message.contains("`effort_days`"),
+            "the other reason, and it must not be reported as the first one: {}",
+            d.message
         );
     }
 
@@ -1192,7 +5660,9 @@ mod tests {
 
     #[test]
     fn dangling_trace_is_an_error() {
-        let dir = tempfile::tempdir().expect("tempdir");
+        let dir = tempfile::Builder::new()
+            .tempdir_in(crate::fixture::fixture_root())
+            .expect("tempdir");
         let mut a = t("A", Status::Todo);
         a.traces = vec!["NOPE.md#x".into()];
         let o = Options {
@@ -1204,9 +5674,40 @@ mod tests {
         assert!(r.diagnostics.iter().any(|d| d.code == code::DANGLING_TRACE));
     }
 
+    /// `DOC.md#` is a typo, and the message must send the author to the trace
+    /// rather than to the document (`A1-116`).
+    #[test]
+    fn an_empty_anchor_is_named_as_one_rather_than_as_a_missing_heading() {
+        let dir = tempfile::Builder::new()
+            .tempdir_in(crate::fixture::fixture_root())
+            .expect("tempdir");
+        std::fs::write(dir.path().join("R.md"), "# Intro\n").expect("write");
+        let mut a = t("A", Status::Todo);
+        a.traces = vec!["R.md#".into()];
+        let o = Options {
+            require_effort: false,
+            traces_root: Some(dir.path().to_path_buf()),
+            ..Default::default()
+        };
+        let r = validate(&plan_of(vec![a]), &o);
+        let d = r
+            .diagnostics
+            .iter()
+            .find(|d| d.code == code::DANGLING_TRACE)
+            .expect("the finding");
+        assert!(d.message.contains("ends in an empty anchor"), "{d:?}");
+        let fix = d.agent_instruction.clone().unwrap_or_default();
+        assert!(fix.contains("write `R.md` on its own"), "{fix}");
+        // Never the old advice, which sent the author to add a heading whose
+        // text slugifies to nothing.
+        assert!(!fix.contains("slugifies"), "{fix}");
+    }
+
     #[test]
     fn resolving_trace_anchor_is_clean() {
-        let dir = tempfile::tempdir().expect("tempdir");
+        let dir = tempfile::Builder::new()
+            .tempdir_in(crate::fixture::fixture_root())
+            .expect("tempdir");
         std::fs::write(dir.path().join("R.md"), "# Intro\n\n## Delaware ICIS\n").expect("write");
         let mut a = t("A", Status::Todo);
         a.traces = vec!["R.md#delaware-icis".into()];
@@ -1223,7 +5724,9 @@ mod tests {
     /// (advisory) warning; a matching stamp stays silent.
     #[test]
     fn trace_drift_fires_only_when_a_stamped_section_changes() {
-        let dir = tempfile::tempdir().expect("tempdir");
+        let dir = tempfile::Builder::new()
+            .tempdir_in(crate::fixture::fixture_root())
+            .expect("tempdir");
         let doc = "# Intro\n\noriginal content\n";
         std::fs::write(dir.path().join("D.md"), doc).expect("write");
         let stamp = crate::anchor::anchor_fingerprint(doc, "intro").expect("fingerprint");
@@ -1255,17 +5758,257 @@ mod tests {
             "drift must fire: {:?}",
             r.diagnostics
         );
+        let d = pick(&r, code::TRACE_DRIFT);
+        assert!(
+            d.message.contains("D.md#intro"),
+            "the message must name the section that drifted: a task may trace \
+             several, and the reader has to know which to re-review: {}",
+            d.message
+        );
+        assert!(
+            d.agent_instruction
+                .as_deref()
+                .is_some_and(|i| i.contains("--restamp")),
+            "the fix must name the command that clears it: {:?}",
+            d.agent_instruction
+        );
         assert!(
             r.is_clean(),
             "APLAN018 is advisory, it must not fail `check`"
         );
     }
 
+    #[test]
+    fn retargeting_a_trace_on_a_closed_task_is_an_error_not_a_silence() {
+        // `A1-098`, the fourth pilot's item 16, reproduced. `trace_fingerprints`
+        // is keyed by the trace string, so editing a `traces` entry on a `done`
+        // task orphans the old key and leaves the new trace unstamped. Before
+        // this rule the plan read clean, and the traced section could then change
+        // with no diagnostic at all.
+        let dir = tempfile::Builder::new()
+            .tempdir_in(crate::fixture::fixture_root())
+            .expect("tempdir");
+        std::fs::write(
+            dir.path().join("D.md"),
+            "# Intro\n\n| 7 | a |\n| 11 | b |\n",
+        )
+        .expect("write");
+        let on = Options {
+            require_effort: false,
+            detect_drift: true,
+            traces_root: Some(dir.path().to_path_buf()),
+            ..Default::default()
+        };
+        let task = |traces: Vec<&str>, stamps: Vec<(&str, &str)>| {
+            let mut t = t("A-1", Status::Done);
+            t.traces = traces.into_iter().map(String::from).collect();
+            t.trace_fingerprints = stamps
+                .into_iter()
+                .map(|(k, v)| (k.to_string(), v.to_string()))
+                .collect();
+            t.evidence = vec![Evidence {
+                kind: EvidenceKind::Commit,
+                reference: "abc1234".into(),
+                captured: None,
+            }];
+            t
+        };
+
+        // Retargeted from the section to a row: the state the migration creates.
+        let r = validate(
+            &plan_of(vec![task(
+                vec!["D.md#7"],
+                vec![("D.md#intro", "deadbeefdeadbeef")],
+            )]),
+            &on,
+        );
+        let d = pick(&r, code::PARTIAL_TRACE_STAMP);
+        assert!(
+            d.message.contains("D.md#7") && d.message.contains("D.md#intro"),
+            "name the trace that lost its stamp *and* the one it no longer traces, \
+             since the orphan is the only record of what it was closed against: {}",
+            d.message
+        );
+        assert!(
+            d.agent_instruction
+                .as_deref()
+                .is_some_and(|i| i.contains("--restamp") && i.contains("A-1")),
+            "{:?}",
+            d.agent_instruction
+        );
+        assert!(!r.is_clean(), "an error must fail the build");
+
+        // Every unstamped trace, not the first. Naming one reads as the only one,
+        // and an author repairing them one at a time is the slow version of what
+        // `--restamp` does in a single pass.
+        let r = validate(
+            &plan_of(vec![task(
+                vec!["D.md#7", "D.md#11"],
+                vec![("D.md#intro", "deadbeefdeadbeef")],
+            )]),
+            &on,
+        );
+        let d = pick(&r, code::PARTIAL_TRACE_STAMP);
+        assert!(
+            d.message.contains("D.md#7") && d.message.contains("D.md#11"),
+            "both unstamped traces must be named: {}",
+            d.message
+        );
+        assert!(
+            d.message.contains("these sections") && d.message.contains("for them"),
+            "and the sentence must read at two, without a `(s)` construction: {}",
+            d.message
+        );
+
+        // Every trace stamped: silent.
+        let good = anchor_fp(dir.path(), "D.md", "7");
+        let r = validate(
+            &plan_of(vec![task(vec!["D.md#7"], vec![("D.md#7", &good)])]),
+            &on,
+        );
+        assert!(
+            !r.diagnostics
+                .iter()
+                .any(|d| d.code == code::PARTIAL_TRACE_STAMP),
+            "{:?}",
+            r.diagnostics
+        );
+
+        // *No* stamps at all stays silent: a task closed before `detect_drift`
+        // was enabled has traces and no fingerprints, and `APLAN018` treats that
+        // as unverifiable rather than in violation. Plans depend on it.
+        let r = validate(&plan_of(vec![task(vec!["D.md#7"], vec![])]), &on);
+        assert!(
+            !r.diagnostics
+                .iter()
+                .any(|d| d.code == code::PARTIAL_TRACE_STAMP),
+            "unstamped is unverifiable, not a violation: {:?}",
+            r.diagnostics
+        );
+
+        // A live task is mid-flight, not a closed record.
+        let mut live = task(vec!["D.md#7"], vec![("D.md#intro", "deadbeefdeadbeef")]);
+        live.status = Status::InProgress;
+        let r = validate(&plan_of(vec![live]), &on);
+        assert!(
+            !r.diagnostics
+                .iter()
+                .any(|d| d.code == code::PARTIAL_TRACE_STAMP),
+            "{:?}",
+            r.diagnostics
+        );
+    }
+
+    /// The live fingerprint of a section, for fixtures that need a matching stamp.
+    fn anchor_fp(root: &Path, rel: &str, anchor: &str) -> String {
+        let text = std::fs::read_to_string(root.join(rel)).expect("read");
+        crate::anchor::anchor_fingerprint(&text, anchor).expect("resolves")
+    }
+
+    #[test]
+    fn the_diff_command_names_the_path_from_the_repository() {
+        // The default root is `.`, which is the case every adopter meets: the
+        // command must read `docs/d.md`, not `./docs/d.md` and not `d.md`.
+        assert_eq!(command_path(Path::new("."), "docs/d.md"), "docs/d.md");
+        // A configured root is prepended, which is the whole point.
+        assert_eq!(command_path(Path::new("docs"), "d.md"), "docs/d.md");
+        // One the user made absolute stays absolute; git accepts it.
+        assert_eq!(command_path(Path::new("/w/repo"), "d.md"), "/w/repo/d.md");
+    }
+
+    #[test]
+    fn the_drift_fix_names_the_commit_to_diff_from_only_when_there_is_one() {
+        // `A1-096`. The reader is otherwise told a section moved and left to work
+        // out which of its lines did, often for a closure somebody else made.
+        let dir = tempfile::Builder::new()
+            .tempdir_in(crate::fixture::fixture_root())
+            .expect("tempdir");
+        std::fs::write(dir.path().join("D.md"), "# Intro\n\nCHANGED\n").expect("write");
+        let on = Options {
+            require_effort: false,
+            detect_drift: true,
+            traces_root: Some(dir.path().to_path_buf()),
+            ..Default::default()
+        };
+        let stamped = |evidence: Vec<Evidence>| {
+            let mut t = t("A-1", Status::Done);
+            t.traces = vec!["D.md#intro".into()];
+            t.trace_fingerprints = [("D.md#intro".to_string(), "0000000000000000".to_string())]
+                .into_iter()
+                .collect();
+            t.evidence = evidence;
+            t
+        };
+        let commit = |r: &str| Evidence {
+            kind: EvidenceKind::Commit,
+            reference: r.to_string(),
+            captured: None,
+        };
+        let fix = |task| {
+            let r = validate(&plan_of(vec![task]), &on);
+            pick(&r, code::TRACE_DRIFT)
+                .agent_instruction
+                .clone()
+                .expect("drift carries an instruction")
+        };
+
+        // Exactly one: name it, so the reader has a command to paste.
+        let one = fix(stamped(vec![commit("a1b2c3d")]));
+        assert!(
+            one.contains("git diff a1b2c3d -- ") && one.contains("D.md"),
+            "the one commit the task cites is where to diff from: {one}"
+        );
+
+        // Several: say nothing about which, rather than picking. Nothing
+        // distinguishes them, and a SHA in a sentence that cannot justify it is
+        // the defect `APLAN024` shipped.
+        let many = fix(stamped(vec![commit("a1b2c3d"), commit("e4f5a6b")]));
+        assert!(
+            !many.contains("git diff"),
+            "with two citations there is no closing commit to name: {many}"
+        );
+        assert!(
+            many.contains("Re-review the task against") && many.contains("D.md"),
+            "and the instruction must still be usable: {many}"
+        );
+
+        // The path is the one a reader can paste. `traces_root` is configurable,
+        // so a trace spelled `D.md#intro` under `traces_root: docs` is `docs/D.md`
+        // from the repository, and naming the trace's own spelling would produce
+        // a `git diff` that matches nothing and exits zero.
+        let nested = dir.path().join("docs");
+        std::fs::create_dir_all(&nested).expect("mkdir");
+        std::fs::write(nested.join("D.md"), "# Intro\n\nCHANGED\n").expect("write");
+        let deep = Options {
+            traces_root: Some(dir.path().join("docs")),
+            ..on.clone()
+        };
+        let r = validate(&plan_of(vec![stamped(vec![commit("a1b2c3d")])]), &deep);
+        let i = pick(&r, code::TRACE_DRIFT)
+            .agent_instruction
+            .clone()
+            .expect("instruction");
+        assert!(
+            i.contains("docs/D.md"),
+            "the command must name the path from the repository, not the trace's \
+             own spelling: {i}"
+        );
+
+        // None, and a blank ref, are the same case: no command, no invented SHA.
+        for e in [vec![], vec![commit("   ")]] {
+            let none = fix(stamped(e));
+            assert!(!none.contains("git diff"), "no commit to diff from: {none}");
+            assert!(none.contains("re-stamp"), "the remedy survives: {none}");
+        }
+    }
+
     /// APLAN018 stays silent without a stamp (unverifiable, not a violation) and
     /// when `detect_drift` is off.
     #[test]
     fn trace_drift_is_silent_without_a_stamp_or_when_off() {
-        let dir = tempfile::tempdir().expect("tempdir");
+        let dir = tempfile::Builder::new()
+            .tempdir_in(crate::fixture::fixture_root())
+            .expect("tempdir");
         std::fs::write(dir.path().join("D.md"), "# Intro\n\ncontent\n").expect("write");
         let mut task = t("A", Status::Done);
         task.evidence = vec![commit_ev()];
@@ -1295,7 +6038,9 @@ mod tests {
     /// the heading the README shows. The old `slugify` rejected it.
     #[test]
     fn readme_trace_example_resolves() {
-        let dir = tempfile::tempdir().expect("tempdir");
+        let dir = tempfile::Builder::new()
+            .tempdir_in(crate::fixture::fixture_root())
+            .expect("tempdir");
         std::fs::write(
             dir.path().join("INITIAL_RESEARCH.md"),
             "# Research\n\n## 2.1 Delaware: the filing channel\n",
@@ -1314,7 +6059,9 @@ mod tests {
 
     #[test]
     fn duplicate_heading_resolves_by_suffix() {
-        let dir = tempfile::tempdir().expect("tempdir");
+        let dir = tempfile::Builder::new()
+            .tempdir_in(crate::fixture::fixture_root())
+            .expect("tempdir");
         std::fs::write(dir.path().join("R.md"), "## Setup\n## Setup\n").expect("write");
         let o = Options {
             require_effort: false,
@@ -1329,5 +6076,30 @@ mod tests {
         let mut bad = t("B", Status::Todo);
         bad.traces = vec!["R.md#setup-2".into()];
         assert!(!validate(&plan_of(vec![bad]), &o).is_clean());
+    }
+    /// Checked against the values `date -u -d <s> +%s` gives, including the
+    /// epoch itself, a leap day, and a date before 1970.
+    #[test]
+    fn an_iso_date_converts_to_the_epoch_second_git_would_use() {
+        for (s, want) in [
+            ("1970-01-01", 0_i64),
+            ("2026-08-19", 1_787_097_600),
+            ("2000-02-29", 951_782_400),
+            ("1969-12-31", -86_400),
+            ("2024-12-31", 1_735_603_200),
+        ] {
+            assert_eq!(iso_date_to_epoch(s), Some(want), "{s}");
+        }
+        // Anything the shape check rejects converts to nothing, rather than to a
+        // plausible-looking number.
+        for bad in [
+            "2026-02-30",
+            "not-a-date",
+            "2026-8-19",
+            "2026-08-19T00:00:00Z",
+            "",
+        ] {
+            assert_eq!(iso_date_to_epoch(bad), None, "{bad}");
+        }
     }
 }

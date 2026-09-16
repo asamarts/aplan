@@ -1,0 +1,4 @@
+evidence:
+  require_min_strength: [commit, test]
+  exempt_tags: [untestable]
+require_cut_membership: true

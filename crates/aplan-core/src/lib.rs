@@ -9,9 +9,9 @@
 //! proof, and refuse to accept a dependency graph that cannot be executed.
 //!
 //! `aplan` therefore enforces a small set of invariants (see
-//! [`validate`](crate::validate)):
+//! [`validate()`](crate::validate()):
 //!
-//! - `done` requires at least one piece of typed [`Evidence`](task::Evidence);
+//! - `done` requires at least one piece of typed [`task::Evidence`];
 //! - the `blocked_by` graph is acyclic and references only real tasks;
 //! - a `done` task cannot depend on one that isn't;
 //! - a `note` as evidence must carry a date;
@@ -30,7 +30,7 @@
 
 /// Define an enum together with its complete `ALL` slice and `as_str`, from one
 /// table, so the variant set, the enumerable registry, and the string names
-/// cannot drift apart, the same discipline [`define_rules!`] gives `Rule`. This
+/// cannot drift apart, the same discipline `define_rules!` gives `Rule`. This
 /// is what stops `facts.json` from silently omitting a real variant: a variant
 /// that is not in the table is not in the enum, so it is also not in `ALL`.
 #[macro_export]
@@ -60,24 +60,46 @@ macro_rules! str_enum {
 }
 
 pub mod anchor;
+pub mod behaviour;
 pub mod close;
+pub mod contract;
+pub mod deprecation;
 pub mod diagnostic;
+pub mod export;
+pub mod fixture;
+pub mod glob;
 pub mod graph;
+pub mod id;
 pub mod load;
+pub mod mutation;
+pub mod reach;
 pub mod roadmap;
+pub mod save;
+pub mod scaffold;
+pub mod select;
+pub mod show;
 pub mod summary;
 pub mod task;
+pub mod vacuity;
 pub mod validate;
 
-pub use anchor::{anchor_fingerprint, heading_anchors};
-pub use close::{CloseError, close, restamp};
-pub use diagnostic::{Diagnostic, Report, Rule, Severity, code};
-pub use graph::{CriticalPath, CriticalTask, Graph};
+pub use anchor::{anchor_fingerprint, fingerprint_holds, heading_anchors, resolvable_anchors};
+pub use close::trace_fingerprints;
+pub use close::{CloseError, add_evidence, close, remove_evidence, replace_evidence, restamp};
+pub use diagnostic::{Diagnostic, Report, Rule, Severity, Verdict, code};
+pub use export::{TaskExport, TaskRow};
+pub use graph::{CriticalPath, CriticalTask, EdgeKind, Graph, Rank, edge_kind};
+pub use id::IdStrategy;
 pub use load::{Plan, load_plan};
-pub use roadmap::{Cut, Roadmap, RoadmapTask, parse_cut_version};
+pub use load::{Unopened, Unresolved, unresolved_by_check};
+pub use roadmap::{Cut, Roadmap, RoadmapTask, cut_label, parse_cut_version};
+pub use show::Show;
 pub use summary::{PhaseSummary, Summary};
 pub use task::{Evidence, EvidenceKind, Status, Task};
-pub use validate::{Options, is_iso_date, validate};
+pub use validate::{
+    AgentsBlock, Cardinality, MilestoneScope, Options, StatusScope, TagFamily, is_iso_date,
+    is_one_edit_apart, validate,
+};
 
 #[cfg(test)]
 mod dependency_sink {

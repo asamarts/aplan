@@ -1,0 +1,287 @@
+{
+  "$defs": {
+    "EvidenceKind": {
+      "description": "What kind of proof closes a task.\n\nThe point of typing this is that \"I finished it\" is not evidence. A commit,\na URL, a committed artefact, a named test, or a dated note is.",
+      "oneOf": [
+        {
+          "const": "commit",
+          "description": "A git commit SHA in this repository.",
+          "type": "string"
+        },
+        {
+          "const": "url",
+          "description": "An external URL (a filing receipt, a regulator page, a vendor quote).",
+          "type": "string"
+        },
+        {
+          "const": "file",
+          "description": "A repo-relative path to a committed artefact (a saved PDF, a transcript), optionally at a rev (`path@rev`) and optionally naming the section that proves it (`path#anchor`).",
+          "type": "string"
+        },
+        {
+          "const": "test",
+          "description": "A named test that must pass.",
+          "type": "string"
+        },
+        {
+          "const": "note",
+          "description": "A dated human note, the weakest kind. Use when nothing better exists,\ne.g. the outcome of a phone call.",
+          "type": "string"
+        }
+      ]
+    },
+    "EvidenceRow": {
+      "description": "One citation, as the data surface carries it.\n\n**Its own type, and not `task::Evidence`.** That type is the *file format*,\nwhere `captured` is omitted when absent because a task file should not carry\n`captured: null` on a commit. A contract a consumer reads is the opposite\ncase: a key that comes and goes hands it `undefined` where it expected a\nvalue, and it would change whenever somebody adjusted the YAML for reasons\nthat have nothing to do with the surface. Every field here is always present\n(`A1-220`).",
+      "properties": {
+        "captured": {
+          "description": "ISO-8601 date the evidence was captured, `null` where there is none.\nRequired for `note`, because an undated note is a rumour.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "kind": {
+          "$ref": "#/$defs/EvidenceKind",
+          "description": "How to read `reference`."
+        },
+        "ref": {
+          "description": "The pointer: a commit SHA, a URL, a repo-relative path, a test name, or\nthe note text itself.",
+          "type": "string"
+        }
+      },
+      "required": [
+        "kind",
+        "ref"
+      ],
+      "type": "object"
+    },
+    "Status": {
+      "description": "Lifecycle of a task. `Done` is the only status that requires evidence.",
+      "oneOf": [
+        {
+          "const": "todo",
+          "description": "Not started. Eligible to be worked once its blockers clear.",
+          "type": "string"
+        },
+        {
+          "const": "in_progress",
+          "description": "Actively being worked.",
+          "type": "string"
+        },
+        {
+          "const": "blocked",
+          "description": "Explicitly parked for a reason outside the dependency graph.",
+          "type": "string"
+        },
+        {
+          "const": "done",
+          "description": "Complete. Requires at least one `evidence` entry.",
+          "type": "string"
+        },
+        {
+          "const": "dropped",
+          "description": "Abandoned. Kept for the record rather than deleted.",
+          "type": "string"
+        }
+      ]
+    },
+    "TaskRow": {
+      "description": "One task, with the facts a rollup needs already resolved.\n\n`cut` and `ready` are computed rather than read off the file: a consumer that\nhad to derive them would be re-implementing the graph, which is the thing a\ntool is for.",
+      "properties": {
+        "blocked_by": {
+          "description": "Declared blockers only. The cut-sequencing edges a task inherits\n(ADR-0013) are implied by `cut`, and repeating them here would make a\nrollup double-count what the plan states once.",
+          "items": {
+            "type": "string"
+          },
+          "type": "array"
+        },
+        "cut": {
+          "description": "The label of the cut this task belongs to, e.g. `v0.8` or `s3`.\n\nA task belongs to exactly one cut where the repository sets\n`require_cut_membership`, which `APLAN022` then enforces in both\ndirections. Where it does not, a task may be listed by several\nmilestones, and this reports the first in roadmap order: deterministic,\nbut a rollup by cut on such a plan will under-count, and the plan has not\nasked the tool to stop it.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "effort_days": {
+          "description": "`null` when the task carries no estimate, which `APLAN009` reports\nseparately. Distinguished from `0` on purpose: an unestimated task is not\na free one.",
+          "format": "double",
+          "type": [
+            "number",
+            "null"
+          ]
+        },
+        "evidence": {
+          "description": "The proof cited for `status: done`, verbatim.\n\nThe whole citation, not a count or a set of kinds: \"cites only `note`\"\nand \"cites a commit that is not in this repository\" are different\nquestions, and a summarised field answers neither.",
+          "items": {
+            "$ref": "#/$defs/EvidenceRow"
+          },
+          "type": "array"
+        },
+        "id": {
+          "type": "string"
+        },
+        "milestone": {
+          "description": "The id of the milestone that owns it, since two cuts may share a label.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "milestone_task": {
+          "description": "Milestones are checkpoints, not work. They are carried so a consumer can\nsee the cut structure, and flagged so a rollup can exclude them the way\nevery rollup here does.",
+          "type": "boolean"
+        },
+        "owner": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "paths": {
+          "description": "The globs this task declares it touches, which `verify` resolves a\ncommit against and `APLAN019` reports when nothing matches.",
+          "items": {
+            "type": "string"
+          },
+          "type": "array"
+        },
+        "phase": {
+          "format": "uint32",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "prefer_after": {
+          "description": "The discretionary order somebody recorded, which is not a dependency\n(ADR-0025): `ready` uses it to break ties and the graph does not draw it.",
+          "items": {
+            "type": "string"
+          },
+          "type": "array"
+        },
+        "rank": {
+          "description": "Where `aplan ready` puts this task, `1` first, and `null` for anything\nthat is not ready (`A1-125`).\n\nCarried because `A1-075` made this the machine surface a rollup is built\non, and a rollup answering \"the next five things\" would otherwise have to\nreimplement the derivation and could get a different answer than the\ncommand. A rank on a task that is not ready would be an order over work\nnobody can start, so those are `null` rather than ranked at the end.",
+          "format": "uint",
+          "minimum": 0,
+          "type": [
+            "integer",
+            "null"
+          ]
+        },
+        "ready": {
+          "description": "Whether every blocker is `done`, including the inherited cut edges. The\nsame answer `aplan ready` gives, so a consumer cannot derive a different\none.",
+          "type": "boolean"
+        },
+        "revisit_at": {
+          "description": "When a parked task is worth looking at again, as an RFC 3339 instant\n(`A1-264`).\n\n**Always present, `null` when there is none**, because this is a contract\na consumer reads: a key that comes and goes hands it `undefined` where it\nexpected a value, which is the rule the whole of this type follows. An\nexternal scheduler filters on it; `aplan due` is the same question asked\nwith validated timestamp semantics.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "status": {
+          "$ref": "#/$defs/Status"
+        },
+        "tags": {
+          "items": {
+            "type": "string"
+          },
+          "type": "array"
+        },
+        "title": {
+          "type": "string"
+        },
+        "trace_fingerprints": {
+          "additionalProperties": {
+            "type": "string"
+          },
+          "description": "The anchor fingerprints a closed task stamped, which is what `APLAN018`\ncompares against to find a traced section that moved.",
+          "type": "object"
+        },
+        "traces": {
+          "description": "The document anchors this task traces to.",
+          "items": {
+            "type": "string"
+          },
+          "type": "array"
+        },
+        "version_impact": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/VersionImpact"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "description": "What the task claims it does to the released version, `null` when it\nclaims nothing (`A1-312`, ADR-0034).\n\nNull is the ordinary case and means \"the level's floor applies\", not\n\"nothing\": most tasks declare no impact and the plan still knows what\nthey owe. A consumer asking what a cut owes reads this together with the\nrepository's floors, which is why the claim is carried verbatim rather\nthan resolved here -- the floors live in `.aplan.yml`, which this type\nhas never read."
+        },
+        "version_impact_reason": {
+          "description": "Why that claim is lower than the level implies, `null` when there is\nnone. This is the half a reviewer reads, and `APLAN044` is the rule that\nasks for it.",
+          "type": [
+            "string",
+            "null"
+          ]
+        }
+      },
+      "required": [
+        "id",
+        "title",
+        "phase",
+        "status",
+        "tags",
+        "blocked_by",
+        "ready",
+        "milestone_task",
+        "evidence",
+        "paths",
+        "traces",
+        "prefer_after",
+        "trace_fingerprints"
+      ],
+      "type": "object"
+    },
+    "VersionImpact": {
+      "description": "What a change did to the thing that ships (`A1-312`, ADR-0034).\n\nOrdered, and the order is the whole type: aggregation takes the strongest of\nwhat a level floors and what its members claim, so `None < Fix < Feature <\nBreaking` is what makes a `Breaking` task raise the cut above it.\n\nIt describes the **change**, and each scheme maps it to its own arithmetic:\nsemver at or past 1.0 sends `Breaking` to major, semver below 1.0 sends it to\nminor, and `CalVer` takes its number from the calendar and keeps only the\ncompatibility claim.",
+      "oneOf": [
+        {
+          "const": "none",
+          "description": "Changes nothing that ships. A pilot log, a plan edit, a note.",
+          "type": "string"
+        },
+        {
+          "const": "fix",
+          "description": "A compatible correction.",
+          "type": "string"
+        },
+        {
+          "const": "feature",
+          "description": "A compatible addition.",
+          "type": "string"
+        },
+        {
+          "const": "breaking",
+          "description": "Something a consumer has to react to.",
+          "type": "string"
+        }
+      ]
+    }
+  },
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "description": "The document `aplan tasks --format json` emits.",
+  "properties": {
+    "schema": {
+      "description": "The document's shape, so a consumer can pin it.",
+      "type": "string"
+    },
+    "tasks": {
+      "items": {
+        "$ref": "#/$defs/TaskRow"
+      },
+      "type": "array"
+    }
+  },
+  "required": [
+    "schema",
+    "tasks"
+  ],
+  "title": "TaskExport",
+  "type": "object"
+}

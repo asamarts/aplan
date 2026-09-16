@@ -41,7 +41,9 @@ fn import_and_check(
     options: &Options,
     validate_opts: &validate::Options,
 ) -> (tempfile::TempDir, aplan_core::Report) {
-    let dir = tempfile::tempdir().expect("tempdir");
+    let dir = tempfile::Builder::new()
+        .tempdir_in(aplan_core::fixture::fixture_root())
+        .expect("tempdir");
     let tasks = dir.path().join("tasks");
 
     for (name, contents) in sources {
@@ -179,7 +181,9 @@ fn opting_in_to_done_is_the_documented_asymmetry() {
 
 #[test]
 fn importing_the_same_source_twice_refuses_rather_than_clobbers() {
-    let dir = tempfile::tempdir().unwrap();
+    let dir = tempfile::Builder::new()
+        .tempdir_in(aplan_core::fixture::fixture_root())
+        .unwrap();
     let tasks = dir.path().join("tasks");
     let out = Kep.parse("kep.yaml", KEP, &Options::default()).unwrap();
     let task = &out.tasks[0];
@@ -217,7 +221,9 @@ fn yaml_hostile_titles_survive_the_round_trip_exactly() {
             .parse("k.yaml", &src, &Options::default())
             .expect("parse");
 
-        let dir = tempfile::tempdir().unwrap();
+        let dir = tempfile::Builder::new()
+            .tempdir_in(aplan_core::fixture::fixture_root())
+            .unwrap();
         let tasks = dir.path().join("tasks");
         emit::write_task(&tasks, &out.tasks[0], "## Why\n\nx\n").expect("write");
 

@@ -11,7 +11,9 @@ const KEP: &str = "title: A proposal\nkep-number: 3063\nstatus: implementable\n"
 
 /// A plan directory with one milestone, plus one imported task.
 fn plan_dir(milestone: &str) -> tempfile::TempDir {
-    let dir = tempfile::tempdir().unwrap();
+    let dir = tempfile::Builder::new()
+        .tempdir_in(aplan_core::fixture::fixture_root())
+        .unwrap();
     let tasks = dir.path().join("tasks");
     std::fs::create_dir_all(&tasks).unwrap();
     std::fs::write(tasks.join("M-v0.6.md"), milestone).unwrap();
@@ -131,7 +133,7 @@ fn an_unknown_cut_is_refused() {
     let dir = plan_dir(OPEN_MILESTONE);
     let plan = load_plan(dir.path());
     let err = cut::place(&plan, "M-nope", &["KEP-3063".to_string()]).expect_err("must refuse");
-    assert!(matches!(err, cut::CutError::NotFound { .. }), "{err:?}");
+    assert!(matches!(err, cut::CutError::NoSuchCut { .. }), "{err:?}");
 }
 
 #[test]
@@ -201,4 +203,95 @@ fn the_imported_task_is_still_a_todo_after_placement() {
         .find(|t| t.task.id == "KEP-3063")
         .unwrap();
     assert_eq!(imported.task.status, Status::Todo);
+}
+
+/// A cut answers to its id and to the label it reports itself under (`A1-139`).
+///
+/// One resolver, because the rule used to live in `graph --cut` alone and every
+/// writing command refused what `roadmap` had just printed.
+/// Proves the named behaviour `cut.named_by_id_or_label` (`A1-211`).
+#[test]
+fn a_cut_is_named_by_its_id_or_by_its_label() {
+    let dir = tempfile::Builder::new()
+        .tempdir_in(aplan_core::fixture::fixture_root())
+        .expect("tempdir");
+    let tasks = dir.path().join("aplan/tasks");
+    std::fs::create_dir_all(&tasks).expect("dirs");
+    std::fs::write(
+        tasks.join("M-s1.md"),
+        "---\nid: M-s1\ntitle: Second cut\nphase: 1\nstatus: todo\n\
+         tags: [milestone, s1]\nblocked_by: [A-01]\n---\n",
+    )
+    .expect("cut");
+    std::fs::write(
+        tasks.join("A-01.md"),
+        "---\nid: A-01\ntitle: Work\nphase: 1\nstatus: todo\neffort_days: 1\n---\n",
+    )
+    .expect("task");
+    let plan = aplan_core::load_plan(&dir.path().join("aplan"));
+
+    assert_eq!(cut::resolve_id(&plan, "M-s1").expect("by id"), "M-s1");
+    assert_eq!(cut::resolve_id(&plan, "s1").expect("by label"), "M-s1");
+
+    // A name nobody answers to is refused with the cuts the plan has, which is
+    // the answer a reader needs rather than a restatement of what they typed.
+    let err = cut::resolve_id(&plan, "nope").expect_err("no such cut");
+    let text = err.to_string();
+    assert!(text.contains("M-s1") && text.contains("s1"), "{text}");
+
+    // An unlabelled cut has no label, and an empty name must not match it: the
+    // first version placed the task in the first unlabelled cut it found
+    // (`A1-139`, found by its audit).
+    std::fs::write(
+        tasks.join("M-only.md"),
+        "---\nid: M-only\ntitle: Unlabelled\nphase: 1\nstatus: todo\n\
+         tags: [milestone]\nblocked_by: [A-01]\n---\n",
+    )
+    .expect("cut");
+    let plan = aplan_core::load_plan(&dir.path().join("aplan"));
+    assert!(
+        cut::resolve_id(&plan, "").is_err(),
+        "an empty name resolved to a cut"
+    );
+    std::fs::remove_file(tasks.join("M-only.md")).expect("rm");
+
+    // A label two cuts answer to does not identify one, and saying so beats
+    // picking by file order.
+    std::fs::write(
+        tasks.join("M-s2.md"),
+        "---\nid: M-s2\ntitle: Another cut\nphase: 1\nstatus: todo\n\
+         tags: [milestone, s1]\nblocked_by: [A-01]\n---\n",
+    )
+    .expect("cut");
+    let plan = aplan_core::load_plan(&dir.path().join("aplan"));
+    let err = cut::resolve_id(&plan, "s1").expect_err("ambiguous");
+    let text = err.to_string();
+    assert!(text.contains("M-s1") && text.contains("M-s2"), "{text}");
+    // The id still resolves, because an id is unique by `APLAN002` and is
+    // resolved first.
+    assert_eq!(cut::resolve_id(&plan, "M-s2").expect("by id"), "M-s2");
+    std::fs::remove_file(tasks.join("M-s2.md")).expect("rm");
+
+    // One name, two cuts, the other way round: a milestone whose *id* is `s1`
+    // beside the one that reports itself as `s1`. Resolving the id silently is
+    // what the first version did, and it sends a reader who typed what
+    // `roadmap` printed into a different cut -- the mistake this feature exists
+    // to prevent, one layer down (`A1-139`, second audit).
+    std::fs::write(
+        tasks.join("s1.md"),
+        "---\nid: s1\ntitle: A cut whose id looks like a label\nphase: 1\nstatus: todo\n\
+         tags: [milestone, v0.9]\nblocked_by: [A-01]\n---\n",
+    )
+    .expect("cut");
+    let plan = aplan_core::load_plan(&dir.path().join("aplan"));
+    let err = cut::resolve_id(&plan, "s1").expect_err("id and label at once");
+    let text = err.to_string();
+    assert!(
+        text.contains("is the id of one cut and the label of"),
+        "the refusal says what it saw: {text}"
+    );
+    assert!(text.contains("M-s1"), "and names the other one: {text}");
+    // Each is still reachable by the name only it answers to.
+    assert_eq!(cut::resolve_id(&plan, "M-s1").expect("by id"), "M-s1");
+    assert_eq!(cut::resolve_id(&plan, "v0.9").expect("by label"), "s1");
 }

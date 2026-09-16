@@ -1,0 +1,21 @@
+[package]
+name = "aplan-attest"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "A tamper-evident record of what a plan proved, bound to a commit."
+
+[lints]
+workspace = true
+
+[dependencies]
+aplan-core.workspace = true
+git2 = { version = "0.21", default-features = false }
+serde_json.workspace = true
+sha2 = "0.10"
+thiserror.workspace = true
+
+[dev-dependencies]
+tempfile.workspace = true

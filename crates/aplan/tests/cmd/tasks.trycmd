@@ -1,0 +1,145 @@
+`aplan tasks` emits the plan as data. `summary` rolls up by phase and by nothing
+else, so a project that types its work another way had to keep a second copy of
+the numbers by hand. This makes any rollup a `jq` line instead.
+
+```
+$ aplan tasks
+id            status      effort  cut       ready   title
+A-001         done          1.0  -         no      Done groundwork
+A-002         todo          2.0  -         yes     Ready to work
+B-001         todo          3.0  -         no      Blocked by A-002
+C-001         dropped       4.0  -         no      work a decision gate cancelled
+
+```
+
+The JSON carries what a rollup needs already resolved: the cut a task belongs to,
+and whether it is ready, so a consumer is not re-implementing the graph. `status`
+is carried rather than filtered, so a rollup decides for itself whether cancelled
+work counts (`A1-074`).
+
+```
+$ aplan tasks --format json
+{
+  "schema": "aplan/tasks/v1",
+  "tasks": [
+    {
+      "id": "A-001",
+      "title": "Done groundwork",
+      "phase": 0,
+      "status": "done",
+      "effort_days": 1.0,
+      "owner": null,
+      "tags": [
+        "kind-b"
+      ],
+      "blocked_by": [],
+      "cut": null,
+      "milestone": null,
+      "ready": false,
+      "milestone_task": false,
+      "rank": null,
+      "evidence": [
+        {
+          "kind": "note",
+          "ref": "shipped in the initial cut",
+          "captured": "2026-07-01"
+        },
+        {
+          "kind": "commit",
+          "ref": "0123456789abcdef0123456789abcdef01234567",
+          "captured": null
+        }
+      ],
+      "paths": [
+        "src/**"
+      ],
+      "traces": [],
+      "prefer_after": [],
+      "trace_fingerprints": {},
+      "revisit_at": null,
+      "version_impact": null,
+      "version_impact_reason": null
+    },
+    {
+      "id": "A-002",
+      "title": "Ready to work",
+      "phase": 0,
+      "status": "todo",
+      "effort_days": 2.0,
+      "owner": null,
+      "tags": [
+        "kind-b"
+      ],
+      "blocked_by": [
+        "A-001"
+      ],
+      "cut": null,
+      "milestone": null,
+      "ready": true,
+      "milestone_task": false,
+      "rank": 1,
+      "evidence": [],
+      "paths": [],
+      "traces": [],
+      "prefer_after": [],
+      "trace_fingerprints": {},
+      "revisit_at": null,
+      "version_impact": null,
+      "version_impact_reason": null
+    },
+    {
+      "id": "B-001",
+      "title": "Blocked by A-002",
+      "phase": 1,
+      "status": "todo",
+      "effort_days": 3.0,
+      "owner": null,
+      "tags": [
+        "kind-m"
+      ],
+      "blocked_by": [
+        "A-002"
+      ],
+      "cut": null,
+      "milestone": null,
+      "ready": false,
+      "milestone_task": false,
+      "rank": null,
+      "evidence": [],
+      "paths": [],
+      "traces": [],
+      "prefer_after": [],
+      "trace_fingerprints": {},
+      "revisit_at": null,
+      "version_impact": null,
+      "version_impact_reason": null
+    },
+    {
+      "id": "C-001",
+      "title": "work a decision gate cancelled",
+      "phase": 1,
+      "status": "dropped",
+      "effort_days": 4.0,
+      "owner": null,
+      "tags": [
+        "kind-r"
+      ],
+      "blocked_by": [],
+      "cut": null,
+      "milestone": null,
+      "ready": false,
+      "milestone_task": false,
+      "rank": null,
+      "evidence": [],
+      "paths": [],
+      "traces": [],
+      "prefer_after": [],
+      "trace_fingerprints": {},
+      "revisit_at": null,
+      "version_impact": null,
+      "version_impact_reason": null
+    }
+  ]
+}
+
+```

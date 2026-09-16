@@ -6,7 +6,8 @@ invariants it advertises.
 $ aplan check
 ? 1
 error[APLAN008] F-002: `traces` target `NOPE.md` does not exist
-  --> aplan/tasks/F-002.md
+  --> aplan/tasks/F-002.md:7:1
+  fix: Create `NOPE.md` or correct the trace path.
 failed: 1 error(s), 0 warning(s) across 2 tasks
 
 ```

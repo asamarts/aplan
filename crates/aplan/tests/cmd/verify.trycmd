@@ -7,6 +7,6 @@ A bad `--format` is rejected before anything else, so it needs no repository:
 ```
 $ aplan verify --format bogus
 ? 2
-aplan: unknown format `bogus` (expected human, json, agent, github, sarif)
+aplan: `aplan verify` renders a set of findings, so it takes --format `human`, `json`, `agent`, `github` or `sarif`, not `bogus`
 
 ```

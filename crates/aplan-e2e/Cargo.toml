@@ -17,5 +17,5 @@ aplan-core.workspace = true
 aplan-config.workspace = true
 aplan-output.workspace = true
 aplan-evidence.workspace = true
-git2 = { version = "0.19", default-features = false }
+git2 = { version = "0.21", default-features = false }
 tempfile.workspace = true

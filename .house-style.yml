@@ -1,0 +1,17 @@
+# What this repository's typographic house style applies to.
+#
+# `cargo xtask lint` forbids em dashes, curly quotes and the like in tracked
+# files. That is this repository's style, and it should stay the default here.
+#
+# It is not an adopter's style. A pilot friction log lives in `private pre-public adoption records` by
+# our own convention, but it is a consumer writing up findings about *their*
+# repository, and requiring our dialect made one adopter carry a warning in their
+# own contract file about not copying prose across (pre-public adoption evidence,
+# item 5). A rule that needs that warning to be survivable has left its scope.
+#
+# Entries are repository-relative path prefixes, not globs. `**` or `.` exempts
+# everything, which is how a repository declines the style rather than narrowing
+# it; a blank entry is a typo and is refused, so a stray line cannot quietly
+# switch the gate off.
+exempt:
+  - docs/pilots/

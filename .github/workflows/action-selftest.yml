@@ -17,11 +17,21 @@ concurrency:
   group: ${{ github.workflow }}-${{ github.ref }}
   cancel-in-progress: true
 
-# Dogfoods `action.yml` against this repository's own plan, which is the only way
-# to know the adoption path works: the unit of value is "a consumer adds four
-# lines to a workflow and gets annotations", and nothing but running it proves
-# that. Runs on the self-hosted runner like every other job (the pre-public repository-boundary decision), so the
-# adoption surface is proven without a billed minute.
+# Dogfoods `action.yml`, which is the only way to know the adoption path works:
+# the unit of value is "a consumer adds four lines to a workflow and gets
+# annotations", and nothing but running it proves that. Runs on the self-hosted
+# runner like every other job (the pre-public repository-boundary decision), so the adoption surface is proven
+# without a billed minute.
+#
+# Against `ci/fixtures/action-selftest/` and not this repository's own plan
+# (`A1-278`). The action installs a *pinned release*, `.aplan.yml` tracks `main`,
+# and pointing the first at the second makes this job a compatibility test between
+# today's configuration and the last tag -- which went red on `unknown field
+# effort_days_per_week` the first time the workflow ran in a month, with nothing
+# in `action.yml` wrong. That directory explains itself; the short version is that
+# its plan is written to what `v0.2.0` can parse. The repository's own plan is
+# checked on every push by `ci/scripts/dogfood.sh`, with the binary built from the
+# commit under test, which is the stronger check and the right place for it.
 permissions:
   contents: read
 
@@ -46,20 +56,44 @@ jobs:
         id: check
         uses: ./
         with:
-          version: v0.1.0
+          version: v0.2.0
           command: check
+          working-directory: ci/fixtures/action-selftest
 
       - name: the installed version is the one that was asked for
         run: |
-          test "${{ steps.check.outputs.version }}" = "v0.1.0" \
-            || { echo "installed '${{ steps.check.outputs.version }}', expected v0.1.0" >&2; exit 1; }
+          test "${{ steps.check.outputs.version }}" = "v0.2.0" \
+            || { echo "installed '${{ steps.check.outputs.version }}', expected v0.2.0" >&2; exit 1; }
 
       # A second run exercising the other command and an explicit root, so the
       # inputs are covered rather than assumed.
       - name: verify, with an explicit root
         uses: ./
         with:
-          version: v0.1.0
+          version: v0.2.0
           command: verify
-          root: aplan
+          root: tasks
           format: human
+          working-directory: ci/fixtures/action-selftest
+
+      # The fixture is only worth having if it would notice a broken action, so
+      # the last step proves the plan under it is one `check` can fail: the
+      # binary that just passed is asked to read a task with a `status` no
+      # schema allows, and the job fails if that comes back clean.
+      - name: a plan that does not validate is still refused
+        working-directory: ci/fixtures/action-selftest
+        run: |
+          set -uo pipefail
+          work="${RUNNER_TEMP}/aplan-selftest"
+          rm -rf "$work"; mkdir -p "$work/tasks"
+          cp .aplan.yml "$work/"
+          sed 's/^status: todo$/status: nonsense/' tasks/S-01.md > "$work/tasks/S-01.md"
+          # An `if` condition, because the runner's shell carries `-e` and this
+          # step *expects* a non-zero exit: capturing `$?` after the command kills
+          # the step before the next line runs. Measured, on the first run.
+          if ( cd "$work" && aplan check --format human ); then
+            rm -rf "$work"
+            echo "a broken plan passed; this fixture proves nothing" >&2
+            exit 1
+          fi
+          rm -rf "$work"

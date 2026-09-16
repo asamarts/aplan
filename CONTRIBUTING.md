@@ -7,16 +7,39 @@ count, or a status disagree with reality is a bug, not a detail.
 ## Build and check
 
 ```sh
-cargo test --workspace          # all unit tests
+cargo test --workspace          # all unit tests (NOT `cargo test`, see below)
 cargo fmt --all --check         # formatting (CI-enforced)
 cargo clippy --workspace --all-targets -- -D warnings
+RUSTDOCFLAGS="-D warnings" cargo doc --workspace --no-deps  # intra-doc links resolve
 cargo xtask gen-schema --check  # the schema is derived from the types, not hand-written
+cargo xtask gen-roadmap --check # ROADMAP.status.md is generated from the plan (ADR-0009)
+cargo xtask check-docs          # ROADMAP.md and private pre-public adoption records agree with the plan
 cargo xtask lint                # house style: no typographic tells (see below)
+cargo xtask coverage --check    # per-crate coverage floors (slow: instrumented rebuild)
 cargo run -p aplan -- check     # aplan lints its own plan (the dogfood)
 ```
 
 A PR is expected to leave all of these green. The dogfood is not optional: a plan tool
 whose own plan does not validate has no business merging.
+
+**`--workspace` is load-bearing.** `default-members = ["crates/aplan"]`, so a bare
+`cargo test` runs only that crate's handful of tests, skips `aplan-core` entirely, and
+reports success. That has already caused a false pass in a review.
+
+## Tests
+
+The contract is in [`AGENTS.md`](AGENTS.md) and applies to humans equally. In short: CI
+rejects a rule with no failing case, a rule with no unit test in the crate that raises it,
+and any crate below its floor in `coverage.json`. `cargo xtask coverage` prints every
+crate's measured percentage and banks a gain; it refuses to lower a floor without
+`--allow-regression`.
+
+None of those gates prove the tests are good. Coverage records which lines ran, not which
+claims were checked: `APLAN023` shipped with the required scenario pair, full line coverage,
+and three defects in the inputs beside the one it was written for (`A1-043`). When you add a
+check, vary one input at a time across the neighbours (empty, blank, whitespace, zero-width,
+zero/one/many, each terminal status, milestones), assert on the message and the
+`agent_instruction` rather than only the code, and write the failing case first.
 
 ## Adding or changing an invariant
 
@@ -33,11 +56,17 @@ consumer contract, so adding one is a breaking change for anyone parsing our out
    is **not optional advice**: because the coverage audit walks `Rule::ALL`, a rule with no
    fires-and-silent pair fails CI. A rule that ships with only its passing case lets its
    failure path silently regress, so the build refuses it.
-4. Update the rule table in `README.md` and the catalog in `HLD.md §6`.
-5. Regenerate `facts.json` (`cargo run -p aplan -- facts > facts.json`): it lists every rule
+4. Add **unit tests in the crate that raises it**, covering the inputs next to the one the
+   rule was written for and asserting on the message and `agent_instruction`, not only the
+   code. `crates/aplan-e2e/tests/rule_tests.rs` fails the build if a rule has no test naming
+   it in its emitting crate; the registry guard in `diagnostic.rs` does not count, because it
+   lists every code by construction. This step exists because `APLAN023` satisfied step 3
+   and was still wrong three ways (`A1-043`, `A1-046`).
+5. Update the rule table in `README.md` and the catalog in `HLD.md §6`.
+6. Regenerate `facts.json` (`cargo run -p aplan -- facts > facts.json`): it lists every rule
    with its severity, derived from the code, and `tests/facts.rs` fails CI if the committed
    file is stale.
-6. Note it in `CHANGELOG.md`.
+7. Note it in `CHANGELOG.md`.
 
 An **opt-in** rule (off unless `.aplan.yml` turns it on, like `APLAN017`/`APLAN018`/`APLAN022`)
 also needs a field on `Config` (`crates/aplan-config`), a matching `Options` field wired

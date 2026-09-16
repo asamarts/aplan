@@ -14,14 +14,14 @@ aplan: plan root `nope` is not a directory, nothing would be checked. Pass `--ro
 ```
 $ aplan check --format toml
 ? 2
-aplan: unknown format `toml` (expected human, json, agent, github, sarif)
+aplan: `aplan check` renders a set of findings, so it takes --format `human`, `json`, `agent`, `github` or `sarif`, not `toml`
 
 ```
 
 ```
 $ aplan why NOT-A-TASK
 ? 2
-aplan: unknown task `NOT-A-TASK`
+aplan: no task `NOT-A-TASK` in this plan
 
 ```
 

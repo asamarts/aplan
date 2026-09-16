@@ -45,7 +45,8 @@ impl NoticeKind {
 /// One thing the reader needs to know about an import.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Notice {
-    /// The source document this arose from, as the user named it.
+    /// The document this arose from, as the user named it: the source for an
+    /// import, the destination for an export.
     pub source: String,
     /// What sort of notice this is.
     pub kind: NoticeKind,
@@ -94,6 +95,20 @@ impl Report {
         ));
     }
 
+    /// Record that `field` has no place in the shape being *written*.
+    ///
+    /// The mirror of [`Report::dropped`], and deliberately a second method
+    /// rather than a reworded first: an import loses what the task model cannot
+    /// hold, an export loses what the target shape cannot, and a reader of the
+    /// report has to be able to tell which end the loss happened at.
+    pub fn not_carried(&mut self, destination: impl Into<String>, field: &str, detail: &str) {
+        self.push(Notice::new(
+            destination,
+            NoticeKind::DroppedField,
+            format!("`{field}` has no place in this shape: {detail}"),
+        ));
+    }
+
     /// Every notice, in the order recorded.
     pub fn notices(&self) -> &[Notice] {
         &self.notices
@@ -136,6 +151,28 @@ mod tests {
         let n = &r.notices()[0];
         assert_eq!(n.source, "kep.yaml");
         assert!(n.message.contains("approvers"), "{}", n.message);
+    }
+
+    #[test]
+    fn a_field_the_target_shape_cannot_hold_names_the_field_and_the_destination() {
+        // The export half of the same honesty rule, and it has to be
+        // distinguishable from the import half in the rendered report: one says
+        // the model could not hold it, the other that the shape could not.
+        let mut r = Report::new();
+        r.not_carried("ROADMAP.md", "evidence", "3 task(s) carry it");
+        let n = &r.notices()[0];
+        assert_eq!(n.kind, NoticeKind::DroppedField);
+        assert_eq!(n.source, "ROADMAP.md");
+        assert!(n.message.contains("evidence"), "{}", n.message);
+        assert!(n.message.contains("this shape"), "{}", n.message);
+
+        let mut other = Report::new();
+        other.dropped("ROADMAP.md", "evidence");
+        assert_ne!(
+            other.notices()[0].message,
+            n.message,
+            "an import loss and an export loss must not read identically"
+        );
     }
 
     #[test]

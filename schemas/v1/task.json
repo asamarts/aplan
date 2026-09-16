@@ -41,7 +41,7 @@
         },
         {
           "const": "file",
-          "description": "A repo-relative path to a committed artefact (a saved PDF, a transcript).",
+          "description": "A repo-relative path to a committed artefact (a saved PDF, a transcript), optionally at a rev (`path@rev`) and optionally naming the section that proves it (`path#anchor`).",
           "type": "string"
         },
         {
@@ -82,6 +82,31 @@
         {
           "const": "dropped",
           "description": "Abandoned. Kept for the record rather than deleted.",
+          "type": "string"
+        }
+      ]
+    },
+    "VersionImpact": {
+      "description": "What a change did to the thing that ships (`A1-312`, ADR-0034).\n\nOrdered, and the order is the whole type: aggregation takes the strongest of\nwhat a level floors and what its members claim, so `None < Fix < Feature <\nBreaking` is what makes a `Breaking` task raise the cut above it.\n\nIt describes the **change**, and each scheme maps it to its own arithmetic:\nsemver at or past 1.0 sends `Breaking` to major, semver below 1.0 sends it to\nminor, and `CalVer` takes its number from the calendar and keeps only the\ncompatibility claim.",
+      "oneOf": [
+        {
+          "const": "none",
+          "description": "Changes nothing that ships. A pilot log, a plan edit, a note.",
+          "type": "string"
+        },
+        {
+          "const": "fix",
+          "description": "A compatible correction.",
+          "type": "string"
+        },
+        {
+          "const": "feature",
+          "description": "A compatible addition.",
+          "type": "string"
+        },
+        {
+          "const": "breaking",
+          "description": "Something a consumer has to react to.",
           "type": "string"
         }
       ]
@@ -138,6 +163,20 @@
       "minimum": 0,
       "type": "integer"
     },
+    "prefer_after": {
+      "description": "Task IDs this one prefers to follow: **discretionary** order, which\n`ready` honours and nothing else reads (`A1-150`, ADR-0025).\n\nNot a dependency, and the distinction is the whole point. A preference\nnever blocks: a task whose preference is unmet is still ready and still\noffered, only offered later. `critical-path`, `why` and `APLAN007` do not\nread it, because a reader asking \"why can I not start this\" must never be\nshown an opinion. Expressing preference as `blocked_by` instead corrupts\nall three, which ADR-0017 measured before deferring this field.",
+      "items": {
+        "type": "string"
+      },
+      "type": "array"
+    },
+    "revisit_at": {
+      "description": "When a parked task is worth re-evaluating, as an RFC 3339 instant\n(`A1-264`).\n\n**It says when to look again, never that the wait is over.** `p00013`'s\n`DN0-29` waits on GitHub creating a real weekday `schedule` event: the\nearliest useful revisit is computable from a committed cron and a\nmeasured delay, and reaching it proves nothing about whether the event\nexists. So this changes no status, satisfies no dependency, and is read\nby `aplan due` and nothing else -- `check`, `ready` and `verify` never\nconsult a clock.\n\nThis does not reverse `A1-175`, which declined a structured *reason*:\nall 22 measured parks waited on an unfalsifiable human judgement, and a\nfield holding one would be a claim nothing could check. A revisit\ninstant is the narrower claim *do not look before this*, which is\ncheckable, and the reason still lives in the body.\n\nMeaningful only while the task is parked, which `APLAN042` reports.",
+      "type": [
+        "string",
+        "null"
+      ]
+    },
     "status": {
       "$ref": "#/$defs/Status",
       "description": "Lifecycle status."
@@ -150,7 +189,8 @@
       "type": "array"
     },
     "title": {
-      "description": "One line. What done looks like, not what the work is.",
+      "description": "One line. What done looks like, not what the work is.\n\nNon-empty, because a task nobody can name is a task nobody can find: it\nrenders as a blank row in `ready`, `roadmap`, and the generated companion,\nand there is no reading of an empty title that was intended.",
+      "minLength": 1,
       "type": "string"
     },
     "trace_fingerprints": {
@@ -166,6 +206,24 @@
         "type": "string"
       },
       "type": "array"
+    },
+    "version_impact": {
+      "anyOf": [
+        {
+          "$ref": "#/$defs/VersionImpact"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "description": "What this task did to the released artifact (`A1-312`, ADR-0034).\n\n**The change, not the arithmetic.** `breaking` stays true at every\nversion; `major` does not, because cargo formalises `0.x.y` as\n`0.INCOMPATIBLE.COMPATIBLE`, so below 1.0 a breaking change bumps the\n*minor*. An author writing the word for the bump would have to know that\nrule and get it right; an author writing the word for the change does\nnot, and the scheme does the arithmetic.\n\nUsually absent. A task's level already supplies a floor -- a unit of work\n`fix`, a cut `feature` -- so this is for saying what the floor cannot: a\n`breaking` change inside one small task, or a `none` that is genuinely\nnone. Declaring *below* the floor needs [`Task::version_impact_reason`],\nwhich `APLAN044` reports."
+    },
+    "version_impact_reason": {
+      "description": "Why this task claims less than its level implies (`A1-312`).\n\nA field rather than a paragraph, because a rule cannot read the body: the\nmodel carries what the loader derived and the prose is not parsed. The\nsame reason `APLAN021` counts members rather than reading the narrative.",
+      "type": [
+        "string",
+        "null"
+      ]
     }
   },
   "required": [

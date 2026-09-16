@@ -1,0 +1,13 @@
+# Where this plan's prose declares a cut's membership (`A1-165`). Two documents,
+# because there are two shapes: a marked line, and a task table whose first cell
+# is the member (ADR-0015).
+docs:
+  membership:
+    - doc: PLAN.md
+      declared_by: line
+      marker: "**Tasks:**"
+    - doc: TABLE.md
+      declared_by: table
+    - doc: DUPLICATE.md
+      declared_by: line
+      marker: "**Tasks:**"

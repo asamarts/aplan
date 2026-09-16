@@ -7,6 +7,13 @@ set -euo pipefail
 #
 # Skip a specific gate (debugging a flaky one):
 #   PREFLIGHT_SKIP="test dogfood" git push
+#
+# `coverage` is the slow one: `cargo llvm-cov` rebuilds the workspace
+# instrumented into its own target directory, so it shares no artifacts with the
+# gates above and adds minutes to a push. It is here anyway, because a bundle
+# that is a subset of CI just moves the discovery later. Skip it deliberately
+# when you know the change cannot move coverage:
+#   PREFLIGHT_SKIP=coverage git push
 
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 SKIP="${PREFLIGHT_SKIP:-}"
@@ -29,9 +36,11 @@ run_gate() {
 
 run_gate fmt
 run_gate clippy
+run_gate doc
 run_gate test
 run_gate spec
 run_gate style
+run_gate coverage
 run_gate dogfood
 
 echo "==> preflight: all gates passed"

@@ -1,0 +1,21 @@
+{
+  "format_version": 1,
+  "project": "example",
+  "phases": [
+    {"id": "0", "title": "Research", "status": "done", "blurb": "Cited research (SPEC-0009)."},
+    {"id": "13", "title": "Web explorer", "status": "in_progress", "blurb": "The SPA."}
+  ],
+  "workstreams": [
+    {
+      "id": "RFC-0001",
+      "title": "Remediation",
+      "artifact": "rfcs/0001-remediation.md",
+      "authority": "nonnormative",
+      "milestones": [
+        {"id": "RFC-0001-A", "title": "Containment", "status": "not_started", "depends_on": []},
+        {"id": "RFC-0001-B", "title": "Restoration", "status": "not_started", "depends_on": ["RFC-0001-A"]}
+      ]
+    }
+  ],
+  "specs": [{"id": "SPEC-0001", "title": "s", "status": "draft"}]
+}

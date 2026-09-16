@@ -44,6 +44,6 @@ The diagnostic formats do not apply to a rollup; they are rejected, not collapse
 ```
 $ aplan critical-path --format agent
 ? 2
-aplan: `aplan critical-path` supports only `--format human` or `--format json`
+aplan: `aplan critical-path` renders a report, so it takes --format `human` or `json`, not `agent`; `agent` renders a set of findings, which `check` and `verify` do
 
 ```

@@ -5,6 +5,7 @@ members = [
     "crates/aplan-config",
     "crates/aplan-output",
     "crates/aplan-evidence",
+    "crates/aplan-attest",
     "crates/aplan-interop",
     "crates/aplan-mcp",
     "crates/aplan",
@@ -15,7 +16,11 @@ members = [
 default-members = ["crates/aplan"]
 
 [workspace.package]
-version = "0.2.0"
+# `main` deliberately carries a pre-release version: a staged build must never
+# report the same string as a published release, or a consumer pinning by
+# `--version` pins nothing (`A1-060`). `ci/scripts/release.sh` refuses to tag
+# while this is set, so releasing is an explicit bump.
+version = "0.3.0"
 edition = "2024"
 rust-version = "1.85"
 license = "Apache-2.0 OR MIT"
@@ -23,12 +28,14 @@ repository = "https://github.com/asamarts/aplan"
 authors = ["aplan contributors"]
 
 [workspace.dependencies]
-aplan-core = { path = "crates/aplan-core", version = "0.2.0" }
-aplan-config = { path = "crates/aplan-config", version = "0.2.0" }
-aplan-output = { path = "crates/aplan-output", version = "0.2.0" }
-aplan-evidence = { path = "crates/aplan-evidence", version = "0.2.0" }
-aplan-interop = { path = "crates/aplan-interop", version = "0.2.0" }
-aplan-mcp = { path = "crates/aplan-mcp", version = "0.2.0" }
+aplan-core = { path = "crates/aplan-core", version = "0.3.0" }
+aplan-config = { path = "crates/aplan-config", version = "0.3.0" }
+aplan-output = { path = "crates/aplan-output", version = "0.3.0" }
+aplan-evidence = { path = "crates/aplan-evidence", version = "0.3.0" }
+aplan-attest = { path = "crates/aplan-attest", version = "0.3.0" }
+aplan-interop = { path = "crates/aplan-interop", version = "0.3.0" }
+aplan-mcp = { path = "crates/aplan-mcp", version = "0.3.0" }
+aplan = { path = "crates/aplan", version = "0.3.0" }
 
 anyhow = "1"
 thiserror = "2"
@@ -36,17 +43,24 @@ serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 serde_yaml_ng = "0.10"
 schemars = "1"
-jsonschema = { version = "0.47", default-features = false }
-clap = { version = "4", features = ["derive", "cargo", "env"] }
+jsonschema = { version = "0.49", default-features = false }
+clap = { version = "4", features = ["derive", "cargo", "env", "wrap_help"] }
 
 # MCP server (A1-024). Pinned at 2.x deliberately: rmcp 3.x requires rustc 1.88,
 # and this workspace commits to `rust-version = "1.85"`, so moving to 3.x is an
 # MSRV decision about consumers, not a version bump.
 rmcp = { version = "2.2.0", features = ["server", "transport-io"] }
 tokio = { version = "1.53", features = ["rt-multi-thread", "macros", "io-std"] }
+globset = "0.4"
 ignore = "0.4"
+# Randomness for `id_strategy: ulid` (`A1-047`), and nothing else: a ULID's 80
+# random bits are the whole mechanism, so the alternative was a ULID crate that
+# brings `rand` for the same fifteen lines.
+getrandom = "0.3"
 anstream = "1"
 anstyle = "1"
+unicode-width = "0.2"
+terminal_size = "0.4"
 
 tempfile = "3"
 trycmd = "1"

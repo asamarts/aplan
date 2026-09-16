@@ -8,3 +8,10 @@
 
 # Release artifacts built by ci/scripts/release.sh.
 /dist
+
+# Lock and temporary files `aplan_core::save` writes beside a plan file while
+# replacing it (`A1-226`). Both are removed on the way out, including on a
+# refusal; these entries cover a writer that was killed mid-write, so a crash
+# leaves no untracked file for the next `git status` to report as a change.
+.*.lock
+.*.tmp[0-9]*

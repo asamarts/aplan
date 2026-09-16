@@ -19,5 +19,34 @@
 pub mod server;
 pub mod tools;
 
-pub use server::{AplanServer, serve};
+/// Everything the server needs that is not the plan itself.
+///
+/// One carrier rather than a growing parameter list: `deny_warnings` arrived with
+/// `A1-101` and the verify settings with `A1-102`, and a fourth loose argument is
+/// how one gets passed wrongly. Each field is resolved by `aplan mcp` from
+/// `.aplan.yml`, from the *plan's* directory and never the caller's, which is the
+/// defect `A1-100` shipped with.
+#[derive(Debug, Clone, Default)]
+pub struct Policy {
+    /// Which rules run, as `check` sees them.
+    pub options: aplan_core::Options,
+    /// The repository's verdict policy: whether a warning blocks, and which rules
+    /// it hears without being stopped by (`A1-112`). A verdict policy, not a
+    /// validation one.
+    pub verdict: aplan_core::Verdict,
+    /// How evidence is resolved. `execute` stays off: running a repository's
+    /// tests because an agent asked is a different trust question from reading
+    /// its history, and nobody has asked for it (`A1-102`).
+    pub verify: aplan_evidence::VerifyOptions,
+    /// Where git lives, which is the repository the plan sits in and not the
+    /// directory the client happened to start the server from.
+    pub repo_root: std::path::PathBuf,
+    /// How `aplan_add` mints an id (`A1-047`). Travels with the policy for the
+    /// reason the verdict does: a repository that configured `ulid` because two
+    /// authors collide offline has an *agent* as one of those authors, and a
+    /// surface that quietly kept deriving the counter would be the collision.
+    pub id_strategy: aplan_core::IdStrategy,
+}
+
+pub use server::{AplanServer, serve, serve_unconfigured};
 pub use tools::{TOOLS, ToolError, ToolSpec};

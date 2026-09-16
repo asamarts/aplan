@@ -1,0 +1,217 @@
+`graph` took no argument but `--root`, so on a 105-task plan the fourth pilot got
+285 lines and 12.6 KB of Mermaid: "a graph that size does not render usefully
+anywhere, so on a plan of this shape the command is effectively unavailable"
+(`docs/pilots/p00020.md` item 13). That finding dispositioned itself as not worth
+fixing alone, and ADR-0017 changed it: an order that is *derived* has to be
+inspectable, or it is an assertion the reader takes on trust.
+
+`tree` is that inspection, and it answers in both directions. Upwards is why a
+task is not offered yet; downwards is what finishing it releases, which is the
+first input to `ready`'s rank (`A1-125`). So the two halves of the order's claim
+are the two halves of this view.
+
+```
+$ aplan tree A-2
+A-2  todo  What it made possible
+  rank: releases 1, on the critical path, a chain of 2 behind it, 2d
+  waits on: nothing
+  releases:
+    A-3  todo  And the one after that
+      B-1  todo  In the next cut
+        M-s1  todo  The second cut  (the cut it is in)
+      M-s0  todo  The first cut  (the cut it is in)
+    M-s0  (shown above)
+
+```
+
+A cut is labelled for what it is. ADR-0008 makes membership an edge, so every
+task "releases" its own checkpoint, and `A1-125`'s rank excludes those on
+purpose: unlabelled here, a reader checking the order against this view would
+count `M-s0` and conclude the rank had forgotten it.
+
+The rank is shown only for a task `ready` would offer, because it is an order
+over offered work. A blocked task has no place in it.
+
+```
+$ aplan tree A-3
+A-3  todo  And the one after that
+  waits on:
+    A-2  todo  What it made possible
+  releases:
+    B-1  todo  In the next cut
+      M-s1  todo  The second cut  (the cut it is in)
+    M-s0  todo  The first cut  (the cut it is in)
+
+```
+
+`--depth` bounds it, and a subtree cut short says how much of the plan it is not
+showing: everything below the cut that this view did not print elsewhere, rather
+than the children it stopped at. On a 4000-long chain those differ by 3998.
+
+```
+$ aplan tree A-2 --depth 1
+A-2  todo  What it made possible
+  rank: releases 1, on the critical path, a chain of 2 behind it, 2d
+  waits on: nothing
+  releases:
+    A-3  todo  And the one after that
+      ... 2 more tasks below, past --depth
+    M-s0  todo  The first cut  (the cut it is in)
+
+```
+
+`graph` gains the two filters the pilot named, and they intersect: "the output
+tasks in this cut" is one question, not two.
+
+What it draws is the *dependency* graph. `ADR-0008` models a cut as a meta-task
+that is `blocked_by` its members, which is a good decision for the model and
+makes one field carry two facts: three quarters of this plan's edges were a cut
+listing a member, and drawing them as constraint made the whole graph nine
+layers deep and 177 nodes wide. Grouping is what `aplan roadmap` prints as a
+heading, so `graph` leaves it out and says how much it left (`A1-216`).
+
+```
+$ aplan graph --cut s0
+graph TD
+    A-2["A-2: What it made possible"]
+    A-3["A-3: And the one after that"]
+    A-2 --> A-3
+%% scoped to cut `s0`.
+%% 3 cut-membership edge(s) and 2 task(s) with no dependency are not drawn: a cut listing its members is grouping, which `aplan roadmap` prints as a heading. `--membership` draws them.
+%% 1 edge to a task outside this view is not drawn. `aplan tree <id>` follows them.
+
+```
+
+An edge is drawn only when both ends are in view, and what left is counted in
+Mermaid's own comment syntax, so what a reader pastes anywhere is still a
+diagram. A dangling arrow to a node nobody can see would say "something outside
+blocks this" without saying what.
+
+`--membership` draws the grouping too, dotted, so the two cannot be read as the
+same relationship.
+
+```
+$ aplan graph --cut s0 --membership
+graph TD
+    A-1(["A-1: The groundwork"])
+    A-2["A-2: What it made possible"]
+    A-3["A-3: And the one after that"]
+    M-s0["M-s0: The first cut"]
+    A-2 --> A-3
+    A-1 -.-> M-s0
+    A-2 -.-> M-s0
+    A-3 -.-> M-s0
+%% scoped to cut `s0`.
+%% 1 edge to a task outside this view is not drawn. `aplan tree <id>` follows them.
+
+```
+
+```
+$ aplan graph --cut s0 --tag output
+graph TD
+    A-3["A-3: And the one after that"]
+%% scoped to cut `s0`, and tag `output`.
+%% 1 task in view and no edges between them: nothing here waits on anything else here.
+%% 3 edges to tasks outside this view are not drawn. `aplan tree <id>` follows them.
+
+```
+
+Boxes and no arrows is itself a claim, so a view with no edges says which it is.
+
+The scope and the rendering are independent decisions (`A1-193`). The same view
+in DOT, which is what every other layout and analysis tool reads, and in JSON,
+which is the graph as data rather than as any rendering of it. Both carry the
+same nodes, the same edges and the same count of what left the view.
+
+```
+$ aplan graph --cut s0 --format dot
+digraph plan {
+    rankdir=TB;
+    "A-2" [label="A-2: What it made possible", shape=box];
+    "A-3" [label="A-3: And the one after that", shape=box];
+    "A-2" -> "A-3";
+    // scoped to cut `s0`.
+    // 3 cut-membership edge(s) and 2 task(s) with no dependency are not drawn: a cut listing its members is grouping, which `aplan roadmap` prints as a heading. `--membership` draws them.
+    // 1 edge to a task outside this view is not drawn. `aplan tree <id>` follows them.
+}
+
+```
+
+```
+$ aplan graph --cut s0 --tag output --format json
+{
+  "edges": [],
+  "grouping": {
+    "edges": 0,
+    "tasks": 0
+  },
+  "hidden_edges": 3,
+  "nodes": [
+    {
+      "done": false,
+      "id": "A-3",
+      "status": "todo",
+      "title": "And the one after that"
+    }
+  ],
+  "schema": "aplan/graph/v1",
+  "scope": [
+    "cut `s0`",
+    "tag `output`"
+  ]
+}
+
+```
+
+And the same view drawn where a person is standing (`A1-219`). One row per task,
+one lane per edge in flight, and edges merging where they arrive: fan-in is the
+question a reader brings to a dependency graph. A filled node is done and a
+hollow one is not, which is what Mermaid rounds a box for. Box drawing is not
+guaranteed in a CI log, so a pipe gets the fallback table -- the same drawing,
+different characters.
+
+What it could not draw it says, in the sentence beneath: a scoped view that
+quietly loses the edges leaving it answers a question the reader did not ask,
+and every shape owes that answer, not only the two with a comment syntax.
+
+```
+$ aplan graph --cut s0 --format text
+o A-2  What it made possible
+o A-3  And the one after that
+
+scoped to cut `s0`.
+
+3 cut-membership edge(s) and 2 task(s) with no dependency are not drawn: a cut listing its
+members is grouping, which `aplan roadmap` prints as a heading. `--membership` draws them.
+
+1 edge to a task outside this view is not drawn. `aplan tree <id>` follows them.
+
+```
+
+`mermaid` is still what `graph` prints with no flag, so the shape a reader
+already depends on did not move under them.
+
+A filter that matches nothing is refused rather than answered with an empty
+diagram, which renders as a blank rectangle and reads as "this plan has nothing
+in it".
+
+```
+$ aplan graph --tag nope
+? 2
+aplan: nothing matches tag `nope`: no task is in view, so there is no graph
+
+```
+
+```
+$ aplan graph --cut v9.9
+? 2
+aplan: no cut `v9.9` in this plan. It has: M-s0 (`s0`), M-s1 (`s1`)
+
+```
+
+```
+$ aplan tree NOPE
+? 2
+aplan: no task `NOPE` in this plan
+
+```

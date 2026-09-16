@@ -1,0 +1,3 @@
+# Only keys `v0.2.0` knows. See README.md in this directory before adding one.
+root: tasks
+require_effort: true

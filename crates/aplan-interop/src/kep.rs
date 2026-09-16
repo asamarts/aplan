@@ -167,7 +167,7 @@ fn evidence_for(
                 NoticeKind::Provenance,
                 format!(
                     "{id} imported `done` on note-level provenance only; attach real proof \
-                     with `aplan close {id} --evidence commit:<sha>`"
+                     with `aplan close {id} --evidence commit:COMMIT_SHA`"
                 ),
             ));
             vec![Evidence {
@@ -184,7 +184,7 @@ fn evidence_for(
                 NoticeKind::Provenance,
                 format!(
                     "{id} claims `implemented`; imported as `todo` (the claim is not proof). \
-                     Close it with `aplan close {id} --evidence commit:<sha>`"
+                     Close it with `aplan close {id} --evidence commit:COMMIT_SHA`"
                 ),
             ));
             Vec::new()
@@ -223,6 +223,7 @@ impl ProposalSource for Kep {
         if contents.trim().is_empty() {
             return Err(ImportError::Empty {
                 source_name: source_name.to_string(),
+                detail: None,
             });
         }
 
@@ -270,14 +271,21 @@ impl ProposalSource for Kep {
             owner,
             effort_days: None,
             blocked_by: Vec::new(),
+            prefer_after: Vec::new(),
             evidence,
             paths: Vec::new(),
             traces: Vec::new(),
             trace_fingerprints: BTreeMap::new(),
             tags,
+            // An importer never invents one: a revisit is a decision about work
+            // somebody parked, and no source format carries it.
+            revisit_at: None,
+            version_impact: None,
+            version_impact_reason: None,
         };
 
         Ok(Import {
+            bodies: vec![crate::emit::provenance_body(source_name, self.flavor())],
             tasks: vec![task],
             report,
         })

@@ -1,0 +1,30 @@
+`aplan check` is structural: schema, the DAG, and the rules that need no repository. It
+never opens git and never asks a runner anything, so a `done` task whose cited commit or
+test stopped resolving passes it clean. That is the design, and the problem was that
+nothing said so -- `ok:` beside `--deny-warnings` reads like a thorough answer, and the
+fifth pilot found two repositories gating on `check` alone.
+
+```
+$ aplan check --deny-warnings
+ok: 1 tasks, 0 warning(s), DAG acyclic
+note: `check` is structural and did not open the repository, so 4 citation(s) on 1 task(s) are unchecked rather than passing -- a cited commit or test that has rotted passes here. `aplan verify` is the half that resolves them; run it in the same gate.
+
+```
+
+The note is about the run, not about a task: it carries no id and no `-->` line, because
+what is missing is the other half of the gate rather than anything wrong with `W-001`.
+
+The two counts are different numbers on purpose. `W-001` carries five citations and four
+of them are resolvable -- one of every kind `verify` opens -- so the note says four on
+one, and a reader can tell which number is which. The fifth is a `note`, the one kind
+nothing re-derives, and it is not counted.
+
+A plan with nothing to resolve says nothing. `note` evidence is the one kind no machine
+re-derives, so a plan holding only those loses nothing by silence -- and a line on every
+run of the fastest command in the tool is the flood a note like this is worth avoiding.
+
+```
+$ aplan check --root quiet
+ok: 1 tasks, 0 warning(s), DAG acyclic
+
+```

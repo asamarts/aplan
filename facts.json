@@ -1,67 +1,443 @@
 {
+  "behaviours": [
+    {
+      "name": "rollup.cut_excludes_releases",
+      "what": "a task's reported `cut` is the cut it is in, never a release that closes it"
+    },
+    {
+      "name": "traces.table_rows",
+      "what": "a `traces` anchor may name a table row by its first cell"
+    },
+    {
+      "name": "verdict.summary_agrees_with_exit_code",
+      "what": "the `ok`/`failed` word and the reported counts are what blocked, not every finding"
+    },
+    {
+      "name": "ready.order_is_derived",
+      "what": "`ready` answers in a derived rank (what a task releases, then the critical path, then the chain of work behind it, then effort) rather than in id order, and `--explain` says which"
+    },
+    {
+      "name": "paths.unmatched_needs_evidence",
+      "what": "`APLAN019` reports a dead `paths` glob only where the task cites a `commit`, `file` or `test`, so a plan that names trees a later cut creates is silent"
+    },
+    {
+      "name": "paths.unmatched_ignores_a_bound_sibling",
+      "what": "`APLAN019` is silent about a dead `paths` glob when the task's cited commit or file binds through another one, so a stale declaration does not refuse a close"
+    },
+    {
+      "name": "ready.reports_a_closeable_cut",
+      "what": "`ready` names a cut whose members are all done rather than answering with silence"
+    },
+    {
+      "name": "mutation.refused_when_check_would_reject",
+      "what": "a command or tool that writes runs the rules against the plan it would produce, and refuses a mutation that introduces a finding"
+    },
+    {
+      "name": "verify.one_tasks_defect_does_not_stop_the_run",
+      "what": "a defect in one task's input, or in one configured command, is a finding rather than a reason to abandon the run and report nothing about the rest"
+    },
+    {
+      "name": "verify.configured_commands_are_bounded",
+      "what": "a configured `test.list` or `url.check` that does not return is killed at its limit and reported, rather than waited for"
+    },
+    {
+      "name": "ready.honours_a_declared_preference",
+      "what": "`ready` offers a task after the offered tasks its `prefer_after` names, without ever blocking it"
+    },
+    {
+      "name": "milestone.members_are_live_work",
+      "what": "`APLAN021` counts a cut's members as live work, so a cut left holding only other cuts, or only cancelled tasks, is reported rather than silent"
+    },
+    {
+      "name": "cut.named_by_id_or_label",
+      "what": "a `--cut` argument may be the milestone id or the label the cut reports itself under, on every command that takes one"
+    },
+    {
+      "name": "milestone.release_holds_cuts",
+      "what": "a milestone tagged `release` holds the cuts it closes: `APLAN021` accepts it and `roadmap` rolls up their work rather than reporting none"
+    },
+    {
+      "name": "rollup.carries_effort",
+      "what": "`roadmap` and `summary` report the effort behind their counts, and divide it into weeks where `effort_days_per_week` is declared"
+    },
+    {
+      "name": "config.explicitly_selectable",
+      "what": "`--config <file>` reads exactly that file and discovers none, `--no-config` reads none at all, and a named file that is missing is an error rather than a fallback"
+    },
+    {
+      "name": "close.evidence_resolves_before_write",
+      "what": "`close` resolves a proposed citation before it writes, on both surfaces; only `--no-resolve` opts out, and it says what it skipped"
+    },
+    {
+      "name": "paths.no_sample_is_not_a_zero",
+      "what": "`aplan paths` reports that nothing was sampled rather than a share of 0%, and a task whose `paths` do not compile is left unmeasured rather than counted as zero"
+    },
+    {
+      "name": "verify.reports_what_nothing_checked",
+      "what": "`verify` reports the citations its configuration gave it no resolver for, rather than counting them as resolved"
+    },
+    {
+      "name": "add.reads_a_task_list",
+      "what": "`aplan add --from <file>` adds every task a file names as one change, each entry resolved against the ones before it"
+    },
+    {
+      "name": "evidence.file_path_is_normalised",
+      "what": "a path is read the same way wherever a plan writes one: a `file` citation, a `paths` glob and a `traces` target all resolve however it is spelled (`./x`, `a/../x`)"
+    },
+    {
+      "name": "evidence.file_names_a_section",
+      "what": "a `file` citation may name the section that proves it (`file:docs/report.md#result`), resolved against that document's own headings and table rows at the cited rev, so a written decision is citable as evidence rather than only as a file that exists"
+    },
+    {
+      "name": "facts.reports_which_build",
+      "what": "`aplan facts --identity` names this build -- its version, the commit it was built from, and the digests of its capability document and its own image -- without needing a plan, a repository or a clean tree"
+    },
+    {
+      "name": "output.plan_text_cannot_steer_a_terminal",
+      "what": "a control character in any field a plan supplies is replaced by a visible marker before it reaches a human rendering, at every `--color` setting, while the machine formats keep the bytes the plan holds"
+    },
+    {
+      "name": "contract.begin_marker_matched_by_prefix",
+      "what": "the generated block's opening marker is recognised by its start: a line opening `<!-- aplan:begin`, then a space or a dash, and closing `-->`, which writing the block replaces with the full marker"
+    },
+    {
+      "name": "color.explicitly_selectable",
+      "what": "`--color=auto|always|never` overrides the terminal detection in both directions, reaching everything the tool prints -- its findings, its refusals, and `clap`'s own usage errors -- while the machine formats stay byte-identical at every setting"
+    },
+    {
+      "name": "why.cut_bounded_by_default",
+      "what": "`aplan why` reports an unfinished cut as itself rather than walking into its members, and names the traversal that produced every answer; `--all` asks for the complete closure"
+    }
+  ],
   "commands": [
     {
       "about": "Validate the plan. Fails on any error. Reads `.aplan.yml` if present; flags below override it",
+      "default_format": "human",
+      "formats": [
+        "human",
+        "json",
+        "agent",
+        "github",
+        "sarif"
+      ],
       "name": "check"
     },
     {
       "about": "Resolve evidence against the git repository (L1/L2, and L3 with `--execute`). Unlike `check`, this opens the repo: a `commit` must exist and touch the task's `paths`, a `file` must exist at the cited rev, a `test` must be one the configured runner lists",
+      "default_format": "human",
+      "formats": [
+        "human",
+        "json",
+        "agent",
+        "github",
+        "sarif"
+      ],
       "name": "verify"
     },
     {
-      "about": "List tasks whose blockers are all `done`",
+      "about": "List tasks whose blockers are all `done`, best first",
+      "default_format": "human",
+      "formats": [
+        "human",
+        "json"
+      ],
       "name": "ready"
     },
     {
-      "about": "Explain what is blocking a task, transitively",
+      "about": "Parked tasks whose `revisit_at` has arrived: a hand-off to a scheduler",
+      "default_format": "human",
+      "formats": [
+        "human",
+        "json"
+      ],
+      "name": "due"
+    },
+    {
+      "about": "Explain what is blocking a task: its own blockers, and any unfinished cut",
+      "default_format": "human",
+      "formats": [
+        "human",
+        "json"
+      ],
       "name": "why"
     },
     {
-      "about": "Print the dependency graph as Mermaid",
+      "about": "Print the dependency graph as Mermaid, whole or scoped",
+      "default_format": "mermaid",
+      "formats": [
+        "json",
+        "mermaid",
+        "dot",
+        "text"
+      ],
       "name": "graph"
     },
     {
+      "about": "Show one task whole: its fields, what it waits on and releases, and the findings currently attached to it",
+      "default_format": "human",
+      "formats": [
+        "human",
+        "json"
+      ],
+      "name": "show"
+    },
+    {
+      "about": "Show one task's neighbourhood: what must precede it, and what it releases",
+      "default_format": null,
+      "formats": [],
+      "name": "tree"
+    },
+    {
+      "about": "Measure how much of recent history each task's `paths` would match",
+      "default_format": "human",
+      "formats": [
+        "human",
+        "json"
+      ],
+      "name": "paths"
+    },
+    {
+      "about": "Report what each rule could actually have failed on",
+      "default_format": "human",
+      "formats": [
+        "human",
+        "json"
+      ],
+      "name": "vacuity"
+    },
+    {
+      "about": "Report live tasks that have sat unchanged, and which of them could start",
+      "default_format": "human",
+      "formats": [
+        "human",
+        "json"
+      ],
+      "name": "stale"
+    },
+    {
+      "about": "Report the deprecation runways this plan declares",
+      "default_format": "human",
+      "formats": [
+        "human",
+        "json",
+        "markdown"
+      ],
+      "name": "deprecations"
+    },
+    {
+      "about": "Record what this plan proved, bound to the commit it proved it at",
+      "default_format": null,
+      "formats": [],
+      "name": "attest"
+    },
+    {
+      "about": "Write the agent contract this repository's policy implies",
+      "default_format": null,
+      "formats": [],
+      "name": "export-agents-md"
+    },
+    {
+      "about": "Write the plan's statuses back into a `roadmap.json` contract",
+      "default_format": null,
+      "formats": [],
+      "name": "export-roadmap-json"
+    },
+    {
+      "about": "Write the plan out in somebody else's shape",
+      "default_format": null,
+      "formats": [],
+      "name": "export"
+    },
+    {
+      "about": "Check that a document names tasks that exist",
+      "default_format": "human",
+      "formats": [
+        "human",
+        "json"
+      ],
+      "name": "check-docs"
+    },
+    {
       "about": "Roll the plan up by phase: tasks, effort, and how many are ready",
+      "default_format": "human",
+      "formats": [
+        "human",
+        "json"
+      ],
       "name": "summary"
     },
     {
+      "about": "Drop a task, or a whole cut, recording the decision rather than deleting the record of it. Refuses to revive anything already terminal",
+      "default_format": null,
+      "formats": [],
+      "name": "drop"
+    },
+    {
+      "about": "Move tasks between cuts, editing both milestones or neither",
+      "default_format": null,
+      "formats": [],
+      "name": "mv"
+    },
+    {
+      "about": "Emit the plan's tasks as data, so a rollup this tool does not have is a `jq` line rather than a feature request. Carries what a rollup needs resolved: the cut a task belongs to, and whether it is ready",
+      "default_format": "human",
+      "formats": [
+        "human",
+        "json"
+      ],
+      "name": "tasks"
+    },
+    {
       "about": "Show the critical path: the longest `effort_days`-weighted chain of dependent tasks. Advisory, never a gate",
+      "default_format": "human",
+      "formats": [
+        "human",
+        "json"
+      ],
       "name": "critical-path"
     },
     {
-      "about": "Render the plan grouped by cut (the milestones): per-cut rollups, the critical path, and cross-cutting tasks. Advisory (ADR-0009)",
+      "about": "Render the plan grouped by cut (the milestones): per-cut rollups, the critical path, and cross-cutting tasks. Advisory: it reports, and never fails a build",
+      "default_format": "human",
+      "formats": [
+        "human",
+        "json",
+        "markdown"
+      ],
       "name": "roadmap"
     },
     {
       "about": "Close a task: set it `done` and attach evidence, in place. With no `--evidence`, records the current `HEAD` commit",
+      "default_format": null,
+      "formats": [],
       "name": "close"
     },
     {
-      "about": "Import proposals from another tool's format into `aplan` tasks. Lossy by design, and says so: every field the task model cannot hold is reported (ADR-0012)",
+      "about": "Repair a closed task's evidence: add, replace or remove a citation, in place, without reopening it",
+      "default_format": null,
+      "formats": [],
+      "name": "amend"
+    },
+    {
+      "about": "File the successor to a closed task whose traced outcome no longer holds, and re-stamp the closed one as reviewed",
+      "default_format": null,
+      "formats": [],
+      "name": "supersede"
+    },
+    {
+      "about": "Add or remove a dependency edge: `dep add A --after B` means A comes after B, and `dep rm` takes it back",
+      "default_format": null,
+      "formats": [],
+      "name": "dep"
+    },
+    {
+      "about": "Import proposals from another tool's format into `aplan` tasks. Lossy by design, and says so: every field the task model cannot hold is reported",
+      "default_format": null,
+      "formats": [],
       "name": "import"
     },
     {
-      "about": "Run an MCP server over stdio, exposing a deliberately small tool set (`ready`, `why`, `check`, `close`) to an agent. `close` goes through the same evidence gate as the CLI: an agent cannot close through MCP what it could not close here",
+      "about": "Scaffold a new task file: the next id in this plan's own convention, the fields `check` needs, and a body to fill in. It fills in nothing it cannot know, so a new task carries no estimate and no evidence unless you give them. `--from <file>` adds every task a file names instead, as one change",
+      "default_format": null,
+      "formats": [],
+      "name": "add"
+    },
+    {
+      "about": "Run an MCP server over stdio, exposing a deliberately small tool set (`identity`, `ready`, `why`, `check`, `verify`, `add`, `show`, `dep`, `close`) to an agent. `close` goes through the same evidence gate as the CLI, in both directions: an agent cannot close through MCP what it could not close here, and is not refused what this command records",
+      "default_format": null,
+      "formats": [],
       "name": "mcp"
     },
     {
       "about": "Scaffold a starter `.aplan.yml`, refusing to overwrite an existing one",
+      "default_format": null,
+      "formats": [],
       "name": "init"
     },
     {
       "about": "Print this tool's facts as JSON: its rules, output formats, commands, and evidence kinds, generated from the code (the source for `facts.json`)",
+      "default_format": null,
+      "formats": [],
       "name": "facts"
     },
     {
       "about": "Print the JSON Schema derived from the Rust types",
+      "default_format": null,
+      "formats": [],
       "name": "schema"
     }
   ],
+  "config_keys": [
+    "advisory",
+    "deny_warnings",
+    "detect_drift",
+    "docs",
+    "docs.membership",
+    "docs.membership.declared_by",
+    "docs.membership.doc",
+    "docs.membership.marker",
+    "effort_days_per_week",
+    "evidence",
+    "evidence.exempt_tags",
+    "evidence.max_unrelated_files",
+    "evidence.require_min_strength",
+    "id_strategy",
+    "no_traces",
+    "policy",
+    "policy.evidence",
+    "policy.evidence.exempt_tags",
+    "policy.evidence.require_min_strength",
+    "policy.when",
+    "policy.when.cut",
+    "policy.when.owner",
+    "policy.when.status",
+    "policy.when.tag",
+    "require_cut_membership",
+    "require_effort",
+    "roadmap",
+    "roadmap.group_by",
+    "root",
+    "stale_after_days",
+    "tag_families",
+    "test",
+    "test.covers",
+    "test.covers_by_test",
+    "test.covers_by_test.paths",
+    "test.covers_by_test.tests",
+    "test.dir",
+    "test.expect_tests",
+    "test.list",
+    "test.max_memory",
+    "test.max_processes",
+    "test.name",
+    "test.run",
+    "test.run_selects",
+    "test.skipped",
+    "test.timeout_seconds",
+    "test.wrap",
+    "traces_external",
+    "traces_root",
+    "url",
+    "url.check",
+    "url.max_memory",
+    "url.max_processes",
+    "url.timeout_seconds",
+    "url.wrap",
+    "version",
+    "version.levels",
+    "version.levels.cut",
+    "version.levels.release",
+    "version.levels.task",
+    "version.require_impact"
+  ],
   "counts": {
-    "commands": 14,
+    "behaviours": 27,
+    "commands": 33,
+    "config_keys": 61,
     "evidence_kinds": 5,
-    "formats": 5,
-    "rules": 20
+    "formats": 9,
+    "mcp_tools": 9,
+    "rules": 44
   },
   "evidence_kinds": [
     "commit",
@@ -81,7 +457,49 @@
     "json",
     "agent",
     "github",
-    "sarif"
+    "sarif",
+    "markdown",
+    "mermaid",
+    "dot",
+    "text"
+  ],
+  "mcp_tools": [
+    {
+      "description": "Name the build of this server: its version, the commit it was built from, and the digests of its capability document and its own image. Asking an installed CLI does not answer this -- a configured MCP process may be a different executable, which is how a pilot spent a pass on a defect the checkout had already fixed. Needs no plan and no repository.",
+      "name": "aplan_identity"
+    },
+    {
+      "description": "List tasks whose blockers are all done, so an agent can pick real work.",
+      "name": "aplan_ready"
+    },
+    {
+      "description": "Explain what is blocking a task: its own blockers, and any unfinished cut, without expanding that cut's membership. Pass `all` for the complete transitive closure; every answer names its `traversal`.",
+      "name": "aplan_why"
+    },
+    {
+      "description": "Validate the plan and return its diagnostics, and `denied`: whether this plan fails the build under the repository's warning policy. Hermetic: no git, no network.",
+      "name": "aplan_check"
+    },
+    {
+      "description": "Resolve the plan's evidence against the repository (L1/L2): a cited commit must exist and touch the task's `paths`, a cited file must exist. Opens git. Never runs tests.",
+      "name": "aplan_verify"
+    },
+    {
+      "description": "Create a task: the next id in this plan's own convention (or its prefix and a ULID, where the repository set `id_strategy: ulid`), placed in a cut, whose `phase` it takes. Refuses before writing what `check` would reject after, by running the rules on the plan this would produce; what it would only warn about is named in `notes` instead.",
+      "name": "aplan_add"
+    },
+    {
+      "description": "One task whole: its `paths`, `traces` and `evidence`, which no other tool returns, plus what the graph resolves (its cut, whether it is ready, what it waits on and what it releases) and every finding attached to it. Reads the evidence ladder, so a closed task whose citation rotted looks different from a healthy one.",
+      "name": "aplan_show"
+    },
+    {
+      "description": "Add or remove one dependency edge: `after` is the task that must finish first. `blocked_by` is the only ordering the model has and it was writable only at creation, so re-sequencing meant editing files by hand. Refuses before writing what `check` would reject after: a cycle, an id that does not exist, a cancelled blocker, or a done task acquiring an unfinished one. A milestone's `blocked_by` is which tasks are in that cut rather than what it comes after, so editing that is refused here and belongs to `aplan mv`.",
+      "name": "aplan_dep"
+    },
+    {
+      "description": "Close a task with evidence, resolved before it is written: a cited commit must exist and touch the task's `paths`, a cited file must exist, and a cited test must be one a configured runner lists. Refuses exactly what the CLI refuses; evidence is a citation to be resolved, never a score the caller asserts. It never runs a test and never fetches a url, and whatever nothing here could check is named in `unchecked` rather than left looking like a pass. `aplan_verify` resolves the whole plan.",
+      "name": "aplan_close"
+    }
   ],
   "rules": [
     {
@@ -160,6 +578,11 @@
       "title": "file evidence resolves at the cited rev"
     },
     {
+      "code": "APLAN016",
+      "severity": "warning",
+      "title": "url evidence answers when it is checked"
+    },
+    {
       "code": "APLAN017",
       "severity": "error",
       "title": "done evidence meets the configured minimum strength"
@@ -168,6 +591,11 @@
       "code": "APLAN018",
       "severity": "warning",
       "title": "a closed task's traced section is unchanged since closure"
+    },
+    {
+      "code": "APLAN019",
+      "severity": "warning",
+      "title": "a task's paths globs each match at least one tracked file, once it cites evidence"
     },
     {
       "code": "APLAN020",
@@ -183,8 +611,118 @@
       "code": "APLAN022",
       "severity": "error",
       "title": "every task is a member of exactly one cut, or is tagged cross-cutting"
+    },
+    {
+      "code": "APLAN023",
+      "severity": "warning",
+      "title": "a done task's path-checkable evidence can actually be path-checked"
+    },
+    {
+      "code": "APLAN024",
+      "severity": "warning",
+      "title": "a done task's commit evidence is about that task, not mostly about other work"
+    },
+    {
+      "code": "APLAN025",
+      "severity": "warning",
+      "title": "a cited test belongs to the part of the repository this task's `paths` cover"
+    },
+    {
+      "code": "APLAN026",
+      "severity": "warning",
+      "title": "a tag that looks like a member of a declared family is one"
+    },
+    {
+      "code": "APLAN027",
+      "severity": "warning",
+      "title": "a cancelled cut's members are cancelled too"
+    },
+    {
+      "code": "APLAN028",
+      "severity": "error",
+      "title": "a done task stamps every trace it stamps any of"
+    },
+    {
+      "code": "APLAN029",
+      "severity": "warning",
+      "title": "a declared tag family is carried by at least one task"
+    },
+    {
+      "code": "APLAN030",
+      "severity": "error",
+      "title": "a task carries the number of members a declared family requires"
+    },
+    {
+      "code": "APLAN031",
+      "severity": "error",
+      "title": "file evidence names a file inside the task's paths"
+    },
+    {
+      "code": "APLAN032",
+      "severity": "error",
+      "title": "a task's paths entries are globs this tool can compile"
+    },
+    {
+      "code": "APLAN033",
+      "severity": "error",
+      "title": "a prefer_after entry names a task that can actually be preferred"
+    },
+    {
+      "code": "APLAN034",
+      "severity": "error",
+      "title": "a traces target outside this repository is declared as external"
+    },
+    {
+      "code": "APLAN035",
+      "severity": "warning",
+      "title": "commit evidence names a commit that did work, not a merge"
+    },
+    {
+      "code": "APLAN036",
+      "severity": "warning",
+      "title": "a configured test runner lists at least one test, or says it expects none"
+    },
+    {
+      "code": "APLAN037",
+      "severity": "warning",
+      "title": "a test that passed under `--execute` is distinguishable from one the runner never ran"
+    },
+    {
+      "code": "APLAN038",
+      "severity": "warning",
+      "title": "a `done` task has answered the acceptance criteria its own body states"
+    },
+    {
+      "code": "APLAN039",
+      "severity": "warning",
+      "title": "a `done` task has not ticked a prompt this tool wrote as though it were a criterion"
+    },
+    {
+      "code": "APLAN040",
+      "severity": "warning",
+      "title": "a task declares each `paths` entry once"
+    },
+    {
+      "code": "APLAN041",
+      "severity": "warning",
+      "title": "the generated `AGENTS.md` block says what this repository's policy says"
+    },
+    {
+      "code": "APLAN042",
+      "severity": "warning",
+      "title": "a `revisit_at` names a real instant, on a task that is parked"
+    },
+    {
+      "code": "APLAN043",
+      "severity": "warning",
+      "title": "a live task carries the scaffold's own prompt beside the criteria its author wrote"
+    },
+    {
+      "code": "APLAN044",
+      "severity": "warning",
+      "title": "a closed task claims less of the released version than its level implies, without saying why"
     }
   ],
   "schema_version": "v1",
-  "version": "0.2.0"
+  "version": "0.3.0"
 }

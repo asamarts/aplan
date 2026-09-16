@@ -71,20 +71,35 @@ impl ProposalSource for LineSource {
                 owner: None,
                 effort_days: None,
                 blocked_by: Vec::new(),
+                prefer_after: Vec::new(),
                 evidence: Vec::new(),
                 paths: Vec::new(),
                 traces: Vec::new(),
                 trace_fingerprints: std::collections::BTreeMap::new(),
                 tags: vec!["line:imported".to_string()],
+                revisit_at: None,
+                version_impact: None,
+                version_impact_reason: None,
             });
         }
 
         if tasks.is_empty() {
             return Err(ImportError::Empty {
                 source_name: source_name.to_string(),
+                detail: None,
             });
         }
-        Ok(Import { tasks, report })
+        // An out-of-tree flavor supplies a body per task, the same as the
+        // built-in ones; the seam does not assume a shared template.
+        let bodies = tasks
+            .iter()
+            .map(|t| format!("## Why\n\nImported: {}\n", t.id))
+            .collect();
+        Ok(Import {
+            tasks,
+            report,
+            bodies,
+        })
     }
 }
 

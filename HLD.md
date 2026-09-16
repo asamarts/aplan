@@ -117,6 +117,64 @@ checkpoint is not work, keyed on `Task::is_milestone`; `APLAN021` keeps the mark
 milestone has members and carries no effort or paths). No new field or edge type (ADR-0008);
 the sequencing itself stays in ROADMAP.md.
 
+**A task's product is not an edge either.** Work whose deliverable is *more work* -- a spike, a
+review round, an evaluation -- says so in its own acceptance criteria, and the follow-ups name the
+investigation that produced them in their bodies. There is no `produces:` field. Neither form checks
+the claim -- `produces: none` and a ticked box are equally unfalsifiable -- so what is on offer is
+two ways of refusing the same silence, and the criterion is the one that already exists and
+generalises to every other statement of what done means. `supersede` reached the same answer for the
+same edge shape one release earlier (ADR-0020, ADR-0027), and a field that changes no answer is the
+half of ADR-0025's bar this one fails. The enforcement is the general one: `close` reading
+acceptance criteria at all (`A1-224`).
+
+**A release is a milestone tagged `release`** (ADR-0022, `A1-146`). It is a checkpoint over *cuts*
+rather than over work: its `blocked_by` names the cuts it closes, `APLAN007` refuses to call it done
+while one is open, and `roadmap` rolls up their work. A task belongs to exactly one cut still, since
+a release claims none, and `APLAN021` reports a release that holds work directly. No new field: the
+second grouping level stays in tags where ADR-0014 put it.
+
+**Membership stays an edge** (ADR-0030, `A1-228`). Whether a cut's members should be a `cut:` field
+on the task instead was a spike, because it reopened an accepted ADR. Three measured symptoms had
+been traced to the edge, and all three now have shipped fixes that left the model alone: `A1-216`
+derived grouping from the pair, `A1-227` found the quadratic was a traversal defect, and `A1-226`
+fixed the write loss with a compare-and-swap and a lock. Both shapes were then measured at 25,000
+tasks, on a fixture where both render a comparable graph, and are within 1.6% on every cell at both
+cut widths (898ms against 897ms at forty cuts).
+The remaining write contention is the sequential id, proved by 24 agents into 24 *different* cuts
+refusing 22 of 24 exactly as they do into one, which is `A1-230` and not this. The migration that is
+not being paid: 2,457 task files across fifteen plans, a drift-gated schema change, and a public
+`cut` field going from derived to declared under the same name.
+
+**And the level above a cut is a repository** (ADR-0029, `A1-200`). One repository holds one plan,
+and `blocked_by` names a task in *this* plan and nothing else: no qualified id, no second `root`, no
+cross-plan edge. `p00011` was read to decide it (pre-public adoption evidence) because it had built the
+alternative by hand -- 148 stream documents in one tree, 23 of them unfinished -- and every field
+that distinguished a stream turned out to be a status, a `paths` list or an edge the model already
+has, with `owner` and its one policy flag taking a single value across all of them. Its costs came
+from splitting a plan rather than from holding one: of ten unresolvable references, five pointed at
+*finished* streams that a directory move had put out of view, which cannot happen where a done task
+keeps its id and stays. This is what keeps `APLAN003` answerable ("exists" means "is in this plan"),
+`APLAN022` countable, and every rollup a single answer.
+
+**New field: `prefer_after`.** A list of task ids this one prefers to follow: **discretionary**
+order, which `ready` honours and nothing else reads (ADR-0025, superseding ADR-0017). It never
+blocks, so a task whose preference is unmet is still ready and still offered, only offered later,
+and `critical-path`, `why` and `APLAN007` do not read it at all -- a reader asking "why can I not
+start this" must never be shown an opinion. `APLAN033` refuses a preference that cannot be
+honoured: an unknown id, the task itself, a pair that is already a `blocked_by` edge, or a cycle.
+
+**And no second declared signal, for now** (ADR-0031, `A1-231`). `prefer_after` is pairwise, so
+"this one matters" against forty-seven others is forty-seven edges; the question was whether an
+ordered declared family should rank instead. Measured across the twelve plans on this host, 88% of
+207 ready tasks score nothing on the first two derived terms, which is the case for one. Two things
+refuse it for now. This repository's own plan carries **0.04** dependency edges per live task, the
+lowest of any plan with more than twenty live tasks, where the rest run 0.40 to 2.11 -- so the doubt
+was measured on the least-connected plan of its size available. And
+`releases` walks one step: counting what sits *transitively* behind a task, over dependency edges
+only, discriminates on seven of ten plans -- `p00016` from 23 of 24 ready tasks with no signal to 21
+of 24 with one. Adopting an opinion while a derivation is uncounted would trade what the tool can
+check for what it cannot, so `A1-298` counts it and the measurement is re-taken after.
+
 **New field: `paths`.** A glob list naming the files this task is responsible for. It
 is what turns evidence from a citation into a checkable relation (§5.2). Optional;
 absent means relevance-checking is skipped for that task.
@@ -124,10 +182,17 @@ absent means relevance-checking is skipped for that task.
 **IDs.** Human-readable `<letter><phase>-<nnn>` by convention. This project's own tasks
 use `A<phase>` (`A` for aplan, `A1-004`); the illustrative examples above use `P` for a
 hypothetical project. dstask's documented footgun is that sequential IDs **collide across
-machines**. `aplan add` therefore warns on
-collision rather than silently renumbering, and `id_strategy: sequential | ulid` in
-config lets high-parallelism repos opt out of collisions entirely. `APLAN002` catches
-what slips through.
+machines**. `aplan add` derives the next id from the convention the plan already uses
+(`A1-046` -> `A1-047`, `AL1-07` -> `AL1-08`), and refuses rather than renumbering when
+the id it would write already exists; two people generating the same id offline is caught
+by `APLAN002` at the merge. `id_strategy: sequential | ulid` **is built** (`A1-047`):
+`ulid` removes the collision instead of detecting it, minting 48 bits of timestamp and 80
+random bits in place of the counter, and keeping the plan's own prefix because that is the
+readable half and nothing about it collides (`A1-01K9ZBW7YQ8N4TQGX2H6RC3PVD`). `sequential`
+stays the default, since a 26-character id is a real cost paid by everyone who reads the
+plan and a repository with one author has nothing to buy with it. A plan holding ULIDs is
+not read as a sequence to continue, so a repository may set the key, unset it, and keep its
+own convention either way.
 
 ---
 
@@ -235,9 +300,16 @@ Mirroring `alint`'s ADR-0004 (spawning rule kinds are top-level-config-only):
   only**, and never shell-interpolated. `{}` placeholder, argv vector, no shell.
 - `--execute` is **off by default**, and CI must not enable it for `pull_request`
   events from forks.
-- `url` evidence is **not fetched by default**. When enabled: HTTPS only, redirects
-  disabled (SSRF hardening, as `alint` does for remote `extends:`), a hard timeout, a
-  body-size cap, and a content-addressed cache.
+- `url` evidence is **not fetched by default** (`APLAN016`, `A1-041`). When enabled by
+  `url.check`, the fetch is a **configured command** rather than a built-in client, so
+  redirect policy, timeout and body-size caps live in that command where the repository
+  owns them (`curl --max-time`, and curl does not follow redirects unless asked). The one
+  part the command cannot own is **which target it is given**, because the citation comes
+  from a task file and a task file can arrive from a fork: `aplan` therefore hands over
+  **`https` citations only**, and reports any other scheme as not checked. Measured while
+  auditing `A1-041`: before that restriction a task file made the checker request
+  `file:///etc/passwd` and `http://169.254.169.254/`, the cloud metadata address.
+  A content-addressed cache is not built; the resolver asks once per url per run.
 - `aplan check` spawns nothing and opens no sockets, ever. That property is worth a
   test.
 
@@ -312,10 +384,32 @@ empty cut must be surfaced, not swallowed.
 | `APLAN013` | `test` evidence names a test that exists | error | L1 | done |
 | `APLAN014` | `test` evidence names a test that **passes** | error | L3 | done |
 | `APLAN015` | `file` evidence resolves at the cited rev | error | L1 | done |
-| `APLAN016` | `url` evidence is reachable | warning | L1 | planned |
+| `APLAN016` | `url` evidence is reachable | warning | L1 | exists (`A1-041`, opt-in) |
 | `APLAN017` | Evidence meets the configured minimum strength | error | n/a | done (opt-in) |
 | `APLAN018` | A closed task's `traces` anchor has changed since closure | warning | n/a | done (opt-in) |
-| `APLAN019` | `paths` globs match at least one tracked file | warning | n/a | planned |
+| `APLAN019` | `paths` globs match at least one tracked file, once the task cites a `commit`, `file` or `test`: where nothing is bound to the paths, nothing binds to nothing (`A1-138`) | warning | L1 | exists (`A1-022`) |
+| `APLAN023` | A `done` task's `commit`/`file` evidence is path-checkable at all | warning | L0 | done |
+| `APLAN024` | A `done` task's commit evidence is about that task, not mostly other work | warning | L2 | done (`A1-062`) |
+| `APLAN025` | A cited test belongs to the part of the repository the task's `paths` cover | warning | L2 | done (`A1-063`, `A1-065`, `A1-069`) |
+| `APLAN026` | A tag that looks like a member of a declared family is one | warning | L0 | done (`A1-076`) |
+| `APLAN027` | A cancelled cut's members are cancelled too | warning | L0 | done (`A1-084`) |
+| `APLAN028` | A `done` task stamps every trace it stamps any of | error | n/a | done (`A1-098`) |
+| `APLAN029` | A declared tag family is carried by at least one task | warning | L0 | done (`A1-085`) |
+| `APLAN030` | A task carries the number of members a declared family requires | error | L0 | done (`A1-133`) |
+| `APLAN031` | A cited `file` is inside the task's `paths` | error | L2 | done (`A1-045`) |
+| `APLAN032` | Every `paths` entry is a glob this tool can compile | error | L0 | done (`A1-066`) |
+| `APLAN033` | A `prefer_after` entry names a task that can actually be preferred | error | L0 | done (`A1-150`) |
+| `APLAN034` | A `traces` target outside this repository is declared as external | error | L0 | done (`A1-143`) |
+| `APLAN035` | Commit evidence names a commit that did work, not a merge | warning | L1 | done (`A1-145`) |
+| `APLAN036` | A configured test runner lists at least one test, or says it expects none | warning | L1 | done (`A1-064`) |
+| `APLAN037` | A test that passed under `--execute` is distinguishable from one the runner never ran | warning | L3 | done (`A1-167`) |
+| `APLAN038` | A `done` task has answered the acceptance criteria its own body states | warning | L0 | done (`A1-224`) |
+| `APLAN039` | A `done` task has not ticked a prompt this tool wrote as though it were a criterion | warning | L0 | done (`A1-271`) |
+| `APLAN040` | A task declares each `paths` entry once | warning | L0 | done (`A1-267`) |
+| `APLAN041` | The generated `AGENTS.md` block says what this repository's policy says | warning | L0 | done (`A1-273`) |
+| `APLAN042` | A `revisit_at` names a real instant, on a task that is parked | warning | L0 | done (`A1-264`) |
+| `APLAN043` | A live task does not carry the scaffold's own prompt beside the criteria its author wrote | warning | L0 | done (`A1-299`) |
+| `APLAN044` | A closed task claims less of the released version than its level implies, without saying why | warning | L0 | done (`A1-312`) |
 
 Every diagnostic carries a stable code, a severity, an optional task id, an optional
 file, a message, and an `agent_instruction`. A **byte span** into the source YAML, so a
@@ -350,7 +444,7 @@ otherwise for a published dependent.
 | Crate | Responsibility | Publish | Status |
 |---|---|---|---|
 | `aplan-core` | task model, loader, graph, validate, diagnostic | yes | **exists** |
-| `aplan-output` | formatters: human, json, agent, github, gitlab, sarif, junit, markdown, mermaid, dot | yes (internal) | **exists** (6 of 10) |
+| `aplan-output` | formatters: human, json, agent, github, gitlab, sarif, junit, markdown, mermaid, dot | yes (internal) | **exists** (7 of 10) |
 | `aplan` | library + thin binary; clap CLI; `facts()` introspection | yes | **exists** |
 | `xtask` | `gen-schema` (exists); `gen-facts` shipped as `aplan facts` + `tests/facts.rs`; `gen-roadmap` (exists, `A1-016`) | no | **exists** |
 | `aplan-evidence` | the verification ladder; git/test/url/file resolvers | yes (internal) | **exists** (commit + file + test resolvers; url/note next) |
@@ -404,21 +498,39 @@ them from one place, and the version is the single source of truth (HLD §17).
 |---|---|---|
 | `aplan check` | validate; hermetic; fails on any error | exists |
 | `aplan verify` | resolve evidence (L1/L2); `--execute` for L3 | exists (`A1-004`) |
-| `aplan ready` | tasks whose blockers are all `done` | exists |
-| `aplan why <id>` | transitive explanation of what blocks a task | exists |
-| `aplan graph` | Mermaid (`--format dot` for Graphviz, planned) | exists |
+| `aplan ready` | tasks whose blockers are all `done`, ordered by a derived rank: what a task releases, then the critical path, then effort, then id. `--explain` says which (`A1-125`) | exists |
+| `aplan why` | `<id>`: what blocks a task -- its own blockers and any unfinished cut, reported as itself with a count of what is behind it; `--all` walks into a cut's membership. An answer that folded anything says so, and the JSON always names its `traversal` | exists (`A1-263`) |
+| `aplan graph` | Mermaid, whole plan or scoped by `--cut` and `--tag`, which intersect. Edges leaving the view are noted rather than drawn (`--format dot` for Graphviz, planned) | exists (`A1-126`) |
+| `aplan show` | `<id>`: one task whole: its `paths`, `traces` and `evidence`, plus what the graph and the ladder resolve about it (cut, ready, both edge directions, and the findings attached to that id). `--format json` carries the same content, `--body` includes the prose, `--no-resolve` skips the ladder and says so | exists (`A1-118`) |
+| `aplan tree` | `<id>`: one task's neighbourhood in both directions, `--depth N`: what must precede it, and what it releases. The inspection a *derived* order needs (ADR-0017), so `ready`'s rank is checkable rather than asserted | exists (`A1-126`) |
 | `aplan schema` | the derived JSON Schema | exists |
 | `aplan facts` | the tool's generated facts (rules, formats, commands, kinds) | exists (`A1-011`) |
+| `aplan paths` | what share of recent commits each task's `paths` would match, against the plan's own median; advisory, never blocking | exists (`A1-151`) |
+| `aplan due` | `--as-of <instant>` (RFC 3339): parked tasks whose `revisit_at` has arrived, longest overdue first. Due for a look, never unblocked; the only command that reads a clock | exists (`A1-264`) |
+| `aplan stale` | live tasks unchanged in git for longer than a window, readiest first; parked work included, since a park is a decision with a half-life; advisory, never blocking | exists (`A1-020`, `A1-275`) |
+| `aplan vacuity` | per rule, the tasks it had a subject in and the tasks whose predicate had nothing to bind against -- the ones it ran on and could not have failed. Hermetic, advisory | exists (`A1-114`) |
+| `aplan deprecations` | the runways a plan declares -- announced in one cut, removed in a later one -- and the ways that pair breaks. Hermetic, advisory, `--format markdown` for the table a project publishes | exists (`A1-021`) |
+| `aplan attest` | the verified plan as a commit-stamped document, optionally attached as a git note | exists (`A1-040`) |
+| `aplan check-docs <files>` | every task id a document names resolves to a task | exists (`A1-148`) |
+| `aplan export-roadmap-json <file>` | the plan's statuses and edges written back into a `roadmap.json` a foreign build reads, merged into the file so the fields this model does not hold are carried through. `--check` gates it | exists (`A1-033`) |
+| `aplan export-agents-md` | the agent contract the plan and `.aplan.yml` imply, fenced and gate-able | exists (`A1-038`) |
+| `aplan export` | `--format <shape>`: the plan written back out in somebody else's shape, the other half of `import`. This build writes `checklist`, where a cut is a `##` heading and a `done` task is a ticked box; the other shapes `import` reads are refused by name with the one field a generated document would have had to invent. What the shape could not carry goes to standard error, so a redirected document is only the document. `--out` writes, `--check` gates | exists (`A1-189`) |
 | `aplan summary` | tasks + effort per phase, ready count | exists (`A1-002`) |
+| `aplan tasks` | the plan as data, so any other rollup is a `jq` line | exists (`A1-075`) |
+| `aplan drop` | drop a task, or a whole cut, recording the cancellation | exists (`A1-077`) |
+| `aplan mv` | `<id>...`: move tasks between cuts, editing both milestones or neither. A set is one move: every refusal runs before any file is written, so a member that cannot move refuses the whole set | exists (`A1-077`, `A1-127`) |
 | `aplan critical-path` | longest path over `effort_days`, **advisory, never a gate** | exists (`A1-013`) |
 | `aplan init` | scaffold `.aplan.yml`; refuses to overwrite | exists (`A1-009`) |
-| `aplan close <id>` | set `done` + attach evidence; derives `HEAD`; never commits | exists (`A1-008`) |
-| `aplan add` | scaffold a new task file | planned |
-| `aplan import <source>` | read another tool's plan; `--format kep` exists (`A1-019`), Backlog.md / task-master / spec-kit / beads planned | partial (`A1-019`) |
+| `aplan close` | `<id>`: set `done` + attach evidence; derives `HEAD`; resolves the evidence and refuses what `verify` would reject (`--no-resolve` opts out); never commits | exists (`A1-008`, `A1-109`) |
+| `aplan amend` | `<id> --replace-evidence <from> <to>`: repair a closed task's evidence in place: replace one citation, both named, resolved exactly as `close` resolves one; leaves `trace_fingerprints` alone | exists (`A1-110`) |
+| `aplan dep` | `add <id> --after <other>`, and `dep rm`: add or remove one `blocked_by` edge, the only per-task ordering the model has. Refuses through the shared post-state check: a cycle, an unknown id, a cancelled blocker, a `done` task acquiring an unfinished one. A milestone's `blocked_by` is its membership rather than its ordering, so that edit belongs to `mv` and is refused here | exists (`A1-124`) |
+| `aplan supersede` | `<id> <title>`: file the successor to a closed task whose traced outcome no longer holds, and re-stamp the closed one as reviewed. The predecessor keeps its status and its evidence: there is no reopen (ADR-0020) | exists (`A1-130`) |
+| `aplan add` | scaffold a new task file: next id in the plan's own convention, `--cut` placement, no invented fields | exists (`A1-029`) |
+| `aplan import` | `<source>`: read another tool's plan; `--format kep` (`A1-019`), `checklist` (`A1-030`) and `roadmap-json` (`A1-031`) exist, Backlog.md / task-master / spec-kit / beads planned | partial (`A1-019`, `A1-030`, `A1-031`) |
 | `aplan mirror` | one-way push to a forge | planned |
 | `aplan export-agents-md` | render the plan's contract into `AGENTS.md` | planned |
 | `aplan lsp` | editor server | planned |
-| `aplan mcp` | agent server: `ready`, `why`, `check`, `close` over stdio | exists (`A1-024`) |
+| `aplan mcp` | agent server: `ready`, `why`, `check`, `verify`, `add`, `show`, `dep`, `close` over stdio | exists (`A1-024`, `A1-102`, `A1-103`, `A1-124`, `A1-118`) |
 | `aplan tui` | the terminal UI | planned |
 | `aplan roadmap` | render the plan grouped by cut: rollups, per-cut critical path, `--format markdown` companion (ADR-0009) | exists (`A1-015`) |
 | `aplan attest` | signed provenance / audit export of the verified plan | planned |
@@ -467,13 +579,30 @@ evidence:                                       # APLAN017, off unless set
   require_min_strength: [commit, test, file]    # a `done` task needs one of these...
   exempt_tags: [phone]                          # ...unless tagged, where a note is best
 detect_drift: true                              # APLAN018, stamp + watch traced sections
+effort_days_per_week: 7.5                       # ADR-0023, derive durations; no rule, no dates
 ```
 
-**The trust boundary lives here** (§5.5). The `test` runner is the only place a command
-may be named, and it is top-level config only, never a task file. `{test}` is substituted
-as a whole argv element and spawned with no shell, so a task file (which can arrive in a
-fork PR) can never inject a command; a runner that would splice `{test}` into a larger
-argument is rejected at load.
+**The trust boundary lives here** (§5.5). The `test` runner and `url.check` are the only
+places a command may be named, and both are top-level config only, never a task file.
+`{test}` and `{url}` are each substituted as a whole argv element and spawned with no
+shell, so a task file (which can arrive in a fork PR) can never inject a command; a
+template that would splice the placeholder into a larger argument is rejected at load.
+What a task file *can* choose is a `url` citation's target, which is why only `https`
+citations are handed to the checker (§5.5).
+
+**Which config is trusted is the caller's choice, and `aplan` cannot make it** (`A1-155`).
+Discovery walks up from the plan root or the repository, so pointing `--root` and `--repo` at
+somebody else's checkout selects *their* `test` and `url` programs -- correct for your own
+repository, wrong for a review. `--config <file>` reads exactly that file and discovers none;
+`--no-config` reads none at all, so no configured command can run and `test`/`url` citations stay
+unchecked rather than passing. A named file that is missing is an error, never a fallback to the
+tree under review. Relative values inside a selected file resolve against *its* directory, while
+the plan's own location remains where git history is read.
+
+Choosing and authenticating the trusted file stays the caller's responsibility: `aplan` reads the
+path it is given. A reviewer that needs more than "this path is mine" -- a signature, a digest, a
+file only root can write -- has to establish that outside the tool, exactly as it establishes that
+the binary it runs is the one it pinned.
 
 **Precedence:** a CLI flag overrides the file, which overrides the default
 (`if cli.flag { .. } else { config.field.unwrap_or(default) }`). A flag misused on the
@@ -503,6 +632,13 @@ One report, many consumers. `alint` ships eight formatters; we should converge.
 | `junit` | generic CI test-report ingestion | planned |
 | `markdown` | a PR comment / job summary | planned |
 | `mermaid` / `dot` | *generated* graph views, never hand-edited | exists / planned |
+
+Colour is a property of the *stream*, not of a formatter: every human renderer writes through
+`anstream`, which styles a terminal and strips into a pipe, and `--color` writes the
+process-global choice `anstream` consults rather than being threaded to each call site
+(`A1-286`). That is what lets one flag reach the renderers, the CLI's own refusals and `clap`'s
+usage errors alike. The machine formats gain nothing from it at any setting, which is asserted
+rather than assumed.
 
 Two ideas worth stealing from `alint`'s `agent` format: an **`argv` field** giving the
 exact command an agent can run to fix one diagnostic (regression-tested against the CLI
@@ -538,7 +674,7 @@ Two surfaces, and both matter.
    maintained under the Model Context Protocol org with a weekly cadence and is
    production-usable.
 
-   Expose a **deliberately small** tool surface, `ready`, `why`, `check`, `close`.
+   Expose a **deliberately small** tool surface, `ready`, `why`, `check`, `verify`, `add`, `show`, `dep`, `close`.
    task-master's ~36 MCP tools load ~21k tokens by default and it had to ship an env var
    to trim them (pre-public product research §6). Context bloat is a measured, published cost: an ETH
    Zurich study over 138 repos found context files raise inference cost >20% and can
@@ -582,12 +718,30 @@ mouse support, theming.
   ratatui publishes an official `insta` snapshot recipe. There is no excuse for an
   untested TUI.
 - **DAG rendering is the one genuinely weak spot in the ecosystem.** There is no mature
-  drop-in. `petgraph` gives the graph and `toposort` but no layout; `ascii-dag` (0.9.1,
-  ~20 stars, single maintainer) is the only Sugiyama→text-grid crate and should be
-  pinned-and-vendored if used; `rust-sugiyama` emits coordinates only; `layout-rs` is
-  SVG-only. **Plan to hand-roll**: `toposort` → layer assignment → box-drawing/braille
-  renderer, which is what `git-graph`, `serie`, and `git log --graph` each did with
-  bespoke code. Our DAG is mostly linear with fan-out, which makes this tractable.
+  drop-in. `petgraph` gives the graph and `toposort` but no layout; `rust-sugiyama` emits
+  coordinates only; `layout-rs` is SVG-only. **Plan to hand-roll**: `toposort` → layer
+  assignment → box-drawing/braille renderer, which is what `git-graph`, `serie`, and
+  `git log --graph` each did with bespoke code.
+
+  *Re-measured and settled (`A1-218`).* The survey above was taken in June and its figures
+  were stale by August: measured on crates.io on 2026-08-31, `ascii-dag` is `0.10.3`, not
+  `0.9.1`, with 72,419 downloads of which 65,188 are recent: a crate on a steep curve
+  rather than a quiet one, though still one maintainer.
+
+  The conclusion survives, on a closer call than "hand-roll" suggests. Rendered over this
+  plan's own dependency graph (83 nodes, 67 edges) and given the titles a reader needs,
+  `ascii-dag` draws 331 rows by 97 columns against the shipped renderer's 159 by 95. The
+  crate fits a terminal; it costs twice the rows and does not bound its width, because in a
+  layered picture the label length feeds the widest layer and `max_width` is computed
+  rather than configured. The shipped renderer lays the graph out in *lanes*, so width
+  follows edges in flight and height follows the plan, which a terminal already scrolls.
+  `A1-218` carries the full table and the prototype that produced it.
+
+  The claim that **our DAG is mostly linear with fan-out was wrong** and is the reason the
+  layered reading looked tractable. It is wide and shallow: before `A1-216` separated
+  grouping from constraint it was nine layers with a widest layer of 177, and three
+  quarters of its edges were a cut listing its members. Only after that separation is it
+  the shape this paragraph assumed.
 
 ---
 
@@ -706,8 +860,12 @@ table of ten. **Generate the counts. Never hand-write them.**
 
 **Landed** (`A1-011`). `facts.json` at the repo root is generated by `aplan facts` from
 the code's enumerable registries: the rules (with severity) from `Rule::ALL`, the formats
-from `Format::ALL`, the evidence kinds from `EvidenceKind::ALL`, and the subcommands
-introspected from the clap tree. `tests/facts.rs` pins the committed file to that output,
+from `Format::ALL`, the evidence kinds from `EvidenceKind::ALL`, the subcommands
+introspected from the clap tree, the MCP tools from `aplan_mcp::TOOLS` (`A1-119`), and
+(`A1-060`) `config_keys`, every `.aplan.yml` key
+this build accepts, walked out of the derived config schema. That last one is a
+*capability* rather than an inventory: a consumer staging a binary needs to assert what
+it can do, and a version string cannot answer it. `tests/facts.rs` pins the committed file to that output,
 so it fails CI on drift, exactly as `gen-schema --check` gates the schema. Two enablers
 shipped with it: rule severity became a declared property (`Rule::severity()`, asserted
 against every firing site by the coverage audit), and the CLI moved into the `aplan`
@@ -770,11 +928,14 @@ Each of these is a real fork in the road, not a formality.
 2. **ADR-0004: evidence verification levels.** The ladder, and why `check` is hermetic
    while `verify` is not.
 3. **ADR-0005: trust boundary for `--execute`.** Why a task file can never name a
-   command. Mirrors `alint` ADR-0004.
+   command. Mirrors `alint`'s ADR-0004.
 4. **ADR-0006: one-way mirror only.** Cite the git-bug bridge failures; make the refusal
    permanent and public.
-5. **ADR-0007: exit-code contract**, if we adopt the four-code scheme.
-6. **ADR-0008: `paths` as the relevance mechanism**, and its limits.
+
+Two more were on this list and have since been written: the exit-code contract is
+`ADR-0007`, and `paths` as the relevance mechanism is `ADR-0008`. A list telling a reader
+to write what already exists sends them to do work that is done, so an entry leaves it when
+its record lands (`A1-222`, which added the gate that noticed).
 
 ---
 

@@ -45,9 +45,28 @@ podman volume create aplan-runner-registry 2>/dev/null || true
 podman volume create aplan-runner-target 2>/dev/null || true
 
 echo "==> Starting runner container: ${CONTAINER_NAME}"
+# `--network pasta:--dns-host,...` pins the resolver this container's DNS is
+# forwarded to, and it is stored in the container, so it survives a restart.
+#
+# Without it, `pasta` reads the host's /etc/resolv.conf at every start and keeps
+# that answer for the container's life. Two things rewrite that file here:
+# dhcpcd, and tailscaled whenever `--accept-dns` changes -- to the single line
+# `nameserver 100.100.100.100`, its own resolver. When Tailscale DNS was
+# switched off on 2026-09-11 that resolver stopped answering and 11 of 14 runner
+# containers on this host lost DNS at once, while keeping full connectivity, so
+# it read as "GitHub is down" rather than as a resolver that had gone away.
+#
+# Verified rather than assumed: a container created with this option keeps
+# resolving across `podman restart`, across Tailscale DNS being toggled off and
+# on, and when the host file names a resolver that no longer answers. The
+# equivalent setting in ~/.config/containers/containers.conf is NOT enough --
+# it is not applied when a single container is restarted on its own.
+DNS_HOST="${RUNNER_DNS_HOST:-192.168.8.1}"
+
 podman run -d \
     --name "${CONTAINER_NAME}" \
     --restart unless-stopped \
+    --network "pasta:--dns-host,${DNS_HOST}" \
     --pids-limit "${PIDS_LIMIT}" \
     -e GITHUB_REPO_URL="${GITHUB_REPO_URL}" \
     -e GITHUB_TOKEN="${GITHUB_TOKEN}" \

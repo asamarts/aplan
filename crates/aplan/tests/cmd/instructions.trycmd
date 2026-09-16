@@ -1,0 +1,26 @@
+Every diagnostic carries the specific thing to do about it. Until this was
+printed, only `--format agent` showed it, so a person running `check` saw the
+finding and not the fix, and the first pilot reasoned its way to disabling a
+guard whose remedy the tool had already written.
+
+It appears once per rule, not once per finding: the advice is the same for every
+finding of a code, so repeating it is what would make a large report unreadable,
+and withholding it is what made a small one unactionable.
+
+```
+$ aplan check
+warning[APLAN009] W-01: no `effort_days` estimate
+  --> aplan/tasks/W-01.md
+  fix: Add an `effort_days` estimate, or drop the task.
+warning[APLAN009] W-02: no `effort_days` estimate
+  --> aplan/tasks/W-02.md
+warning[APLAN009] W-03: no `effort_days` estimate
+  --> aplan/tasks/W-03.md
+(2 further finding(s) carry their own fix; `--format agent` prints every one)
+ok: 3 tasks, 3 warning(s), DAG acyclic
+
+```
+
+`--format agent` is unchanged and still carries the instruction on every
+diagnostic, because something already consumes it that way; `violations.trycmd`
+pins that shape.

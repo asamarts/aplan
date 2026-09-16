@@ -4,9 +4,10 @@
 # builds with default-features = false, so no OpenSSL), and the runner agent.
 FROM debian:bookworm-slim
 
-ARG RUNNER_VERSION=2.334.0
+ARG RUNNER_VERSION=2.336.0
 ARG RUST_VERSION=stable
 ARG GH_VERSION=2.63.2
+ARG LLVM_COV_VERSION=0.8.7
 
 # System packages. libicu72 + zlib1g are what the runner agent's .NET host and
 # ./bin/installdependencies.sh need; build-essential + git + pkg-config + zlib1g-dev
@@ -42,8 +43,21 @@ ENV RUSTUP_HOME=/usr/local/rustup \
 # above provides the linker it needs.
 RUN curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs \
     | sh -s -- -y --default-toolchain ${RUST_VERSION} \
-    && rustup component add clippy rustfmt \
+    && rustup component add clippy rustfmt llvm-tools-preview \
     && rustup target add x86_64-unknown-linux-musl
+
+# The coverage gate (`ci/scripts/coverage.sh`, A1-046) needs `cargo llvm-cov` and
+# the `llvm-tools-preview` component added above. Installed from the project's
+# prebuilt tarball rather than `cargo install`, which would compile it on every
+# image build; pinned like the runner agent and gh, so a version change is a
+# visible edit here rather than a silent drift between image rebuilds.
+RUN DPKG_ARCH=$(dpkg --print-architecture) \
+    && case "$DPKG_ARCH" in amd64) ARCH=x86_64 ;; arm64) ARCH=aarch64 ;; *) ARCH="$DPKG_ARCH" ;; esac \
+    && curl -fsSL -o llvm-cov.tar.gz \
+       "https://github.com/taiki-e/cargo-llvm-cov/releases/download/v${LLVM_COV_VERSION}/cargo-llvm-cov-${ARCH}-unknown-linux-gnu.tar.gz" \
+    && tar -xzf llvm-cov.tar.gz \
+    && install -m 0755 cargo-llvm-cov /usr/local/cargo/bin/cargo-llvm-cov \
+    && rm -f llvm-cov.tar.gz cargo-llvm-cov
 
 # The GitHub CLI, used by the release workflow to publish a release and upload its
 # assets. Pinned and downloaded the same way the runner agent below is, rather

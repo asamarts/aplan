@@ -27,7 +27,7 @@ fn mk(
         writeln!(s, "tags: [{}]", tags.join(", ")).unwrap();
     }
     if let Some(sha) = evidence {
-        write!(s, "evidence:\n  - kind: commit\n    ref: {sha}\n").unwrap();
+        write!(s, "evidence:\n  - kind: commit\n    ref: \"{sha}\"\n").unwrap();
     }
     s.push_str("---\nbody\n");
     s
@@ -36,7 +36,9 @@ fn mk(
 /// Materialise `(relative path, contents)` under a fresh temp root and load it.
 /// The `TempDir` is returned so the caller keeps it alive while borrowing `Plan`.
 fn load_tree(files: &[(&str, String)]) -> (tempfile::TempDir, Plan) {
-    let dir = tempfile::tempdir().expect("tempdir");
+    let dir = tempfile::Builder::new()
+        .tempdir_in(aplan_core::fixture::fixture_root())
+        .expect("tempdir");
     for (rel, contents) in files {
         let path = dir.path().join(rel);
         std::fs::create_dir_all(path.parent().unwrap()).expect("mkdir");

@@ -1,0 +1,66 @@
+`aplan add` scaffolds one task file. Its write path is covered against a temp tree in
+`tests/add.rs`, and deliberately not here: a trycmd case that writes into its own `.in`
+fixture leaves the file behind and the next run then sees a different plan. What is
+pinned here is everything that does *not* write, which is where the guards live.
+
+The id is derived from the convention the plan already uses, and `--dry-run` shows the
+whole result without writing it. Both notes are the point of the command: it declines to
+invent an estimate or a set of paths, and says what that will cost.
+
+```
+$ aplan add "Wire the sequencer" --dry-run
+note: this adds 1 finding(s) `check` will report:
+  APLAN009 A1-005: no `effort_days` estimate
+      fix: Add an `effort_days` estimate, or drop the task.
+would write A1-005  todo  Wire the sequencer
+  -> aplan/tasks/A1-005.md
+note: no `paths`; add them, or a commit cited later proves only that it exists (APLAN023)
+
+```
+
+Given what it cannot know, it stays quiet:
+
+```
+$ aplan add "Wire the sequencer" --dry-run --effort 2 --paths src/seq/**
+would write A1-005  todo  Wire the sequencer
+  -> aplan/tasks/A1-005.md
+
+```
+
+A milestone is a cut, not a task, so its id shape (`M-v0.1`) is never continued:
+
+```
+$ aplan add "Not a milestone" --dry-run --effort 1 --paths src/**
+would write A1-005  todo  Not a milestone
+  -> aplan/tasks/A1-005.md
+
+```
+
+An id that already exists is refused by id, not by path, because identity is the `id`
+field:
+
+```
+$ aplan add "A clash" --id A1-004
+? 2
+aplan: task `A1-004` already exists in aplan/tasks/A1-004.md; refusing to overwrite it
+
+```
+
+A blocker that does not exist is refused before anything is written, rather than
+producing a file `check` would reject:
+
+```
+$ aplan add "Bad blocker" --blocked-by A9-999
+? 2
+aplan: blocked by task(s) that do not exist: A9-999. `APLAN003` would reject the file, so the id is checked before the file is written.
+
+```
+
+A cut that is not a milestone is refused the same way `import --cut` refuses it:
+
+```
+$ aplan add "Wrong cut" --cut A1-004 --dry-run
+? 2
+aplan: `A1-004` is not tagged `milestone`, so it is not a cut
+
+```

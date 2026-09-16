@@ -42,6 +42,15 @@ fi
 # reject: publishing `v0.2.0` built from a `0.1.0` tree would make the release
 # name a claim nothing backs.
 if [[ -n "${TAG:-}" ]]; then
+    # `main` carries a pre-release version so a staged build is never mistakable
+    # for a published one (A1-060). Releasing is therefore an explicit bump, and
+    # saying so beats a mismatch error the reader has to decode.
+    if [[ "$version" == *-* ]]; then
+        echo "ERROR: [workspace.package].version is '${version}', a pre-release." >&2
+        echo "       main carries one on purpose, so a staged build cannot claim to be" >&2
+        echo "       a release. Set the release version in Cargo.toml, commit, then tag." >&2
+        exit 1
+    fi
     if [[ "$TAG" != "v${version}" ]]; then
         echo "ERROR: tag '${TAG}' does not match [workspace.package].version '${version}'." >&2
         echo "       Expected tag 'v${version}'. Bump the version, or fix the tag." >&2

@@ -1,0 +1,59 @@
+A warning is advice by default: the plan below has one and nothing worse, so `check`
+reports it and exits `0`. A repository that wants every gate to pass or block can say so,
+and both directions are pinned here because a strict flag that silently passes would be
+worse than no flag at all.
+
+```
+$ aplan check
+warning[APLAN009] W-001: no `effort_days` estimate
+  --> aplan/tasks/W-001.md
+  fix: Add an `effort_days` estimate, or drop the task.
+ok: 1 tasks, 1 warning(s), DAG acyclic
+
+```
+
+With `--deny-warnings` the same run is a failure. The exit code is still `1`: a warning
+became a finding, which is what `1` already means, rather than a new code a consumer's CI
+would have to learn (ADR-0007). The reason goes to stderr, so a `--format json` consumer's
+stdout stays one document, and so the human output does not read `ok:` and then fail
+without saying why.
+
+```
+$ aplan check --deny-warnings
+? 1
+warning[APLAN009] W-001: no `effort_days` estimate
+  --> aplan/tasks/W-001.md
+  fix: Add an `effort_days` estimate, or drop the task.
+failed: 0 error(s), 1 warning(s) across 1 tasks
+denied: 1 warning(s), and `deny_warnings` is set (no errors)
+
+```
+
+`--no-deny-warnings` is the other direction, for a one-off lenient run in a repository whose
+`.aplan.yml` sets `deny_warnings: true`. There is no config file here, so it changes nothing;
+that the flag beats the file in *both* directions is pinned by
+`an_explicit_flag_wins_over_the_file_in_both_directions`, which can set a config without a
+fixture on disk:
+
+```
+$ aplan check --no-deny-warnings
+warning[APLAN009] W-001: no `effort_days` estimate
+  --> aplan/tasks/W-001.md
+  fix: Add an `effort_days` estimate, or drop the task.
+ok: 1 tasks, 1 warning(s), DAG acyclic
+
+```
+
+The two are contradictory, so asking for both is a usage error rather than a silent
+precedence rule nobody would remember:
+
+```
+$ aplan check --deny-warnings --no-deny-warnings
+? 2
+error: the argument '--deny-warnings' cannot be used with '--no-deny-warnings'
+
+Usage: aplan check --deny-warnings
+
+For more information, try '--help'.
+
+```

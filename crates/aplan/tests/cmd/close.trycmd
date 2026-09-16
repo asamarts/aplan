@@ -7,7 +7,7 @@ An unknown task is refused:
 ```
 $ aplan close MISSING --evidence commit:abc1234
 ? 2
-aplan: unknown task `MISSING`
+aplan: no task `MISSING` in this plan
 
 ```
 

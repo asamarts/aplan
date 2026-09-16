@@ -4,9 +4,11 @@
 $ aplan check
 ? 1
 error[APLAN003] B-001: `blocked_by` references unknown task `GHOST`
-  --> aplan/tasks/B-001.md
+  --> aplan/tasks/B-001.md:7:1
+  fix: Either create task `GHOST` or remove it from `B-001`'s `blocked_by`.
 error[APLAN005] B-001: `status: done` with no `evidence`: a status is a claim, not a proof
   --> aplan/tasks/B-001.md
+  fix: Add at least one evidence entry (commit, url, file, test, or a dated note), or move the task back to `in_progress`.
 failed: 2 error(s), 0 warning(s) across 1 tasks
 
 ```
@@ -17,11 +19,14 @@ Every diagnostic carries an `agent_instruction` in the agent format.
 $ aplan check --format agent
 ? 1
 {
+  "advisory": 0,
   "diagnostics": [
     {
       "agent_instruction": "Either create task `GHOST` or remove it from `B-001`'s `blocked_by`.",
       "code": "APLAN003",
+      "column": 1,
       "file": "aplan/tasks/B-001.md",
+      "line": 7,
       "message": "`blocked_by` references unknown task `GHOST`",
       "severity": "error",
       "task": "B-001"
@@ -29,7 +34,9 @@ $ aplan check --format agent
     {
       "agent_instruction": "Add at least one evidence entry (commit, url, file, test, or a dated note), or move the task back to `in_progress`.",
       "code": "APLAN005",
+      "column": null,
       "file": "aplan/tasks/B-001.md",
+      "line": null,
       "message": "`status: done` with no `evidence`: a status is a claim, not a proof",
       "severity": "error",
       "task": "B-001"
@@ -47,17 +54,22 @@ $ aplan check --format agent
 $ aplan check --format json
 ? 1
 {
+  "advisory": 0,
   "diagnostics": [
     {
       "code": "APLAN003",
+      "column": 1,
       "file": "aplan/tasks/B-001.md",
+      "line": 7,
       "message": "`blocked_by` references unknown task `GHOST`",
       "severity": "error",
       "task": "B-001"
     },
     {
       "code": "APLAN005",
+      "column": null,
       "file": "aplan/tasks/B-001.md",
+      "line": null,
       "message": "`status: done` with no `evidence`: a status is a claim, not a proof",
       "severity": "error",
       "task": "B-001"
@@ -76,7 +88,7 @@ Workflow-command annotations for inline PR review.
 ```
 $ aplan check --format github
 ? 1
-::error file=aplan/tasks/B-001.md,title=APLAN003 B-001::`blocked_by` references unknown task `GHOST`
+::error file=aplan/tasks/B-001.md,line=7,col=1,title=APLAN003 B-001::`blocked_by` references unknown task `GHOST`
 ::error file=aplan/tasks/B-001.md,title=APLAN005 B-001::`status: done` with no `evidence`: a status is a claim, not a proof
 
 ```
@@ -102,7 +114,8 @@ $ aplan check --format sarif
                   "uri": "aplan/tasks/B-001.md"
                 },
                 "region": {
-                  "startLine": 1
+                  "startColumn": 1,
+                  "startLine": 7
                 }
               }
             }
@@ -117,7 +130,6 @@ $ aplan check --format sarif
           "locations": [
             {
               "physicalLocation": {
-                "artifactLocation": {
 ...
           ],
           "message": {

@@ -1,0 +1,54 @@
+A plan with **cuts and releases together**, which the corpus had no case for until
+`A1-240` (found by `p00016`, which authored eleven cuts under three releases).
+
+ADR-0022 says a release is a checkpoint over cuts rather than a cut holding work, and
+that "a task stays in exactly one cut, because a release claims none of them". The
+model honoured that and the reporting did not: a release carries its cuts' members for
+its own rollup (`A1-146`), and every surface that asked "which cut is this task in"
+read that borrowed list as ownership.
+
+The cuts and the release are counted apart, and the release names what it closes
+rather than repeating the rows of the cuts it closes:
+
+```
+$ aplan roadmap
+roadmap: 2 cut(s), 1 release(s), 2 task(s), 3.0d effort
+
+v0.1 (release)  The first release  [todo]  0/2 done, 2 ready, 0 blocked, crit 2.0d, 3.0d effort
+  closes s0 (M-s0)
+  closes s1 (M-s1)
+
+s0  First cut  [todo]  0/1 done, 1 ready, 0 blocked, crit 1.0d, 1.0d effort
+  IP-1        todo          Work in the first cut
+
+s1  Second cut  [todo]  0/1 done, 1 ready, 0 blocked, crit 2.0d, 2.0d effort
+  IP-2        todo          Work in the second cut
+
+(statuses are as claimed in the plan and gated by `aplan verify` in CI)
+
+```
+
+The task count is the cuts' work counted once: three effort days over two tasks, not
+six over four. A release borrowing its cuts' rollup is what makes `0/2 done` an answer
+to "how is v0.1 going" rather than `0/0`, and it is why the double-count was easy to
+introduce.
+
+`tasks` is the surface a rollup is written against, and it reports the cut a task is
+**in**. Every row names both, so the association is pinned rather than inferred: the
+release is in no cut, because it is not in one.
+
+```
+$ aplan tasks
+id            status      effort  cut       ready   title
+IP-1          todo          1.0  s0        yes     Work in the first cut
+IP-2          todo          2.0  s1        yes     Work in the second cut
+M-s0          todo            -  s0        -       First cut
+M-s1          todo            -  s1        -       Second cut
+M-v01         todo            -  -         -       The first release
+
+```
+
+Before `A1-240` the `cut` column read `v0.1` for every row, including the two cuts: the
+walk returned the first entry in roadmap order that listed the task, and a release lists
+its cuts' members. A `jq` line over this surface was wrong on any plan with a release,
+which is the whole reason `tasks` exists (ADR-0008, `A1-182`).

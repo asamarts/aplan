@@ -1,0 +1,78 @@
+A consumer that stages the binary needs to know whether *this* build can run its
+gate, which a version cannot answer. `--require` asserts a capability by name.
+
+Five kinds, and all five are exercised here on purpose: the defect this flag
+already had was accepting output formats and evidence kinds while its help named
+only the other three, so a corpus that checks three would have reproduced it
+(`A1-093`).
+
+```
+$ aplan facts --require test.covers_by_test --require APLAN024 --require tasks --require sarif --require commit
+aplan [..] advertises every required capability (5 checked)
+
+```
+
+A widening of an existing rule is assertable too, which a rule code cannot express:
+`--require APLAN008` passes on every build since that rule existed, long before it learned to
+resolve a table row (`A1-099`).
+
+```
+$ aplan facts --require traces.table_rows
+aplan [..] advertises every required capability (1 checked)
+
+```
+
+Every missing one is named, not just the first: fixing them one build at a time
+is the slow version of what this command is for.
+
+```
+$ aplan facts --require deny_warnings --require APLAN099 --require nope
+? 1
+aplan [..] does not advertise:
+  APLAN099
+  nope
+It advertises [..] others; `aplan facts` lists them. A build that predates `--require` refuses the flag instead, and exits 2.
+
+```
+
+Anything the build advertises can be asserted, which includes an output format
+and an evidence kind, not only the three above.
+
+```
+$ aplan facts --require sarif --require commit
+aplan [..] advertises every required capability (2 checked)
+
+```
+
+One capability named twice is one question, and a blank one is not a question at
+all.
+
+```
+$ aplan facts --require APLAN024 --require APLAN024
+aplan [..] advertises every required capability (1 checked)
+
+```
+
+```
+$ aplan facts --require ""
+? 2
+aplan: `--require` needs a capability name; one was empty
+
+```
+
+The two failures stay apart on purpose. A build that answers "no" exits 1; a
+build too old to be asked has no such flag and exits 2, so an operator is never
+told a binary lacks a key it actually supports.
+
+```
+$ aplan facts --requires nope
+? 2
+error: unexpected argument '--requires' found
+
+  tip: a similar argument exists: '--require'
+
+Usage: aplan facts --require <CAPABILITY>
+
+For more information, try '--help'.
+
+```

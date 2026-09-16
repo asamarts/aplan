@@ -38,8 +38,27 @@ jobs:
         run: ci/scripts/fmt.sh
       - name: clippy
         run: ci/scripts/clippy.sh
+      # Broken intra-doc links compile, pass clippy, and are dead on the page, so
+      # nothing but rustdoc sees them. Seven had accumulated before this ran.
+      - name: doc
+        run: ci/scripts/doc.sh
       - name: test
         run: ci/scripts/test.sh
+
+  coverage:
+    name: coverage floors
+    runs-on: [self-hosted, linux, aplan]
+    # Longer than the others: the run rebuilds the workspace instrumented, which
+    # shares no artifacts with the ordinary test build.
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@v7
+      # Per-crate line-coverage floors, committed in coverage.json and ratcheted
+      # (A1-046). This gate catches code no test executes at all; it cannot tell
+      # whether the lines that ran were checked, which is why the rule-level audit
+      # in the test job exists beside it.
+      - name: no crate is below its committed floor
+        run: ci/scripts/coverage.sh
 
   spec:
     name: spec drift

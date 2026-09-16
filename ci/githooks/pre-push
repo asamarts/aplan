@@ -28,4 +28,16 @@ if [[ "$deletion_only" == "1" ]]; then
 fi
 
 REPO_ROOT="$(git rev-parse --show-toplevel)"
+
+# Git deliberately exports repository-local variables to hooks. They are useful
+# above, while locating the checkout this hook belongs to, but are actively
+# harmful to the gate: tests create their own repositories, and an inherited
+# GIT_DIR makes their Git commands mutate this checkout instead. Ask Git for the
+# complete version-specific list rather than maintaining a partial copy here.
+while IFS= read -r name; do
+    if [[ -n "$name" ]]; then
+        unset "$name"
+    fi
+done < <(git rev-parse --local-env-vars)
+
 exec "$REPO_ROOT/ci/scripts/preflight.sh"

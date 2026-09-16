@@ -9,13 +9,26 @@
 use aplan_mcp::server::wire_tools;
 
 #[test]
-fn the_wire_surface_is_exactly_four_tools() {
+fn the_wire_surface_is_exactly_its_tools() {
     let tools = wire_tools();
     let names: Vec<&str> = tools.iter().map(|t| t.name.as_ref()).collect();
     assert_eq!(
         names,
-        vec!["aplan_ready", "aplan_why", "aplan_check", "aplan_close"],
-        "the MCP surface changed; growing it is a decision, not a refactor"
+        vec![
+            "aplan_identity",
+            "aplan_ready",
+            "aplan_why",
+            "aplan_check",
+            "aplan_verify",
+            "aplan_add",
+            "aplan_show",
+            "aplan_dep",
+            "aplan_close",
+        ],
+        "the MCP surface changed; growing it is a decision, not a refactor. \
+         `aplan_verify` was that decision (`A1-102`): `check` is hermetic, so an \
+         agent could close a task citing a file that does not exist, see zero \
+         errors, and hand CI a plan that fails on the citation it just wrote"
     );
     for t in &tools {
         assert!(t.description.is_some(), "{} has no description", t.name);

@@ -5,15 +5,23 @@ The plan is deadlocked, and `check`, the gate, must say so rather than pass.
 $ aplan check
 ? 1
 error[APLAN020] C-002: is `todo` but blocker `C-001` is `dropped`: it can never legitimately start
-  --> aplan/tasks/C-002.md
+  --> aplan/tasks/C-002.md:7:1
+  fix: Either drop `C-002` too, revive `C-001`, or remove `C-001` from its `blocked_by` and name a real blocker.
 failed: 1 error(s), 0 warning(s) across 2 tasks
 
 ```
 
 `ready` and `why` already knew: a dropped blocker does not satisfy a dependency.
 
+`ready` also says *which* silence this is. An empty list answers two questions, and
+telling them apart is the difference between "the plan is finished or deadlocked"
+and "a cut is waiting to be closed" (`A1-105`). Here nothing is closeable, and it
+says so rather than printing nothing at all.
+
 ```
 $ aplan ready
+nothing is ready, and no cut is waiting to be closed.
+
 ```
 
 ```

@@ -1,6 +1,10 @@
 `aplan summary` rolls the plan up by phase: tasks, how many are done, total
 estimated effort, and how many tasks are ready to pick up now.
 
+Cancelled work is named rather than counted as scope. `dropped` is chosen over
+deleting a task so the measurement that rejected it stays findable, and a total
+that quietly included it reported pre-cancellation scope forever.
+
 ```
 $ aplan summary
 phase  tasks  done  effort
@@ -8,6 +12,7 @@ phase  tasks  done  effort
     1      1     0    3.0d
 total      3     1    6.0d
 
+dropped: 1 task(s), 4.0d, not counted above
 ready: 1
 
 ```
@@ -17,25 +22,37 @@ The same data machine-readable (sorted keys, so it is stable):
 ```
 $ aplan summary --format json
 {
+  "effort_days_per_week": null,
   "phases": [
     {
       "done": 1,
+      "done_effort_days": 1.0,
+      "dropped": 0,
+      "dropped_effort_days": 0.0,
       "effort_days": 3.0,
       "phase": 0,
       "tasks": 2
     },
     {
       "done": 0,
+      "done_effort_days": 0.0,
+      "dropped": 1,
+      "dropped_effort_days": 4.0,
       "effort_days": 3.0,
       "phase": 1,
       "tasks": 1
     }
   ],
   "ready": 1,
-  "schema": "aplan/summary/v1",
+  "remaining_weeks": null,
+  "schema": "aplan/summary/v2",
   "total_done": 1,
+  "total_done_effort_days": 1.0,
+  "total_dropped": 1,
+  "total_dropped_effort_days": 4.0,
   "total_effort_days": 6.0,
-  "total_tasks": 3
+  "total_tasks": 3,
+  "total_weeks": null
 }
 
 ```

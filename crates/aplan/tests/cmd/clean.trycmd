@@ -1,9 +1,15 @@
 A plan that satisfies every invariant: `check` is clean, and the other
 commands answer from it.
 
+`A-001` is `done` and cites a commit, and this run never opened git to look at
+it -- so the clean answer comes with the note that says which half of the gate
+just ran. It is here, in the canonical clean plan, because that is exactly where
+"ok" is most likely to be read as more than it is.
+
 ```
 $ aplan check
 ok: 2 tasks, 0 warning(s), DAG acyclic
+note: `check` is structural and did not open the repository, so 1 citation(s) on 1 task(s) are unchecked rather than passing -- a cited commit or test that has rotted passes here. `aplan verify` is the half that resolves them; run it in the same gate.
 
 ```
 
@@ -56,7 +62,7 @@ so this case never needs updating when a rule is added.
 ```
 $ aplan facts
 {
-  "commands": [
+  "behaviours": [
 ...
 }
 

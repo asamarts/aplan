@@ -12,7 +12,7 @@ would import 1 task(s) from kep.yaml
   KEP-3063  todo  [kep:implemented, kep:stage:beta, sig:node]  Graduate the widget API to stable
     -> aplan/tasks/KEP-3063.md
 report:
-  provenance: KEP-3063 claims `implemented`; imported as `todo` (the claim is not proof). Close it with `aplan close KEP-3063 --evidence commit:<sha>` (kep.yaml)
+  provenance: KEP-3063 claims `implemented`; imported as `todo` (the claim is not proof). Close it with `aplan close KEP-3063 --evidence commit:COMMIT_SHA` (kep.yaml)
   dropped: `approvers` is not held by the task model (kep.yaml)
   dropped: `creation-date` is not held by the task model (kep.yaml)
   dropped: `metrics` is not held by the task model (kep.yaml)
@@ -60,7 +60,7 @@ A flavor this build cannot read is refused by name.
 ```
 $ aplan import kep.yaml --format backlog
 ? 2
-aplan: unknown --format `backlog` (this build reads: kep)
+aplan: unknown --format `backlog` (this build reads: kep, checklist, roadmap-json, spec-kit, openspec)
 
 ```
 
@@ -84,7 +84,7 @@ would import 1 task(s) from kep.yaml
   KEP-3063  todo  [kep:implemented, kep:stage:beta, sig:node]  Graduate the widget API to stable
     -> aplan/tasks/KEP-3063.md
 report:
-  provenance: KEP-3063 claims `implemented`; imported as `todo` (the claim is not proof). Close it with `aplan close KEP-3063 --evidence commit:<sha>` (kep.yaml)
+  provenance: KEP-3063 claims `implemented`; imported as `todo` (the claim is not proof). Close it with `aplan close KEP-3063 --evidence commit:COMMIT_SHA` (kep.yaml)
   dropped: `approvers` is not held by the task model (kep.yaml)
   dropped: `creation-date` is not held by the task model (kep.yaml)
   dropped: `metrics` is not held by the task model (kep.yaml)
@@ -93,5 +93,110 @@ report:
   placement: would add KEP-3063 to `M-open` (kep.yaml)
   placement: imported tasks carry no `effort_days`, because there is nothing to derive one from; `check` warns (APLAN009) until you estimate them (kep.yaml)
 (dry run: nothing was written)
+
+```
+
+## A markdown checklist
+
+`--format checklist` reads the commonest planning shape there is: `- [ ]` items under
+`##` headings. A checklist carries less than a KEP does, so the report says more. Note
+what it refuses to invent: a ticked box is a claim, the list's order is not a dependency,
+and the ids are generated because the source has none.
+
+```
+$ aplan import roadmap.md --format checklist --dry-run
+would import 4 task(s) from roadmap.md
+  T-001  todo  [phase-0-the-risky-part, checklist:checked]  Spike the protocol client, including reconnect on a dropped link, because that is where the risk is.
+    -> aplan/tasks/T-001.md
+  T-002  todo  [phase-0-the-risky-part]  Render a frame end to end.
+    -> aplan/tasks/T-002.md
+  T-003  todo  [phase-0-the-risky-part]  a nested item
+    -> aplan/tasks/T-003.md
+  T-004  todo  [phase-1-the-product]  Ship it.
+    -> aplan/tasks/T-004.md
+report:
+  provenance: a checklist has no task ids, so 4 were generated as `T-001` onward; rename them before they are referred to elsewhere, or re-run with `--id-prefix` (roadmap.md)
+  dropped: 1 nested item(s) became tasks of their own: the model has no subtasks, so the nesting itself is not represented (roadmap.md)
+  provenance: 4 title(s) are the item as written (roadmap.md)
+  dropped: list order is not a dependency: nothing was written to `blocked_by`, because inferring one from position would be a guess recorded as a fact (roadmap.md)
+  provenance: T-001 was ticked in the source; imported as `todo` (a checkbox is a claim, not proof). Close it with `aplan close T-001 --evidence commit:COMMIT_SHA` (roadmap.md)
+  placement: imported tasks belong to no cut; where `require_cut_membership` is set, `check` reports APLAN022 until `--cut <milestone>` or a `cross-cutting` tag places them (roadmap.md)
+  placement: imported tasks carry no `effort_days`, because there is nothing to derive one from; `check` warns (APLAN009) until you estimate them (roadmap.md)
+(dry run: nothing was written)
+
+```
+
+A file with no checkboxes yields no tasks, and saying so beats reporting a successful
+import of nothing:
+
+```
+$ aplan import prose.md --format checklist --dry-run
+? 2
+aplan: prose.md: no importable proposal found: this reads `- [ ]` and `- [x]` rows, and the document has none. It has 1 heading(s). List the items you mean as `- [ ]` rows and import that (`docs/importing-proposals.md`, under "A table is not a checklist")
+
+```
+
+`--id-prefix` belongs to the flavor whose source has no ids:
+
+```
+$ aplan import kep.yaml --id-prefix X --dry-run
+? 2
+aplan: `--id-prefix` applies to `--format checklist`, whose source carries no ids, and to `--format spec-kit`/`openspec`, whose ids it qualifies
+
+```
+
+## A hand-maintained status contract
+
+`--format roadmap-json` reads a status-and-dependency projection: phases, and a workstream
+whose milestones carry a `depends_on` graph. The graph becomes `blocked_by`, so a reference
+to a milestone that does not exist is `APLAN003` and a cycle is `APLAN004`, neither of which
+the source's own linter could see. The workstream itself becomes a cut (ADR-0008), so
+`APLAN007` then refuses to call it done while a member is not.
+
+```
+$ aplan import roadmap.json --format roadmap-json --dry-run
+would import 5 task(s) from roadmap.json
+  PHASE-00  todo  [roadmap-json:done]  Research
+    -> aplan/tasks/PHASE-00.md
+  PHASE-13  in_progress  [roadmap-json:in_progress]  Web explorer
+    -> aplan/tasks/PHASE-13.md
+  RFC-0001-A  todo  [roadmap-json:not_started]  Containment
+    -> aplan/tasks/RFC-0001-A.md
+  RFC-0001-B  todo  [roadmap-json:not_started]  Restoration
+    -> aplan/tasks/RFC-0001-B.md
+  RFC-0001-CUT  todo  [milestone]  Remediation
+    -> aplan/tasks/RFC-0001-CUT.md
+report:
+  provenance: status mapping: `not_started` -> `todo` (not started here either); `in_progress` -> `in_progress` (carried across as-is); `blocked` -> `blocked` (carried across as-is); `dropped` -> `dropped` (carried across as-is); `done` -> `todo` (a hand-maintained `done` is a claim, so it arrives `todo` with the claim as a tag); `not_applicable` -> `dropped` (a requirement that turned out not to apply is a decision, so it arrives `dropped`) (roadmap.json)
+  dropped: `format_version` is not held by the task model (roadmap.json)
+  dropped: `project` is not held by the task model (roadmap.json)
+  dropped: `specs` lists 1 record(s) with their own statuses; not imported, because they are reference documents rather than work (roadmap.json)
+  dropped: `workstreams[RFC-0001].authority` is not held by the task model (roadmap.json)
+  provenance: PHASE-00 claims `done`; imported as `todo` (the claim is what this tool is here to check). Close it with `aplan close PHASE-00 --evidence commit:COMMIT_SHA` (roadmap.json)
+  dropped: PHASE-00 names SPEC-0009 in its prose; kept in the body but not converted to `traces`, because the source gives ids rather than paths and a trace has to resolve (roadmap.json)
+  provenance: RFC-0001: `artifact` became a `traces` entry; `check` fails (APLAN008) if that file is not there, which is the point of recording it (roadmap.json)
+  placement: imported tasks belong to no cut; where `require_cut_membership` is set, `check` reports APLAN022 until `--cut <milestone>` or a `cross-cutting` tag places them (roadmap.json)
+  placement: imported tasks carry no `effort_days`, because there is nothing to derive one from; `check` warns (APLAN009) until you estimate them (roadmap.json)
+(dry run: nothing was written)
+
+```
+
+Both of these refusals happen before the first file is written, because an import that stops
+halfway leaves the author with files to delete as well as a mistake to find. A source that
+declares one id twice would have one task overwriting the other:
+
+```
+$ aplan import duplicate.json --format roadmap-json
+? 2
+aplan: the source declares `PHASE-01` twice; ids are identities, so importing both would mean one overwriting the other
+
+```
+
+And a source with no title for a task writes a file `check` would reject on sight:
+
+```
+$ aplan import untitled.json --format roadmap-json
+? 2
+aplan: `PHASE-01` has no title in the source; a task nobody can name is one nobody can find, and `check` would reject the file (APLAN001)
 
 ```

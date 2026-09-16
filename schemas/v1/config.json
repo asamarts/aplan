@@ -1,5 +1,62 @@
 {
   "$defs": {
+    "Cardinality": {
+      "description": "How many members of a family a task in scope must carry (`APLAN030`).",
+      "oneOf": [
+        {
+          "const": "optional",
+          "description": "Any number, including none. What a bare list declares, and the default.",
+          "type": "string"
+        },
+        {
+          "const": "at-most-one",
+          "description": "At most one, so two members of the same family is a finding.",
+          "type": "string"
+        },
+        {
+          "const": "at-least-one",
+          "description": "At least one, so a task carrying none is a finding.",
+          "type": "string"
+        },
+        {
+          "const": "exactly-one",
+          "description": "Exactly one, which is `at-most-one` and `at-least-one` together.",
+          "type": "string"
+        }
+      ]
+    },
+    "DeclaredBy": {
+      "description": "The two shapes a cut's membership is declared in.",
+      "oneOf": [
+        {
+          "const": "line",
+          "description": "A line beginning with `marker`, whose ids are the members.",
+          "type": "string"
+        },
+        {
+          "const": "table",
+          "description": "A table under the cut's heading, one member per row, in the row's first\ncell (ADR-0015). The remaining cells are prose and are not read.",
+          "type": "string"
+        }
+      ]
+    },
+    "DocsConfig": {
+      "additionalProperties": false,
+      "description": "What `aplan check-docs` may check beyond references resolving.",
+      "properties": {
+        "membership": {
+          "description": "Documents that declare a cut's membership, and where in them it is\ndeclared.\n\nA plan document listing a cut's tasks beside a `M-<cut>` milestone holds\ntwo copies of one fact, and until something reads both, one of them is\nungated. Declared rather than inferred: measured on the two real documents\nof this shape, reading a cut's whole section instead of its declaration\ncalls fourteen ordinary cross-references false declarations, and a\ndocument's shape means whatever its author intended (ADR-0019).\n\nAbsent, `check-docs` checks references alone, exactly as before.",
+          "items": {
+            "$ref": "#/$defs/MembershipDoc"
+          },
+          "type": [
+            "array",
+            "null"
+          ]
+        }
+      },
+      "type": "object"
+    },
     "EvidenceConfig": {
       "additionalProperties": false,
       "description": "How strong a `done` task's evidence must be (`APLAN017`), and which tasks are\nexempt because nothing stronger exists.",
@@ -12,6 +69,16 @@
           },
           "type": [
             "array",
+            "null"
+          ]
+        },
+        "max_unrelated_files": {
+          "default": null,
+          "description": "How many paths a cited commit may touch *outside* a task's `paths` before\n`APLAN024` calls the citation diluted. Default 50; `0` turns the rule off.\n\nPaths rather than files: this counts the same set `APLAN012` calls\n\"touched\", which includes both sides of a rename.\n\nCounted outside rather than in total, deliberately: a large change wholly\ninside a task's `paths` is focused, and a small commit cannot swamp\nanything however little of it matches. What the rule is looking for is a\ncitation that drags in a lot of unrelated work, which is what makes\n`APLAN012`'s overlap test pass by accident.",
+          "format": "uint",
+          "minimum": 0,
+          "type": [
+            "integer",
             "null"
           ]
         },
@@ -44,7 +111,7 @@
         },
         {
           "const": "file",
-          "description": "A repo-relative path to a committed artefact (a saved PDF, a transcript).",
+          "description": "A repo-relative path to a committed artefact (a saved PDF, a transcript), optionally at a rev (`path@rev`) and optionally naming the section that proves it (`path#anchor`).",
           "type": "string"
         },
         {
@@ -59,19 +126,328 @@
         }
       ]
     },
-    "TestRunner": {
+    "IdStrategy": {
+      "description": "How `aplan add` mints an id when the caller does not pass `--id` (`A1-047`).",
+      "oneOf": [
+        {
+          "const": "sequential",
+          "description": "Continue the sequence the plan already uses: `A1-046` -> `A1-047`. The\ndefault, and what every existing plan gets.",
+          "type": "string"
+        },
+        {
+          "const": "ulid",
+          "description": "Mint a ULID, so two authors offline cannot derive the same id. Readable\nids are the cost.",
+          "type": "string"
+        }
+      ]
+    },
+    "LevelFloors": {
       "additionalProperties": false,
-      "description": "How to list and run tests, for `aplan verify`. Both are argv vectors, spawned\nwithout a shell (HLD §5.5).",
+      "description": "The floor each level of the plan carries (`A1-312`, ADR-0034).\n\nA **floor**, not an assertion: aggregation takes the strongest of the floors\nand the claims, so a `breaking` task raises the cut that holds it. Only a\nfloor composes -- a ceiling would let a break ship inside a compatible\nrelease.\n\nConfiguration rather than a constant, and that is the point. The shipped\ndefault does not fit the plan that ships it: this repository has eight done\ncuts against two tags, so a cut here is a planning bucket rather than a\ndelivery. A map nobody can change is a map that fits one project.",
       "properties": {
-        "list": {
-          "description": "argv that prints the available test names to stdout, one per line. A\ntrailing `: test` / `: benchmark` (cargo's `--list` format) is stripped.",
+        "cut": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/VersionImpact"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "description": "A milestone holding work (ADR-0022). Default: `feature`."
+        },
+        "release": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/VersionImpact"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "description": "A milestone closing cuts (ADR-0022). Default: `none` -- \"every release is\na major\" is version by ceremony rather than by compatibility, and wrong\nfor any project past 1.0. A team that versions that way sets it here."
+        },
+        "task": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/VersionImpact"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "description": "A unit of work. Default: `fix`."
+        }
+      },
+      "type": "object"
+    },
+    "MembershipDoc": {
+      "additionalProperties": false,
+      "description": "One document that declares cut membership.\n\n```yaml\ndocs:\n  membership:\n    - doc: ROADMAP.md\n      declared_by: line\n      marker: \"**Tasks:**\"\n```",
+      "properties": {
+        "declared_by": {
+          "$ref": "#/$defs/DeclaredBy",
+          "description": "Which shape the declaration takes."
+        },
+        "doc": {
+          "description": "The document, relative to the repository root. It is only read when\n`check-docs` is given that path, so a run over one file does not report\nevery cut in a document nobody asked about.",
+          "type": "string"
+        },
+        "marker": {
+          "default": null,
+          "description": "For `declared_by: line`, the marker the line begins with.",
+          "type": [
+            "string",
+            "null"
+          ]
+        }
+      },
+      "required": [
+        "doc",
+        "declared_by"
+      ],
+      "type": "object"
+    },
+    "MilestoneScope": {
+      "description": "Whether milestone tasks are subject to a cardinality.",
+      "oneOf": [
+        {
+          "const": "include",
+          "description": "Milestones are judged like any other task, the default.",
+          "type": "string"
+        },
+        {
+          "const": "exclude",
+          "description": "Milestones are exempt, for a vocabulary that classifies work.",
+          "type": "string"
+        },
+        {
+          "const": "only",
+          "description": "Only milestones, for a vocabulary that classifies cuts.",
+          "type": "string"
+        }
+      ]
+    },
+    "RoadmapConfig": {
+      "additionalProperties": false,
+      "description": "Roadmap rendering options.",
+      "properties": {
+        "group_by": {
+          "default": null,
+          "description": "The tag family whose members group a cut's tasks in the roadmap view.\n\nMust name a family declared in [`tag_families`](Config::tag_families):\ngrouping by a vocabulary nothing validates would render headings a typo\ncould invent (ADR-0014, `A1-078`).",
+          "type": [
+            "string",
+            "null"
+          ]
+        }
+      },
+      "type": "object"
+    },
+    "Scope": {
+      "additionalProperties": false,
+      "description": "The subset a [`ScopedPolicy`] applies to: the four dimensions `--cut`,\n`--tag`, `--owner` and `--status` name on the command line (`A1-214`).",
+      "properties": {
+        "cut": {
+          "default": [],
+          "description": "Cut labels or milestone ids. A task matches if it is in any of them.",
           "items": {
             "type": "string"
           },
           "type": "array"
         },
-        "run": {
-          "description": "argv that runs one test. Exactly one element must be [`PLACEHOLDER`]; it\nis replaced, whole, by the test name.",
+        "owner": {
+          "default": [],
+          "description": "Owners. A task matches if any is its owner.",
+          "items": {
+            "type": "string"
+          },
+          "type": "array"
+        },
+        "status": {
+          "default": [],
+          "description": "Statuses. A task matches if it is in any of them.",
+          "items": {
+            "type": "string"
+          },
+          "type": "array"
+        },
+        "tag": {
+          "default": [],
+          "description": "Tags. A task matches if it carries any of them.",
+          "items": {
+            "type": "string"
+          },
+          "type": "array"
+        }
+      },
+      "type": "object"
+    },
+    "ScopedEvidence": {
+      "additionalProperties": false,
+      "description": "The evidence dials a scope may set.\n\nOnly the two that `evidence.exempt_tags` already scopes between them, because\nthe first scoped dial should be the one whose degenerate case is already in\nthe file rather than a new idea (`A1-183`).",
+      "properties": {
+        "exempt_tags": {
+          "default": null,
+          "description": "Tags that exempt a task in this subset from the requirement.",
+          "items": {
+            "type": "string"
+          },
+          "type": [
+            "array",
+            "null"
+          ]
+        },
+        "require_min_strength": {
+          "default": null,
+          "description": "Evidence kinds strong enough to close a task in this subset. An empty\nlist is \"no requirement here\", which is what `exempt_tags` says globally.",
+          "items": {
+            "$ref": "#/$defs/EvidenceKind"
+          },
+          "type": [
+            "array",
+            "null"
+          ]
+        }
+      },
+      "type": "object"
+    },
+    "ScopedPolicy": {
+      "additionalProperties": false,
+      "description": "A policy that applies to part of the plan rather than all of it (`A1-183`).\n\n**Narrowest match wins, and among equals the first entry in the file.**\nNarrowness is the count of dimensions the scope names, which is the usual\nreading of \"more specific\"; the whole-plan settings are the scope that names\nnone, so they lose to any scope that matches. Reading down the list is how a\nreader resolves a tie, which is a rule that needs no merge.",
+      "properties": {
+        "evidence": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/ScopedEvidence"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "description": "The dials this scope sets. Absent keys fall through to the next widest\nscope that matches, and finally to the whole-plan value."
+        },
+        "when": {
+          "$ref": "#/$defs/Scope",
+          "description": "The subset this applies to. An empty scope is refused rather than read as\n\"everything\": the whole-plan keys already say that, and a scope that\nsilently became global is the shape a reader would least expect."
+        }
+      },
+      "required": [
+        "when"
+      ],
+      "type": "object"
+    },
+    "StatusScope": {
+      "description": "Which statuses a cardinality applies to.\n\nTwo separate keys rather than a list of predicates, so a contradiction cannot\nbe written: `[live, done]` would be a rule that can never fire, which is the\nvacuity this project keeps finding in other people's gates.",
+      "oneOf": [
+        {
+          "const": "any",
+          "description": "Every status, the default.",
+          "type": "string"
+        },
+        {
+          "const": "live",
+          "description": "`todo`, `in_progress` and `blocked`: work that has not finished.",
+          "type": "string"
+        },
+        {
+          "const": "done",
+          "description": "`done` only.",
+          "type": "string"
+        },
+        {
+          "const": "dropped",
+          "description": "`dropped` only.",
+          "type": "string"
+        },
+        {
+          "const": "terminal",
+          "description": "`done` or `dropped`.",
+          "type": "string"
+        }
+      ]
+    },
+    "TagFamily": {
+      "anyOf": [
+        {
+          "description": "`epic: [epic-a, epic-b]`, the shape every existing config uses.",
+          "items": {
+            "type": "string"
+          },
+          "type": "array"
+        },
+        {
+          "$ref": "#/$defs/TagFamilySpec",
+          "description": "The same, plus a cardinality rule and the tasks it applies to."
+        }
+      ],
+      "description": "A declared tag vocabulary: its members, and optionally how many of them a\ntask must carry.\n\nUntagged so the list shorthand keeps working unchanged. `epic: [epic-a]` and\n`epic: {members: [epic-a]}` are the same declaration, and a repository that\nnever wanted cardinality never learns the longer form exists (`A1-133`)."
+    },
+    "TagFamilySpec": {
+      "additionalProperties": false,
+      "description": "The long form of a [`TagFamily`].",
+      "properties": {
+        "members": {
+          "description": "The tags this family contains, as whole tags.",
+          "items": {
+            "type": "string"
+          },
+          "type": "array"
+        },
+        "milestones": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/MilestoneScope"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "description": "Whether milestone tasks are subject to it. Absent means they are."
+        },
+        "require": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/Cardinality"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "description": "How many of them a task in scope carries. Absent means `optional`, which\nis what a bare list declares."
+        },
+        "status": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/StatusScope"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "description": "Which statuses the requirement applies to. Absent means every status."
+        }
+      },
+      "required": [
+        "members"
+      ],
+      "type": "object"
+    },
+    "TestCoverage": {
+      "additionalProperties": false,
+      "description": "Paths a named subset of a runner's tests covers.",
+      "properties": {
+        "paths": {
+          "description": "Path globs the matching tests cover. `['**']` says \"the whole\nrepository\", which is what a repository-wide invariant asserts.",
+          "items": {
+            "type": "string"
+          },
+          "type": "array"
+        },
+        "tests": {
+          "description": "Test-name patterns, where `*` matches any run of characters\n(`invariants::*`). Matched against the name as the runner lists it.",
           "items": {
             "type": "string"
           },
@@ -79,9 +455,259 @@
         }
       },
       "required": [
+        "tests",
+        "paths"
+      ],
+      "type": "object"
+    },
+    "TestRunner": {
+      "additionalProperties": false,
+      "description": "How to list and run tests, for `aplan verify`. Both are argv vectors, spawned\nwithout a shell (HLD §5.5).",
+      "properties": {
+        "covers": {
+          "default": null,
+          "description": "Path globs this runner's tests cover, for `APLAN025`.\n\nSeparate from [`dir`](Self::dir) because *where a runner runs* is not\n*what it covers*: `cargo test --manifest-path server/Cargo.toml`, an npm\nworkspace filter, and `pytest --rootdir` all select a component while\nrunning at the repository root, which is usually where the lockfile is.\nReading `dir` alone left `APLAN025` unable to fire on any real pilot\n(`A1-065`).\n\nTakes precedence over `dir` when both are set, being the more specific\nclaim. Absent, and with no `dir` either, the runner makes no claim about\nlocality and `APLAN025` stays silent.",
+          "items": {
+            "type": "string"
+          },
+          "type": [
+            "array",
+            "null"
+          ]
+        },
+        "covers_by_test": {
+          "description": "Paths covered by *some* of this runner's tests, named by test.\n\nOne runner's tests do not always cover one thing. A repository whose only\nharness that can read the tree is a tools crate keeps its repository-wide\ninvariants there: those tests assert facts about directories they do not\nlive in, while the rest of the same crate's tests cover the crate. A\nsingle `covers` cannot say both, and saying the coarse thing made\n`APLAN025` report proof as borrowed (`A1-069`).\n\nThe first entry whose `tests` match wins; anything unmatched falls back to\n`covers`, then `dir`.",
+          "items": {
+            "$ref": "#/$defs/TestCoverage"
+          },
+          "type": [
+            "array",
+            "null"
+          ]
+        },
+        "dir": {
+          "default": null,
+          "description": "Directory to run `list` and `run` in, relative to the repository root.\nAbsent means the repository root.\n\nPart of the feature rather than an extra: a JavaScript or Python runner\nusually has to run inside its package directory, and without this the\nmulti-runner support would cover Rust and little else.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "expect_tests": {
+          "default": null,
+          "description": "Whether this runner is expected to list any tests at all. Default: `true`.\n\nA runner that lists nothing is usually a mistake -- a `dir` that moved, a\nmanifest path that is wrong -- and until `APLAN036` nothing said so: every\ncitation against it failed later as \"no runner lists this\", which blames\nthe citation. Sometimes it is not a mistake: a component that genuinely\nhas no tests yet is correct and inert, and the first repository to\nconfigure five runners had two of them in exactly that state.\n\nSet `false` to say so. That is the whole point of the field: without it a\nrepository has to choose between a permanent warning and deleting a runner\nit will need next month.",
+          "type": [
+            "boolean",
+            "null"
+          ]
+        },
+        "list": {
+          "description": "argv that prints the available test names to stdout, one per line. A\ntrailing `: test` / `: benchmark` (cargo's `--list` format) is stripped.\n\n**This runs on a plain `verify`, not only under `--execute`**, because\nresolving a `test` citation means asking what a runner lists. For a cargo\nrunner that *compiles*: measured, a plain `verify` on a crate with no\n`target/` left one behind, and tests that do not compile surface as\n`APLAN013` about the runner. So the gate needs whatever your build needs\n-- a workspace that path-depends on a sibling checkout fails here if the\nsibling is absent -- and it costs what a build costs: this repository's\nown plan takes about 31 seconds warm across ten runners\n(`docs/upgrading.md` has the numbers and the commands).\n\nA runner also sees exactly one feature set, so a test behind a flag is\ninvisible to a default listing and its citations cannot resolve. Cite the\nname this command prints, not the path you would write in Rust: for an\nintegration test `cargo test -- --list` prints the bare function name,\nand the near-match in `APLAN013` names the right form when you get it\nwrong.\n\nEvery other non-empty line is a name, including a summary sentence the\nrunner prints at the end of its own listing. `pytest --collect-only -q`\nends with `5 tests collected in 0.01s` and gives no way to suppress it\n(`A1-034`), so that line is a name too. It is harmless until the runner\ncollects nothing, when the summary is the *only* line and a runner that\nfound no tests looks like one with a test in it (`A1-064`).",
+          "items": {
+            "type": "string"
+          },
+          "type": "array"
+        },
+        "max_memory": {
+          "default": null,
+          "description": "Whether this runner's `run` command selects exactly the name `list`\nprinted. Default: unknown, and `APLAN037` finds out by asking.\n\nThe rung `--execute` claims is that the cited test *passed*, and that is\nonly worth what the runner makes it worth: a `run` command whose filter\ndoes not match the names `list` prints selects nothing, skips everything\nand exits `0`, which reads as a pass. `APLAN037` learns what a miss looks\nlike by running a name no test can have, and compares.\n\nSet `true` where the runner is right and simply says nothing either way,\nwhich no probe can tell from a runner that ran nothing. It is a claim the\nrepository makes and nothing checks -- so it also skips the probe's extra\nrun of `test.run`, which is the honest trade: a claim in exchange for the\ncost of the question.\n\n`false` is the same as leaving it out. The key is a one-sided claim, like\n`expect_tests`: saying a runner does *not* select exactly is saying the\nprobe is right, and silencing a rule on the strength of agreeing with it\nwould be the one reading nobody wants.\nThe most memory this runner's commands may hold, as a size (`4G`, `512M`)\n(`A1-310`, ADR-0033).\n\nEnforced by a cgroup, which sets `memory.max` **and** `memory.swap.max`:\nprototyped, a process under a 64MB `memory.max` alone allocated 3GB with\n`oom_kill` still `0`, because the pages went to swap. A cap that a box\nwith swap turns into a paging target is not a cap.\n\nWhat a command spends is the harness's and varies by two orders of\nmagnitude: measured on one machine, `cargo test` warm peaks at 156MB,\n`go test ./...` at 1.2GB, and `npm test` (vitest) at 33GB. Size it from\nwhat your own run reports rather than from a number here.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "max_processes": {
+          "default": null,
+          "description": "The most processes this runner's commands may have alive at once\n(`A1-310`, ADR-0033).\n\nEnforced as the cgroup's `pids.max`. **A breach is not a kill**: `fork()`\nreturns `EAGAIN` and the command usually exits with its own error, so it\nis detected by reading the cgroup's `pids.events` afterwards rather than\ninferred from an exit status.",
+          "format": "uint32",
+          "minimum": 0,
+          "type": [
+            "integer",
+            "null"
+          ]
+        },
+        "name": {
+          "default": null,
+          "description": "What to call this runner in a diagnostic. Optional, and only useful when\nthere is more than one: an ambiguous test name has to be able to say\nwhich runners reported it.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "run": {
+          "description": "argv that runs one test. Exactly one element must be [`PLACEHOLDER`]; it\nis replaced, whole, by the test name.\n\n**`--execute` believes this command's exit status**, so it is worth\nknowing whether yours earns that. The assumption is that the name `list`\nprints is the name this command selects: `cargo test -- --exact <name>`\nand `pytest <node id>` both honour it, and a filter flag over a different\nnamespace does not. `vitest list` prints `file > suite > test` while\n`vitest run -t` matches the test's title, so the listed name selects\nnothing, every test is skipped, and the exit status is `0` -- which reads\nhere as the test passing (`A1-034`, `A1-167`).\n\nThe one-command check: run your `run` command with a name no test could\nhave. If it fails, the exit status means something. If it succeeds,\n`--execute` cannot tell a pass from a miss for this runner, and the\ncitations it resolves are worth their L1 claim rather than their L3 one.",
+          "items": {
+            "type": "string"
+          },
+          "type": "array"
+        },
+        "run_selects": {
+          "default": null,
+          "type": [
+            "boolean",
+            "null"
+          ]
+        },
+        "skipped": {
+          "default": null,
+          "description": "argv that prints the tests this runner **will not run**, one per line, in\nthe names `list` uses (`A1-300`).\n\n`--execute` reads a zero exit status as \"the cited test passed\", and a\nrunner that *skips* a test exits zero too. `cargo test -- --exact <an\nignored test>` prints `running 1 test`, `0 passed`, `1 ignored`, and\nexits `0`: the test was selected, was not run, and the citation reads as\nproof. `APLAN037` does not catch it and should not -- that rule asks\nwhether a passing run is *indistinguishable from a miss*, and this one is\nplainly distinguishable; the runner said what it did.\n\nSo the runner is asked, the same way `list` is asked, rather than this\ntool learning what \"ignored\" looks like in any particular harness. For\ncargo: `[cargo, test, -q, -p, <crate>, '--', --list, --ignored]`.\n\n**Declaring it is opting in.** A repository that deliberately cites a\nnightly-gated test and knows it simply leaves this out, and nothing\nchanges. The same one-sided shape as `run_selects`.\n\n**What it cannot cover**: a test skipped at *runtime*, by a guard inside\nthe test body, which no harness lists in advance because nothing knows\nuntil the test runs. What this asks about is a skip the harness declares\n-- `#[ignore]`, a collection marker, a nightly gate -- which is the kind\na citation can be checked against before the run.",
+          "items": {
+            "type": "string"
+          },
+          "type": [
+            "array",
+            "null"
+          ]
+        },
+        "timeout_seconds": {
+          "default": null,
+          "description": "How long `list` may take before this runner is reported as one that could\nnot be asked, in seconds. Default: 600. `0` means no limit (`A1-121`).\n\nTen minutes because `cargo test --list` *compiles*: on a cold cache in CI\nthat is minutes, legitimately, and a limit that fires on a slow runner\nwould be a worse defect than the hang it prevents. It bounds the failure\nrather than policing the duration.\n\n**`run` is deliberately not bounded by this.** Under `--execute` the\nrunner is running a real test, where a long run is the point rather than\na symptom, and a limit there would report a suite that is merely slow as\na runner fault. `--execute` is opt-in and off by default; the harness's\nown timeout is the right place for that decision.",
+          "format": "uint64",
+          "minimum": 0,
+          "type": [
+            "integer",
+            "null"
+          ]
+        },
+        "wrap": {
+          "default": null,
+          "description": "argv prepended to every command this runner runs (`A1-310`, ADR-0033).\n\nThe escape hatch beside the dials, and the shape HLD 5.5 already implies\nfor `url.check`: `nice`, `taskset`, `cgexec`, a container runner, or a\ncgroup property the dials do not model. `[systemd-run, --user, --scope,\n-p, MemoryMax=4G, --]` is the whole of `max_memory` written by hand.\n\nTop-level config only, like every other command here: a task file must\nnever be able to name one (HLD 5.5).",
+          "items": {
+            "type": "string"
+          },
+          "type": [
+            "array",
+            "null"
+          ]
+        }
+      },
+      "required": [
         "list",
         "run"
       ],
+      "type": "object"
+    },
+    "TestRunners": {
+      "anyOf": [
+        {
+          "$ref": "#/$defs/TestRunner",
+          "description": "The original form: exactly one runner for the whole repository."
+        },
+        {
+          "description": "One runner per component, language, or test kind.",
+          "items": {
+            "$ref": "#/$defs/TestRunner"
+          },
+          "type": "array"
+        }
+      ],
+      "description": "One runner, or several.\n\nUntagged so today's single mapping keeps parsing exactly as written: every\nexisting adopter, this repository included, has one, and a config change that\nmade them all edit their file would be a poor trade for a feature most of them\ndo not need.\n\nSeveral is not an exotic case. An umbrella repository of independent projects\n(no root workspace, so no `cargo test` sees more than one), a polyglot tree\nwith a runner per language, and a repository separating unit from e2e runs all\nhit the same wall: one `list` command cannot see the whole corpus, so most\ntasks cannot cite `test` evidence at all and fall back to weaker kinds\n(`A1-054`)."
+    },
+    "UrlCheck": {
+      "additionalProperties": false,
+      "description": "How to check a `url` citation, for `aplan verify` (`APLAN016`).\n\nAn argv vector, spawned without a shell (HLD section 5.5), exactly one\nelement of which is [`URL_PLACEHOLDER`]. Exit zero means reachable.",
+      "properties": {
+        "check": {
+          "description": "argv that exits zero when the cited url is reachable, e.g.\n`[\"curl\", \"-sfI\", \"--max-time\", \"10\", \"{url}\"]`.\n\nGive it one of its own too (`--max-time` for curl, `--timeout` for wget):\nthe command knows what it is doing, and this key is the backstop for when\nit does not.",
+          "items": {
+            "type": "string"
+          },
+          "type": "array"
+        },
+        "max_memory": {
+          "default": null,
+          "description": "The most memory this checker's command may hold, as a size (`256M`)\n(`A1-310`, ADR-0033).\n\nThe same key `test` takes, and enforced the same way. Here because\nADR-0033 decided the cap covers *every* spawned command rather than the\ntest runner's alone: the machine does not care which command ate it, and\na checker is argv an adopter chose exactly as a runner is.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "max_processes": {
+          "default": null,
+          "description": "The most processes this checker's command may have alive at once\n(`A1-310`, ADR-0033).",
+          "format": "uint32",
+          "minimum": 0,
+          "type": [
+            "integer",
+            "null"
+          ]
+        },
+        "timeout_seconds": {
+          "default": null,
+          "description": "How long the checker may take per url before the citation is reported as\n*not checked*, in seconds. Default: 30. `0` means no limit (`A1-121`).\n\nThirty because this is one network request and a page that has not\nanswered in half a minute has not answered. Lower than the runner's limit\nby two orders of magnitude on purpose: the failure a network check meets\nis the silent one, since a black-holed packet does not refuse, it goes\nquiet, so a hang here is the ordinary case rather than the exotic one.",
+          "format": "uint64",
+          "minimum": 0,
+          "type": [
+            "integer",
+            "null"
+          ]
+        },
+        "wrap": {
+          "default": null,
+          "description": "argv prepended to the checker's command (`A1-310`, ADR-0033).\n\nTop-level config only, like the command itself: a task file names a url,\nnever a command to run against it (HLD 5.5).",
+          "items": {
+            "type": "string"
+          },
+          "type": [
+            "array",
+            "null"
+          ]
+        }
+      },
+      "required": [
+        "check"
+      ],
+      "type": "object"
+    },
+    "VersionImpact": {
+      "description": "What a change did to the thing that ships (`A1-312`, ADR-0034).\n\nOrdered, and the order is the whole type: aggregation takes the strongest of\nwhat a level floors and what its members claim, so `None < Fix < Feature <\nBreaking` is what makes a `Breaking` task raise the cut above it.\n\nIt describes the **change**, and each scheme maps it to its own arithmetic:\nsemver at or past 1.0 sends `Breaking` to major, semver below 1.0 sends it to\nminor, and `CalVer` takes its number from the calendar and keeps only the\ncompatibility claim.",
+      "oneOf": [
+        {
+          "const": "none",
+          "description": "Changes nothing that ships. A pilot log, a plan edit, a note.",
+          "type": "string"
+        },
+        {
+          "const": "fix",
+          "description": "A compatible correction.",
+          "type": "string"
+        },
+        {
+          "const": "feature",
+          "description": "A compatible addition.",
+          "type": "string"
+        },
+        {
+          "const": "breaking",
+          "description": "Something a consumer has to react to.",
+          "type": "string"
+        }
+      ]
+    },
+    "VersionPolicy": {
+      "additionalProperties": false,
+      "description": "What a task is expected to say about the released version (`A1-312`,\nADR-0034).\n\nOff unless asked for, and cheap when asked for: a task's **level** supplies a\nfloor, so with this on and nothing else configured a plan that declares no\nimpacts at all still judges clean. The only thing an author writes by hand is\nwhat a floor cannot supply -- a `breaking` change inside one task, or a `none`\nwith the reason it is none.",
+      "properties": {
+        "levels": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/LevelFloors"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "description": "What each level owes before any member speaks. Default: a unit of work\n`fix`, a cut `feature`, a release nothing of its own."
+        },
+        "require_impact": {
+          "default": null,
+          "description": "Whether a task claiming less than its level implies must say why\n(`APLAN044`). Default: `false`.",
+          "type": [
+            "boolean",
+            "null"
+          ]
+        }
+      },
       "type": "object"
     }
   },
@@ -89,11 +715,50 @@
   "additionalProperties": false,
   "description": "The parsed `.aplan.yml`. Every field is optional: an absent key means \"use\nthe built-in default\", and a CLI flag overrides whatever is here (the CLI\nowns precedence). Unknown keys are rejected, not ignored.",
   "properties": {
+    "advisory": {
+      "default": null,
+      "description": "Rule codes this repository hears without failing its build on them.\n\nThe severity stays the rule's own: `APLAN022` is an error in `facts` and\nin the catalogue whatever is listed here. What this changes is the\n*verdict*, which is where `deny_warnings` already lives. It exists because\nthe check most useful during a migration was the one a migration could not\nturn on until it was finished: four tasks of thirty-three without a cut\nkept `APLAN022` off for the other twenty-nine\n(pre-public adoption evidence, item 3, `A1-112`).\n\nEvery finding downgraded this way is still printed, and the run says how\nmany there were, because a build that passed on a downgraded rule must not\nread like one that had nothing to say.",
+      "items": {
+        "type": "string"
+      },
+      "type": [
+        "array",
+        "null"
+      ]
+    },
+    "deny_warnings": {
+      "default": null,
+      "description": "Treat any warning as a finding that fails the command, so `check` and\n`verify` exit `1` rather than `0` when a plan has warnings and nothing\nworse. Off unless set.\n\nFor a repository whose policy is that every gate either passes or blocks:\nthe advisory tier is useful by default (`APLAN023` warns because a\ncitation may be perfectly honest and the repository is the judge of that),\nand this is how a repository says it would rather be the judge in the\nstrict direction. The exit code is unchanged: `1` still means \"at least\none finding\", not a new code a consumer's CI has to learn (ADR-0007).",
+      "type": [
+        "boolean",
+        "null"
+      ]
+    },
     "detect_drift": {
       "default": null,
       "description": "Turn on stale-`done` drift detection (`APLAN018`): `aplan close` stamps a\ncontent fingerprint of each traced section, and `check` warns when a closed\ntask's traced section changes afterward. Off unless set.",
       "type": [
         "boolean",
+        "null"
+      ]
+    },
+    "docs": {
+      "anyOf": [
+        {
+          "$ref": "#/$defs/DocsConfig"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "description": "Where this repository's prose declares a cut's membership, so\n`aplan check-docs` can read it against the milestones (`A1-165`)."
+    },
+    "effort_days_per_week": {
+      "default": null,
+      "description": "Effort days this repository absorbs in a week, for the *derived*\nduration `summary` and `roadmap` report (`A1-147`, ADR-0023).\n\nOne ratio, declared once, and nothing else about time: no start date, no\ncalendar, no per-cut duration. A duration is then arithmetic over numbers\nthe plan already carries -- `effort_days` and cut membership -- so it\ncannot drift from them, which is the failure the sixth pilot measured\nthree times in nine audits of its own hand-written schedule\n(pre-public adoption evidence item 2).\n\nIt is a *capacity*, not a promise: `7.5` says \"five days at an assumed\n1.5x\", and the derived weeks say what that capacity implies about the\neffort in the plan. Absent, nothing is reported.",
+      "format": "double",
+      "type": [
+        "number",
         "null"
       ]
     },
@@ -108,11 +773,33 @@
       ],
       "description": "Evidence-strength policy (`APLAN017`)."
     },
+    "id_strategy": {
+      "anyOf": [
+        {
+          "$ref": "#/$defs/IdStrategy"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": null,
+      "description": "How `aplan add` mints an id when the caller does not pass `--id`\n(`A1-047`). Default: `sequential`, the derivation every existing plan\nalready gets.\n\n`ulid` is for a repository with authors working offline in parallel,\nwhere two of them derive the same next id and find out at the merge.\nIt costs readability -- a ULID is 26 characters nobody types from memory\n-- so it is a trade a repository makes once, knowingly, rather than a\ndefault that arrives with an upgrade."
+    },
     "no_traces": {
       "default": null,
       "description": "Skip `traces` checking entirely. Default: `false`. The `--no-traces` flag\noverrides it.",
       "type": [
         "boolean",
+        "null"
+      ]
+    },
+    "policy": {
+      "description": "Policy scoped to a subset of the plan, narrowest match winning\n(`A1-183`).\n\nEvery other dial here is whole-plan, and the one exception --\n`evidence.exempt_tags` -- is the degenerate case of this: \"required\nstrength is *none* for these tags\". A repository that wants stricter\nevidence on a release cut than on ordinary work, or none on spikes, can\nonly say it by exemption today, which is all or nothing.\n\nThe subset is named with the same four dimensions `--cut`, `--tag`,\n`--owner` and `--status` take on the command line, with the same reading:\nwithin a dimension any, across dimensions all (ADR-0026's selector,\n`A1-214`). One model of what a subset is, two renderings of it.",
+      "items": {
+        "$ref": "#/$defs/ScopedPolicy"
+      },
+      "type": [
+        "array",
         "null"
       ]
     },
@@ -132,6 +819,17 @@
         "null"
       ]
     },
+    "roadmap": {
+      "anyOf": [
+        {
+          "$ref": "#/$defs/RoadmapConfig"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "description": "How `aplan roadmap` renders (`A1-078`)."
+    },
     "root": {
       "default": null,
       "description": "Directory holding the plan's task files. Default: `aplan`. A relative value\nis resolved against this config file's directory, so `root: plan` means\n`<repo>/plan` wherever the command runs. The `--root` flag overrides it.",
@@ -140,16 +838,47 @@
         "null"
       ]
     },
+    "stale_after_days": {
+      "default": null,
+      "description": "How long a live task may sit unchanged before `aplan stale` names it,\nin days (`A1-020`). Default 30; `--older-than` overrides it.\n\nA window, not a threshold for failing anything: the command reports and\nnever blocks, because a task file's date is a proxy for the work's state.",
+      "format": "uint32",
+      "minimum": 0,
+      "type": [
+        "integer",
+        "null"
+      ]
+    },
+    "tag_families": {
+      "additionalProperties": {
+        "$ref": "#/$defs/TagFamily"
+      },
+      "description": "Tag vocabularies this plan uses, as family name to its members\n(`APLAN026`).\n\nA second grouping level always ends up in tags, because tags are what\nexists: a pilot put 22 epics there and a build/measure/review taxonomy\nbeside them, and nothing noticed a typo in either. Declaring the\nvocabulary makes a claim the repository already believes checkable,\nwithout making tags into a model and so without pre-empting `A1-032`.\n\n```yaml\ntag_families:\n  epic: [epic-a, epic-b]\n  kind: [kind-b, kind-m, kind-r]\n```\n\nAbsent, nothing changes. Tags outside every declared family stay legal\nand silent, or the feature would be a migration.",
+      "type": [
+        "object",
+        "null"
+      ]
+    },
     "test": {
       "anyOf": [
         {
-          "$ref": "#/$defs/TestRunner"
+          "$ref": "#/$defs/TestRunners"
         },
         {
           "type": "null"
         }
       ],
-      "description": "The test runner for `aplan verify --execute`."
+      "description": "The test runner(s) for `aplan verify`. A single mapping, or a sequence\nwhen one command cannot list every test in the repository."
+    },
+    "traces_external": {
+      "default": null,
+      "description": "Roots outside this repository that a `traces` target may name (`A1-143`,\nADR-0021). Resolved against `traces_root`, exactly as a trace target is,\nso `[\"../p0000007\"]` means the sibling beside the root the traces\nthemselves are read from.\n\nAbsent, and a trace that escapes the repository is refused (`APLAN034`).\nThe refusal is the default because such a trace resolves *fully* -- a bad\nanchor is caught, drift fires across the boundary -- whenever the sibling\nhappens to be checked out, and reports a per-task `APLAN008` on the day a\njob runs without it. That is an undeclared hard dependency on another\nrepository's presence and ref, which is the class of failure this tool\nexists to remove: a plan that passes on one machine and not another, for\na reason the plan does not state.\n\nDeclaring one makes the dependency the repository's stated position: its\nabsence is then a configuration error naming this key, rather than a\nfinding about a task that is fine.",
+      "items": {
+        "type": "string"
+      },
+      "type": [
+        "array",
+        "null"
+      ]
     },
     "traces_root": {
       "default": null,
@@ -158,6 +887,28 @@
         "string",
         "null"
       ]
+    },
+    "url": {
+      "anyOf": [
+        {
+          "$ref": "#/$defs/UrlCheck"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "description": "How to check that a `url` citation is reachable (`APLAN016`).\n\nA configured command rather than a built-in HTTP client, for the reason\n`test` is: the tool must not decide on an adopter's behalf what touching\nthe network means. It keeps the trust boundary where the repository can\nsee it, adds no TLS or async runtime to a binary whose other work is\nhermetic, and makes the rule opt-in by construction -- no key, no\nnetwork, which is what `check`'s hermetic contract requires.\n\nTimeout and redirect policy live in the command, where they are visible\nand the adopter's to set, rather than as knobs this tool invents."
+    },
+    "version": {
+      "anyOf": [
+        {
+          "$ref": "#/$defs/VersionPolicy"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "description": "What a task is expected to say about the released version (`A1-312`,\nADR-0034). Absent by default, and a plan that never declares it is\nunaffected."
     }
   },
   "title": "Config",

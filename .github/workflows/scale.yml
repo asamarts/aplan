@@ -1,0 +1,32 @@
+name: scale
+
+# Not on push. This generates 24,000 task files and runs for about twenty
+# seconds (a 29s job on the runner, 2026-09-09), which is not a per-commit cost
+# (`A1-229`); the per-commit gates are in `ci.yml`.
+# Nightly catches a regression within a day, and `workflow_dispatch` is there for
+# the change that is *expected* to move the number.
+on:
+  schedule:
+    - cron: '17 4 * * *'
+  workflow_dispatch:
+
+concurrency:
+  group: ${{ github.workflow }}
+  cancel-in-progress: true
+
+env:
+  CARGO_TERM_COLOR: always
+  RUSTFLAGS: -D warnings
+
+permissions:
+  contents: read
+
+jobs:
+  scale:
+    name: scale shape
+    runs-on: [self-hosted, linux, aplan]
+    timeout-minutes: 30  # bound a hang: one runner, so a stuck job blocks all CI
+    steps:
+      - uses: actions/checkout@v7
+      - name: scale
+        run: ci/scripts/scale.sh

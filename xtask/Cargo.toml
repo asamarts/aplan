@@ -17,8 +17,18 @@ path = "src/main.rs"
 aplan-core.workspace = true
 aplan-config.workspace = true
 aplan-output.workspace = true
+aplan-interop.workspace = true
+# The CLI surface gate reads clap's own tree (`A1-208`), which only the binary
+# crate can hand over. A dev tool depending on the crate it gates is the point.
+aplan.workspace = true
+clap.workspace = true
 anyhow.workspace = true
+serde.workspace = true
 serde_json.workspace = true
+serde_yaml_ng.workspace = true
+
+[dev-dependencies]
+tempfile.workspace = true
 
 [lints]
 workspace = true

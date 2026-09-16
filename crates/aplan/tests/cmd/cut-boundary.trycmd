@@ -1,0 +1,53 @@
+The moment a cut completes is the moment `ready` used to go quiet.
+
+Every member of `M-s0` is done, so there is no work to pick up: a milestone is a
+checkpoint and `ready` offers work (ADR-0008). But every task in the next cut is
+waiting on that milestone, and someone has to close it. Printing nothing at all
+was indistinguishable from a finished plan or a broken config, and the fourth
+pilot met exactly this on its first cut boundary (`A1-105`).
+
+```
+$ aplan ready
+nothing is ready. `M-s0`'s members are all done: `aplan close M-s0` opens what follows it.
+
+```
+
+`why` agrees with `ready` about what a milestone is. It used to answer "M-s0 is
+ready: nothing blocks it", which is the word `ready` uses for something it will
+not offer.
+
+```
+$ aplan why M-s0
+M-s0 is a cut and its members are all done: `aplan close M-s0` opens what follows it
+
+```
+
+A cut that scopes no work is not a finished one. `all()` over an empty list is
+true, so `M-empty` read as "members all done" and the reader was told to record
+the completion of a cut with nothing in it. That is `APLAN021`'s finding, and
+`ready` leaves it alone.
+
+```
+$ aplan why M-empty
+M-empty is a cut: nothing blocks it
+
+```
+
+A task that is over is not "ready" either, which is the same word used for the
+same wrong reason: `ready` offers neither a checkpoint nor a finished task.
+
+```
+$ aplan why A-001
+A-001 is `done`: there is nothing to do
+
+```
+
+And the task in the next cut still gets the plain answer, because a milestone
+blocking it is an ordinary blocker.
+
+```
+$ aplan why B-001
+B-001 is blocked by:
+  M-s0 [todo]  Foundations
+
+```

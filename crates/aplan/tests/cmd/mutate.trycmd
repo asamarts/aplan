@@ -1,0 +1,91 @@
+`drop` and `mv` write, so only their refusals belong in this corpus: a case that
+succeeds would rewrite the fixture it runs against and pass ever after for the
+wrong reason. The refusals are where the messages live anyway.
+
+A milestone's `blocked_by` holds its members *and* the cut it follows, so moving
+one would rewrite the order the cuts run in rather than the membership it looks
+like it is rewriting.
+
+```
+$ aplan mv M-s0 --cut M-s1
+? 2
+aplan: `M-s0` is a cut, not a task in one: moving it would rewrite which cut follows which, not its membership. Sequence the cuts instead: `aplan dep add M-s0 --after <cut>`, and `aplan dep rm` to undo it.
+
+```
+
+Emptying a cut of its work used to be `mv`'s own refusal, and this file pinned
+it. It is gone, and the absence is the point: `APLAN021` counts live work members
+since `A1-134`, so the move succeeds and the *rule* reports the empty cut at the
+repository's own policy -- a note here, a failure under `deny_warnings`. A
+successful `mv` cannot live in this corpus, because it writes into its own
+fixture and the next run would see a different plan, so that case is a test over
+a temporary plan instead (`a_cut_emptied_of_work_is_reported_rather_than_refused`).
+
+`mv` takes a set since `A1-127`, and the set is what makes a refusal matter: a
+member that cannot move refuses the whole move rather than leaving the ones
+before it in the new cut.
+
+```
+$ aplan mv B-01 GHOST --cut M-s0
+? 2
+aplan: no task `GHOST` in this plan
+
+```
+
+`--cut` applies to every id given, so a task named alongside it is refused rather
+than half-applied.
+
+```
+$ aplan drop M-s1 A-01 --cut
+? 2
+aplan: `A-01` is not a milestone; drop it without `--cut`
+
+```
+
+```
+$ aplan drop GHOST
+? 2
+aplan: no task `GHOST` in this plan
+
+```
+
+`dep` writes too, so the same rule applies: its refusals are here and its success
+is a test that runs against a temporary plan (`A1-124`).
+
+A cut's `blocked_by` is which tasks are in it, so editing one end of it here
+would be `mv` with its guard removed: taking a task out without putting it
+anywhere. Adding a member is `APLAN022`, which is off unless
+`require_cut_membership` is set.
+
+```
+$ aplan dep rm M-s1 --after B-01
+? 2
+aplan: `M-s1` is a cut, and its `blocked_by` is which tasks are in it: this would take `B-01` out of it without putting it anywhere, and a sequenced cut emptied of work keeps its predecessor in `blocked_by`, so `APLAN021` stays silent. Run `aplan mv B-01 --cut <other>`, or `aplan drop` whichever of the two is finished with.
+
+```
+
+```
+$ aplan dep add M-s0 --after B-01
+? 2
+aplan: `M-s0` is a cut, and its `blocked_by` is which tasks are in it, not what it comes after: this would put `B-01` in a second cut, which only `APLAN022` catches and only when `require_cut_membership` is set. Run `aplan mv B-01 --cut M-s0`, which removes it from the cut it is in now.
+
+```
+
+A cycle is `APLAN004`, reported by the shared post-state check with the remedy
+the rule carries rather than by a message this command wrote for itself.
+
+```
+$ aplan dep add A-01 --after M-s1
+? 2
+aplan: refusing to make `A-01` come after `M-s1`: it would add 1 finding(s) `check` reports:
+  APLAN004 A-01: dependency cycle: A-01 → M-s1 → B-01 → M-s0 → A-01
+      fix: Break the cycle by removing one `blocked_by` edge; a plan with a cycle has no valid execution order.
+
+```
+
+```
+$ aplan dep add A-01 --after A-01
+? 2
+aplan: `A-01` cannot come after itself
+
+```
