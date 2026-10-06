@@ -51,6 +51,106 @@ fn repo(config: &str) -> tempfile::TempDir {
     dir
 }
 
+/// **Emptying a cut leaves a plan that still loads** (`A1-363`).
+///
+/// It did not. The removal rewrote the list in place and kept the
+/// `blocked_by:` key, so the last member taken out left a key with no value:
+/// YAML `null`, where the schema wants an array, and the file stopped loading.
+/// `aplan mv` could write a plan `aplan check` could not read.
+///
+/// Both list forms, because only one was broken -- the flow branch rewrote to
+/// `blocked_by: []`, a valid empty array, and the block branch is the form `add`
+/// and the importer write.
+#[test]
+fn emptying_a_cut_leaves_a_plan_that_loads_in_either_list_form() {
+    for members in ["blocked_by: [A-1]", "blocked_by:\n  - A-1"] {
+        let dir = repo("root: aplan\n");
+        let root = dir.path();
+        // Re-write the first cut with the list form under test.
+        write_task(
+            root,
+            "M-0",
+            "The first cut",
+            &format!("tags: [milestone]\n{members}"),
+        );
+
+        let out = common::run(root, &["mv", "A-1", "--cut", "M-1"]);
+        assert_eq!(out.code, 0, "the move was refused: {}", out.text());
+
+        // The one thing that was wrong: the plan the move left behind.
+        let after = common::run(root, &["check"]);
+        assert_eq!(
+            after.code,
+            0,
+            "`mv` wrote a plan that does not load ({members:?}): {}",
+            after.text()
+        );
+        assert!(
+            !after.text().contains("APLAN001"),
+            "the emptied cut no longer parses ({members:?}): {}",
+            after.text()
+        );
+        // And the cut that lost its work is reported, at the severity `A1-134`
+        // chose for it rather than as a refusal.
+        assert!(
+            after.text().contains("APLAN021"),
+            "an emptied cut should still be reported ({members:?}): {}",
+            after.text()
+        );
+    }
+}
+
+/// **A member can leave a settled cut; it cannot be added to one** (`A1-362`).
+///
+/// One `resolve` carried "never extend a settled cut" for three callers, and
+/// `plan_removal` is not one that extends. So moving finished work *out* of a
+/// finished cut was refused, and told the caller that "adding an unfinished task
+/// to a settled cut would break it" about the cut it was leaving.
+#[test]
+fn a_settled_cut_can_be_left_but_not_extended() {
+    let dir = repo("root: aplan\n");
+    let root = dir.path();
+    // `M-0` is finished, and so is the work in it.
+    write_task(
+        root,
+        "A-1",
+        "Finished work",
+        "effort_days: 1\npaths:\n- \"*.yml\"\nevidence:\n  - kind: file\n\
+         \x20   ref: .aplan.yml",
+    );
+    let a1 = root.join("aplan/tasks/A-1.md");
+    let body = std::fs::read_to_string(&a1).expect("A-1");
+    std::fs::write(&a1, body.replace("status: todo", "status: done")).expect("A-1 done");
+    let m0 = root.join("aplan/tasks/M-0.md");
+    let body = std::fs::read_to_string(&m0).expect("M-0");
+    std::fs::write(
+        &m0,
+        body.replace(
+            "status: todo",
+            "status: done\nevidence:\n  - kind: file\n    ref: .aplan.yml",
+        ),
+    )
+    .expect("M-0 done");
+
+    // Leaving is allowed, and what it leaves is the gate's to report.
+    let out = common::run(root, &["mv", "A-1", "--cut", "M-1"]);
+    assert_eq!(
+        out.code,
+        0,
+        "a member could not leave a settled cut: {}",
+        out.text()
+    );
+
+    // Extending one is still refused, which is what the guard is for.
+    let out = common::run(root, &["mv", "A-2", "--cut", "M-0"]);
+    assert_ne!(out.code, 0, "a settled cut was extended: {}", out.text());
+    assert!(
+        out.text().contains("settled cut") && out.text().contains("M-0"),
+        "the refusal should name the cut being added to: {}",
+        out.text()
+    );
+}
+
 /// The first measured case, and the one that has now closed (`A1-134`).
 ///
 /// `APLAN021` used to ask whether a milestone's `blocked_by` was *empty*, and a

@@ -1,0 +1,5 @@
+root: aplan
+tag_families:
+  priority:
+    members: [priority-p0, priority-p1]
+    require: exactly-one

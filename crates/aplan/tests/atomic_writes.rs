@@ -360,19 +360,20 @@ fn every_plan_write_goes_through_save() {
     // this list: `emit::write_task` opens with `create_new(true)`, which cannot
     // clobber because it fails if the file exists, and its cut edits go through
     // `save` already.
-    let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
-    // **Every crate, discovered rather than listed.** A hand-kept list is the
-    // weakness that let `aplan-mcp` keep this defect through `A1-246`: the scan
-    // named the crates somebody had thought of. Walking the workspace means a
-    // crate that grows its first plan write is covered on the commit that adds
-    // it, which is the whole point of the audit (`A1-270`'s audit).
-    let crates: Vec<std::path::PathBuf> = std::fs::read_dir(root.join("crates"))
-        .expect("crates")
-        .flatten()
-        .map(|e| e.path().join("src"))
-        .filter(|p| p.is_dir())
-        .chain(std::iter::once(root.join("xtask/src")))
-        .collect();
+    // **Every crate, discovered rather than listed, at every depth, and all of
+    // each file.** A hand-kept list is the weakness that let `aplan-mcp` keep
+    // this defect through `A1-246`: the scan named the crates somebody had
+    // thought of. The walk, the recursion and the `#[cfg(test)]` handling now
+    // live in `common::sources`, which says what each of them was getting
+    // wrong -- this scan could not see past the first test module, and
+    // `aplan-output/src/lib.rs` keeps forty production items after its one
+    // (`A1-354`, audit).
+    //
+    // `aplan-interop` needs no exemption and the reason is in its code rather
+    // than in a list here: `emit::write_task` opens with `create_new(true)`,
+    // which cannot clobber because it fails if the file exists, and its cut
+    // edits go through `save` already.
+    let root = common::sources::workspace_root();
     // **One, and the list is the argument.** Two artefact writers were exempt
     // here and both were wrong: `roadmap.json` is *merged* rather than rendered
     // (`A1-033`) and `AGENTS.md` keeps the repository's own prose around a
@@ -411,60 +412,47 @@ fn every_plan_write_goes_through_save() {
     ];
     let mut raw = Vec::new();
     let mut scanned = 0usize;
-    for entry in crates
-        .iter()
-        .flat_map(|d| std::fs::read_dir(d).expect("crate src").flatten())
-    {
-        let path = entry.path();
-        if path.extension().is_some_and(|x| x == "rs") {
-            scanned += 1;
-            let text = std::fs::read_to_string(&path).expect("read");
-            let mut current = String::new();
-            // Production only. A fixture writing its own temp files is not the
-            // hazard, and `mod tests` is where most of them are -- the first
-            // pass at this scan reported four of them in `test_policy`, which
-            // is a helper it had misattributed anyway.
-            let production = text
-                .split_once("\n#[cfg(test)]")
-                .map_or(text.as_str(), |(before, _)| before);
-            for (n, line) in production.lines().enumerate() {
-                if let Some(rest) = line
-                    .strip_prefix("fn ")
-                    .or_else(|| line.strip_prefix("pub fn "))
-                {
-                    current = rest.split('(').next().unwrap_or_default().to_string();
-                }
-                // The call, not a mention of it: these files discuss the defect
-                // in prose, and a comment naming it is the opposite of one.
-                let trimmed = line.trim_start();
-                if trimmed.starts_with("//") || trimmed.starts_with("///") {
-                    continue;
-                }
-                // Every way to put bytes in a file, not just the one this
-                // defect happened to use. `fs::write` is what the six call
-                // sites were; `File::create` and an `OpenOptions` that creates
-                // or truncates are the same hazard spelled differently, and a
-                // gate that only knew the first would pass the day somebody
-                // wrote the second (`A1-246`'s audit).
-                //
-                // A bare `.write(true).open()` is not a write: three of those
-                // are permission *probes*, which open without modifying so the
-                // refusal names the file before the work rather than after.
-                let opens_to_write = line.contains("OpenOptions")
-                    && production
-                        .lines()
-                        .skip(n)
-                        .take(6)
-                        .any(|l| l.contains(".create(") || l.contains(".truncate("));
-                let writes =
-                    line.contains("fs::write(") || line.contains("File::create(") || opens_to_write;
-                if writes && !exempt.iter().any(|(f, _)| *f == current) {
-                    raw.push(format!(
-                        "{}:{} in `{current}`",
-                        path.file_name().unwrap_or_default().to_string_lossy(),
-                        n + 1
-                    ));
-                }
+    for path in common::sources::all_sources(&root) {
+        scanned += 1;
+        let text = std::fs::read_to_string(&path).expect("read");
+        let mut current = String::new();
+        // Production only. A fixture writing its own temp files is not the
+        // hazard, and `mod tests` is where most of them are -- the first pass
+        // at this scan reported four of them in `test_policy`, which is a
+        // helper it had misattributed anyway.
+        let production = common::sources::production_lines(&text);
+        for (i, (n, line)) in production.iter().enumerate() {
+            if let Some(name) = common::sources::enclosing_fn(line) {
+                current = name.to_string();
+            }
+            // The call, not a mention of it: these files discuss the defect in
+            // prose, and a comment naming it is the opposite of one.
+            if common::sources::is_comment(line) {
+                continue;
+            }
+            // Every way to put bytes in a file, not just the one this defect
+            // happened to use. `fs::write` is what the six call sites were;
+            // `File::create` and an `OpenOptions` that creates or truncates are
+            // the same hazard spelled differently, and a gate that only knew
+            // the first would pass the day somebody wrote the second
+            // (`A1-246`'s audit).
+            //
+            // A bare `.write(true).open()` is not a write: three of those are
+            // permission *probes*, which open without modifying so the refusal
+            // names the file before the work rather than after.
+            let opens_to_write = line.contains("OpenOptions")
+                && production
+                    .iter()
+                    .skip(i)
+                    .take(6)
+                    .any(|(_, l)| l.contains(".create(") || l.contains(".truncate("));
+            let writes =
+                line.contains("fs::write(") || line.contains("File::create(") || opens_to_write;
+            if writes && !exempt.iter().any(|(f, _)| *f == current) {
+                raw.push(format!(
+                    "{}:{n} in `{current}`",
+                    path.file_name().unwrap_or_default().to_string_lossy()
+                ));
             }
         }
     }
@@ -484,11 +472,9 @@ fn every_plan_write_goes_through_save() {
     // The exemptions must still name real functions, or this audit narrows
     // itself every time one is renamed. Empty today, and kept so the next
     // exemption has to say why in a place somebody reviews.
-    let all: String = crates
+    let all: String = common::sources::all_sources(&root)
         .iter()
-        .flat_map(|d| std::fs::read_dir(d).expect("crate src").flatten())
-        .filter(|e| e.path().extension().is_some_and(|x| x == "rs"))
-        .map(|e| std::fs::read_to_string(e.path()).unwrap_or_default())
+        .map(|p| std::fs::read_to_string(p).unwrap_or_default())
         .collect();
     for (f, why) in exempt {
         assert!(

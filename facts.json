@@ -53,6 +53,14 @@
       "what": "a `--cut` argument may be the milestone id or the label the cut reports itself under, on every command that takes one"
     },
     {
+      "name": "supersede.successor_is_placed_and_classified",
+      "what": "a successor inherits the predecessor's subject tags and is judged in the cut `--cut` names, so `supersede` itself can repair a plan that requires a tag family and a cut membership"
+    },
+    {
+      "name": "import.carries_the_plans_vocabulary",
+      "what": "`import` gives every task it writes the tags the invocation names, and says which declared `tag_families` member the import would otherwise leave missing, so a plan with a mandatory vocabulary can be imported into"
+    },
+    {
       "name": "milestone.release_holds_cuts",
       "what": "a milestone tagged `release` holds the cuts it closes: `APLAN021` accepts it and `roadmap` rolls up their work rather than reporting none"
     },
@@ -105,8 +113,28 @@
       "what": "`--color=auto|always|never` overrides the terminal detection in both directions, reaching everything the tool prints -- its findings, its refusals, and `clap`'s own usage errors -- while the machine formats stay byte-identical at every setting"
     },
     {
+      "name": "traces.structured_documents",
+      "what": "a `traces` anchor may address a node of a YAML or JSON document, as a JSON Pointer (`#/states/provisioning`) or a JSONPath (`#$.states.provisioning`)"
+    },
+    {
+      "name": "traces.unstamped_is_reported",
+      "what": "a `done` task that stamps none of its anchored `traces` is reported by `APLAN028`, rather than exempt as a task closed before drift was enabled"
+    },
+    {
+      "name": "generated.names_the_build_that_wrote_it",
+      "what": "a generated `ROADMAP.status.md` and `AGENTS.md` block carry a comment naming the version and surface that wrote them, and a drift report names the build doing the checking"
+    },
+    {
       "name": "why.cut_bounded_by_default",
       "what": "`aplan why` reports an unfinished cut as itself rather than walking into its members, and names the traversal that produced every answer; `--all` asks for the complete closure"
+    },
+    {
+      "name": "identity.reads_a_per_user_file",
+      "what": "a claimant's name may come from a per-user file outside the repository, read between the environment variable and git's `user.name`, and holding nothing a rule reads"
+    },
+    {
+      "name": "ids.sequential_survives_concurrent_writers",
+      "what": "a command that mints an id re-reads the plan and mints again when another writer takes it first, so concurrent writers do not serialise on the id"
     }
   ],
   "commands": [
@@ -160,6 +188,15 @@
         "json"
       ],
       "name": "why"
+    },
+    {
+      "about": "What the plan says the next version must be",
+      "default_format": "human",
+      "formats": [
+        "human",
+        "json"
+      ],
+      "name": "version"
     },
     {
       "about": "Print the dependency graph as Mermaid, whole or scoped",
@@ -273,6 +310,30 @@
       "name": "drop"
     },
     {
+      "about": "Record who is working on a task, so two actors sharing a repository can see it. Refuses to take a task somebody else holds unless `--from` names them, and refuses to overwrite a claim made between reading and writing",
+      "default_format": null,
+      "formats": [],
+      "name": "claim"
+    },
+    {
+      "about": "Drop a claim, naming whose it was. Anybody may run it, so a claim nobody released can always be cleared; the record of who held it is in the diff",
+      "default_format": null,
+      "formats": [],
+      "name": "release"
+    },
+    {
+      "about": "Record that work on a task has started. The claim is checked against the repository afterwards, so this is a statement `verify` can contradict rather than one it takes on trust",
+      "default_format": null,
+      "formats": [],
+      "name": "start"
+    },
+    {
+      "about": "Record that work on a task has stopped, returning it to `todo`. Not a closure: nothing is claimed about the work, which is what `close` is for",
+      "default_format": null,
+      "formats": [],
+      "name": "stop"
+    },
+    {
       "about": "Move tasks between cuts, editing both milestones or neither",
       "default_format": null,
       "formats": [],
@@ -331,6 +392,12 @@
       "name": "dep"
     },
     {
+      "about": "Add, remove or rename a tag: `tag add A cli`, `tag rm A cli`, and `tag rename epic-a epic-b` across every task that carries it",
+      "default_format": null,
+      "formats": [],
+      "name": "tag"
+    },
+    {
       "about": "Import proposals from another tool's format into `aplan` tasks. Lossy by design, and says so: every field the task model cannot hold is reported",
       "default_format": null,
       "formats": [],
@@ -343,7 +410,7 @@
       "name": "add"
     },
     {
-      "about": "Run an MCP server over stdio, exposing a deliberately small tool set (`identity`, `ready`, `why`, `check`, `verify`, `add`, `show`, `dep`, `close`) to an agent. `close` goes through the same evidence gate as the CLI, in both directions: an agent cannot close through MCP what it could not close here, and is not refused what this command records",
+      "about": "Run an MCP server over stdio, exposing a deliberately small tool set (`identity`, `ready`, `why`, `check`, `verify`, `add`, `show`, `dep`, `close`, `claim`, `release`, `start`, `stop`) to an agent. `close` goes through the same evidence gate as the CLI, in both directions: an agent cannot close through MCP what it could not close here, and is not refused what this command records",
       "default_format": null,
       "formats": [],
       "name": "mcp"
@@ -410,6 +477,7 @@
     "test.max_memory",
     "test.max_processes",
     "test.name",
+    "test.output_lines",
     "test.run",
     "test.run_selects",
     "test.skipped",
@@ -424,20 +492,33 @@
     "url.timeout_seconds",
     "url.wrap",
     "version",
+    "version.check",
+    "version.check.command",
+    "version.check.max_memory",
+    "version.check.max_processes",
+    "version.check.timeout_seconds",
+    "version.check.wrap",
+    "version.current",
+    "version.current.command",
+    "version.current.max_memory",
+    "version.current.max_processes",
+    "version.current.timeout_seconds",
+    "version.current.wrap",
     "version.levels",
     "version.levels.cut",
     "version.levels.release",
     "version.levels.task",
+    "version.release_tag",
     "version.require_impact"
   ],
   "counts": {
-    "behaviours": 27,
-    "commands": 33,
-    "config_keys": 61,
+    "behaviours": 34,
+    "commands": 39,
+    "config_keys": 75,
     "evidence_kinds": 5,
     "formats": 9,
-    "mcp_tools": 9,
-    "rules": 44
+    "mcp_tools": 13,
+    "rules": 53
   },
   "evidence_kinds": [
     "commit",
@@ -499,6 +580,22 @@
     {
       "description": "Close a task with evidence, resolved before it is written: a cited commit must exist and touch the task's `paths`, a cited file must exist, and a cited test must be one a configured runner lists. Refuses exactly what the CLI refuses; evidence is a citation to be resolved, never a score the caller asserts. It never runs a test and never fetches a url, and whatever nothing here could check is named in `unchecked` rather than left looking like a pass. `aplan_verify` resolves the whole plan.",
       "name": "aplan_close"
+    },
+    {
+      "description": "Record that you are working on a task, so other agents sharing this repository can see it and `aplan_ready` can be filtered to what nobody holds. Two agents cannot both be told they hold one task: the write is a compare-and-swap, and the second is refused rather than overwriting the first. Taking a task somebody holds needs `from` naming them, which is checked. The name comes from `as`, else `APLAN_OWNER`, else the repository's git user, else the operating system's; it is never read from `.aplan.yml`, because several actors share one repository.",
+      "name": "aplan_claim"
+    },
+    {
+      "description": "Drop a claim, reporting whose it was. Any caller may release, because a claim lasts until it is released or taken over and an abandoned one has to be clearable by somebody else; the record of who held it is in the diff. Releasing a task nobody holds changes nothing and says so.",
+      "name": "aplan_release"
+    },
+    {
+      "description": "Record that work on a task has begun, setting `in_progress`. A claim rather than a proof, and checked like one: `aplan_verify` reports `APLAN053` where the repository holds nothing matching the task's `paths`, so a status nobody acted on does not pass as progress. Refuses a task that is already terminal, because nothing reopens finished work.",
+      "name": "aplan_start"
+    },
+    {
+      "description": "Record that work on a task has stopped, returning it to `todo`. Not a closure: it claims nothing about what was done, which is what `aplan_close` is for. Refuses a task that is not `in_progress`, since there is then nothing to stop.",
+      "name": "aplan_stop"
     }
   ],
   "rules": [
@@ -540,7 +637,7 @@
     {
       "code": "APLAN008",
       "severity": "error",
-      "title": "traces anchors resolve to real headings"
+      "title": "traces anchors resolve to a real heading or node"
     },
     {
       "code": "APLAN009",
@@ -640,7 +737,7 @@
     {
       "code": "APLAN028",
       "severity": "error",
-      "title": "a done task stamps every trace it stamps any of"
+      "title": "a done task stamps every trace that can be stamped"
     },
     {
       "code": "APLAN029",
@@ -721,8 +818,53 @@
       "code": "APLAN044",
       "severity": "warning",
       "title": "a closed task claims less of the released version than its level implies, without saying why"
+    },
+    {
+      "code": "APLAN045",
+      "severity": "warning",
+      "title": "a live task's traced section is unchanged since the task was last touched"
+    },
+    {
+      "code": "APLAN046",
+      "severity": "error",
+      "title": "a done task's ratifiers are done"
+    },
+    {
+      "code": "APLAN047",
+      "severity": "error",
+      "title": "a `contains` names a milestone that exists, and closes no loop"
+    },
+    {
+      "code": "APLAN048",
+      "severity": "error",
+      "title": "the released version has moved as far as the closed tasks require"
+    },
+    {
+      "code": "APLAN049",
+      "severity": "error",
+      "title": "the artifact agrees with what the plan claims about compatibility"
+    },
+    {
+      "code": "APLAN050",
+      "severity": "error",
+      "title": "a recorded `version` is on a release, and is a version this tool can read"
+    },
+    {
+      "code": "APLAN051",
+      "severity": "warning",
+      "title": "a tag is not one edit from a word that changes what this tool does"
+    },
+    {
+      "code": "APLAN052",
+      "severity": "warning",
+      "title": "`cross-cutting` is not on a task that is a member of a cut"
+    },
+    {
+      "code": "APLAN053",
+      "severity": "warning",
+      "title": "a task that is `in_progress` has something in the repository to show for it"
     }
   ],
   "schema_version": "v1",
-  "version": "0.3.0"
+  "version": "0.4.0"
 }

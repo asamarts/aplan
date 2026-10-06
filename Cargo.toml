@@ -20,22 +20,26 @@ default-members = ["crates/aplan"]
 # report the same string as a published release, or a consumer pinning by
 # `--version` pins nothing (`A1-060`). `ci/scripts/release.sh` refuses to tag
 # while this is set, so releasing is an explicit bump.
-version = "0.3.0"
+version = "0.4.0"
 edition = "2024"
-rust-version = "1.85"
+# Raised from 1.85 to match the locked graph, which needed 1.88 through
+# `darling 0.23` and had done since before anyone noticed: the declaration was
+# a promise a source adopter could not keep, and `cargo xtask msrv` now checks
+# it on every run (`A1-327`, pre-public adoption evidence item 15).
+rust-version = "1.88"
 license = "Apache-2.0 OR MIT"
 repository = "https://github.com/asamarts/aplan"
 authors = ["aplan contributors"]
 
 [workspace.dependencies]
-aplan-core = { path = "crates/aplan-core", version = "0.3.0" }
-aplan-config = { path = "crates/aplan-config", version = "0.3.0" }
-aplan-output = { path = "crates/aplan-output", version = "0.3.0" }
-aplan-evidence = { path = "crates/aplan-evidence", version = "0.3.0" }
-aplan-attest = { path = "crates/aplan-attest", version = "0.3.0" }
-aplan-interop = { path = "crates/aplan-interop", version = "0.3.0" }
-aplan-mcp = { path = "crates/aplan-mcp", version = "0.3.0" }
-aplan = { path = "crates/aplan", version = "0.3.0" }
+aplan-core = { path = "crates/aplan-core", version = "0.4.0" }
+aplan-config = { path = "crates/aplan-config", version = "0.4.0" }
+aplan-output = { path = "crates/aplan-output", version = "0.4.0" }
+aplan-evidence = { path = "crates/aplan-evidence", version = "0.4.0" }
+aplan-attest = { path = "crates/aplan-attest", version = "0.4.0" }
+aplan-interop = { path = "crates/aplan-interop", version = "0.4.0" }
+aplan-mcp = { path = "crates/aplan-mcp", version = "0.4.0" }
+aplan = { path = "crates/aplan", version = "0.4.0" }
 
 anyhow = "1"
 thiserror = "2"
@@ -43,20 +47,26 @@ serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 serde_yaml_ng = "0.10"
 schemars = "1"
-jsonschema = { version = "0.49", default-features = false }
+jsonschema = { version = "0.58", default-features = false }
 clap = { version = "4", features = ["derive", "cargo", "env", "wrap_help"] }
 
-# MCP server (A1-024). Pinned at 2.x deliberately: rmcp 3.x requires rustc 1.88,
-# and this workspace commits to `rust-version = "1.85"`, so moving to 3.x is an
-# MSRV decision about consumers, not a version bump.
-rmcp = { version = "2.2.0", features = ["server", "transport-io"] }
+# MCP server (A1-024), on 3.x since `A1-331`. It was held at 2.x because 3.x
+# "requires rustc 1.88, and this workspace commits to 1.85" -- and the 2.x it
+# stayed on pulled `darling 0.23`, which requires 1.88 anyway, so the constraint
+# bought nothing and cost a major version (`A1-327`). Moving cost one signature
+# and two constructors: 3.x widened `call_tool`'s reply to an enum. The MSRV is
+# unchanged at 1.88 either way, which `cargo xtask msrv` now checks rather than
+# anybody asserting it.
+rmcp = { version = "3.4.0", features = ["server", "transport-io"] }
 tokio = { version = "1.53", features = ["rt-multi-thread", "macros", "io-std"] }
 globset = "0.4"
 ignore = "0.4"
-# Randomness for `id_strategy: ulid` (`A1-047`), and nothing else: a ULID's 80
-# random bits are the whole mechanism, so the alternative was a ULID crate that
-# brings `rand` for the same fifteen lines.
-getrandom = "0.3"
+# Randomness for `id_strategy: ulid` (`A1-047`) and for the jitter on an id-race
+# retry (`A1-230`), and nothing else: a ULID's 80 random bits are the whole
+# mechanism, so the alternative was a ULID crate that brings `rand` for the same
+# fifteen lines. The jitter wants no more than that either -- unbiased is not a
+# property a backoff window needs, and a failed draw falls back to the window.
+getrandom = "0.4"
 anstream = "1"
 anstyle = "1"
 unicode-width = "0.2"
@@ -76,6 +86,13 @@ module_name_repetitions = "allow"
 missing_errors_doc = "allow"
 missing_panics_doc = "allow"
 must_use_candidate = "allow"
+# New in clippy 1.99. It wants `assert_eq!(x, [] as [T; 0])` wherever a test
+# writes `assert!(x.is_empty())`, so that a failure shows the value. The point
+# is fair and the suggested form is not: it needs the element type spelled out
+# at 62 call sites across 20 files, and reads worse than the predicate it
+# replaces. Allowed deliberately rather than silently; whether those assertions
+# should say what they saw is a question about diagnostics, not about a lint.
+assert_is_empty = "allow"
 
 [profile.release]
 lto = "thin"

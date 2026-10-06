@@ -16,7 +16,7 @@ aplan: no task `MISSING` in this plan
 ```
 $ aplan close A-001 --evidence note:phonecall
 ? 2
-aplan: `note` evidence needs a `captured` date; add it by hand rather than via `close`
+aplan: `note` evidence needs a `captured` date, which this tool will not invent; write it into the task by hand
 
 ```
 

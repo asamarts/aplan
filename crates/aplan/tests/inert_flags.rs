@@ -150,10 +150,15 @@ fn scratch() -> tempfile::TempDir {
 fn fixture(dir: &Path, plan: Plan) {
     std::fs::create_dir_all(dir.join("aplan/tasks")).expect("mkdir");
     std::fs::create_dir_all(dir.join("src/one")).expect("mkdir");
+    // `version.current` so `aplan version` has a number to do arithmetic on;
+    // without it the command refuses before it opens anything and `--repo` is
+    // unreachable (`A1-313`). Silent for every other command: `APLAN048` needs
+    // a release tag, and this plan's own repository has none.
+    let declares = "version:\n  current:\n    command: [echo, 0.1.0]\n";
     let config = if plan == Plan::Strict {
-        "root: aplan\ndeny_warnings: true\n"
+        format!("root: aplan\ndeny_warnings: true\n{declares}")
     } else {
-        "root: aplan\n"
+        format!("root: aplan\n{declares}")
     };
     std::fs::write(dir.join(".aplan.yml"), config).expect("config");
     std::fs::write(dir.join("src/one/a.rs"), "fn main() {}\n").expect("src");
@@ -342,6 +347,15 @@ fn elsewhere() -> std::path::PathBuf {
         let dir = scratch();
         std::fs::write(dir.path().join("other.txt"), "x\n").expect("file");
         commit_all(dir.path());
+        // A release tag, so `aplan version --repo` has a different *window* to
+        // find and not merely a different directory to stand in. Without it
+        // both repositories answer "no release tag is reachable" and the flag
+        // is indistinguishable from the default (`A1-313`).
+        let repo = git2::Repository::open(dir.path()).expect("open");
+        let head = repo.head().expect("head").peel_to_commit().expect("commit");
+        let sig = git2::Signature::now("t", "t@e.com").expect("sig");
+        repo.tag("v9.9.9", head.as_object(), &sig, "a release", false)
+            .expect("tag");
         dir
     });
     dir.path().to_path_buf()
@@ -383,6 +397,11 @@ fn writes(command: &str) -> bool {
         "add"
             | "amend"
             | "attest"
+            // `A1-359`'s four. Omitting one is not a silent miss: the probe
+            // runs against the shared fixture, writes to it, and the next
+            // read-only run reports a plan that moved under it, which is how
+            // this was caught.
+            | "claim"
             | "close"
             | "dep"
             | "drop"
@@ -392,6 +411,9 @@ fn writes(command: &str) -> bool {
             | "import"
             | "init"
             | "mv"
+            | "release"
+            | "start"
+            | "stop"
             | "supersede"
     )
 }
@@ -528,6 +550,15 @@ const PROBES: &[Probe] = &[
     // it, which is what this audit asks (`A1-241`).
     p("add", "--from", Some("bulk.yml"), &[]),
     p("add", "--id", Some("X-9"), &["Newtask"]),
+    // `D-1` is held by `kim` in this fixture, which is what lets each of these
+    // two runs differ by its flag alone (`A1-359`). For `--as`, both runs write
+    // and they differ in the name recorded: the base takes whatever identity
+    // this machine offers, and on a machine offering none it refuses instead,
+    // which is a difference either way. For `--from`, the base is refused
+    // because somebody holds the task and the flag is what permits the
+    // takeover.
+    p("claim", "--as", Some("probe"), &["D-1", "--from", "kim"]),
+    p("claim", "--from", Some("kim"), &["D-1", "--as", "probe"]),
     p("add", "--phase", Some("3"), &["Newtask"]),
     p("add", "--blocked-by", Some("D-1"), &["Newtask"]),
     p("add", "--tag", Some("docs"), &["Newtask"]),
@@ -569,6 +600,11 @@ const PROBES: &[Probe] = &[
     p("check", "--cut", Some("M-b"), &[]),
     p("check", "--tag", Some("docs"), &[]),
     p("check", "--owner", Some("ada"), &[]),
+    // `--unclaimed` on every command that flattens `SelectArgs` (`A1-359`).
+    // Every non-milestone task in this fixture has an owner, so the flag
+    // narrows to the two milestones -- which is a difference, and the one the
+    // audit asks about.
+    p("check", "--unclaimed", None, &[]),
     p("check", "--status", Some("in_progress"), &[]),
     p("check", "--format", Some("json"), &[]),
     p("check", "--no-require-effort", None, &[]),
@@ -607,6 +643,7 @@ const PROBES: &[Probe] = &[
     p("graph", "--cut", Some("M-b"), &[]),
     p("graph", "--tag", Some("docs"), &[]),
     p("graph", "--owner", Some("ada"), &[]),
+    p("graph", "--unclaimed", None, &[]),
     p("graph", "--status", Some("in_progress"), &[]),
     p("graph", "--reach", Some("downstream:D-1"), &[]),
     p("graph", "--membership", None, &[]),
@@ -627,6 +664,14 @@ const PROBES: &[Probe] = &[
         "import",
         "--dry-run",
         None,
+        &["PLAN.md", "--format", "checklist"],
+    ),
+    // The tag reaches every imported task, so the "what will happen" block
+    // shows it and the run differs from the one without (`A1-357`).
+    p(
+        "import",
+        "--tag",
+        Some("area-x"),
         &["PLAN.md", "--format", "checklist"],
     ),
     p(
@@ -667,12 +712,14 @@ const PROBES: &[Probe] = &[
     p("paths", "--cut", Some("M-b"), &[]),
     p("paths", "--tag", Some("docs"), &[]),
     p("paths", "--owner", Some("ada"), &[]),
+    p("paths", "--unclaimed", None, &[]),
     p("paths", "--status", Some("in_progress"), &[]),
     p("ready", "--explain", None, &[]),
     p("ready", "--format", Some("json"), &[]),
     p("ready", "--cut", Some("M-b"), &[]),
     p("ready", "--tag", Some("docs"), &[]),
     p("ready", "--owner", Some("ada"), &[]),
+    p("ready", "--unclaimed", None, &[]),
     p("ready", "--status", Some("in_progress"), &[]),
     p("roadmap", "--format", Some("json"), &[]),
     p("roadmap", "--regenerate-with", Some("x"), &[]),
@@ -687,6 +734,7 @@ const PROBES: &[Probe] = &[
     p("due", "--cut", Some("M-b"), &[]),
     p("due", "--tag", Some("docs"), &[]),
     p("due", "--owner", Some("ada"), &[]),
+    p("due", "--unclaimed", None, &[]),
     p("due", "--status", Some("in_progress"), &[]),
     p("stale", "--older-than", Some("0"), &[]),
     p("stale", "--as-of", Some("2026-01-01"), &[]),
@@ -695,19 +743,25 @@ const PROBES: &[Probe] = &[
     p("stale", "--cut", Some("M-b"), &[]),
     p("stale", "--tag", Some("docs"), &[]),
     p("stale", "--owner", Some("ada"), &[]),
+    p("stale", "--unclaimed", None, &[]),
     p("stale", "--status", Some("in_progress"), &[]),
     p("summary", "--format", Some("json"), &[]),
     p("summary", "--cut", Some("M-b"), &[]),
     p("summary", "--tag", Some("docs"), &[]),
     p("summary", "--owner", Some("ada"), &[]),
+    p("summary", "--unclaimed", None, &[]),
     p("summary", "--status", Some("in_progress"), &[]),
     p("supersede", "--cut", Some("M-b"), &["D-4", "Successor"]),
     p("supersede", "--effort", Some("4"), &["D-4", "Successor"]),
     p("supersede", "--owner", Some("ada"), &["D-4", "Successor"]),
+    // `D-4` carries `docs`, so the successor inherits one tag without the flag
+    // and carries this one with it: the line naming them differs either way.
+    p("supersede", "--tag", Some("area-x"), &["D-4", "Successor"]),
     p("tasks", "--format", Some("json"), &[]),
     p("tasks", "--cut", Some("M-b"), &[]),
     p("tasks", "--tag", Some("docs"), &[]),
     p("tasks", "--owner", Some("ada"), &[]),
+    p("tasks", "--unclaimed", None, &[]),
     p("tasks", "--status", Some("in_progress"), &[]),
     p("tree", "--depth", Some("1"), &["D-2"]),
     p("tree", "--live", None, &["D-2"]),
@@ -715,10 +769,12 @@ const PROBES: &[Probe] = &[
     p("vacuity", "--cut", Some("M-b"), &[]),
     p("vacuity", "--tag", Some("docs"), &[]),
     p("vacuity", "--owner", Some("ada"), &[]),
+    p("vacuity", "--unclaimed", None, &[]),
     p("vacuity", "--status", Some("in_progress"), &[]),
     p("verify", "--cut", Some("M-b"), &[]),
     p("verify", "--tag", Some("docs"), &[]),
     p("verify", "--owner", Some("ada"), &[]),
+    p("verify", "--unclaimed", None, &[]),
     p("verify", "--status", Some("in_progress"), &[]),
     p("verify", "--format", Some("json"), &[]),
     p("verify", "--repo", Some("{elsewhere}"), &[]),
@@ -728,6 +784,13 @@ const PROBES: &[Probe] = &[
     p("verify", "--execute", None, &[]),
     warned("verify", "--deny-warnings", None, &[]),
     strict("verify", "--no-deny-warnings", None, &[]),
+    // The id is required before `--format` is reached, the same trap `why` had:
+    // without it the bare form refuses and every format looks accepted.
+    p("version", "--format", Some("json"), &["D-1"]),
+    // And the bare form, which is the only one that reads a repository at all:
+    // `{elsewhere}` carries a release tag and this plan's own does not, so the
+    // window moves and with it the number (`A1-313`).
+    p("version", "--repo", Some("{elsewhere}"), &[]),
     p("why", "--format", Some("json"), &["D-1"]),
     // `D-9` waits on the cut `M-b`, so the bounded answer names the cut and the
     // complete one walks into its membership (`A1-263`).

@@ -871,6 +871,9 @@ pub struct TestResolver {
     /// the citations that would have used this runner are skipped rather than
     /// reported as names it does not list.
     faults: RefCell<Vec<Option<RunnerFault>>>,
+    /// Which failing tests have already shown their output in this run
+    /// (`A1-365`), keyed the way `executed` is: by runner and name.
+    shown: RefCell<std::collections::BTreeSet<(usize, String)>>,
     /// What a *miss* looks like for each runner, learned once from a sentinel
     /// and only when a citation has passed under `--execute` (`A1-167`).
     misses: RefCell<Vec<Option<MissProfile>>>,
@@ -984,12 +987,14 @@ impl TestResolver {
         let executed = RefCell::new(std::collections::BTreeMap::new());
         let skips = RefCell::new(vec![None; runners.len()]);
         let costs = RefCell::new(vec![Cost::default(); runners.len()]);
+        let shown = RefCell::new(std::collections::BTreeSet::new());
         Self {
             runners,
             repo_root,
             execute,
             listings,
             faults,
+            shown,
             misses,
             unproven,
             executed,
@@ -1104,12 +1109,20 @@ impl TestResolver {
                 out.push(self.stopped(runner, breach, ev, task, file));
                 Executed::Stopped
             }
-            Outcome::Failed => Executed::Ran(false),
+            Outcome::Failed(shown) => {
+                // Attached to the first citation of this test and referred to
+                // afterwards (`A1-365`, criterion 5): one failing test cited by
+                // many tasks must not print its output once per citation --
+                // measured on one adopter's plan, 86 citations over nine names.
+                // Two distinct failing tests stay distinguishable because the
+                // excerpt is keyed by runner and name.
+                Executed::Failed(self.first_sighting(runner, &ev.reference, shown))
+            }
             Outcome::Passed { proves_nothing } => {
                 if proves_nothing {
                     self.note_unproven(runner, &ev.reference);
                 }
-                Executed::Ran(true)
+                Executed::Passed
             }
         }
     }
@@ -1118,7 +1131,7 @@ impl TestResolver {
     fn outcome_of(&self, runner: usize, name: &str) -> Option<Outcome> {
         let key = (runner, name.to_string());
         if let Some(hit) = self.executed.borrow().get(&key) {
-            return Some(*hit);
+            return Some(hit.clone());
         }
         let (outcome, settled) = self.execute_once(runner, name)?;
         // Only a verdict this run can stand behind is kept. The probe that
@@ -1129,7 +1142,7 @@ impl TestResolver {
         // completed, and a real false green went unreported where it had been
         // caught before (`A1-243`, audit).
         if settled {
-            self.executed.borrow_mut().insert(key, outcome);
+            self.executed.borrow_mut().insert(key, outcome.clone());
         }
         Some(outcome)
     }
@@ -1171,7 +1184,21 @@ impl TestResolver {
                     judged.is_some(),
                 ))
             }
-            Ok(Ran::Exited(_)) => Some((Outcome::Failed, true)),
+            Ok(Ran::Exited(out)) => {
+                // The one place the streams still exist. They were captured and
+                // then dropped here, which is the whole of the defect
+                // (`A1-365`).
+                let bound = crate::excerpt::Bound {
+                    lines: self.runners[runner]
+                        .output_lines
+                        .unwrap_or(crate::excerpt::DEFAULT_LINES),
+                    ..crate::excerpt::Bound::default()
+                };
+                Some((
+                    Outcome::Failed(crate::excerpt::of(&out.stdout, &out.stderr, bound)),
+                    true,
+                ))
+            }
             Ok(Ran::TimedOut(_)) => unreachable!("no limit was set"),
             Err(why) => {
                 self.fault(
@@ -1185,6 +1212,79 @@ impl TestResolver {
                 None
             }
         }
+    }
+
+    /// The first citation of `name` in this run, and what it may show
+    /// (`A1-365`).
+    ///
+    /// One failing test cited by many tasks printed its output once per
+    /// citation, which on one adopter's plan would be 86 copies over nine
+    /// distinct names. The excerpt goes to whichever citation is judged first
+    /// and the rest point at it, so the bound is on the *run* rather than on
+    /// each finding.
+    ///
+    /// Every finding still names the test, so two distinct failing tests remain
+    /// distinguishable whatever order they are read in.
+    fn first_sighting(&self, runner: usize, name: &str, shown: Option<String>) -> Shown {
+        let key = (runner, name.to_string());
+        if self.shown.borrow().contains(&key) {
+            return Shown::Already;
+        }
+        self.shown.borrow_mut().insert(key);
+        match shown {
+            Some(text) => Shown::Excerpt(text),
+            None => Shown::Nothing,
+        }
+    }
+
+    /// `APLAN014` for a test that ran and failed (`A1-365`).
+    ///
+    /// Extracted because the message now has three shapes and the caller is at
+    /// the length this workspace lints for: what the test printed, a pointer to
+    /// where it was printed, and the bare statement for a runner that printed
+    /// nothing or was told to show nothing.
+    fn failed(ev: &Evidence, task: &Task, file: &Path, shown: Shown) -> Diagnostic {
+        let name = &ev.reference;
+        let mut detail = Vec::new();
+        let (message, instruction) = match shown {
+            Shown::Excerpt(text) => {
+                // The lines go in `detail`, not into the message: a message is
+                // prose every surface folds to its own width, and reflowing an
+                // assertion would rearrange the thing being read (`A1-365`).
+                detail = text.lines().map(str::to_string).collect();
+                (
+                    format!("test `{name}` failed under `--execute`, and printed:"),
+                    format!(
+                        "Read the output beneath the finding: it is the tail of what the \
+                         runner printed, bounded and redacted. Then make `{name}` pass, or \
+                         stop citing it as evidence. `test.output_lines` widens it, and `0` \
+                         suppresses it for a repository whose tests print things it would \
+                         rather not publish."
+                    ),
+                )
+            }
+            Shown::Already => (
+                format!("test `{name}` failed under `--execute`"),
+                format!(
+                    "Another finding for `{name}` in this run carries what it printed; it ran \
+                     once and is reported against every citation. Make it pass, or stop citing \
+                     it as evidence."
+                ),
+            ),
+            Shown::Nothing => (
+                format!("test `{name}` failed under `--execute` and printed nothing"),
+                format!(
+                    "Nothing was captured, so the runner is silent on failure or \
+                     `test.output_lines: 0` is set. Run `{name}` through the configured \
+                     command to see why, then make it pass or stop citing it as evidence."
+                ),
+            ),
+        };
+        Diagnostic::error(code::TEST_FAILED, message)
+            .with_task(&task.id)
+            .with_file(file)
+            .with_agent_instruction(instruction)
+            .with_detail(detail)
     }
 
     /// The finding for a command the kernel stopped at its cap (`A1-310`).
@@ -1492,10 +1592,10 @@ impl TestResolver {
                 continue;
             };
             // The citation is qualified and the runner lists it bare.
-            if let Some(hit) = listed.iter().find(|n| *n == bare) {
-                if hit != name {
-                    return Some(hit.clone());
-                }
+            if let Some(hit) = listed.iter().find(|n| *n == bare)
+                && hit != name
+            {
+                return Some(hit.clone());
             }
             // The reverse: the runner qualifies and the citation does not.
             if let Some(hit) = listed
@@ -1751,24 +1851,13 @@ impl EvidenceResolver for TestResolver {
         // test, and reporting it as `APLAN014` would say the cited test failed
         // when nothing ran it. Recorded and reported once, like the listing
         // failure above, instead of ending the run (`A1-066`).
-        let ran = match self.execute_citation(runner, ev, task, file, out) {
+        let shown = match self.execute_citation(runner, ev, task, file, out) {
             // Stopped at its cap: the finding is already pushed, and a citation
             // whose command never ran is neither proved nor disproved.
-            Executed::Stopped => return Ok(()),
-            Executed::NotAsked => None,
-            Executed::Ran(passed) => Some(passed),
+            Executed::Stopped | Executed::NotAsked | Executed::Passed => return Ok(()),
+            Executed::Failed(shown) => shown,
         };
-        if ran == Some(false) {
-            out.push(
-                Diagnostic::error(
-                    code::TEST_FAILED,
-                    format!("test `{}` failed under `--execute`", ev.reference),
-                )
-                .with_task(&task.id)
-                .with_file(file)
-                .with_agent_instruction("Make the cited test pass, or stop citing it as evidence."),
-            );
-        }
+        out.push(Self::failed(ev, task, file, shown));
         Ok(())
     }
 
@@ -2086,23 +2175,49 @@ impl Cost {
 ///
 /// Distinct from [`Executed`], which is what happened to one *citation*: a
 /// dozen citations of one name share one of these and each get their own.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+// `Clone` without `Copy`: `Failed` now carries the excerpt, which is a `String`
+// (`A1-365`). The memoised copy is read once per citation of the name, which is
+// a handful of clones of a bounded few lines.
+#[derive(Debug, Clone, PartialEq, Eq)]
 enum Outcome {
     /// It passed. `proves_nothing` when the output was indistinguishable from
     /// what this runner produces for a name that does not exist (`APLAN037`).
     Passed { proves_nothing: bool },
     /// It ran and failed, which is a failure for every citation naming it.
-    Failed,
+    ///
+    /// Carries what it printed, bounded and redacted (`A1-365`). The pilot's
+    /// finding was that this variant used to carry nothing, so a failure that
+    /// only happened inside a hosted runner could not be diagnosed from the CI
+    /// record at all. `None` where the runner suppressed it with
+    /// `output_lines: 0`, or where it printed nothing.
+    Failed(Option<String>),
     /// The kernel stopped it at a declared cap (`A1-310`).
     Stopped(Breach),
+}
+
+/// What a failed citation may show of the output (`A1-365`).
+enum Shown {
+    /// The bounded, redacted tail of what the command printed.
+    Excerpt(String),
+    /// Another finding in this run carries it: the test ran once, and its
+    /// output is reported once however many tasks cite it.
+    Already,
+    /// The command printed nothing, or the runner was told to show nothing.
+    Nothing,
 }
 
 /// What `--execute` did with one citation (`A1-310`).
 enum Executed {
     /// `--execute` was not asked for, so nothing was run and nothing is claimed.
     NotAsked,
-    /// It ran, and this is whether it passed.
-    Ran(bool),
+    /// It ran and passed.
+    Passed,
+    /// It ran and failed, with what to show for it (`A1-365`).
+    ///
+    /// `Shown::Excerpt` on the first citation of this test in the run, and
+    /// `Shown::Already` on the rest, so the output appears once however many
+    /// tasks cite it.
+    Failed(Shown),
     /// It was stopped at a declared cap. The finding is already reported, and
     /// the citation is neither proved nor disproved.
     Stopped,
@@ -2147,6 +2262,21 @@ pub enum Breach {
     /// `max`. **Not a kill** -- the command carries on and exits however it
     /// likes, which is why this is read rather than inferred from the status.
     Processes,
+}
+
+impl Breach {
+    /// The config key this breach is of, without the block that declares it.
+    ///
+    /// One mapping, because there are two callers and a third would have been
+    /// the second chance to write `max_memory` where `max_processes` belonged:
+    /// the key names what the adopter has to change, and a message naming the
+    /// wrong one sends them to a limit that was never reached.
+    pub(crate) fn key(self) -> &'static str {
+        match self {
+            Breach::Memory => "max_memory",
+            Breach::Processes => "max_processes",
+        }
+    }
 }
 
 /// One cgroup, created for one command and removed with it.
@@ -2699,6 +2829,142 @@ fn spawn_capped(
     spawn_in_cage(argv, dir, what, limit, caps, &cgroup_root())
 }
 
+/// Run a command a config key declares, once, and return what it printed
+/// (`A1-313`).
+///
+/// [`spawn_capped`] with the four keys every declaring block carries applied,
+/// and every outcome that is not "it exited zero with output" turned into an
+/// [`Error::Exec`] that names the key. It is the seam a caller outside this
+/// module uses, because the cage, the timeout and the cost sampler are this
+/// module's and a fourth hand-written spawn would be the fourth chance to leave
+/// one of them out -- which is how `url.check` came to declare `max_memory` and
+/// never apply it (`A1-310`, audit).
+///
+/// Not a resolver: this answers one question for the run rather than resolving a
+/// citation, so it has no [`EvidenceResolver`] to hang off and no cost to fold
+/// into a subject's total.
+pub(crate) fn run_declared(
+    argv: Vec<String>,
+    wrap: Option<&[String]>,
+    dir: &Path,
+    what: &str,
+    timeout_seconds: u64,
+    max_memory: Option<&str>,
+    max_processes: Option<u32>,
+) -> Result<String, Error> {
+    let caps = Caps {
+        memory_bytes: max_memory.and_then(|s| aplan_config::parse_size(s).ok()),
+        max_processes,
+    };
+    let argv: Vec<String> = match wrap {
+        Some(prefix) => prefix.iter().chain(argv.iter()).cloned().collect(),
+        None => argv,
+    };
+    let limit = std::time::Duration::from_secs(timeout_seconds);
+    let (ran, cost) = spawn_capped(&argv, dir, what, limit, caps)?;
+    declared_outcome(what, ran, cost)
+}
+
+/// Run a declared command and report whether it *exited zero*, rather than what
+/// it printed (`A1-314`).
+///
+/// [`run_declared`]'s sibling, for the checker whose whole answer is its exit
+/// status. A non-zero exit is the answer here and an error there, which is the
+/// one thing the two cannot share: `version.check` says "not compatible" by
+/// refusing, and reporting that as a command that could not be run would turn
+/// the finding this rule exists for into a configuration fault.
+///
+/// Everything that is *not* an exit -- a command that could not be launched,
+/// one the kernel stopped, one that ran out of time -- is still an error, and
+/// no claim is called false on the strength of it.
+pub(crate) fn run_declared_ok(
+    argv: Vec<String>,
+    wrap: Option<&[String]>,
+    dir: &Path,
+    what: &str,
+    timeout_seconds: u64,
+    max_memory: Option<&str>,
+    max_processes: Option<u32>,
+) -> Result<(bool, Cost), Error> {
+    let caps = Caps {
+        memory_bytes: max_memory.and_then(|s| aplan_config::parse_size(s).ok()),
+        max_processes,
+    };
+    let argv: Vec<String> = match wrap {
+        Some(prefix) => prefix.iter().chain(argv.iter()).cloned().collect(),
+        None => argv,
+    };
+    let limit = std::time::Duration::from_secs(timeout_seconds);
+    let (ran, cost) = spawn_capped(&argv, dir, what, limit, caps)?;
+    // The cost is carried out whichever way the answer goes, because a command
+    // that took eleven minutes and nine gigabytes is worth reporting even when
+    // it said no -- and *especially* when it was stopped for saying it
+    // (`A1-309`, `A1-310`).
+    declared_result(what, ran, cost).map(|out| (out.status.success(), cost))
+}
+
+/// What [`run_declared`] makes of what the command did.
+///
+/// Separated from the spawn because the three failing outcomes are the ones
+/// worth pinning and the hardest to produce: a cap breach needs a delegated
+/// cgroup, and a timeout needs a command that hangs for as long as the test is
+/// willing to wait. Here they are values, and the messages they produce are
+/// asserted rather than hoped for.
+fn declared_outcome(what: &str, ran: Ran, cost: Cost) -> Result<String, Error> {
+    let out = declared_result(what, ran, cost)?;
+    if out.status.success() {
+        return Ok(String::from_utf8_lossy(&out.stdout).into_owned());
+    }
+    let detail = String::from_utf8_lossy(&out.stderr);
+    let detail = detail.lines().next().unwrap_or("no output").trim();
+    Err(Error::Exec(format!(
+        "`{what}`: the command exited {}: {detail}",
+        out.status
+            .code()
+            .map_or("abnormally".to_string(), |c| c.to_string())
+    )))
+}
+
+/// Everything that is not an exit, as an error; any exit, as itself
+/// (`A1-314`).
+///
+/// **The split is the one thing the two callers cannot share.** A non-zero exit
+/// is a *fault* for a command that was asked to print something and an *answer*
+/// for one that was asked a yes-or-no question, so the decision belongs to the
+/// caller and everything before it belongs here: a command that could not be
+/// launched, one the kernel stopped, one that ran out of time. None of those is
+/// an answer, and no claim may be called false on the strength of one.
+fn declared_result(what: &str, ran: Ran, cost: Cost) -> Result<std::process::Output, Error> {
+    // A command the kernel stopped answered nothing, and the adopter's own cap
+    // must not be reported as the command's answer (ADR-0033).
+    if let Some(breach) = cost.breach {
+        return Err(Error::Exec(format!(
+            "`{what}`: it was stopped because it exceeded `{what}.{}`, so it neither \
+             answered nor refused",
+            breach.key()
+        )));
+    }
+    match ran {
+        // **A death by signal is not an exit.** `ExitStatus::success()` is false
+        // for a command the kernel killed and `code()` is `None`, so a checker
+        // that segfaulted read as "the answer is no" -- and `version.check`'s no
+        // means *the artifact is incompatible*. A crashing `cargo semver-checks`
+        // would have reported a break that was not there, which is the one thing
+        // a checker that could not be asked must never do (`A1-314`, audit).
+        Ran::Exited(out) if out.status.code().is_none() => Err(Error::Exec(format!(
+            "`{what}`: it was killed rather than exiting ({}), so it neither answered nor \
+             refused",
+            out.status
+        ))),
+        Ran::Exited(out) => Ok(out),
+        Ran::TimedOut(after) => Err(Error::Exec(format!(
+            "`{what}`: it was still running after {}s and was stopped, so nothing was \
+             learned. Raise `{what}.timeout_seconds`, or `0` for no limit",
+            after.as_secs()
+        ))),
+    }
+}
+
 /// [`spawn_capped`], against a cage root already found (`A1-310`).
 ///
 /// Both answers this takes are real states of a real machine -- a delegated
@@ -2808,7 +3074,7 @@ fn spawn_in_cage(
     // would be this function's own busy-wait rather than the adopter's
     // (`A1-121`, found by its audit).
     if limit.is_zero() {
-        let status = child.wait().map_err(&fail)?;
+        let status = child.wait().map_err(fail)?;
         return Ok(finish(Ran::Exited(std::process::Output {
             status,
             stdout: out_thread.map(join_or_empty).unwrap_or_default(),
@@ -2818,7 +3084,7 @@ fn spawn_in_cage(
 
     let started = std::time::Instant::now();
     let status = loop {
-        if let Some(status) = child.try_wait().map_err(&fail)? {
+        if let Some(status) = child.try_wait().map_err(fail)? {
             break status;
         }
         if started.elapsed() >= limit {
@@ -3114,10 +3380,7 @@ impl UrlResolver {
                 *self.fault.borrow_mut() = Some(format!(
                     "the configured `url.check` command was stopped: it exceeded `url.{}`, so \
                      it neither answered nor refused",
-                    match breach {
-                        Breach::Memory => "max_memory",
-                        Breach::Processes => "max_processes",
-                    }
+                    breach.key()
                 ));
                 return None;
             }
@@ -3373,10 +3636,7 @@ pub fn report_unmatched_paths(
         // remedy rather than the generic advice: a glob naming a directory that
         // *is* tracked needs `/**`, and saying so turns this from a puzzle into
         // a one-character fix.
-        let looks_like_a_directory = !glob.contains('*')
-            && tracked
-                .iter()
-                .any(|p| p.starts_with(std::path::Path::new(&glob)));
+        let looks_like_a_directory = looks_like_a_tracked_directory(&glob, tracked);
         let instruction = if looks_like_a_directory {
             format!(
                 "`{glob}` names a directory, and a glob without a wildcard names one file. \
@@ -3433,6 +3693,87 @@ pub fn report_unmatched_paths(
         );
     }
     Ok(())
+}
+
+/// Whether `glob` names a directory the repository tracks, rather than a file.
+///
+/// The shape every pilot hit: `paths: [src]` owns the file `src` and nothing
+/// under it, so a repository full of `src/**` matches none of it. Shared
+/// between `APLAN019` and `APLAN053` because both reach the same wrong
+/// conclusion otherwise -- "nothing matches these paths" -- and only this
+/// distinguishes a glob that needs one character from work that does not exist
+/// (`A1-359`, audit). Two rules diagnosing the same thing two ways is how one
+/// of them ends up giving advice that cannot work.
+fn looks_like_a_tracked_directory(glob: &str, tracked: &[PathBuf]) -> bool {
+    !glob.contains('*') && tracked.iter().any(|p| p.starts_with(Path::new(glob)))
+}
+
+/// `APLAN053`: a task says it is under way and the repository holds nothing it
+/// claims (`A1-359`).
+///
+/// **The derived half of a stored claim.** `in_progress` arrives with nothing to
+/// resolve against, unlike `done`, whose citations `verify` resolves -- and an
+/// unresolvable claim is the failure this tool exists to expose. So the status
+/// is stored *and* checked: the premise is not "do not store claims", it is "do
+/// not take claims on trust".
+///
+/// Read from the index rather than from history, which is what makes it cheap
+/// and what makes it fair: a file written and staged counts, so a task started
+/// a minute ago that has created what it owns is silent. The tracked set is
+/// already computed once per `verify` for `APLAN019`, so this costs one pass
+/// over globs that were going to be compiled anyway.
+///
+/// Silent for a task with no `paths`, because there is then nothing to judge the
+/// claim by and `APLAN023` already asks for them. Silent for globs that will not
+/// compile, which is `APLAN032`'s question rather than this one -- an unusable
+/// glob matching nothing must not be read as the work not existing.
+pub fn report_unstarted_in_progress(
+    task: &Task,
+    file: &Path,
+    tracked: &[PathBuf],
+    out: &mut Vec<Diagnostic>,
+) {
+    if task.status != Status::InProgress || task.paths.is_empty() {
+        return;
+    }
+    let Some(set) = build_globset(&task.paths) else {
+        return;
+    };
+    if tracked.iter().any(|p| set.is_match(p)) {
+        return;
+    }
+    // **The bare-directory case gets the remedy that works** (`A1-359`, audit).
+    // `paths: [src]` with `src/a.rs` tracked matches nothing, and telling that
+    // author to `git add` their files is advice they have already followed: the
+    // glob needs `/**`. `APLAN019` has said so since `A1-022` and is silent
+    // here, because a task that is merely under way cites nothing for its globs
+    // to bind -- so this rule has to say it or nobody does.
+    let directory = task
+        .paths
+        .iter()
+        .find(|glob| looks_like_a_tracked_directory(glob, tracked));
+    let instruction = match directory {
+        Some(glob) => format!(
+            "`{glob}` names a directory, and a glob without a wildcard names one file. \
+             Write `{glob}/**` to own everything under it. The work may well have started; \
+             nothing can tell while the declaration matches nothing."
+        ),
+        None => "Either the work has not started, in which case `aplan stop <id>` says so, \
+                 or it has and its files are not added yet, in which case `git add` them. If \
+                 the task owns files that do not exist yet, its `paths` are a plan rather \
+                 than a claim and the status is the thing to change."
+            .to_string(),
+    };
+    out.push(
+        Diagnostic::warning(
+            code::UNSTARTED_IN_PROGRESS,
+            "this task is `in_progress`, and nothing the repository tracks matches its \
+             `paths`, so there is nothing to show the work has started",
+        )
+        .with_task(&task.id)
+        .with_file(file)
+        .with_agent_instruction(instruction),
+    );
 }
 
 /// Whether any citation this task makes binds through its `paths`.
@@ -3574,11 +3915,76 @@ mod tests {
     use super::{
         Breach, Cage, Caps, Cost, EvidenceResolver as _, LIST_TIMEOUT_SECS, Ran, TestResolver,
         URL_TIMEOUT_SECS, Unenforced, UrlResolver, listed_names, report_unmatched_paths,
-        root_under, spawn_in_cage, test_name_matches,
+        report_unstarted_in_progress, root_under, spawn_in_cage, test_name_matches,
     };
     use aplan_config::TestRunner;
     use aplan_core::code;
     use std::path::{Path, PathBuf};
+
+    /// **Each way a declared command can fail says which, and names the key**
+    /// (`A1-313`).
+    ///
+    /// Asserted against values rather than against a machine, because two of the
+    /// three need a state a test cannot cheaply produce: a cap breach needs a
+    /// delegated cgroup, and a timeout needs a command that hangs for as long as
+    /// the suite is willing to wait. The messages are what the adopter acts on,
+    /// and hoping they are right is how `url.check` came to declare a limit it
+    /// never applied (`A1-310`, audit).
+    #[test]
+    fn every_way_a_declared_command_fails_names_the_key() {
+        let ran = |argv: &str| {
+            let out = std::process::Command::new(argv)
+                .output()
+                .expect("a program every unix has");
+            Ran::Exited(out)
+        };
+        let breached = |b: Breach| Cost {
+            breach: Some(b),
+            ..Cost::default()
+        };
+
+        // Stopped at a cap: neither an answer nor a refusal, and the key named
+        // is the one that stopped it.
+        for (breach, key) in [
+            (Breach::Memory, "max_memory"),
+            (Breach::Processes, "max_processes"),
+        ] {
+            let err = super::declared_outcome("version.current", ran("true"), breached(breach))
+                .expect_err("a stopped command answered nothing");
+            let said = err.to_string();
+            assert!(
+                said.contains(&format!("`version.current.{key}`")) && said.contains("neither"),
+                "{said}"
+            );
+        }
+
+        // It exited non-zero, which is the command refusing rather than the
+        // machine stopping it.
+        let err = super::declared_outcome("version.current", ran("false"), Cost::default())
+            .expect_err("a non-zero exit is not an answer");
+        assert!(err.to_string().contains("exited 1"), "{err}");
+
+        // Its limit expired: nothing was learned, and the message says which key
+        // to raise rather than leaving the reader to find it.
+        let err = super::declared_outcome(
+            "version.current",
+            Ran::TimedOut(std::time::Duration::from_secs(7)),
+            Cost::default(),
+        )
+        .expect_err("an abandoned command answered nothing");
+        let said = err.to_string();
+        assert!(
+            said.contains("after 7s") && said.contains("version.current.timeout_seconds"),
+            "{said}"
+        );
+
+        // And the one that worked, so the pair is not three refusals.
+        assert_eq!(
+            super::declared_outcome("version.current", ran("true"), Cost::default())
+                .expect("it exited zero"),
+            ""
+        );
+    }
 
     /// [`spawn_capped`] with nothing declared, which is what most of these
     /// cases are about: the machinery around a command, not the cap on it.
@@ -3671,6 +4077,7 @@ mod tests {
     #[test]
     fn a_runner_with_no_timeout_configured_gets_the_default() {
         let runner = aplan_config::TestRunner {
+            output_lines: None,
             skipped: None,
             max_memory: None,
             max_processes: None,
@@ -3704,6 +4111,8 @@ mod tests {
             effort_days: None,
             blocked_by: Vec::new(),
             prefer_after: Vec::new(),
+            ratified_by: Vec::new(),
+            contains: Vec::new(),
             // A citation, because the rule is scoped to tasks that make one
             // (`A1-138`). A `test` rather than a `file` or a `commit`: those bind
             // *through* a glob, and a citation that binds silences the rule
@@ -3723,6 +4132,7 @@ mod tests {
             revisit_at: None,
             version_impact: None,
             version_impact_reason: None,
+            version: None,
         }
     }
 
@@ -3753,6 +4163,129 @@ mod tests {
         )
         .expect("no git access is needed without commit evidence");
         out
+    }
+
+    /// One `APLAN053` run: a task in `status` owning `paths`, against a
+    /// repository tracking `tracked`.
+    fn unstarted(
+        paths: &[&str],
+        tracked: &[&str],
+        status: aplan_core::Status,
+    ) -> Vec<aplan_core::Diagnostic> {
+        let mut task = task_owning(paths, status);
+        task.status = status;
+        let tracked: Vec<PathBuf> = tracked.iter().map(PathBuf::from).collect();
+        let mut out = Vec::new();
+        report_unstarted_in_progress(&task, Path::new("aplan/tasks/A-1.md"), &tracked, &mut out);
+        out
+    }
+
+    #[test]
+    fn aplan053_says_the_repository_holds_nothing_for_the_claim() {
+        // The message is the product. It has to say *why* the status is being
+        // questioned -- that nothing matching the `paths` is tracked -- rather
+        // than merely that the status is `in_progress`, which the reader can
+        // see. And the remedy has to name both ways out, because which one is
+        // right is the author's call: stop the task, or add the files.
+        let out = unstarted(
+            &["src/not-yet/**"],
+            &["src/other.rs"],
+            aplan_core::Status::InProgress,
+        );
+        assert_eq!(out.len(), 1, "the claim is contradicted, so it is reported");
+        assert_eq!(out[0].code, code::UNSTARTED_IN_PROGRESS);
+        assert!(
+            out[0].message.contains("in_progress") && out[0].message.contains("`paths`"),
+            "must say which claim and what was judged: {}",
+            out[0].message
+        );
+        let fix = out[0]
+            .agent_instruction
+            .as_deref()
+            .expect("a rule an author has to act on carries an instruction");
+        assert!(
+            fix.contains("aplan stop") && fix.contains("git add"),
+            "must name both ways out: {fix}"
+        );
+        assert_eq!(out[0].task.as_deref(), Some("A-1"), "names the task");
+    }
+
+    #[test]
+    fn aplan053_is_silent_where_it_has_nothing_to_judge_the_claim_by() {
+        // Three silences, each for its own reason, and all three matter: a rule
+        // that fires on any of them is one an adopter switches off.
+        assert!(
+            unstarted(
+                &["src/started.rs"],
+                &["src/started.rs"],
+                aplan_core::Status::InProgress
+            )
+            .is_empty(),
+            "the work exists, so there is nothing to report"
+        );
+        assert!(
+            unstarted(&[], &["src/a.rs"], aplan_core::Status::InProgress).is_empty(),
+            "no `paths` means nothing to judge the claim by; `APLAN023` asks for them"
+        );
+        for status in [
+            aplan_core::Status::Todo,
+            aplan_core::Status::Done,
+            aplan_core::Status::Dropped,
+            aplan_core::Status::Blocked,
+        ] {
+            assert!(
+                unstarted(&["src/not-yet/**"], &["src/other.rs"], status).is_empty(),
+                "`{status}` claims nothing about work having started"
+            );
+        }
+    }
+
+    #[test]
+    fn aplan053_offers_the_wildcard_when_the_glob_is_a_tracked_directory() {
+        // The remedy has to fit the cause. `paths: [src]` with `src/a.rs`
+        // tracked matches nothing, and the generic advice -- "add your files"
+        // -- is advice this author has already followed. `APLAN019` has said
+        // the right thing since `A1-022` and is silent here, because a task
+        // that is merely under way cites nothing for its globs to bind.
+        let out = unstarted(&["src"], &["src/a.rs"], aplan_core::Status::InProgress);
+        assert_eq!(out.len(), 1);
+        let fix = out[0].agent_instruction.as_deref().expect("an instruction");
+        assert!(
+            fix.contains("`src/**`") && fix.contains("names a directory"),
+            "the generic advice was given for the directory case: {fix}"
+        );
+        assert!(
+            !fix.contains("git add"),
+            "told to add files that are already added: {fix}"
+        );
+
+        // And the genuinely-missing case keeps the advice that fits it.
+        let out = unstarted(
+            &["lib/not-yet/**"],
+            &["src/a.rs"],
+            aplan_core::Status::InProgress,
+        );
+        let fix = out[0].agent_instruction.as_deref().expect("an instruction");
+        assert!(
+            fix.contains("git add") && fix.contains("aplan stop"),
+            "the directory advice leaked into the missing-work case: {fix}"
+        );
+    }
+
+    #[test]
+    fn aplan053_does_not_read_an_unusable_glob_as_work_that_is_missing() {
+        // `APLAN032`'s question, not this one. A glob that will not compile
+        // matches nothing, and reading that as "the work does not exist" would
+        // report a second finding for one defect, against the wrong rule.
+        assert!(
+            unstarted(
+                &["src/[unclosed"],
+                &["src/a.rs"],
+                aplan_core::Status::InProgress
+            )
+            .is_empty(),
+            "a broken glob is a declaration fault rather than absent work"
+        );
     }
 
     #[test]
@@ -4100,6 +4633,7 @@ mod tests {
     /// A runner that declares `skipped` and nothing else that matters here.
     fn skip_runner(skipped: &[&str], timeout_seconds: Option<u64>) -> aplan_config::TestRunner {
         aplan_config::TestRunner {
+            output_lines: None,
             skipped: Some(skipped.iter().map(|a| (*a).to_string()).collect()),
             max_memory: None,
             max_processes: None,
@@ -4171,6 +4705,8 @@ mod tests {
             effort_days: None,
             blocked_by: Vec::new(),
             prefer_after: Vec::new(),
+            ratified_by: Vec::new(),
+            contains: Vec::new(),
             evidence: vec![a_citation()],
             paths: Vec::new(),
             traces: Vec::new(),
@@ -4179,6 +4715,7 @@ mod tests {
             revisit_at: None,
             version_impact: None,
             version_impact_reason: None,
+            version: None,
         }
     }
 

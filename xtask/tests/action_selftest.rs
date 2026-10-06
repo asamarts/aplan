@@ -31,27 +31,44 @@ fn read(rel: &str) -> String {
     std::fs::read_to_string(&path).unwrap_or_else(|e| panic!("read {}: {e}", path.display()))
 }
 
-/// Every `.aplan.yml` key the pinned release knows, from the error it prints
-/// when it meets one it does not:
+/// Every top-level `.aplan.yml` key the pinned release knows.
 ///
-/// ```text
-/// unknown field `effort_days_per_week`, expected one of `require_effort`,
-/// `traces_root`, `no_traces`, `test`, `evidence`, `detect_drift`,
-/// `require_cut_membership`, `root`
+/// Read out of the released binary rather than out of this checkout, which is
+/// the whole point: `aplan facts` on the artifact published for the pinned tag
+/// reports what *it* accepts, and the source tree reports what the next release
+/// will. Taking it from the wrong one is how the fixture drifts ahead of the
+/// release and the workflow goes red a month later with nothing wrong in
+/// `action.yml` (`A1-278`).
+///
+/// ```console
+/// $ ./aplan --version
+/// aplan 0.3.0
+/// $ ./aplan facts | jq -r '.config_keys[] | split(".")[0]' | sort -u
 /// ```
 ///
-/// Copied from a real run rather than derived, because that is the only place
-/// the released binary's surface is stated. Raising the pinned version means
-/// widening this list from the same source.
-const KEYS_V0_2_0: &[&str] = &[
-    "require_effort",
-    "traces_root",
-    "no_traces",
-    "test",
-    "evidence",
+/// Twenty top-level keys of the sixty-one `v0.3.0` accepts; the rest are nested
+/// under one of these and arrive with it.
+const KEYS_V0_3_0: &[&str] = &[
+    "advisory",
+    "deny_warnings",
     "detect_drift",
+    "docs",
+    "effort_days_per_week",
+    "evidence",
+    "id_strategy",
+    "no_traces",
+    "policy",
     "require_cut_membership",
+    "require_effort",
+    "roadmap",
     "root",
+    "stale_after_days",
+    "tag_families",
+    "test",
+    "traces_external",
+    "traces_root",
+    "url",
+    "version",
 ];
 
 /// The workflow checks the fixture, and not this repository's plan.
@@ -101,17 +118,21 @@ fn the_fixture_config_uses_only_keys_the_pinned_release_knows() {
         // Top-level keys only: a nested one belongs to a key already checked.
         .filter(|l| !l.starts_with([' ', '\t', '-']))
         .filter_map(|l| l.split_once(':').map(|(k, _)| k))
-        .filter(|k| !KEYS_V0_2_0.contains(k))
+        .filter(|k| !KEYS_V0_3_0.contains(k))
         .collect();
     assert!(
         unknown.is_empty(),
         "the fixture's config uses {unknown:?}, which the release the workflow pins cannot \
-         parse. Widen `KEYS_V0_2_0` only when the pinned version is raised too"
+         parse. Widen `KEYS_V0_3_0` only when the pinned version is raised too"
     );
 }
 
-/// The fixture's plan is one the pinned release can load: `v0.2.0`'s task schema
-/// required `id`, `title`, `phase` and `status`, and knew no other fields.
+/// The fixture's plan is one the pinned release can load.
+///
+/// From the same source as the keys above, and for the same reason: `aplan
+/// schema` on the published artifact reports the task shape *it* validates
+/// against. `v0.3.0` added `prefer_after`, `revisit_at`, `version_impact` and
+/// `version_impact_reason` to what `v0.2.0` knew.
 #[test]
 fn the_fixture_tasks_carry_only_fields_the_pinned_release_knows() {
     const FIELDS: &[&str] = &[
@@ -122,11 +143,15 @@ fn the_fixture_tasks_carry_only_fields_the_pinned_release_knows() {
         "owner",
         "paths",
         "phase",
+        "prefer_after",
+        "revisit_at",
         "status",
         "tags",
         "title",
         "trace_fingerprints",
         "traces",
+        "version_impact",
+        "version_impact_reason",
     ];
     let dir = repo_root().join("ci/fixtures/action-selftest/tasks");
     let mut seen = 0;

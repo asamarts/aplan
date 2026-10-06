@@ -247,11 +247,11 @@ fn collect(
             });
         }
     }
-    if let Some((name, sub_matches)) = matches.subcommand() {
-        if let Some(sub) = cmd.find_subcommand(name) {
-            let next = if prefix.is_empty() { "aplan" } else { &path };
-            collect(sub, sub_matches, next, out);
-        }
+    if let Some((name, sub_matches)) = matches.subcommand()
+        && let Some(sub) = cmd.find_subcommand(name)
+    {
+        let next = if prefix.is_empty() { "aplan" } else { &path };
+        collect(sub, sub_matches, next, out);
     }
 }
 

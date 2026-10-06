@@ -148,12 +148,13 @@ fn scan(contents: &str) -> (Vec<Item>, BTreeMap<String, Section>, usize) {
         // separated from it by a blank line or a heading. p0000004's roadmap
         // wraps nearly every item, so dropping these would truncate most titles
         // mid-sentence.
-        if continuing && line.starts_with(char::is_whitespace) {
-            if let Some(last) = items.last_mut() {
-                last.text.push(' ');
-                last.text.push_str(trimmed);
-                continue;
-            }
+        if continuing
+            && line.starts_with(char::is_whitespace)
+            && let Some(last) = items.last_mut()
+        {
+            last.text.push(' ');
+            last.text.push_str(trimmed);
+            continue;
         }
         continuing = false;
 
@@ -810,6 +811,8 @@ impl ProposalSource for Checklist {
                 effort_days: None,
                 blocked_by: Vec::new(),
                 prefer_after: Vec::new(),
+                ratified_by: Vec::new(),
+                contains: Vec::new(),
                 evidence,
                 paths: Vec::new(),
                 traces: Vec::new(),
@@ -820,6 +823,7 @@ impl ProposalSource for Checklist {
                 revisit_at: None,
                 version_impact: None,
                 version_impact_reason: None,
+                version: None,
             });
         }
 
@@ -886,6 +890,11 @@ const NOT_CARRIED: &[NotCarried] = &[
         "the discretionary order, which is not a dependency and has nowhere to go in a list",
     ),
     NotCarried(
+        "ratified_by",
+        |t| !t.ratified_by.is_empty(),
+        "who has to bless this before it counts as finished, which a tick cannot record",
+    ),
+    NotCarried(
         "tags",
         |t| !t.tags.is_empty(),
         "labels a heading cannot hold, because a heading here is a cut",
@@ -926,6 +935,17 @@ struct Grouped<'a> {
     in_two_cuts: Vec<&'a str>,
     /// Milestones with no row to write, which produce no heading.
     empty_cuts: usize,
+    /// Milestones declaring `contains`, counted over the whole plan rather than
+    /// over `cuts` (`A1-333`): a container's rows live under the checkpoints
+    /// *beneath* it, so it frequently has none of its own and never appears
+    /// there. Counting it there reported nothing and looked like coverage.
+    containers: usize,
+    /// Releases recording the version they produced. Counted here for the reason
+    /// `containers` is: only a release may carry `version` (`APLAN050`), this
+    /// exporter writes no milestone as a row, and a `NOT_CARRIED` entry over the
+    /// rows could therefore never fire -- which is a claim of coverage rather
+    /// than coverage (`A1-333`, `A1-339`).
+    recorded_versions: usize,
     /// Cancelled cuts that still hold live work, whose members were written
     /// loose instead of under a heading that reads as a live section.
     cancelled_cuts: usize,
@@ -956,6 +976,8 @@ fn group<'a>(tasks: &[&'a Task]) -> Grouped<'a> {
             .values()
             .filter(|t| !t.is_milestone() && t.status == Status::Dropped)
             .count(),
+        containers: by_id.values().filter(|t| !t.contains.is_empty()).count(),
+        recorded_versions: by_id.values().filter(|t| t.version.is_some()).count(),
         ..Grouped::default()
     };
     // Which cut wrote each id, so a task named by two cuts appears once. First in
@@ -1128,6 +1150,33 @@ fn report_export_losses(grouped: &Grouped, to: &str, report: &mut Report) {
             &format!(
                 "{unticked_but_live} task(s) that are in progress or blocked are written as an \
                  empty box, because a checkbox has two states and the plan has five"
+            ),
+        );
+    }
+    // `contains` is a milestone's field, and this exporter writes no milestone as
+    // a row -- a heading here *is* a cut. So it is counted over the cuts rather
+    // than over `written`, where the `NOT_CARRIED` table would never have seen
+    // it: a table entry that cannot fire is a claim of coverage, not coverage
+    // (`A1-333`).
+    if grouped.containers > 0 {
+        report.not_carried(
+            to,
+            "contains",
+            &format!(
+                "{} cut(s) contain another: a checklist has one level of heading, \
+                 so the checkpoints beneath them are flattened and the nesting is lost",
+                grouped.containers
+            ),
+        );
+    }
+    if grouped.recorded_versions > 0 {
+        report.not_carried(
+            to,
+            "version",
+            &format!(
+                "{} release(s) record the version they produced: a checklist is work to do, \
+                 and what already shipped has no box to tick",
+                grouped.recorded_versions
             ),
         );
     }
@@ -1860,6 +1909,8 @@ mod tests {
             effort_days: None,
             blocked_by: Vec::new(),
             prefer_after: Vec::new(),
+            ratified_by: Vec::new(),
+            contains: Vec::new(),
             evidence: Vec::new(),
             paths: Vec::new(),
             traces: Vec::new(),
@@ -1868,6 +1919,7 @@ mod tests {
             revisit_at: None,
             version_impact: None,
             version_impact_reason: None,
+            version: None,
         }
     }
 

@@ -215,6 +215,56 @@ impl PartialOrd for OrderedEffort {
     }
 }
 
+/// Which work the weighted walk counts (`A1-352`).
+///
+/// **Not a filter, a weight.** `Remaining` leaves every node and every edge in
+/// the graph and gives a `done` task zero days, exactly as a milestone has
+/// always been a zero-weight passthrough here. That is what keeps it sound where
+/// `A1-214` refuses selection: nothing is asserted irrelevant and no chain is
+/// shortened by removing a constraint -- a finished constraint genuinely delays
+/// nothing, which is the whole content of the word "done".
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum Weigh {
+    /// Every task's own `effort_days`: how long this chain is, start to finish.
+    All,
+    /// Zero for `done`, `effort_days` otherwise: how much of it is still to do.
+    Remaining,
+}
+
+impl Weigh {
+    /// What one task contributes under this weighting.
+    fn of(self, t: &Task) -> f64 {
+        if self == Self::Remaining && t.status == Status::Done {
+            return 0.0;
+        }
+        t.effort_days.unwrap_or(0.0)
+    }
+
+    /// Whether a task is one of the rows this weighting reports.
+    ///
+    /// **Status, not weight** (`A1-352`, audit). Filtering the spine on "weighs
+    /// more than zero" reads a `todo` task with no `effort_days` as finished and
+    /// drops it: it contributes nothing to the total either way, but it is work
+    /// left and belongs on a list of what is left. `APLAN009` reports a missing
+    /// estimate as a warning precisely because plans carry them, so this is the
+    /// ordinary case rather than a corner.
+    fn reports(self, t: &Task) -> bool {
+        match self {
+            Self::All => true,
+            Self::Remaining => t.status != Status::Done,
+        }
+    }
+}
+
+/// The longest-path DP's two tables: each node's finish time, and the blocker
+/// that supplied it. Named rather than a tuple so the walk back cannot read one
+/// for the other.
+#[derive(Default)]
+struct LongestPaths<'a> {
+    finish: BTreeMap<&'a str, f64>,
+    pred: BTreeMap<&'a str, Option<&'a str>>,
+}
+
 /// An index over tasks by id. `BTreeMap` so iteration order is deterministic,
 /// diagnostics must not reorder between runs.
 #[derive(Debug, Default)]
@@ -575,10 +625,10 @@ impl<'a> Graph<'a> {
                 .filter(|b| self.blocks(d, b));
             // Exactly one, and not the task itself: a task that blocks itself is
             // `APLAN006`'s finding, and it releases nothing by being finished.
-            if let (Some(only), None) = (blocking.next(), blocking.next()) {
-                if only != d.id {
-                    *out.entry(only).or_default() += 1;
-                }
+            if let (Some(only), None) = (blocking.next(), blocking.next())
+                && only != d.id
+            {
+                *out.entry(only).or_default() += 1;
             }
         }
         out
@@ -891,30 +941,194 @@ impl<'a> Graph<'a> {
     }
 
     /// The unique known blockers of `v` that lie within `nodes` (self-edges and
-    /// unknown/outside ids dropped). Sorted, so downstream tie-breaks are stable.
+    /// unknown/outside ids dropped), **plus what `v` contains**. Sorted, so
+    /// downstream tie-breaks are stable.
+    ///
+    /// **Containment is read as an ordering edge, and on a valid plan it is
+    /// already there** (`A1-345`, audit). A container is not finished until
+    /// everything beneath it is, and `APLAN047` enforces exactly that: a
+    /// `contains` entry must also appear in `blocked_by`, or the checkpoint
+    /// "does not wait for what it holds". So on a plan `check` accepts this adds
+    /// nothing, and the set dedupes it.
+    ///
+    /// It earns its place on a plan `check` does *not* accept. `critical-path`
+    /// and `roadmap` are reports, not gates, so they render a plan mid-migration
+    /// to `contains` -- and the rollup descends `contains` whether or not
+    /// `blocked_by` agrees. Reading only `blocked_by` there put `crit 0.0d`
+    /// beside the held work's real effort: two quantities on one page, which is
+    /// the defect `A1-345` exists to remove, on the page of the author least
+    /// able to explain it.
+    ///
+    /// This is not `contains` becoming a dependency (ADR-0042 is deliberate that
+    /// it is not): `ready` never offers a checkpoint, `why` still answers about
+    /// declared edges, and no rule reads this. It is the longest-path DP's edge
+    /// set, and a walk that must not skip work cannot skip the work a checkpoint
+    /// holds.
     fn blockers_within(&self, v: &str, nodes: &BTreeSet<&'a str>) -> BTreeSet<&'a str> {
+        let held = self
+            .get(v)
+            .into_iter()
+            .flat_map(|t| t.contains.iter().map(String::as_str));
         self.blockers_of(v)
             .into_iter()
+            .chain(held)
             .filter_map(|b| nodes.get(b).copied())
             .filter(|&b| b != v)
             .collect()
     }
 
     /// The critical path: the longest `effort_days`-weighted chain of dependent
-    /// tasks. `None` if the graph is cyclic (a longest path is then undefined;
-    /// `check` reports the cycle as `APLAN004`). Dropped tasks are excluded, they
+    /// tasks. `None` if the walk is cyclic (a longest path is then undefined;
+    /// `check` reports a `blocked_by` cycle as `APLAN004` and a `contains` loop
+    /// as `APLAN047`). Dropped tasks are excluded, they
     /// are not going to happen. Milestones stay in the graph as zero-weight
     /// passthrough nodes, so a task that depends on a whole cut still inherits the
     /// cut's work, but a milestone is never the endpoint and is filtered out of
     /// the reported spine: a checkpoint is not itself work.
     pub fn critical_path(&self) -> Option<CriticalPath> {
-        let nodes: BTreeSet<&str> = self
-            .by_id
+        self.critical_path_within(&self.live_nodes())
+    }
+
+    /// The whole plan's longest chain under an explicit weighting (`A1-352`).
+    ///
+    /// The endpoint is chosen under the same weighting, which is the point: the
+    /// heaviest chain of *remaining* work ordinarily ends somewhere else than
+    /// the heaviest chain overall.
+    #[must_use]
+    pub fn weighted_path(&self, w: Weigh) -> Option<CriticalPath> {
+        let nodes = self.live_nodes();
+        let dp = self.longest_paths(&nodes, w)?;
+        let mut end: Option<&'a str> = None;
+        let mut end_finish = 0.0_f64;
+        for &v in &nodes {
+            // **The endpoint is a row this weighting reports** (`A1-352`,
+            // audit). A milestone is never one, and under `Remaining` neither is
+            // finished work: ending the chain there and then filtering the row
+            // away left an empty answer on a plan that plainly had work left,
+            // because every finish ties at zero when the estimates are missing
+            // and the tie breaks on the smallest id.
+            if self
+                .get(v)
+                .is_none_or(|t| t.is_milestone() || !w.reports(t))
+            {
+                continue;
+            }
+            let f = dp.finish[v];
+            if end.is_none() || f > end_finish {
+                end = Some(v);
+                end_finish = f;
+            }
+        }
+        Some(end.map_or_else(
+            || CriticalPath {
+                total_effort_days: 0.0,
+                tasks: Vec::new(),
+            },
+            |end| self.chain_to(&dp, end, w),
+        ))
+    }
+
+    /// The longest effort-weighted prerequisite chain **terminating at `id`**
+    /// (`A1-345`).
+    ///
+    /// **The full graph, with a fixed endpoint.** Every real edge is kept,
+    /// including prerequisites that cross a cut boundary, and only the endpoint
+    /// is chosen rather than derived: the answer is what must finish before this
+    /// checkpoint can, which is a different question from what the whole plan's
+    /// longest chain is.
+    ///
+    /// That is why it is sound where a selector is not (`A1-214`). Filtering
+    /// nodes first turns a fragment into a false path -- a chain whose blockers
+    /// were removed reads as shorter than it is. Nothing is removed here;
+    /// nothing outside the target's ancestry is asserted irrelevant, it is
+    /// simply not on the way to this checkpoint.
+    ///
+    /// A milestone is a zero-weight passthrough and is filtered from the
+    /// reported spine, exactly as in the whole-plan answer -- so naming a cut, a
+    /// container or a release gives the work that must precede it and never
+    /// invents effort for the checkpoint itself. A target with no live ancestry
+    /// gives an empty chain and a total of zero, which the caller says out loud
+    /// rather than printing nothing.
+    ///
+    /// **What a checkpoint holds is on the way to it**, at any depth. On a plan
+    /// `check` accepts that follows from `blocked_by` alone, because `APLAN047`
+    /// requires a container to wait on what it contains; the walk reads
+    /// `contains` too, so a plan mid-migration does not get a chain that
+    /// disagrees with its own rollup (`blockers_within` says why, and why that
+    /// is not `contains` becoming a dependency).
+    ///
+    /// An edge rather than a second pass over the target's own children, because
+    /// containment reached *through* the target's ancestry counts too: a release
+    /// waiting on a cut that holds a sub-cut is the case that proves it.
+    ///
+    /// `None` when `id` names nothing, when it is `dropped` (work that is not
+    /// going to happen has no chain leading to it), or when the walk is cyclic
+    /// -- a `blocked_by` cycle (`APLAN004`) or a `contains` loop (`APLAN047`),
+    /// both of which `check` reports and neither of which has a defensible
+    /// longest path.
+    #[must_use]
+    pub fn critical_path_to(&self, id: &str) -> Option<CriticalPath> {
+        self.weighted_path_to(id, Weigh::All)
+    }
+
+    /// The same chain under an explicit weighting (`A1-352`).
+    ///
+    /// [`Weigh::Remaining`] answers "what is left before this checkpoint",
+    /// which is the question an endpoint-bounded command is usually asked and
+    /// is *not* the tail of the longest chain: a chain that is mostly finished
+    /// can be the longest one while a shorter all-live chain is the real bound
+    /// on what remains. Re-running the walk is what makes it a bound rather
+    /// than a subtraction.
+    #[must_use]
+    pub fn weighted_path_to(&self, id: &str, w: Weigh) -> Option<CriticalPath> {
+        let target = self.get(id)?;
+        if target.status == Status::Dropped {
+            return None;
+        }
+        let nodes = self.live_nodes();
+        let end = *nodes.get(id)?;
+        let dp = self.longest_paths(&nodes, w)?;
+        Some(self.chain_to(&dp, end, w))
+    }
+
+    /// The chain terminating at each of `ids`, from **one** walk.
+    ///
+    /// [`critical_path_to`](Self::critical_path_to) answers about one checkpoint
+    /// and runs a whole-plan DP to do it, which is right for a command and wrong
+    /// for a report that asks about every borrowing row on the page: the walk
+    /// does not depend on the endpoint, only the predecessor trace does. The
+    /// roadmap asked ten times on a ten-release plan and paid for ten walks --
+    /// 472ms against 214ms for the same plan with no releases, measured at 4,870
+    /// tasks (`A1-345`, audit).
+    ///
+    /// Ids that name nothing, or name `dropped` work, are absent from the map
+    /// rather than present with an empty chain: the caller must be able to tell
+    /// "no chain leads here" from "nothing leads here". `None` when the walk is
+    /// cyclic, for the reason [`critical_path`](Self::critical_path) gives.
+    pub(crate) fn chains_to(
+        &self,
+        ids: &BTreeSet<&str>,
+    ) -> Option<BTreeMap<&'a str, CriticalPath>> {
+        let nodes = self.live_nodes();
+        let dp = self.longest_paths(&nodes, Weigh::All)?;
+        Some(
+            ids.iter()
+                .filter_map(|id| nodes.get(*id).copied())
+                .map(|end| (end, self.chain_to(&dp, end, Weigh::All)))
+                .collect(),
+        )
+    }
+
+    /// Every task that is going to happen: the walk's node set.
+    ///
+    /// Dropped work is excluded everywhere a chain is computed, so this is named
+    /// once rather than spelled out at each call.
+    fn live_nodes(&self) -> BTreeSet<&'a str> {
+        self.by_id
             .iter()
             .filter(|(_, t)| t.status != Status::Dropped)
             .map(|(id, _)| *id)
-            .collect();
-        self.critical_path_within(&nodes)
+            .collect()
     }
 
     /// The critical path over an explicit node set: used by [`critical_path`] for
@@ -924,51 +1138,69 @@ impl<'a> Graph<'a> {
     /// endpoint, and filtered from the reported spine. `None` if the induced
     /// subgraph is cyclic.
     pub(crate) fn critical_path_within(&self, nodes: &BTreeSet<&'a str>) -> Option<CriticalPath> {
-        let order = self.toposort_nodes(nodes)?;
-
-        // Longest-path DP in topological order: each task's finish is its own
-        // effort plus the greatest finish among its blockers.
-        let mut finish: BTreeMap<&str, f64> = BTreeMap::new();
-        let mut pred: BTreeMap<&str, Option<&str>> = BTreeMap::new();
-        for &v in &order {
-            let effort = self.get(v).and_then(|t| t.effort_days).unwrap_or(0.0);
-            let mut best: Option<&str> = None;
-            let mut best_finish = 0.0_f64;
-            for b in self.blockers_within(v, nodes) {
-                let f = finish[b];
-                if best.is_none() || f > best_finish {
-                    best = Some(b);
-                    best_finish = f;
-                }
-            }
-            finish.insert(v, effort + best_finish);
-            pred.insert(v, best);
-        }
-
+        let dp = self.longest_paths(nodes, Weigh::All)?;
         // The endpoint is the non-milestone task with the greatest finish
         // (smallest id on a tie, since `nodes` iterates in id order). A milestone
         // is a checkpoint, never the spine's endpoint; its finish never exceeds
         // its heaviest member's, so skipping it drops no chain.
-        let mut end: Option<&str> = None;
+        let mut end: Option<&'a str> = None;
         let mut end_finish = 0.0_f64;
         for &v in nodes {
             if self.get(v).is_some_and(Task::is_milestone) {
                 continue;
             }
-            let f = finish[v];
+            let f = dp.finish[v];
             if end.is_none() || f > end_finish {
                 end = Some(v);
                 end_finish = f;
             }
         }
+        match end {
+            Some(end) => Some(self.chain_to(&dp, end, Weigh::All)),
+            // Every node is a milestone, so there is no spine to report.
+            None => Some(CriticalPath {
+                total_effort_days: 0.0,
+                tasks: Vec::new(),
+            }),
+        }
+    }
 
-        // Walk predecessors back to the chain's start, then reverse into
-        // execution order.
+    /// The longest-path DP over `nodes`, in topological order: each node's
+    /// finish is its own effort plus the greatest finish among its blockers,
+    /// and its predecessor is the blocker that supplied that finish.
+    ///
+    /// One DP, because two questions share it -- *which chain is longest* and
+    /// *which chain ends here*. A second copy would be two answers to one
+    /// question, and the pair could drift (`A1-345`).
+    fn longest_paths(&self, nodes: &BTreeSet<&'a str>, w: Weigh) -> Option<LongestPaths<'a>> {
+        let order = self.toposort_nodes(nodes)?;
+        let mut dp = LongestPaths::default();
+        for &v in &order {
+            let effort = self.get(v).map_or(0.0, |t| w.of(t));
+            let mut best: Option<&str> = None;
+            let mut best_finish = 0.0_f64;
+            for b in self.blockers_within(v, nodes) {
+                let f = dp.finish[b];
+                if best.is_none() || f > best_finish {
+                    best = Some(b);
+                    best_finish = f;
+                }
+            }
+            dp.finish.insert(v, effort + best_finish);
+            dp.pred.insert(v, best);
+        }
+        Some(dp)
+    }
+
+    /// The chain the DP found ending at `end`, as a reported spine: walk
+    /// predecessors back to its start, reverse into execution order, then drop
+    /// the milestones, which are passthroughs rather than work.
+    fn chain_to(&self, dp: &LongestPaths<'a>, end: &'a str, w: Weigh) -> CriticalPath {
         let mut ids = Vec::new();
-        let mut cur = end;
+        let mut cur = Some(end);
         while let Some(v) = cur {
             ids.push(v);
-            cur = pred[v];
+            cur = dp.pred[v];
         }
         ids.reverse();
 
@@ -976,10 +1208,14 @@ impl<'a> Graph<'a> {
             .iter()
             .filter_map(|id| self.get(id))
             .filter(|t| !t.is_milestone())
+            // A `done` row is not work left and does not belong on a list of
+            // it. Under `All` every row stays, which is what makes the two
+            // answers comparable.
+            .filter(|t| w.reports(t))
             .map(|t| CriticalTask {
                 id: t.id.clone(),
                 title: t.title.clone(),
-                effort_days: t.effort_days.unwrap_or(0.0),
+                effort_days: w.of(t),
                 status: t.status,
             })
             .collect();
@@ -989,10 +1225,10 @@ impl<'a> Graph<'a> {
         // (`A1-074`). Adding `0.0` maps `-0.0` to `0.0` and leaves every other
         // value untouched.
         let total_effort_days = tasks.iter().map(|t| t.effort_days).sum::<f64>() + 0.0;
-        Some(CriticalPath {
+        CriticalPath {
             total_effort_days,
             tasks,
-        })
+        }
     }
 }
 
@@ -1011,6 +1247,8 @@ mod tests {
             effort_days: None,
             blocked_by: blocked_by.iter().map(|s| (*s).to_string()).collect(),
             prefer_after: Vec::new(),
+            ratified_by: Vec::new(),
+            contains: Vec::new(),
             evidence: Vec::new(),
             paths: Vec::new(),
             traces: Vec::new(),
@@ -1019,6 +1257,7 @@ mod tests {
             revisit_at: None,
             version_impact: None,
             version_impact_reason: None,
+            version: None,
         }
     }
 
@@ -1485,6 +1724,734 @@ mod tests {
         assert!(cp.tasks.is_empty());
         assert!((cp.total_effort_days - 0.0).abs() < 1e-9);
     }
+
+    // --- `critical_path_to`, the target-bounded chain (`A1-345`) ---
+
+    /// A checkpoint, `blocked_by` its members.
+    fn cut(id: &str, members: &[&str]) -> Task {
+        let mut t = task(id, Status::Todo, members);
+        t.tags = vec!["milestone".into()];
+        t
+    }
+
+    /// A container: it *holds* `held` and waits on them, which is the only shape
+    /// `APLAN047` accepts. A `contains` entry absent from `blocked_by` is an
+    /// error -- "this checkpoint does not wait for what it holds" -- so a test
+    /// that wrote one would be asserting behaviour on a plan `check` rejects.
+    ///
+    /// That is a mistake this file made once (`A1-345`, audit): every
+    /// containment case here declared `contains` alone, which made them look
+    /// like proof that the walk reads containment when the walk was reading the
+    /// `blocked_by` the model requires beside it. The helper exists so the shape
+    /// cannot be got wrong again; the one case that *is* about a plan
+    /// mid-migration says so in its name.
+    fn container(id: &str, held: &[&str]) -> Task {
+        let mut t = cut(id, held);
+        t.contains = held.iter().map(|h| (*h).to_string()).collect();
+        t
+    }
+
+    #[test]
+    fn a_named_target_gets_the_longest_chain_that_ends_at_it() {
+        // Two chains reach D; the heavier one is reported, and nothing after D
+        // is, because the question is what must finish before D can.
+        let a = task_e("A", &[], 3.0);
+        let b = task_e("B", &["A"], 1.0);
+        let c = task_e("C", &["A"], 4.0);
+        let d = task_e("D", &["B", "C"], 1.0);
+        let later = task_e("E", &["D"], 50.0);
+        let cp = Graph::new([&a, &b, &c, &d, &later])
+            .critical_path_to("D")
+            .expect("D is live and the graph is acyclic");
+        assert_eq!(
+            cp.tasks.iter().map(|t| t.id.as_str()).collect::<Vec<_>>(),
+            vec!["A", "C", "D"]
+        );
+        assert!((cp.total_effort_days - 8.0).abs() < 1e-9, "{cp:?}");
+    }
+
+    #[test]
+    fn a_target_bounded_chain_keeps_blockers_from_outside_the_target_group() {
+        // The distinction from a selector (`A1-214`): filtering to the cut first
+        // would drop `OUT`, and the chain would read as 1.0d rather than 6.0d.
+        // Naming an endpoint removes nothing.
+        let out = task_e("OUT", &[], 5.0);
+        let inside = task_e("IN", &["OUT"], 1.0);
+        let cp = Graph::new([&out, &inside])
+            .critical_path_to("IN")
+            .expect("acyclic");
+        assert_eq!(
+            cp.tasks.iter().map(|t| t.id.as_str()).collect::<Vec<_>>(),
+            vec!["OUT", "IN"],
+            "a prerequisite outside the target's group still gates it"
+        );
+        assert!((cp.total_effort_days - 6.0).abs() < 1e-9);
+    }
+
+    #[test]
+    fn a_milestone_target_reports_its_members_and_not_itself() {
+        // Naming a cut or a release asks what must finish before the checkpoint.
+        // The checkpoint is a zero-weight passthrough, so it is never a row and
+        // never adds effort.
+        let a = task_e("A", &[], 2.0);
+        let b = task_e("B", &["A"], 3.0);
+        let mut milestone = task("M", Status::Todo, &["A", "B"]);
+        milestone.tags = vec!["milestone".into()];
+        let cp = Graph::new([&a, &b, &milestone])
+            .critical_path_to("M")
+            .expect("acyclic");
+        assert_eq!(
+            cp.tasks.iter().map(|t| t.id.as_str()).collect::<Vec<_>>(),
+            vec!["A", "B"]
+        );
+        assert!((cp.total_effort_days - 5.0).abs() < 1e-9);
+    }
+
+    #[test]
+    fn a_release_chain_is_not_the_longest_chain_among_its_members() {
+        // The pilot finding this exists for: a release row reported the longest
+        // chain *inside* the release, which counts work that runs in parallel
+        // with the spine. R waits on M only, so the 40.0d cut it does not
+        // contain is irrelevant, and the 3.0d sibling of the spine is too.
+        let a = task_e("A", &[], 2.0);
+        let sibling = task_e("S", &[], 3.0);
+        let mut cut = task("M", Status::Todo, &["A"]);
+        cut.tags = vec!["milestone".into()];
+        let mut other = task("M-x", Status::Todo, &[]);
+        other.tags = vec!["milestone".into()];
+        let heavy = task_e("H", &[], 40.0);
+        let mut release = task("R", Status::Todo, &["M"]);
+        release.tags = vec!["milestone".into(), "release".into()];
+        let g = Graph::new([&a, &sibling, &cut, &other, &heavy, &release]);
+        let cp = g.critical_path_to("R").expect("acyclic");
+        assert_eq!(
+            cp.tasks.iter().map(|t| t.id.as_str()).collect::<Vec<_>>(),
+            vec!["A"],
+            "only what R waits on is on the way to R"
+        );
+        assert!((cp.total_effort_days - 2.0).abs() < 1e-9);
+        // And the whole-plan answer is a different, larger number, so the two
+        // questions cannot be conflated.
+        let whole = g.critical_path().expect("acyclic");
+        assert!((whole.total_effort_days - 40.0).abs() < 1e-9, "{whole:?}");
+    }
+
+    #[test]
+    fn a_target_with_no_live_ancestry_is_an_empty_chain_and_not_an_error() {
+        // A checkpoint nothing leads to is a real answer, distinguishable from
+        // "no such task" only because one is `Some` and the other is `None`.
+        let mut empty = task("M", Status::Todo, &[]);
+        empty.tags = vec!["milestone".into()];
+        let cp = Graph::new([&empty])
+            .critical_path_to("M")
+            .expect("a milestone with no members is not an error");
+        assert!(cp.tasks.is_empty());
+        assert!(cp.total_effort_days.is_sign_positive());
+        assert!((cp.total_effort_days - 0.0).abs() < 1e-9);
+    }
+
+    #[test]
+    fn a_target_bounded_chain_skips_dropped_prerequisites() {
+        // Work that is not going to happen does not gate anything.
+        let mut gone = task_e("Z", &[], 100.0);
+        gone.status = Status::Dropped;
+        let a = task_e("A", &[], 2.0);
+        let d = task_e("D", &["Z", "A"], 1.0);
+        let cp = Graph::new([&gone, &a, &d])
+            .critical_path_to("D")
+            .expect("acyclic");
+        assert_eq!(
+            cp.tasks.iter().map(|t| t.id.as_str()).collect::<Vec<_>>(),
+            vec!["A", "D"]
+        );
+        assert!((cp.total_effort_days - 3.0).abs() < 1e-9);
+    }
+
+    #[test]
+    fn there_is_no_chain_to_a_target_that_is_dropped_or_absent() {
+        let mut gone = task_e("Z", &[], 4.0);
+        gone.status = Status::Dropped;
+        let g = Graph::new([&gone]);
+        assert!(
+            g.critical_path_to("Z").is_none(),
+            "work that is not going to happen has no chain leading to it"
+        );
+        assert!(g.critical_path_to("nope").is_none());
+    }
+
+    #[test]
+    fn a_target_bounded_chain_is_none_on_a_cycle() {
+        // A longest path is undefined on a cycle; `check` reports APLAN004.
+        let a = task("A", Status::Todo, &["B"]);
+        let b = task("B", Status::Todo, &["A"]);
+        assert!(Graph::new([&a, &b]).critical_path_to("A").is_none());
+    }
+
+    #[test]
+    fn a_container_reaches_the_work_it_holds() {
+        // The valid shape: `C` holds `M-a` and waits on it. The chain to `C`
+        // runs through the work beneath it, and the checkpoints on the way
+        // weigh nothing.
+        let a = task_e("A", &[], 2.0);
+        let b = task_e("B", &["A"], 3.0);
+        let inner = cut("M-a", &["A", "B"]);
+        let top = container("C", &["M-a"]);
+        let cp = Graph::new([&a, &b, &inner, &top])
+            .critical_path_to("C")
+            .expect("acyclic");
+        assert_eq!(
+            cp.tasks.iter().map(|t| t.id.as_str()).collect::<Vec<_>>(),
+            vec!["A", "B"]
+        );
+        assert!((cp.total_effort_days - 5.0).abs() < 1e-9);
+    }
+
+    #[test]
+    fn containment_reaches_any_depth_and_takes_the_longest_branch() {
+        // Nested containment, two branches: the heavier one, not the first
+        // found and not the sum.
+        let light = task_e("L", &[], 1.0);
+        let heavy = task_e("H", &[], 7.0);
+        let inner = cut("M-in", &["H"]);
+        let mid = container("M-mid", &["M-in"]);
+        let other = cut("M-other", &["L"]);
+        let top = container("C", &["M-mid", "M-other"]);
+        let cp = Graph::new([&light, &heavy, &inner, &mid, &other, &top])
+            .critical_path_to("C")
+            .expect("acyclic");
+        assert_eq!(
+            cp.tasks.iter().map(|t| t.id.as_str()).collect::<Vec<_>>(),
+            vec!["H"],
+            "two levels down is still beneath the container"
+        );
+        assert!((cp.total_effort_days - 7.0).abs() < 1e-9);
+    }
+
+    #[test]
+    fn a_container_counts_what_it_waits_on_as_well_as_what_it_holds() {
+        // A container may also be sequenced after another cut (ADR-0013). Held
+        // work and the preceding cut's work are both on the way to it, and the
+        // heavier wins rather than one silently replacing the other.
+        //
+        // The prerequisite is a *cut*, not a task: a task in a milestone's
+        // `blocked_by` is its membership, and a member inherits the cut's
+        // predecessors -- so the first draft of this test measured that
+        // inheritance and called it a prerequisite (`A1-345`, audit).
+        let held = task_e("H", &[], 2.0);
+        let before = task_e("P", &[], 9.0);
+        let inner = cut("M-a", &["H"]);
+        let previous = cut("M-prev", &["P"]);
+        let mut top = container("C", &["M-a"]);
+        top.blocked_by.push("M-prev".into());
+        let cp = Graph::new([&held, &before, &inner, &previous, &top])
+            .critical_path_to("C")
+            .expect("acyclic");
+        assert_eq!(
+            cp.tasks.iter().map(|t| t.id.as_str()).collect::<Vec<_>>(),
+            vec!["P"]
+        );
+        assert!((cp.total_effort_days - 9.0).abs() < 1e-9);
+
+        // And the held branch wins when it is the heavier one.
+        let mut heavy = task_e("H", &[], 20.0);
+        heavy.id = "H".into();
+        let cp = Graph::new([&heavy, &before, &inner, &previous, &top])
+            .critical_path_to("C")
+            .expect("acyclic");
+        assert_eq!(
+            cp.tasks.iter().map(|t| t.id.as_str()).collect::<Vec<_>>(),
+            vec!["H"]
+        );
+        assert!((cp.total_effort_days - 20.0).abs() < 1e-9);
+    }
+
+    #[test]
+    fn containment_reached_through_ancestry_is_still_on_the_way() {
+        // R waits on cut M-a, which holds M-inner, which holds W-1. Two levels
+        // of containment between the release and the work, and the roadmap
+        // rolls W-1 up into R -- so a chain that stopped at M-a would print
+        // `crit 0.0d` beside `5.0d effort`.
+        let w = task_e("W-1", &[], 5.0);
+        let inner = cut("M-inner", &["W-1"]);
+        let outer = container("M-a", &["M-inner"]);
+        let mut release = task("R", Status::Todo, &["M-a"]);
+        release.tags = vec!["milestone".into(), "release".into()];
+        let cp = Graph::new([&w, &inner, &outer, &release])
+            .critical_path_to("R")
+            .expect("acyclic");
+        assert_eq!(
+            cp.tasks.iter().map(|t| t.id.as_str()).collect::<Vec<_>>(),
+            vec!["W-1"]
+        );
+        assert!((cp.total_effort_days - 5.0).abs() < 1e-9, "{cp:?}");
+    }
+
+    #[test]
+    fn a_dependent_inherits_the_work_a_container_holds() {
+        // X is sequenced after cut M-a (ADR-0013), which holds M-inner, so X
+        // comes after M-inner's work and its own effort sits on top.
+        let w = task_e("W-1", &[], 5.0);
+        let inner = cut("M-inner", &["W-1"]);
+        let outer = container("M-a", &["M-inner"]);
+        let x = task_e("X", &["M-a"], 2.0);
+        let cp = Graph::new([&w, &inner, &outer, &x])
+            .critical_path_to("X")
+            .expect("acyclic");
+        assert_eq!(
+            cp.tasks.iter().map(|t| t.id.as_str()).collect::<Vec<_>>(),
+            vec!["W-1", "X"]
+        );
+        assert!((cp.total_effort_days - 7.0).abs() < 1e-9, "{cp:?}");
+    }
+
+    #[test]
+    fn a_plan_part_way_through_declaring_containment_still_agrees_with_itself() {
+        // **The one case about an invalid plan, and deliberately.** `APLAN047`
+        // refuses a `contains` that is not also in `blocked_by`, so this plan
+        // fails `check` -- and `critical-path` and `roadmap` still render it,
+        // because a report is not a gate. The rollup descends `contains`
+        // regardless, so if the walk read only `blocked_by` the row would say
+        // `crit 0.0d` next to `5.0d effort`: the two-quantities defect this task
+        // exists to remove, on the page of the author least able to explain it.
+        //
+        // Reading `contains` as an ordering edge costs nothing on a valid plan,
+        // where `APLAN047` has already put the same edge in `blocked_by`.
+        let w = task_e("W-1", &[], 5.0);
+        let inner = cut("M-inner", &["W-1"]);
+        let mut half_migrated = task("M-a", Status::Todo, &[]);
+        half_migrated.tags = vec!["milestone".into()];
+        half_migrated.contains = vec!["M-inner".into()];
+        let cp = Graph::new([&w, &inner, &half_migrated])
+            .critical_path_to("M-a")
+            .expect("acyclic");
+        assert_eq!(
+            cp.tasks.iter().map(|t| t.id.as_str()).collect::<Vec<_>>(),
+            vec!["W-1"],
+            "the chain disagreed with the rollup on the same page"
+        );
+        assert!((cp.total_effort_days - 5.0).abs() < 1e-9);
+    }
+
+    #[test]
+    fn a_containment_loop_has_no_longest_chain_and_says_so_by_being_none() {
+        // Two checkpoints each claiming the other's work: `APLAN047` refuses it
+        // as a modelling mistake, and there is no defensible longest chain over
+        // it -- whichever is walked first swallows the other, which is the same
+        // reason the rollup refuses. `None` is how this crate has always said
+        // "no longest path"; the caller turns it into "run `aplan check`".
+        //
+        // Reporting a number here would be the worse failure: a plan `check`
+        // rejects would still print a confident chain.
+        let a = task_e("A", &[], 2.0);
+        let mut one = container("C-1", &["C-2"]);
+        one.blocked_by.push("A".into());
+        let two = container("C-2", &["C-1"]);
+        let g = Graph::new([&a, &one, &two]);
+        assert!(g.critical_path_to("C-2").is_none());
+        assert!(g.critical_path().is_none(), "the whole-plan answer agrees");
+        // And it terminates rather than hanging, which is what the loop
+        // threatens: reaching this line at all is the assertion.
+    }
+
+    #[test]
+    fn a_dropped_container_child_holds_no_work() {
+        let a = task_e("A", &[], 2.0);
+        let mut inner = cut("M-a", &["A"]);
+        inner.status = Status::Dropped;
+        let top = container("C", &["M-a"]);
+        let cp = Graph::new([&a, &inner, &top])
+            .critical_path_to("C")
+            .expect("acyclic");
+        assert!(
+            cp.tasks.is_empty(),
+            "a cancelled cut still gated its container: {cp:?}"
+        );
+    }
+
+    // --- `Weigh::Remaining`, what is left rather than how long (`A1-352`) ---
+
+    #[test]
+    fn the_remaining_chain_is_re_walked_rather_than_subtracted() {
+        // The whole point, in four tasks. The longest chain is A -> B at 11.0d
+        // with 1.0d live on it. The longest chain of *live* work is C -> D at
+        // 8.0d, and it is the real bound on what is left -- subtracting the done
+        // rows from the longest chain would answer 1.0d.
+        let mut shipped = task_e("A", &[], 10.0);
+        shipped.status = Status::Done;
+        let tail = task_e("B", &["A"], 1.0);
+        let head = task_e("C", &[], 5.0);
+        let rest = task_e("D", &["C"], 3.0);
+        let g = Graph::new([&shipped, &tail, &head, &rest]);
+
+        let whole = g.weighted_path(Weigh::All).expect("acyclic");
+        assert_eq!(
+            whole
+                .tasks
+                .iter()
+                .map(|t| t.id.as_str())
+                .collect::<Vec<_>>(),
+            vec!["A", "B"]
+        );
+        assert!((whole.total_effort_days - 11.0).abs() < 1e-9);
+
+        let left = g.weighted_path(Weigh::Remaining).expect("acyclic");
+        assert_eq!(
+            left.tasks.iter().map(|t| t.id.as_str()).collect::<Vec<_>>(),
+            vec!["C", "D"],
+            "the remaining answer ended at a different task, which is why it is \
+             re-walked"
+        );
+        assert!((left.total_effort_days - 8.0).abs() < 1e-9, "{left:?}");
+    }
+
+    #[test]
+    fn a_done_task_is_a_zero_weight_passthrough_not_a_removed_node() {
+        // The distinction from a filter (`A1-214`): D waits on a finished A, and
+        // A's edge still holds the chain together even though it weighs nothing.
+        // Removing A instead would be the same arithmetic here and a different
+        // thing in principle, which is why the weight is what changes.
+        let mut a = task_e("A", &[], 10.0);
+        a.status = Status::Done;
+        let b = task_e("B", &["A"], 4.0);
+        let g = Graph::new([&a, &b]);
+        let left = g.weighted_path(Weigh::Remaining).expect("acyclic");
+        assert_eq!(
+            left.tasks.iter().map(|t| t.id.as_str()).collect::<Vec<_>>(),
+            vec!["B"],
+            "a finished row is not work left, so it is not on a list of it"
+        );
+        assert!((left.total_effort_days - 4.0).abs() < 1e-9);
+    }
+
+    #[test]
+    fn unestimated_live_work_is_still_work_left() {
+        // A `todo` task with no `effort_days` weighs zero, and zero is not
+        // "finished". `APLAN009` reports the missing estimate as a warning, so
+        // plans really do carry these -- dropping them from what is left says
+        // the work is done.
+        let mut a = task_e("A", &[], 4.0);
+        a.status = Status::Done;
+        let unestimated = task("B", Status::Todo, &["A"]);
+        let cp = Graph::new([&a, &unestimated])
+            .weighted_path(Weigh::Remaining)
+            .expect("acyclic");
+        assert_eq!(
+            cp.tasks.iter().map(|t| t.id.as_str()).collect::<Vec<_>>(),
+            vec!["B"],
+            "an unestimated live task vanished from what is left"
+        );
+    }
+
+    #[test]
+    fn a_chain_with_nothing_left_is_empty_rather_than_absent() {
+        // A checkpoint whose ancestry is finished has an answer -- zero -- and it
+        // is not the same answer as "there is no chain here" (`None`).
+        let mut a = task_e("A", &[], 3.0);
+        a.status = Status::Done;
+        let g = Graph::new([&a]);
+        let left = g.weighted_path(Weigh::Remaining).expect("acyclic");
+        assert!(left.tasks.is_empty());
+        assert!(left.total_effort_days.is_sign_positive());
+        assert!((left.total_effort_days - 0.0).abs() < 1e-9);
+    }
+
+    #[test]
+    fn the_remaining_chain_to_a_target_is_bounded_the_same_way() {
+        // `Remaining` composes with an endpoint: only what is left *and* on the
+        // way to `M` counts, and work outside its ancestry does not.
+        let mut a = task_e("A", &[], 9.0);
+        a.status = Status::Done;
+        let b = task_e("B", &["A"], 2.0);
+        let elsewhere = task_e("X", &[], 40.0);
+        let m = cut("M", &["A", "B"]);
+        let g = Graph::new([&a, &b, &elsewhere, &m]);
+        let left = g.weighted_path_to("M", Weigh::Remaining).expect("acyclic");
+        assert_eq!(
+            left.tasks.iter().map(|t| t.id.as_str()).collect::<Vec<_>>(),
+            vec!["B"]
+        );
+        assert!((left.total_effort_days - 2.0).abs() < 1e-9);
+    }
+
+    #[test]
+    fn what_is_left_never_exceeds_how_long_the_chain_is() {
+        // Over generated plans: remaining is bounded by the total, because it
+        // weighs a subset of the same days on the same graph.
+        for seed in 0..80_u64 {
+            let tasks = generated_plan(seed, 24);
+            let g = Graph::new(tasks.iter());
+            let (Some(all), Some(left)) = (
+                g.weighted_path(Weigh::All),
+                g.weighted_path(Weigh::Remaining),
+            ) else {
+                continue; // cyclic through an inherited edge
+            };
+            assert!(
+                left.total_effort_days <= all.total_effort_days + 1e-9,
+                "seed {seed}: {}d left of a {}d chain",
+                left.total_effort_days,
+                all.total_effort_days
+            );
+            for row in &left.tasks {
+                assert_ne!(
+                    g.get(&row.id).expect("a real task").status,
+                    Status::Done,
+                    "seed {seed}: `{}` is finished and on a list of what is left",
+                    row.id
+                );
+            }
+        }
+    }
+
+    // --- properties, over generated plans (`A1-345`, audit) ---
+
+    /// A plan of `n` tasks, seeded so a failure is reproducible from its seed
+    /// alone. Declared edges only ever point backwards (`j < i`).
+    ///
+    /// That does **not** make every generated plan acyclic, and the first run of
+    /// these tests is how that was learned: a cut's members inherit the cut's
+    /// predecessors (ADR-0013), and an inherited edge can point forward. Such a
+    /// plan is genuinely cyclic and `check` reports it as `APLAN004`, so the
+    /// properties below skip it rather than pretend it cannot arise.
+    ///
+    /// Hand-written cases prove the shapes somebody thought of. These are for
+    /// the ones nobody did: the endpoint search, the predecessor walk and the
+    /// containment edge all interact, and the defect that survived review here
+    /// was an interaction (containment reached through ancestry).
+    fn generated_plan(seed: u64, n: usize) -> Vec<Task> {
+        let mut state = seed.wrapping_mul(6_364_136_223_846_793_005).wrapping_add(1);
+        let mut next = move || {
+            state = state
+                .wrapping_mul(6_364_136_223_846_793_005)
+                .wrapping_add(1_442_695_040_888_963_407);
+            (state >> 33) as usize
+        };
+        let mut tasks: Vec<Task> = Vec::with_capacity(n);
+        for i in 0..n {
+            let id = format!("T-{i:03}");
+            let milestone = i > 0 && next() % 4 == 0;
+            let mut t = task(&id, Status::Todo, &[]);
+            if milestone {
+                t.tags = vec!["milestone".into()];
+                if next() % 5 == 0 {
+                    t.tags.push("release".into());
+                }
+            } else {
+                // A quarter carry no estimate, which is the common real shape
+                // and the one that makes a chain weigh zero.
+                // `u32::from` rather than a cast: lossless by construction, and
+                // the gate refuses a cast that could lose precision even where
+                // the value cannot.
+                let tenths = u32::try_from(next() % 80).unwrap_or(0);
+                t.effort_days = (next() % 4 != 0).then(|| f64::from(tenths) / 10.0);
+            }
+            for _ in 0..(next() % 3) {
+                if i > 0 {
+                    let b = next() % i;
+                    t.blocked_by.push(format!("T-{b:03}"));
+                }
+            }
+            if milestone {
+                for _ in 0..(next() % 2) {
+                    // Only a milestone may be contained, mirroring the model.
+                    if let Some(c) = (0..i).rev().find(|&j| tasks[j].is_milestone()) {
+                        t.contains.push(format!("T-{c:03}"));
+                    }
+                }
+            }
+            // A spread of statuses, because `Weigh::Remaining` reads them and a
+            // generator that produces only `todo` cannot exercise it
+            // (`A1-352`, audit).
+            t.status = match next() % 11 {
+                0 => Status::Dropped,
+                1..=4 => Status::Done,
+                5 => Status::InProgress,
+                _ => Status::Todo,
+            };
+            tasks.push(t);
+        }
+        tasks
+    }
+
+    /// **Work that is left has a chain, and it is never finished work.**
+    ///
+    /// The invariant that would have caught the defect this file's
+    /// `unestimated_live_work_is_still_work_left` names: the endpoint search
+    /// picked by weight, so on a plan whose live tasks carried no estimate it
+    /// ended the chain at a finished task, the row filter removed it, and a plan
+    /// with plenty to do reported nothing left (`A1-352`, audit).
+    #[test]
+    fn a_plan_with_live_work_has_a_remaining_chain() {
+        for seed in 0..120_u64 {
+            let tasks = generated_plan(seed, 24);
+            let g = Graph::new(tasks.iter());
+            let Some(left) = g.weighted_path(Weigh::Remaining) else {
+                continue; // cyclic through an inherited edge
+            };
+            let live = tasks
+                .iter()
+                .any(|t| !t.is_milestone() && !matches!(t.status, Status::Done | Status::Dropped));
+            assert_eq!(
+                live,
+                !left.tasks.is_empty(),
+                "seed {seed}: live work {live}, but the remaining chain has {} row(s)",
+                left.tasks.len()
+            );
+            for row in &left.tasks {
+                let full = g.get(&row.id).expect("a real task");
+                assert_ne!(full.status, Status::Done, "seed {seed}: `{}`", row.id);
+                assert_ne!(full.status, Status::Dropped, "seed {seed}: `{}`", row.id);
+            }
+        }
+    }
+
+    /// The two answers are one derivation, so the unqualified chain must be the
+    /// heaviest chain over every endpoint it could have chosen. This is what
+    /// keeps `critical_path` and `critical_path_to` from drifting apart.
+    #[test]
+    fn the_unqualified_chain_is_the_heaviest_target_bounded_one() {
+        for seed in 0..120_u64 {
+            let tasks = generated_plan(seed, 24);
+            let g = Graph::new(tasks.iter());
+            let Some(whole) = g.critical_path() else {
+                continue; // cyclic through an inherited edge; `check` reports it
+            };
+            let best = tasks
+                .iter()
+                .filter(|t| !t.is_milestone() && t.status != Status::Dropped)
+                .filter_map(|t| g.critical_path_to(&t.id))
+                .map(|cp| cp.total_effort_days)
+                .fold(0.0_f64, f64::max);
+            assert!(
+                (whole.total_effort_days - best).abs() < 1e-9,
+                "seed {seed}: whole-plan {} but the best endpoint gives {best}",
+                whole.total_effort_days
+            );
+        }
+    }
+
+    /// Every edge the walk reads -- declared, inherited, or containment -- must
+    /// not shorten the chain. A blocker that lengthens nothing is an edge the DP
+    /// dropped, which is precisely how the containment defect looked.
+    #[test]
+    fn no_edge_the_walk_reads_can_shorten_the_chain() {
+        for seed in 0..120_u64 {
+            let tasks = generated_plan(seed, 24);
+            let g = Graph::new(tasks.iter());
+            if g.critical_path().is_none() {
+                continue; // cyclic; there is no longest path to compare against
+            }
+            let live: BTreeSet<&str> = tasks
+                .iter()
+                .filter(|t| t.status != Status::Dropped)
+                .map(|t| t.id.as_str())
+                .collect();
+            for t in tasks.iter().filter(|t| t.status != Status::Dropped) {
+                let Some(here) = g.critical_path_to(&t.id) else {
+                    continue;
+                };
+                for b in g.blockers_within(&t.id, &live) {
+                    let there = g
+                        .critical_path_to(b)
+                        .unwrap_or_else(|| panic!("seed {seed}: no chain to live `{b}`"));
+                    assert!(
+                        here.total_effort_days >= there.total_effort_days - 1e-9,
+                        "seed {seed}: `{}` is {:.1}d but waits on `{b}` at {:.1}d",
+                        t.id,
+                        here.total_effort_days,
+                        there.total_effort_days
+                    );
+                }
+            }
+        }
+    }
+
+    /// What the rows say and what the total says are the same number, the rows
+    /// are each reported once, and neither a checkpoint nor cancelled work is
+    /// ever among them.
+    #[test]
+    fn every_chain_is_internally_consistent() {
+        for seed in 0..120_u64 {
+            let tasks = generated_plan(seed, 24);
+            let g = Graph::new(tasks.iter());
+            let cyclic = g.critical_path().is_none();
+            for t in &tasks {
+                let Some(cp) = g.critical_path_to(&t.id) else {
+                    // The only three reasons, and this generator cannot produce
+                    // the third (an id that is not there).
+                    assert!(
+                        t.status == Status::Dropped || cyclic,
+                        "seed {seed}: no chain to live `{}` in an acyclic plan",
+                        t.id
+                    );
+                    continue;
+                };
+                let summed: f64 = cp.tasks.iter().map(|r| r.effort_days).sum();
+                assert!(
+                    (summed - cp.total_effort_days).abs() < 1e-9,
+                    "seed {seed}: rows sum to {summed}, total says {}",
+                    cp.total_effort_days
+                );
+                assert!(
+                    cp.total_effort_days.is_sign_positive(),
+                    "seed {seed}: negative zero on `{}`",
+                    t.id
+                );
+                let mut seen = BTreeSet::new();
+                for row in &cp.tasks {
+                    assert!(
+                        seen.insert(row.id.clone()),
+                        "seed {seed}: `{}` twice",
+                        row.id
+                    );
+                    let full = g.get(&row.id).expect("a row names a real task");
+                    assert!(
+                        !full.is_milestone(),
+                        "seed {seed}: `{}` is a checkpoint",
+                        row.id
+                    );
+                    assert_ne!(full.status, Status::Dropped, "seed {seed}: `{}`", row.id);
+                }
+            }
+        }
+    }
+
+    /// A target that is not live, or not there, has no chain -- and says so by
+    /// being `None` rather than by an empty one, which means something else.
+    #[test]
+    fn only_a_live_target_has_a_chain() {
+        for seed in 0..40_u64 {
+            let tasks = generated_plan(seed, 24);
+            let g = Graph::new(tasks.iter());
+            for t in tasks.iter().filter(|t| t.status == Status::Dropped) {
+                assert!(g.critical_path_to(&t.id).is_none(), "seed {seed}: {}", t.id);
+            }
+            assert!(g.critical_path_to("T-999").is_none());
+        }
+    }
+
+    #[test]
+    fn the_whole_plan_answer_is_the_best_target_bounded_answer() {
+        // The two share one DP, so this is what keeps them from drifting: the
+        // unqualified chain must equal the heaviest chain over every endpoint.
+        let a = task_e("A", &[], 3.0);
+        let light = task_e("B", &["A"], 1.0);
+        let heavy = task_e("C", &["A"], 4.0);
+        let join = task_e("D", &["B", "C"], 1.0);
+        let apart = task_e("E", &[], 2.0);
+        let g = Graph::new([&a, &light, &heavy, &join, &apart]);
+        let whole = g.critical_path().expect("acyclic");
+        let best = ["A", "B", "C", "D", "E"]
+            .iter()
+            .filter_map(|id| g.critical_path_to(id))
+            .map(|cp| cp.total_effort_days)
+            .fold(0.0_f64, f64::max);
+        assert!(
+            (whole.total_effort_days - best).abs() < 1e-9,
+            "whole-plan {} but the best endpoint gives {best}",
+            whole.total_effort_days
+        );
+    }
 }
 
 #[cfg(test)]
@@ -1502,6 +2469,8 @@ mod closeable {
             effort_days: None,
             blocked_by: blocked_by.iter().map(|s| (*s).to_string()).collect(),
             prefer_after: Vec::new(),
+            ratified_by: Vec::new(),
+            contains: Vec::new(),
             evidence: Vec::new(),
             paths: Vec::new(),
             traces: Vec::new(),
@@ -1510,6 +2479,7 @@ mod closeable {
             revisit_at: None,
             version_impact: None,
             version_impact_reason: None,
+            version: None,
         }
     }
 
@@ -1672,6 +2642,8 @@ mod ranking {
             effort_days: effort,
             blocked_by: blocked_by.iter().map(|s| (*s).to_string()).collect(),
             prefer_after: Vec::new(),
+            ratified_by: Vec::new(),
+            contains: Vec::new(),
             evidence: Vec::new(),
             paths: Vec::new(),
             traces: Vec::new(),
@@ -1680,6 +2652,7 @@ mod ranking {
             revisit_at: None,
             version_impact: None,
             version_impact_reason: None,
+            version: None,
         }
     }
 

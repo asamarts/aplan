@@ -38,6 +38,10 @@ trycmd = "1.2"
 git2 = { version = "0.21", default-features = false }
 serde.workspace = true
 serde_json.workspace = true
+# For the workflow census (`A1-117`, audit): a gate that reads YAML should
+# parse it rather than scan lines, and this is already a workspace
+# dependency of three crates.
+serde_yaml_ng.workspace = true
 
 [lints]
 workspace = true

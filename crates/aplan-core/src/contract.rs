@@ -126,9 +126,96 @@ pub fn block_in(text: &str) -> Block<'_> {
     Block::Present(&text[b.end..e])
 }
 
+/// What the provenance line inside a generated block starts with (`A1-325`).
+///
+/// The rest of the line is the build's version and surface digest, which change;
+/// this prefix does not, so a reader recognising the line does not have to parse
+/// it. Kept here rather than beside the renderer because three places need it
+/// and only one of them writes it: the renderer emits it, `APLAN041` asks
+/// whether two blocks differ *only* in it, and `export-agents-md --check` says
+/// which build is doing the checking.
+pub const WRITTEN_BY_PREFIX: &str = "<!-- written by aplan ";
+
+/// `text` with its provenance line removed, if it has one.
+///
+/// Used to ask what two blocks disagree about *apart from* which build wrote
+/// them. Every line matching is dropped rather than only the first: a block that
+/// somehow carried two is a block whose difference is still not about policy,
+/// and reporting it as a policy change would be the wrong answer twice over.
+#[must_use]
+pub fn without_provenance(text: &str) -> String {
+    text.lines()
+        .filter(|l| !l.trim_start().starts_with(WRITTEN_BY_PREFIX))
+        .collect::<Vec<_>>()
+        .join("\n")
+}
+
+/// Whether two blocks say the same thing and were written by different builds.
+///
+/// The distinction `A1-325` exists to draw. A pinned binary in CI and a newer
+/// one locally produce blocks that differ in one line, and calling that a policy
+/// change sends the reader looking for a policy that did not change.
+#[must_use]
+pub fn differs_only_by_build(found: &str, want: &str) -> bool {
+    found.trim() != want.trim()
+        && without_provenance(found).trim() == without_provenance(want).trim()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn two_blocks_differing_only_in_who_wrote_them_say_so() {
+        let one = format!("{WRITTEN_BY_PREFIX}0.2.0, surface aaaaaaaaaaaa -->\n- a rule\n");
+        let two = format!("{WRITTEN_BY_PREFIX}0.4.0, surface bbbbbbbbbbbb -->\n- a rule\n");
+        assert!(differs_only_by_build(&one, &two));
+        assert_eq!(without_provenance(&one), without_provenance(&two));
+    }
+
+    #[test]
+    fn a_real_difference_is_not_a_build_difference() {
+        let one = format!("{WRITTEN_BY_PREFIX}0.2.0, surface aaaaaaaaaaaa -->\n- a rule\n");
+        let two = format!("{WRITTEN_BY_PREFIX}0.4.0, surface bbbbbbbbbbbb -->\n- another\n");
+        assert!(!differs_only_by_build(&one, &two));
+    }
+
+    #[test]
+    fn identical_blocks_differ_in_nothing_at_all() {
+        // Not a build difference either: the caller asks this question only
+        // after establishing the two are not equal, and answering "yes" for
+        // two equal blocks would make a matching file a finding.
+        let one = format!("{WRITTEN_BY_PREFIX}0.4.0, surface bbbbbbbbbbbb -->\n- a rule\n");
+        assert!(!differs_only_by_build(&one, &one.clone()));
+    }
+
+    #[test]
+    fn a_block_with_no_provenance_line_is_left_alone() {
+        // What a pre-`A1-325` build wrote. Against a block that has one, the
+        // difference is still only the build.
+        let old = "- a rule\n";
+        let new = format!("{WRITTEN_BY_PREFIX}0.4.0, surface bbbbbbbbbbbb -->\n- a rule\n");
+        assert_eq!(without_provenance(old), "- a rule");
+        assert!(differs_only_by_build(old, &new));
+    }
+
+    #[test]
+    fn an_indented_provenance_line_is_still_one() {
+        // A block inside a list item carries the file's indentation, the same
+        // way `an_indented_marker_keeps_its_indentation_and_still_counts`
+        // covers for the marker.
+        let text = format!("  {WRITTEN_BY_PREFIX}0.4.0, surface bbbbbbbbbbbb -->\n- a rule\n");
+        assert_eq!(without_provenance(&text), "- a rule");
+    }
+
+    #[test]
+    fn prose_mentioning_the_line_mid_sentence_is_not_stripped() {
+        // Line-anchored, like the marker: a sentence *about* the provenance
+        // line is the adopter's prose and removing it would make two blocks
+        // look equal when they are not.
+        let text = format!("the block opens with `{WRITTEN_BY_PREFIX}...`\n");
+        assert_eq!(without_provenance(&text), text.trim_end());
+    }
 
     #[test]
     fn a_plausible_begin_marker_is_one() {

@@ -113,7 +113,12 @@ checked `blocked_by` edge, and a milestone cannot be
 listed scope rather than of exhaustive membership (made exhaustive by `APLAN022`, opt-in via
 `require_cut_membership`).
 The work-views (`ready`, `critical-path`, `summary`, `APLAN009`) skip milestones, because a
-checkpoint is not work, keyed on `Task::is_milestone`; `APLAN021` keeps the marker honest (a
+checkpoint is not work, keyed on `Task::is_milestone`. `critical-path`'s weighted walk does read
+`contains` as an ordering edge, which is not that field becoming a dependency (ADR-0042): on a plan
+`check` accepts it is the same edge `APLAN047` already requires in `blocked_by`, and it keeps a plan
+part-way through adopting `contains` from showing a chain that contradicts its own rollup
+(`A1-345`).
+`APLAN021` keeps the marker honest (a
 milestone has members and carries no effort or paths). No new field or edge type (ADR-0008);
 the sequencing itself stays in ROADMAP.md.
 
@@ -361,7 +366,7 @@ module (`diagnostic::code`) rather than being sprinkled through the validator.
 | `APLAN005` | `done` carries at least one piece of evidence | error | L0 |
 | `APLAN006` | No task blocks itself | error | n/a |
 | `APLAN007` | A `done` task does not depend on an unfinished one | error | n/a |
-| `APLAN008` | `traces` anchors resolve to real headings | error | n/a |
+| `APLAN008` | `traces` anchors resolve to a real heading or node | error | n/a |
 | `APLAN009` | Active tasks carry an effort estimate | **warning** | n/a |
 | `APLAN010` | A `note` used as evidence carries a date | error | L0 |
 | `APLAN020` | A live task is not blocked by a `dropped` one | error | L0 |
@@ -382,7 +387,7 @@ empty cut must be surfaced, not swallowed.
 | `APLAN011` | `commit` evidence resolves to a commit in this repository | error | L1 | done |
 | `APLAN012` | `commit` evidence touches at least one path in `paths` | error | L2 | done |
 | `APLAN013` | `test` evidence names a test that exists | error | L1 | done |
-| `APLAN014` | `test` evidence names a test that **passes** | error | L3 | done |
+| `APLAN014` | `test` evidence names a test that **passes**, and a failure carries a bounded, redacted tail of what the runner printed so it can be diagnosed from the CI record | error | L3 | done |
 | `APLAN015` | `file` evidence resolves at the cited rev | error | L1 | done |
 | `APLAN016` | `url` evidence is reachable | warning | L1 | exists (`A1-041`, opt-in) |
 | `APLAN017` | Evidence meets the configured minimum strength | error | n/a | done (opt-in) |
@@ -409,6 +414,15 @@ empty cut must be surfaced, not swallowed.
 | `APLAN041` | The generated `AGENTS.md` block says what this repository's policy says | warning | L0 | done (`A1-273`) |
 | `APLAN042` | A `revisit_at` names a real instant, on a task that is parked | warning | L0 | done (`A1-264`) |
 | `APLAN043` | A live task does not carry the scaffold's own prompt beside the criteria its author wrote | warning | L0 | done (`A1-299`) |
+| `APLAN045` | A live task's traced section is unchanged since the task was last touched | warning | L1 | done (`A1-301`) |
+| `APLAN046` | A done task's ratifiers are done | error | L0 | done (`A1-306`) |
+| `APLAN047` | A `contains` names a milestone that exists, and closes no loop | error | L0 | done (`A1-333`) |
+| `APLAN048` | The released version has moved as far as the closed tasks require | error | L2 | done (`A1-313`) |
+| `APLAN049` | The artifact agrees with what the plan claims about compatibility | error | L3 | done (`A1-314`) |
+| `APLAN050` | A recorded `version` is on a release, and is a version this tool can read | error | L0 | done (`A1-339`) |
+| `APLAN051` | A tag is not one edit from a word that changes what this tool does | warning | L0 | done (`A1-212`) |
+| `APLAN052` | `cross-cutting` is not on a task that is a member of a cut | warning | L0 | done (`A1-212`) |
+| `APLAN053` | A task that is `in_progress` has something in the repository to show for it: its declared `paths` match at least one tracked file | warning | L1 | done (`A1-359`) |
 | `APLAN044` | A closed task claims less of the released version than its level implies, without saying why | warning | L0 | done (`A1-312`) |
 
 Every diagnostic carries a stable code, a severity, an optional task id, an optional
@@ -420,40 +434,40 @@ renderer can underline `/status` rather than name it, is *planned* (§7), not ye
 
 ## 7. Crate architecture
 
-Mirrors `alint`'s conventions: `aplan-<role>`, with the bare `aplan` binary so
-`cargo install aplan` works. `aplan-core` is a **runtime dependency sink**, zero
-intra-workspace dependencies, enforced by a test. Internal crates are marked
-`"Internal: ..."` in their description and `publish = false` unless cargo forces
-otherwise for a published dependent.
+Uses `aplan-<role>`, with the bare `aplan` package providing the library and binary so
+`cargo install aplan` works. `aplan-core` is the runtime dependency sink: it has zero
+intra-workspace dependencies, enforced by a test. Runtime support crates depend on it;
+the `aplan` package composes those crates into the public CLI, and `xtask` plus
+`aplan-e2e` are workspace-only development packages.
 
-```
-                       ┌──────────┐
-                       │  aplan   │  (bin: clap CLI)
-                       └────┬─────┘
-      ┌──────────┬──────────┼──────────┬──────────┬──────────┐
-      ▼          ▼          ▼          ▼          ▼          ▼
- aplan-config aplan-output aplan-evidence aplan-interop aplan-lsp aplan-mcp aplan-tui aplan-forge
-      └──────────┴──────────┴──────────┴──────────┴──────────┴──────────┘
-                                  │
-                                  ▼
-                            ┌───────────┐
-                            │ aplan-core│   ← dependency sink (tier 0)
-                            └───────────┘
+```text
+                  aplan (library + CLI)
+                           |
+       +---------+---------+---------+---------+
+       |         |         |         |         |
+    config    output    evidence  interop     mcp
+       |         |         |         |         |
+       +---------+---------+---------+---------+
+                           |
+                       aplan-core
+
+    aplan-attest -> aplan-core
+    xtask and aplan-e2e -> the runtime crates they exercise
 ```
 
 | Crate | Responsibility | Publish | Status |
 |---|---|---|---|
 | `aplan-core` | task model, loader, graph, validate, diagnostic | yes | **exists** |
-| `aplan-output` | formatters: human, json, agent, github, gitlab, sarif, junit, markdown, mermaid, dot | yes (internal) | **exists** (7 of 10) |
+| `aplan-output` | formatters: human, json, agent, github, sarif, markdown, mermaid, dot, text | yes | **exists** |
 | `aplan` | library + thin binary; clap CLI; `facts()` introspection | yes | **exists** |
 | `xtask` | `gen-schema` (exists); `gen-facts` shipped as `aplan facts` + `tests/facts.rs`; `gen-roadmap` (exists, `A1-016`) | no | **exists** |
-| `aplan-evidence` | the verification ladder; git/test/url/file resolvers | yes (internal) | **exists** (commit + file + test resolvers; url/note next) |
-| `aplan-config` | `.aplan.yml` loading, schema-derived `Config` | yes (internal) | **exists** (`require_effort`, `traces_root`, `no_traces`, `test` runner, `evidence` strength, `detect_drift`) |
-| `aplan-interop` | importers: Backlog.md, `tasks.json`, spec-kit `tasks.md`, beads JSONL | yes (internal) | **planned** |
+| `aplan-evidence` | the verification ladder; commit, file, test and URL resolvers | yes | **exists** |
+| `aplan-config` | `.aplan.yml` loading and schema-derived `Config` | yes | **exists** |
+| `aplan-interop` | import/export adapters and bulk task manifests | yes | **exists** |
 | `aplan-lsp` | LSP server behind `aplan lsp` | yes (internal) | **planned** |
-| `aplan-mcp` | MCP server behind `aplan mcp` | yes (internal) | **planned** |
+| `aplan-mcp` | MCP server behind `aplan mcp` | yes | **exists** |
 | `aplan-forge` | one-way mirror to GitHub / GitLab | yes (internal) | **planned** |
-| `aplan-attest` | signed provenance / audit export (`aplan attest`) | yes (internal) | **planned** |
+| `aplan-attest` | tamper-evident audit export (`aplan attest`) | yes | **exists** |
 | `aplan-tui` | btop-style terminal UI | yes (internal) | **planned** |
 | `aplan-testkit` | scenario DSL, tree-spec materializer, proptest strategies | no | **planned** (materializer currently folded into `aplan-e2e`) |
 | `aplan-e2e` | scenario corpus + coverage-drift audits | no | **exists** (rule + format audits) |
@@ -463,9 +477,9 @@ Throughout this document, tables mark a feature **exists** or **planned**; *whic
 delivers each planned item is sequenced only in [ROADMAP §10](ROADMAP.md), HLD carries
 no phase numbers, so the two cannot drift.
 
-**Error handling**, mirroring `alint` precisely: one flat `thiserror` enum per crate
-converging on `aplan_core::Error`; **`anyhow` only in the binary**, for `.context()`
-glue; exit-code routing downcasts through the chain to distinguish internal errors.
+**Error handling:** library crates use typed errors, while executable orchestration in
+the `aplan` binary and `xtask` may use `anyhow` for context. Exit-code routing distinguishes
+usage/configuration errors from internal failures.
 
 **On `miette`.** `alint` declares it and never uses it, its human renderer is
 hand-rolled ANSI over `anstyle`. We have a stronger case than `alint` does, because we
@@ -500,6 +514,7 @@ them from one place, and the version is the single source of truth (HLD §17).
 | `aplan verify` | resolve evidence (L1/L2); `--execute` for L3 | exists (`A1-004`) |
 | `aplan ready` | tasks whose blockers are all `done`, ordered by a derived rank: what a task releases, then the critical path, then effort, then id. `--explain` says which (`A1-125`) | exists |
 | `aplan why` | `<id>`: what blocks a task -- its own blockers and any unfinished cut, reported as itself with a count of what is behind it; `--all` walks into a cut's membership. An answer that folded anything says so, and the JSON always names its `traversal` | exists (`A1-263`) |
+| `aplan version` | `<id>`: what that node owes the released version -- its own claim, or its level's floor, or the strongest of what its members owe. Answered from the plan alone, so it is `check`'s rung; `--format json` names the member that raised it. Without an id it needs the release window and refuses until that exists | partial (`A1-313`) |
 | `aplan graph` | Mermaid, whole plan or scoped by `--cut` and `--tag`, which intersect. Edges leaving the view are noted rather than drawn (`--format dot` for Graphviz, planned) | exists (`A1-126`) |
 | `aplan show` | `<id>`: one task whole: its `paths`, `traces` and `evidence`, plus what the graph and the ladder resolve about it (cut, ready, both edge directions, and the findings attached to that id). `--format json` carries the same content, `--body` includes the prose, `--no-resolve` skips the ladder and says so | exists (`A1-118`) |
 | `aplan tree` | `<id>`: one task's neighbourhood in both directions, `--depth N`: what must precede it, and what it releases. The inspection a *derived* order needs (ADR-0017), so `ready`'s rank is checkable rather than asserted | exists (`A1-126`) |
@@ -519,21 +534,24 @@ them from one place, and the version is the single source of truth (HLD §17).
 | `aplan tasks` | the plan as data, so any other rollup is a `jq` line | exists (`A1-075`) |
 | `aplan drop` | drop a task, or a whole cut, recording the cancellation | exists (`A1-077`) |
 | `aplan mv` | `<id>...`: move tasks between cuts, editing both milestones or neither. A set is one move: every refusal runs before any file is written, so a member that cannot move refuses the whole set | exists (`A1-077`, `A1-127`) |
-| `aplan critical-path` | longest path over `effort_days`, **advisory, never a gate** | exists (`A1-013`) |
+| `aplan claim` | `<id> [--as NAME] [--from HOLDER]`: record who holds a task, through the compare-and-swap writer, so two actors cannot both be told they hold it. Taking a held task needs `--from` naming the holder, which is checked | exists (`A1-359`, ADR-0044) |
+| `aplan release` | `<id>`: drop a claim, naming whose it was. Any caller may run it, because a claim with no expiry needs a way out that does not depend on the holder being reachable | exists (`A1-359`) |
+| `aplan start` | `<id>`: record that work has begun, setting `in_progress`. A stored claim, checked by `APLAN053` rather than trusted, and refused on a terminal task because nothing reopens finished work | exists (`A1-359`, ADR-0044) |
+| `aplan stop` | `<id>`: record that work has stopped, returning the task to `todo`. Not a closure: it claims nothing about what was done | exists (`A1-359`, ADR-0044) |
+| `aplan critical-path` | `[<ID>]`: longest path over `effort_days`, **advisory, never a gate**. With an id, the longest chain that *ends at* that task, cut, container or release: what must finish before that checkpoint can. The whole graph is kept and only the endpoint is chosen, which is why this is sound where the refused `--cut` is not -- filtering first turns a fragment into a false path | exists (`A1-013`, `A1-345`) |
 | `aplan init` | scaffold `.aplan.yml`; refuses to overwrite | exists (`A1-009`) |
 | `aplan close` | `<id>`: set `done` + attach evidence; derives `HEAD`; resolves the evidence and refuses what `verify` would reject (`--no-resolve` opts out); never commits | exists (`A1-008`, `A1-109`) |
 | `aplan amend` | `<id> --replace-evidence <from> <to>`: repair a closed task's evidence in place: replace one citation, both named, resolved exactly as `close` resolves one; leaves `trace_fingerprints` alone | exists (`A1-110`) |
 | `aplan dep` | `add <id> --after <other>`, and `dep rm`: add or remove one `blocked_by` edge, the only per-task ordering the model has. Refuses through the shared post-state check: a cycle, an unknown id, a cancelled blocker, a `done` task acquiring an unfinished one. A milestone's `blocked_by` is its membership rather than its ordering, so that edit belongs to `mv` and is refused here | exists (`A1-124`) |
-| `aplan supersede` | `<id> <title>`: file the successor to a closed task whose traced outcome no longer holds, and re-stamp the closed one as reviewed. The predecessor keeps its status and its evidence: there is no reopen (ADR-0020) | exists (`A1-130`) |
+| `aplan tag` | `add <id> <tag>`, `rm`, and `rename <from> <to>` across the plan: the tag edits, which were creation-only until a family's cardinality made `APLAN030` an error and brought them inside `A1-077`'s test. Judged by the shared post-state check before writing, and written through the locked compare-and-swap path, so a rename is all files or none. The five words that decide what a plan *is* are refused on either side of a `rename`, because that edit reaches every task at once and `tag rename milestone epic` dissolves every cut in the plan, and `tag rm` refuses to take `milestone` off a cut that still holds work, which is the same loss one task at a time and quieter; `add`, `mv` and `drop` change what a task is | exists (`A1-213`) |
+| `aplan supersede` | `<id> <title>`: file the successor to a closed task whose traced outcome no longer holds, and re-stamp the closed one as reviewed. The predecessor keeps its status and its evidence: there is no reopen (ADR-0020). The successor inherits the predecessor's `paths`, `traces` and subject tags -- not the five reserved words, which say what a task *is* rather than what it is about, `cross-cutting` among them because a waiver is not inherited -- and `--tag` says them outright instead; `--cut` is part of the plan the mutation gate judges, so a placement it makes is not then reported as a task in no cut | exists (`A1-130`, `A1-251`) |
 | `aplan add` | scaffold a new task file: next id in the plan's own convention, `--cut` placement, no invented fields | exists (`A1-029`) |
-| `aplan import` | `<source>`: read another tool's plan; `--format kep` (`A1-019`), `checklist` (`A1-030`) and `roadmap-json` (`A1-031`) exist, Backlog.md / task-master / spec-kit / beads planned | partial (`A1-019`, `A1-030`, `A1-031`) |
+| `aplan import` | `<source>`: read another tool's plan; `--format kep` (`A1-019`), `checklist` (`A1-030`) and `roadmap-json` (`A1-031`) exist, Backlog.md / task-master / spec-kit / beads planned. `--cut` places what it writes and `--tag` gives it the vocabulary the plan requires, because a source document supplies neither; the run names any declared `tag_families` member the import would leave missing, as it already names cut membership and effort | partial (`A1-019`, `A1-030`, `A1-031`, `A1-357`) |
 | `aplan mirror` | one-way push to a forge | planned |
-| `aplan export-agents-md` | render the plan's contract into `AGENTS.md` | planned |
 | `aplan lsp` | editor server | planned |
-| `aplan mcp` | agent server: `ready`, `why`, `check`, `verify`, `add`, `show`, `dep`, `close` over stdio | exists (`A1-024`, `A1-102`, `A1-103`, `A1-124`, `A1-118`) |
+| `aplan mcp` | agent server: `identity`, `ready`, `why`, `check`, `verify`, `add`, `show`, `dep`, `close`, `claim`, `release`, `start`, `stop` over stdio | exists (`A1-024`, `A1-102`, `A1-103`, `A1-124`, `A1-118`, `A1-359`) |
 | `aplan tui` | the terminal UI | planned |
 | `aplan roadmap` | render the plan grouped by cut: rollups, per-cut critical path, `--format markdown` companion (ADR-0009) | exists (`A1-015`) |
-| `aplan attest` | signed provenance / audit export of the verified plan | planned |
 | `aplan migrate` | schema version upgrades | when `v2` exists |
 
 **Flag conventions**, from `alint`: `--format` is a bare `String` on the clap struct
@@ -630,8 +648,10 @@ One report, many consumers. `alint` ships eight formatters; we should converge.
 | `sarif` | GitHub code scanning, and the lingua franca of static analysis | exists (`A1-023`) |
 | `gitlab` | Code Quality report | planned |
 | `junit` | generic CI test-report ingestion | planned |
-| `markdown` | a PR comment / job summary | planned |
-| `mermaid` / `dot` | *generated* graph views, never hand-edited | exists / planned |
+| `markdown` | a PR comment / job summary | exists |
+| `mermaid` | generated Mermaid graph views, never hand-edited | exists |
+| `dot` | generated Graphviz graph views, never hand-edited | exists |
+| `text` | stable plain-text command output | exists |
 
 Colour is a property of the *stream*, not of a formatter: every human renderer writes through
 `anstream`, which styles a terminal and strips into a pipe, and `--color` writes the
@@ -892,9 +912,23 @@ and its README points back upstream.
 | GitHub Action | composite `action.yml` that installs a pinned release |
 | pre-commit | `.pre-commit-hooks.yaml` |
 
-Single source of truth for the version is `[workspace.package].version`, with a CI gate
-that fails when any documented version string disagrees. `alint` learned this the hard
-way; inherit the lesson, not the incident.
+Single source of truth for the version is `[workspace.package].version`. The gate that
+keeps the documentation honest is `ci/scripts/check-version-pins.sh`, and it is
+**narrower than the sentence that used to stand here**, which promised a gate failing
+"when any documented version string disagrees" (`A1-318`).
+
+That sentence is not implementable, which was measured rather than argued. The unit is
+an occurrence and not a file: `docs/upgrading.md` says on one line that a repository
+needs a feature "newer than `v0.3.0`", which must move when v0.4.0 ships, and on the
+next that most of the page "shipped in `v0.3.0`", which must not. Nor is syntax enough:
+matching every `uses: ...@vX.Y.Z` found four, all of them quotations -- a CHANGELOG
+entry, two task bodies, a pilot log. A record of an instruction is not an instruction.
+
+So the gate checks install pins in the documents that *instruct* an adopter, and leaves
+records alone. And it compares against the newest **release tag**, not the workspace
+version: this workspace carries `X.Y.Z-dev` between releases (`A1-060`), so no published
+release ever equals it. `alint`'s equivalent gate does compare against the workspace
+version, correctly for `alint` and wrongly for this: inherit the lesson, not the script.
 
 ---
 

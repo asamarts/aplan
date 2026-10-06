@@ -24,11 +24,18 @@ fn the_wire_surface_is_exactly_its_tools() {
             "aplan_show",
             "aplan_dep",
             "aplan_close",
+            "aplan_claim",
+            "aplan_release",
+            "aplan_start",
+            "aplan_stop",
         ],
         "the MCP surface changed; growing it is a decision, not a refactor. \
          `aplan_verify` was that decision (`A1-102`): `check` is hermetic, so an \
          agent could close a task citing a file that does not exist, see zero \
-         errors, and hand CI a plan that fails on the citation it just wrote"
+         errors, and hand CI a plan that fails on the citation it just wrote. \
+         The last four were `A1-359`'s, on the ground that `A1-077`'s refusal of \
+         a status setter assumed an actor with a text editor, which an agent \
+         reaching aplan through this server is not"
     );
     for t in &tools {
         assert!(t.description.is_some(), "{} has no description", t.name);

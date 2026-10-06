@@ -123,6 +123,13 @@
       },
       "type": "array"
     },
+    "contains": {
+      "description": "The milestones this one **contains**: its children, whose work rolls up\ninto it at any depth (`A1-333`, ADR-0042).\n\nThe third thing `blocked_by` was being asked to mean. ADR-0013 decided\nthat a milestone listing another milestone there *sequences* the two\ncuts, and the member filter excludes it deliberately -- so an author who\nwrites it intending containment gets a rollup of `0.0d` over real work\nand an `APLAN021` saying their cut is empty, with nothing anywhere using\nthe word \"sequence\". Measured on a four-level plan (`A1-317`'s audit),\nand misdiagnosed there as a traversal defect.\n\n`prefer_after`'s precedent again (ADR-0025), and `ratified_by`'s\n(ADR-0036): a second meaning earns a second field, never a second kind\nof edge. A release is now the special case of this rather than the\nmechanism for it.\n\n**This is not a second grouping level** (ADR-0014): a task still belongs\nto exactly one cut, the one that lists it. A container *borrows* the work\nbeneath it, which is the word ADR-0022 already used for a release.",
+      "items": {
+        "type": "string"
+      },
+      "type": "array"
+    },
     "effort_days": {
       "description": "Estimated effort in days. Typed so phases can be rolled up. Non-negative:\na negative estimate is meaningless and would corrupt a rollup.",
       "format": "double",
@@ -170,6 +177,13 @@
       },
       "type": "array"
     },
+    "ratified_by": {
+      "description": "Task IDs that must bless this one before it counts as finished: a\nconstraint on *counting done*, never on starting (`A1-306`, ADR-0036).\n\n`blocked_by` was carrying two relationships that behave nothing alike. A\n**producer** edge means the work cannot begin, because it consumes what\nthe blocker makes. A **ratification** edge means somebody must approve\nthe result, and the work can be built, tested and gated today. The sixth\npilot modelled eleven of the second kind as the first, `ready` reported\nnone of them, and it was right to: nothing in the file said which was\nmeant. Five of those artefacts already existed and were gated in CI while\nthe plan called them blocked, which cost two days of wrong belief\n(pre-public adoption evidence).\n\nFollowing `prefer_after`'s precedent exactly (ADR-0025): the answer to\n\"`blocked_by` is being asked to mean two things\" is a second field that\nmeans one of them, not a second kind of edge. `ready` does not read this,\nso a ratification never hides startable work; `APLAN046` refuses `done`\nwhile a ratifier is unfinished, which is where the gate the pilot was\naccidentally relying on actually belongs.",
+      "items": {
+        "type": "string"
+      },
+      "type": "array"
+    },
     "revisit_at": {
       "description": "When a parked task is worth re-evaluating, as an RFC 3339 instant\n(`A1-264`).\n\n**It says when to look again, never that the wait is over.** `p00013`'s\n`DN0-29` waits on GitHub creating a real weekday `schedule` event: the\nearliest useful revisit is computable from a committed cron and a\nmeasured delay, and reaching it proves nothing about whether the event\nexists. So this changes no status, satisfies no dependency, and is read\nby `aplan due` and nothing else -- `check`, `ready` and `verify` never\nconsult a clock.\n\nThis does not reverse `A1-175`, which declined a structured *reason*:\nall 22 measured parks waited on an unfalsifiable human judgement, and a\nfield holding one would be a claim nothing could check. A revisit\ninstant is the narrower claim *do not look before this*, which is\ncheckable, and the reason still lives in the body.\n\nMeaningful only while the task is parked, which `APLAN042` reports.",
       "type": [
@@ -206,6 +220,13 @@
         "type": "string"
       },
       "type": "array"
+    },
+    "version": {
+      "description": "The version this **release** produced, written when it closed\n(`A1-339`, ADR-0038).\n\n**Derived while open, recorded at close.** The plan decides the number\nrather than grading a human's guess (`A1-313`), and the number is written\ninto the node when it closes so a later run can ask what a release\ncontained without re-deriving from a plan that has since moved. A closed\nrelease whose answer changes when somebody edits a task it closed is not\na record.\n\n**Only a release carries it**, and `APLAN050` refuses it anywhere else: a\ncut is a planning bucket rather than a delivery (ADR-0038), and a\n`version` on one would read as a claim that it shipped.\n\n**A field, which ADR-0008 resists, and the argument is measured.** The\nexisting tag vocabulary cannot carry it: `parse_cut_version` reads `vN.N`\nand a release needs `vN.N.P`, so a node tagged `v1.0.0` falls through to\nthe first tag that is not `milestone` and renders as the word `release`.\nA tag that does not survive being read back is not a record either.",
+      "type": [
+        "string",
+        "null"
+      ]
     },
     "version_impact": {
       "anyOf": [

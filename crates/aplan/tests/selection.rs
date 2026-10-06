@@ -120,7 +120,10 @@ fn every_selecting_command_takes_the_same_flags() {
         (
             "critical-path",
             "one derived chain; a subset of a path is not a path, and the longest \
-             chain through part of a plan is a different question from the one asked",
+             chain through part of a plan is a different question from the one \
+             asked. It takes a positional endpoint instead (`A1-345`), which \
+             removes nothing: every edge is kept and only the chain's end is \
+             chosen",
         ),
         (
             "roadmap",

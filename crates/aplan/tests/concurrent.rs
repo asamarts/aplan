@@ -21,8 +21,10 @@ use std::path::Path;
 mod common;
 
 /// A plan with one cut already holding `members` tasks, and ULID ids so two
-/// concurrent `add`s cannot derive the same id -- that is a different race
-//  (`A1-230`), and letting it fire here would measure the wrong thing.
+/// concurrent `add`s cannot derive the same id. That is a different race, now
+//  fixed by retrying (`A1-230`, `tests/id_race.rs`) -- which is exactly why it
+//  stays out of this fixture: a retry here would fold id contention into the
+//  membership measurement and make a lost update look like latency.
 fn fixture(dir: &Path, members: usize) {
     std::fs::create_dir_all(dir.join("aplan/tasks")).expect("mkdir");
     std::fs::write(dir.join(".aplan.yml"), "root: aplan\nid_strategy: ulid\n").expect("config");

@@ -1,5 +1,12 @@
 //! `.aplan.yml`: the repository's policy, in one schema-derived type.
 //!
+//! This crate owns two files, and the line between them is load-bearing.
+//! `.aplan.yml` is the repository's: shared, committed, binding on everybody
+//! who works the checkout. [`user`] is the per-user one, which is about the
+//! *actor* and holds nothing any rule reads -- so it cannot weaken what a
+//! repository requires, by construction rather than by a precedence rule
+//! (`A1-364`).
+//!
 //! A repo declares its policy once, in `.aplan.yml`, rather than threading flags
 //! through CI. The `Config` type is the single source of that schema, exactly as
 //! `aplan_core::task::Task` is for a task: `schemas/v1/config.json` is *derived*
@@ -29,7 +36,16 @@ pub const PLACEHOLDER: &str = "{test}";
 pub const URL_PLACEHOLDER: &str = "{url}";
 
 /// The config file, at the repository root.
+pub mod user;
+
 pub const CONFIG_FILE: &str = ".aplan.yml";
+
+/// Which tags name a release when `version.release_tag` says nothing (ADR-0038).
+///
+/// `v*` because it is what this project and its pilots tag with. It is a default
+/// rather than a rule: the glob exists so a repository that tags
+/// `release-2026-09` is not told its vocabulary is wrong (`A1-037`).
+pub const DEFAULT_RELEASE_TAG: &str = "v*";
 
 /// A failure loading or validating `.aplan.yml`.
 #[derive(Debug, thiserror::Error)]
@@ -59,6 +75,10 @@ pub enum Error {
     /// variant for the reason [`BadUrlCheck`](Self::BadUrlCheck) has one.
     #[error("invalid `docs.membership` in `.aplan.yml`: {0}")]
     BadDocs(String),
+    /// A `version` block the tool cannot act on (`A1-313`). Its own variant for
+    /// the reason [`BadUrlCheck`](Self::BadUrlCheck) has one.
+    #[error("invalid `version` in `.aplan.yml`: {0}")]
+    BadVersion(String),
     #[error("could not read `.aplan.yml`: {0}")]
     Io(String),
     #[error("could not parse `.aplan.yml`: {0}")]
@@ -531,6 +551,11 @@ impl Scope {
             tags: self.tag.clone(),
             owners: self.owner.clone(),
             statuses,
+            // A `policy` scope says which work is judged to which standard, and
+            // "whoever happens to hold it right now" is not that: a claim moves
+            // between actors while the standard the work is held to does not.
+            // So the config side does not offer it (`A1-359`).
+            unclaimed: false,
         })
     }
 
@@ -747,6 +772,29 @@ pub struct TestRunner {
     /// a citation can be checked against before the run.
     #[serde(default)]
     pub skipped: Option<Vec<String>>,
+    /// How many lines of a failed test's output a finding may carry. Default:
+    /// eight; `0` suppresses it (`A1-365`).
+    ///
+    /// **Present by default, which is a decision with a recorded cost.** A pilot
+    /// rejected two cited tests that failed only inside its nested-Podman
+    /// runner, and the whole actionable output was "failed under `--execute`"
+    /// with the instruction to make the test pass: both streams had been
+    /// captured and thrown away, so the cause could only be found by entering
+    /// the runner by hand. `test.list` has retained one line of stderr for a
+    /// launch failure since it was written, and this is that precedent applied
+    /// to the other half. An opt-in would reproduce the pilot's experience
+    /// exactly: they met the opaque failure first, and would only then have
+    /// discovered a key existed.
+    ///
+    /// The cost is that a CI log can contain a little output nobody explicitly
+    /// asked for. Three things bound it: the default is small, every line goes
+    /// through the sanitizer a generated document uses, and recognisable
+    /// credential shapes are masked. Set `0` for a repository whose tests print
+    /// things it would rather not publish -- redaction is a best-effort filter
+    /// over shapes that look like credentials, not a secret scanner, and the
+    /// upgrade guidance says so in those words.
+    #[serde(default)]
+    pub output_lines: Option<usize>,
     /// Whether this runner is expected to list any tests at all. Default: `true`.
     ///
     /// A runner that lists nothing is usually a mistake -- a `dir` that moved, a
@@ -761,25 +809,6 @@ pub struct TestRunner {
     /// it will need next month.
     #[serde(default)]
     pub expect_tests: Option<bool>,
-    /// Whether this runner's `run` command selects exactly the name `list`
-    /// printed. Default: unknown, and `APLAN037` finds out by asking.
-    ///
-    /// The rung `--execute` claims is that the cited test *passed*, and that is
-    /// only worth what the runner makes it worth: a `run` command whose filter
-    /// does not match the names `list` prints selects nothing, skips everything
-    /// and exits `0`, which reads as a pass. `APLAN037` learns what a miss looks
-    /// like by running a name no test can have, and compares.
-    ///
-    /// Set `true` where the runner is right and simply says nothing either way,
-    /// which no probe can tell from a runner that ran nothing. It is a claim the
-    /// repository makes and nothing checks -- so it also skips the probe's extra
-    /// run of `test.run`, which is the honest trade: a claim in exchange for the
-    /// cost of the question.
-    ///
-    /// `false` is the same as leaving it out. The key is a one-sided claim, like
-    /// `expect_tests`: saying a runner does *not* select exactly is saying the
-    /// probe is right, and silencing a rule on the strength of agreeing with it
-    /// would be the one reading nobody wants.
     /// The most memory this runner's commands may hold, as a size (`4G`, `512M`)
     /// (`A1-310`, ADR-0033).
     ///
@@ -814,6 +843,25 @@ pub struct TestRunner {
     /// never be able to name one (HLD 5.5).
     #[serde(default)]
     pub wrap: Option<Vec<String>>,
+    /// Whether this runner's `run` command selects exactly the name `list`
+    /// printed. Default: unknown, and `APLAN037` finds out by asking.
+    ///
+    /// The rung `--execute` claims is that the cited test *passed*, and that is
+    /// only worth what the runner makes it worth: a `run` command whose filter
+    /// does not match the names `list` prints selects nothing, skips everything
+    /// and exits `0`, which reads as a pass. `APLAN037` learns what a miss looks
+    /// like by running a name no test can have, and compares.
+    ///
+    /// Set `true` where the runner is right and simply says nothing either way,
+    /// which no probe can tell from a runner that ran nothing. It is a claim the
+    /// repository makes and nothing checks -- so it also skips the probe's extra
+    /// run of `test.run`, which is the honest trade: a claim in exchange for the
+    /// cost of the question.
+    ///
+    /// `false` is the same as leaving it out. The key is a one-sided claim, like
+    /// `expect_tests`: saying a runner does *not* select exactly is saying the
+    /// probe is right, and silencing a rule on the strength of agreeing with it
+    /// would be the one reading nobody wants.
     #[serde(default)]
     pub run_selects: Option<bool>,
     /// argv that prints the available test names to stdout, one per line. A
@@ -941,6 +989,95 @@ pub struct VersionPolicy {
     /// `fix`, a cut `feature`, a release nothing of its own.
     #[serde(default)]
     pub levels: Option<LevelFloors>,
+    /// How to read the version the artifact ships today (`A1-313`, ADR-0040).
+    ///
+    /// A command, never a parse. This tool does not know what a `pyproject.toml`
+    /// means, what a `version` key in one of four build backends refers to, or
+    /// which of a monorepo's eleven manifests is the one that ships -- and a
+    /// guess about any of those is a wrong number stated confidently, which is
+    /// the one thing the arithmetic must never produce.
+    ///
+    /// It prints the version on stdout and exits zero. The first non-empty line
+    /// is taken, trimmed, with a leading `v` removed -- because `git describe`
+    /// and `cargo pkgid` disagree about that one character and neither is wrong.
+    ///
+    /// Without it the plan still answers what a node *owes*, which needs nothing
+    /// outside the plan. What it cannot do is turn that into a number, because
+    /// the number is relative to one this tool has no way to learn.
+    #[serde(default)]
+    pub current: Option<DeclaredCommand>,
+    /// How to ask the artifact whether it is compatible with the last release
+    /// (`A1-314`, `APLAN049`).
+    ///
+    /// **Exit zero when it is, non-zero when it is not.** That is the question
+    /// `cargo semver-checks check-release` already answers natively, and asking
+    /// it this way is what keeps this tool's vocabulary out of somebody else's
+    /// checker: a command that had to print `none|fix|feature|breaking` would be
+    /// this project teaching an ecosystem its words, which is the refusal
+    /// `A1-037` makes about `vN.N` one layer along.
+    ///
+    /// It is the L3 rung of a version claim, and it behaves like the other one:
+    /// opt-in, run only where declared, reported as a finding about the *claim*
+    /// rather than as a crash, and bounded by the limits above -- an API differ
+    /// is exactly the kind of command that compiles a workspace twice.
+    ///
+    /// Nothing here reimplements API diffing. The tool runs the checker the
+    /// repository declares and reports what it said, exactly as it runs
+    /// `test.run`.
+    #[serde(default)]
+    pub check: Option<DeclaredCommand>,
+    /// Which tags name a release, as a glob (`A1-317`, ADR-0038). Default: `v*`.
+    ///
+    /// ADR-0038 decided the window with no release node is everything closed
+    /// since the nearest release tag reachable from `HEAD`, and that a
+    /// repository tagging things other than releases has to say which tags are
+    /// releases. `v*` is what this project and its pilots use; a project tagging
+    /// `release-2026-09` says so here rather than being told its vocabulary is
+    /// wrong (`A1-037`).
+    #[serde(default)]
+    pub release_tag: Option<String>,
+}
+
+/// A command `.aplan.yml` declares under `version` (`A1-313`, `A1-314`).
+///
+/// **One type for the two of them**, because they are the same idea with
+/// different questions: `version.current` prints the version the artifact ships,
+/// and `version.check` exits zero when the artifact is compatible with the last
+/// release. What each *means* is documented on the key that takes it; what they
+/// share -- how it is spawned and what it may spend -- is documented here.
+///
+/// It carries the same four limit keys `test` and `url` carry, because ADR-0033
+/// covers *every* spawned command: the machine does not care which one ate it.
+/// A third implementation of the configured-checker idea is what `A1-185` is
+/// about, and adding a fourth here rather than a second would have been that
+/// task's subject arriving twice in one cut.
+#[derive(Debug, Clone, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct DeclaredCommand {
+    /// argv, e.g. `["ci/scripts/version.sh"]`.
+    ///
+    /// Spawned with no shell (HLD section 5.5). A pipeline is declared as one:
+    /// `["sh", "-c", "..."]` is this repository's business to write and not this
+    /// tool's to synthesise.
+    pub command: Vec<String>,
+    /// How long it may take before the version is reported as *not read*, in
+    /// seconds. Default: 30. `0` means no limit (`A1-121`).
+    ///
+    /// The same thirty seconds `url.check` gets, and for the same reason: this
+    /// is one question with one answer, and a command that has not printed a
+    /// version in half a minute is not going to.
+    #[serde(default)]
+    pub timeout_seconds: Option<u64>,
+    /// The most memory this command may hold, as a size (`256M`) (`A1-310`,
+    /// ADR-0033).
+    #[serde(default)]
+    pub max_memory: Option<String>,
+    /// The most processes it may have alive at once (`A1-310`, ADR-0033).
+    #[serde(default)]
+    pub max_processes: Option<u32>,
+    /// argv prepended to it (`A1-310`, ADR-0033).
+    #[serde(default)]
+    pub wrap: Option<Vec<String>>,
 }
 
 /// The floor each level of the plan carries (`A1-312`, ADR-0034).
@@ -975,6 +1112,12 @@ impl VersionPolicy {
     #[must_use]
     pub fn requires_impact(&self) -> bool {
         self.require_impact.unwrap_or(false)
+    }
+
+    /// The glob that says which tags are releases, defaulted (ADR-0038).
+    #[must_use]
+    pub fn release_tag(&self) -> &str {
+        self.release_tag.as_deref().unwrap_or(DEFAULT_RELEASE_TAG)
     }
 
     /// This policy's floors, with the shipped defaults filled in.
@@ -1063,6 +1206,68 @@ impl ScopedPolicy {
                  `evidence.require_min_strength` or an `evidence.exempt_tags`, or delete it"
                     .into(),
             ));
+        }
+        Ok(())
+    }
+}
+
+impl VersionPolicy {
+    /// Reject a `version` block that could not be acted on.
+    ///
+    /// # Errors
+    /// [`Error::BadVersion`] naming what about it cannot be acted on.
+    pub fn validate(&self) -> Result<(), Error> {
+        // Before the command, because this key is answered whether or not one is
+        // declared: an empty glob matches no tag, so the window would silently
+        // become "everything this plan ever closed" on a repository that has
+        // tagged eleven releases.
+        if self
+            .release_tag
+            .as_deref()
+            .is_some_and(|t| t.trim().is_empty())
+        {
+            return Err(Error::BadVersion(
+                "`version.release_tag` is empty; remove the key to take the default `v*`, \
+                 or give it the glob this repository's release tags match"
+                    .into(),
+            ));
+        }
+        for (key, declared) in [("current", &self.current), ("check", &self.check)] {
+            let Some(declared) = declared else { continue };
+            declared.validate(&format!("version.{key}"))?;
+        }
+        Ok(())
+    }
+}
+
+impl DeclaredCommand {
+    /// Reject a declared command that could not be acted on, naming the key that
+    /// declared it.
+    ///
+    /// # Errors
+    /// [`Error::BadVersion`] naming `key` and what about it cannot be acted on.
+    pub fn validate(&self, key: &str) -> Result<(), Error> {
+        validate_limits(
+            key,
+            self.max_memory.as_deref(),
+            self.max_processes,
+            self.wrap.as_deref(),
+        )
+        .map_err(Error::BadVersion)?;
+        if self.command.is_empty() {
+            return Err(Error::BadVersion(format!(
+                "`{key}.command` is empty; remove the key, or give it a command to run"
+            )));
+        }
+        // The same refusal `url.check` makes, for the same reason: a blank
+        // element reaches the spawn as an empty program name and fails with
+        // `No such file or directory`, which reads as a missing binary rather
+        // than as the config mistake it is.
+        if self.command.iter().any(|a| a.trim().is_empty()) {
+            return Err(Error::BadVersion(format!(
+                "`{key}.command` contains a blank argument; every element must be a real \
+                 program name or argument"
+            )));
         }
         Ok(())
     }
@@ -1503,6 +1708,9 @@ fn validate_all(config: &Config) -> Result<(), Error> {
     if let Some(url) = &config.url {
         url.validate()?;
     }
+    if let Some(version) = &config.version {
+        version.validate()?;
+    }
     // A scope that names no subset, or sets no policy for the one it names, is an
     // entry that reads as a decision and makes none (`A1-183`).
     for scoped in config.policy.as_deref().unwrap_or_default() {
@@ -1765,6 +1973,53 @@ pub const SCAFFOLD: &str = r#"# .aplan.yml, this repository's `aplan` policy.
 #     cut: feature
 #     release: none
 #
+# How the version this repository ships today is read, for `aplan version` and
+# APLAN048. A command, never a parse: this tool does not know what a
+# `pyproject.toml` means, which of a monorepo's manifests is the one that ships,
+# or what a `version` key in one of four build backends refers to -- and a guess
+# about any of those is a wrong number stated confidently.
+#
+# It prints the version on stdout and exits zero. The first non-empty line is
+# taken, trimmed, with one leading `v` removed, because `git describe` prints one
+# and `cargo pkgid` does not. It takes the same four limit keys every other
+# declared command does.
+#
+# Without it, `aplan version <ID>` still answers what a node owes, which needs
+# nothing outside the plan. What it cannot do is turn that into a number.
+#
+# `release_tag` is which tags name a release, as a glob, default `v*`. The window
+# with no release node is everything closed since the nearest matching tag
+# *reachable from HEAD* -- reachability, not recency, so a tag on a side branch
+# cannot become the baseline by being cut an hour later.
+# version:
+#   current:
+#     command: [ci/scripts/version.sh]
+#     timeout_seconds: 30
+#   release_tag: 'v*'
+#
+# Whether the artifact agrees with what the plan claims about compatibility
+# (APLAN049). `check` is argv that **exits zero when this artifact is compatible
+# with its last release**, and non-zero when it is not -- which is what
+# `cargo semver-checks check-release` already does natively.
+#
+# Asked that way on purpose: a command that had to print `none`, `fix`, `feature`
+# or `breaking` would be this tool teaching your ecosystem its vocabulary. It
+# runs the checker you declare and reports what it said; it never diffs an API.
+#
+# It fires one way only. A checker finding a break the plan does not claim is an
+# error; one finding none where the plan claims `breaking` is silent, because
+# claiming more is always allowed and an API differ cannot see a behavioural
+# break at all. A checker that could not be *asked* is a configuration fault, and
+# no claim is called false on the strength of it.
+#
+# Bounded like every other declared command, and worth bounding: an API differ
+# compiles the workspace, often twice. The default limit is ten minutes.
+# version:
+#   check:
+#     command: [cargo, semver-checks, check-release]
+#     timeout_seconds: 900
+#     max_memory: 8G
+#
 # What a runner may spend, if this platform can hold it to that (APLAN014 when a
 # cited test's own command is stopped, APLAN013 when it was `list` or `skipped`). `max_memory` becomes a cgroup's `memory.max` *and*
 # `memory.swap.max`, because the first alone turns a cap into a paging target;
@@ -1937,10 +2192,10 @@ fn walk_unknown(
         // already has would answer a question nobody asked.
         if let Some(name) = rename_to {
             let key = serde_yaml_ng::Value::String(name);
-            if !map.contains_key(&key) {
-                if let Some(v) = keep.remove(&k) {
-                    map.insert(key, v);
-                }
+            if !map.contains_key(&key)
+                && let Some(v) = keep.remove(&k)
+            {
+                map.insert(key, v);
             }
         }
     }
@@ -2002,10 +2257,10 @@ fn collect_keys(
         if let Some(name) = reference.strip_prefix("#/$defs/") {
             // Keyed by prefix too: the same type reached under two different
             // paths contributes keys under each.
-            if seen.insert((name.to_string(), prefix.to_string())) {
-                if let Some(target) = defs.get(name) {
-                    collect_keys(target, defs, prefix, seen, out);
-                }
+            if seen.insert((name.to_string(), prefix.to_string()))
+                && let Some(target) = defs.get(name)
+            {
+                collect_keys(target, defs, prefix, seen, out);
             }
         }
         return;
@@ -2165,6 +2420,7 @@ mod tests {
             max_memory: None,
             max_processes: None,
             wrap: None,
+            output_lines: None,
             expect_tests: None,
             skipped: None,
             run_selects: None,
@@ -2255,6 +2511,7 @@ test:
   dir: libs
   expect_tests: true
   run_selects: true
+  output_lines: 8
   skipped: [cargo, test, '--', --list, --ignored]
   max_memory: 4G
   max_processes: 64
@@ -2268,6 +2525,19 @@ test:
   timeout_seconds: 600
 version:
   require_impact: true
+  release_tag: 'v*'
+  current:
+    command: [ci/scripts/current-version.sh]
+    timeout_seconds: 30
+    max_memory: 256M
+    max_processes: 16
+    wrap: [nice, -n, '10', --]
+  check:
+    command: [cargo, semver-checks, check-release]
+    timeout_seconds: 600
+    max_memory: 8G
+    max_processes: 64
+    wrap: [nice, -n, '10', --]
   levels:
     task: fix
     cut: feature
@@ -2516,7 +2786,7 @@ stale_after_days: 30
         let keys = accepted_keys();
         assert_eq!(
             keys.len(),
-            61,
+            75,
             "config keys changed; teach the fixture above, then update this count: {keys:?}"
         );
         for key in keys {
@@ -3278,6 +3548,101 @@ test:
         }
     }
 
+    /// **The version is read by a command, never parsed** (ADR-0040).
+    ///
+    /// The key carries the same four limits every other spawning block does,
+    /// because ADR-0033 covers *every* spawned command: `url.check` was declared
+    /// with `max_memory` and never applied it, and this is the block that would
+    /// have repeated it.
+    #[test]
+    fn the_current_version_is_a_declared_command_with_the_usual_limits() {
+        let c: Config = serde_yaml_ng::from_str(
+            "version:\n  current:\n    command: [ci/version.sh]\n    timeout_seconds: 5\n    \
+             max_memory: 256M\n    max_processes: 8\n    wrap: [nice, '--']\n  \
+             release_tag: 'release-*'\n",
+        )
+        .expect("it parses");
+        let v = c.version.as_ref().expect("the block");
+        let current = v.current.as_ref().expect("the command");
+        assert_eq!(current.command, vec!["ci/version.sh".to_string()]);
+        assert_eq!(current.timeout_seconds, Some(5));
+        assert_eq!(current.max_memory.as_deref(), Some("256M"));
+        assert_eq!(current.max_processes, Some(8));
+        assert_eq!(v.release_tag(), "release-*");
+        v.validate().expect("it is usable");
+        // And the default, which is what every plan measured so far tags with.
+        let bare: Config =
+            serde_yaml_ng::from_str("version:\n  require_impact: true\n").expect("it parses");
+        assert_eq!(
+            bare.version.as_ref().expect("the block").release_tag(),
+            DEFAULT_RELEASE_TAG
+        );
+    }
+
+    /// A `version` block that could not be acted on is refused at load, and the
+    /// message names the key rather than the block (`A1-310`'s lesson).
+    ///
+    /// **Both declared commands, because they share one validator** (`A1-314`):
+    /// a message naming `version.current` for a `version.check` mistake would
+    /// send the reader to the wrong key, which is the defect `BadUrlCheck` has
+    /// its own variant for.
+    #[test]
+    fn an_unusable_version_block_is_refused_by_name() {
+        let cases = [
+            (
+                "version:\n  check:\n    command: []\n",
+                "`version.check.command`",
+            ),
+            (
+                "version:\n  check:\n    command: [x]\n    max_processes: 0\n",
+                "`version.check.max_processes`",
+            ),
+            ("version:\n  current:\n    command: []\n", "command"),
+            ("version:\n  current:\n    command: ['']\n", "blank"),
+            ("version:\n  release_tag: '  '\n", "release_tag"),
+            (
+                "version:\n  current:\n    command: [x]\n    max_memory: lots\n",
+                "max_memory",
+            ),
+            (
+                "version:\n  current:\n    command: [x]\n    max_processes: 0\n",
+                "max_processes",
+            ),
+            (
+                "version:\n  current:\n    command: [x]\n    wrap: []\n",
+                "wrap",
+            ),
+        ];
+        for (yaml, wanted) in cases {
+            let c: Config = serde_yaml_ng::from_str(yaml).expect("it parses");
+            let err = c
+                .version
+                .as_ref()
+                .expect("the block")
+                .validate()
+                .expect_err(yaml);
+            let said = err.to_string();
+            assert!(
+                said.contains(wanted) && said.contains("`version`"),
+                "{yaml}\n  said: {said}"
+            );
+        }
+    }
+
+    /// An empty `release_tag` is refused **whether or not a command is
+    /// declared**, which is the ordering defect this test exists for: written
+    /// the obvious way, the check sat after the early return and an empty glob
+    /// silently widened the window to the whole of history.
+    #[test]
+    fn an_empty_release_tag_is_refused_without_a_command_too() {
+        let c: Config = serde_yaml_ng::from_str("version:\n  release_tag: ''\n").expect("parses");
+        c.version
+            .as_ref()
+            .expect("the block")
+            .validate()
+            .expect_err("an empty glob matches no tag");
+    }
+
     /// The version policy is off until asked for, and its floors fall back to
     /// the shipped ones a level at a time (`A1-312`, ADR-0034).
     #[test]
@@ -3428,6 +3793,95 @@ mod docs_tests {
         ] {
             let c: Config = serde_yaml_ng::from_str(yaml).expect("it parses");
             c.validate_docs().expect("a usable declaration");
+        }
+    }
+}
+
+#[cfg(test)]
+mod published_schema_tests {
+    use super::*;
+
+    /// **Every key the schema publishes says what it is.**
+    ///
+    /// `run_selects` carried no description for the whole of its existence, and
+    /// not because nobody wrote one: the paragraph was written, and sat above
+    /// `max_memory` with no blank line between them, so Rust read the two
+    /// blocks as one comment. The published schema gave the memory cap an
+    /// opening paragraph about test selection and gave the selection key
+    /// nothing at all.
+    ///
+    /// A doc comment that drifts onto the next field is not a thing review
+    /// catches -- both keys look documented in the source, and the diff that
+    /// did it moved a field, not a comment. The generated artifact is where it
+    /// is visible, so that is where it is asserted. Found while auditing
+    /// `A1-354`'s own fixture, which had to enumerate these keys and read their
+    /// documentation to do it.
+    #[test]
+    fn every_published_key_says_what_it_is() {
+        let schema = derived_schema();
+        let mut silent = std::collections::BTreeSet::new();
+        describe(&schema, "", &mut silent);
+        if let Some(defs) = schema.get("$defs").and_then(serde_json::Value::as_object) {
+            for (name, def) in defs {
+                describe(def, name, &mut silent);
+            }
+        }
+        assert!(
+            silent.is_empty(),
+            "{} configuration key(s) published with no description, so an adopter reading the \
+             schema is told the key exists and nothing else: {:?}",
+            silent.len(),
+            silent
+        );
+        // A walk that finds nothing to check passes. The surface is large and
+        // this number only has to be a floor the walk cannot reach by accident.
+        let mut all = std::collections::BTreeSet::new();
+        count(&schema, "", &mut all);
+        if let Some(defs) = schema.get("$defs").and_then(serde_json::Value::as_object) {
+            for (name, def) in defs {
+                count(def, name, &mut all);
+            }
+        }
+        assert!(
+            all.len() > 40,
+            "the walk saw only {} key(s), so it cannot have read the schema",
+            all.len()
+        );
+    }
+
+    fn describe(
+        node: &serde_json::Value,
+        path: &str,
+        out: &mut std::collections::BTreeSet<String>,
+    ) {
+        if let Some(properties) = node
+            .get("properties")
+            .and_then(serde_json::Value::as_object)
+        {
+            for (key, value) in properties {
+                let child = format!("{path}.{key}");
+                let said = value
+                    .get("description")
+                    .and_then(serde_json::Value::as_str)
+                    .unwrap_or_default();
+                if said.trim().is_empty() {
+                    out.insert(child.clone());
+                }
+                describe(value, &child, out);
+            }
+        }
+    }
+
+    fn count(node: &serde_json::Value, path: &str, out: &mut std::collections::BTreeSet<String>) {
+        if let Some(properties) = node
+            .get("properties")
+            .and_then(serde_json::Value::as_object)
+        {
+            for (key, value) in properties {
+                let child = format!("{path}.{key}");
+                out.insert(child.clone());
+                count(value, &child, out);
+            }
         }
     }
 }

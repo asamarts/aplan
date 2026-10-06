@@ -403,7 +403,7 @@ fn section_text(lines: &[&str]) -> String {
 
 /// A stable 16-hex-digit FNV-1a hash of `s`. Deterministic across platforms and
 /// toolchains (unlike `std`'s `DefaultHasher`), which a stored fingerprint needs.
-fn fnv1a_hex(s: &str) -> String {
+pub(crate) fn fnv1a_hex(s: &str) -> String {
     let mut h: u64 = 0xcbf2_9ce4_8422_2325;
     for b in s.bytes() {
         h ^= u64::from(b);
@@ -1122,4 +1122,35 @@ mod normalise_tests {
         // `a/../../..` look like it stays inside.
         assert_eq!(normalise(Path::new("../../x")), Path::new("../../x"));
     }
+}
+
+/// The fingerprint of `anchor` in a document, whichever kind of document it is
+/// (`A1-191`).
+///
+/// One dispatch point, so the three callers that stamp, compare and resolve
+/// cannot disagree about which resolver a path gets. `None` where the anchor
+/// does not address anything, which is the same answer markdown gives for a
+/// heading that is not there.
+#[must_use]
+pub fn fingerprint_in(rel: &str, text: &str, anchor: &str) -> Option<String> {
+    if let Some(format) = crate::structured::format_for(rel) {
+        let value = crate::structured::parse(text, format)?;
+        let steps = crate::structured::parse_anchor(anchor).ok()?;
+        let node = crate::structured::resolve(&value, &steps)?;
+        return Some(crate::structured::fingerprint(node));
+    }
+    anchor_fingerprint(text, anchor)
+}
+
+/// Whether a stored fingerprint still holds, whichever kind of document it is.
+///
+/// Markdown keeps its own comparison because it accepts the pre-`A1-122` form as
+/// well as the current one; a structured address has no legacy spelling to
+/// forgive, so equality is the whole of it.
+#[must_use]
+pub fn holds_in(rel: &str, text: &str, anchor: &str, stored: &str) -> bool {
+    if crate::structured::format_for(rel).is_some() {
+        return fingerprint_in(rel, text, anchor).is_some_and(|f| f == stored);
+    }
+    fingerprint_holds(text, anchor, stored)
 }

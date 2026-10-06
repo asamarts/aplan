@@ -25,13 +25,11 @@ OUT_DIR="${REPO_ROOT}/dist"
 # The single source of truth for the version is `[workspace.package].version`
 # (HLD section 17). Read it from there rather than from the tag, so the tag is
 # checked against the code instead of the code being described by the tag.
-version="$(awk '
-    /^\[workspace\.package\]/ { in_block = 1; next }
-    /^\[/                     { in_block = 0 }
-    in_block && /^version[[:space:]]*=/ {
-        gsub(/[",]/, "", $3); print $3; exit
-    }
-' Cargo.toml)"
+#
+# Through the same one-line script `.aplan.yml` declares as `version.current`,
+# so the number this script refuses a tag against and the number `aplan version`
+# does arithmetic on cannot come apart.
+version="$(ci/scripts/current-version.sh)"
 
 if [[ -z "$version" ]]; then
     echo "ERROR: could not read [workspace.package].version from Cargo.toml" >&2
@@ -57,6 +55,11 @@ if [[ -n "${TAG:-}" ]]; then
         exit 1
     fi
     echo "==> Tag ${TAG} matches the workspace version"
+
+    # A matching tag and manifest still do not tell a reader which changes the
+    # release carries. Refuse before the expensive build, and while the author
+    # can still run this script before creating or pushing the tag (`A1-321`).
+    ci/scripts/check-release-changelog.sh "$version"
 fi
 
 echo "==> Building aplan ${version} for ${TARGET}"
@@ -92,6 +95,47 @@ built_version="$("$binary" --version | awk '{print $2}')"
 if [[ "$built_version" != "$version" ]]; then
     echo "ERROR: binary reports '${built_version}', expected '${version}'" >&2
     exit 1
+fi
+
+# And the plan's own arithmetic (A1-313, ADR-0034). The tag check above asks
+# whether the tag agrees with the manifest, which is two files saying the same
+# number; this asks whether that number is *large enough* for what has closed
+# since the last release. A breaking change that shipped in a patch release is
+# not discovered by reading the tag -- it is discovered by a consumer, and the
+# tag is the last moment it is still preventable.
+#
+# Asked of the artifact that was just built, rather than of a second build from
+# source: it is the binary being shipped, so the gate and the release cannot be
+# two different programs, and it costs nothing here where the build has already
+# happened.
+#
+# Only under TAG, for the same reason the check above is: an untagged build is a
+# staged one, and `main` carries a pre-release version it is *supposed* to be
+# short of.
+if [[ -n "${TAG:-}" ]]; then
+    echo "==> Asking the plan what this release must be"
+    # stderr is kept rather than discarded: on the refusing path it is the
+    # reason, and on the disagreeing path it names the window and the task that
+    # demanded the larger number -- the whole difference between a refusal
+    # somebody can act on and one they argue with.
+    why="$(mktemp)"
+    trap 'rm -f "$why"' EXIT
+    if ! required="$("$binary" version 2>"$why")"; then
+        echo "ERROR: the plan could not say what the next version must be:" >&2
+        sed 's/^/       /' "$why" >&2
+        echo "       It refuses rather than guessing, because a version number is a" >&2
+        echo "       compatibility promise to somebody who is not in the room." >&2
+        exit 1
+    fi
+    if [[ "$required" != "$version" ]]; then
+        echo "ERROR: the plan requires version '${required}', and this tree declares" >&2
+        echo "       '${version}':" >&2
+        sed 's/^/       /' "$why" >&2
+        echo "       Set [workspace.package].version to '${required}' and re-tag, or" >&2
+        echo "       correct the version_impact of the work that demands it." >&2
+        exit 1
+    fi
+    echo "==> The plan agrees: ${required}"
 fi
 
 rm -rf "$OUT_DIR"

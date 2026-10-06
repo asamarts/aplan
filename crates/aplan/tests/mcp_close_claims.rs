@@ -92,6 +92,7 @@ fn repo() -> tempfile::TempDir {
 
 fn runner() -> aplan_config::TestRunners {
     aplan_config::TestRunners::One(aplan_config::TestRunner {
+        output_lines: None,
         max_memory: None,
         max_processes: None,
         wrap: None,
@@ -119,6 +120,8 @@ fn policy(root: &Path, url_check: Option<aplan_config::UrlCheck>) -> aplan_mcp::
             advisory: Vec::new(),
         },
         verify: aplan_evidence::VerifyOptions {
+            version: None,
+            traces_root: None,
             config_file: None,
             execute: false,
             test_runner: Some(runner()),
@@ -193,6 +196,8 @@ fn the_close_description_matches_what_close_does() {
         &aplan_mcp::Policy {
             id_strategy: aplan_core::IdStrategy::Sequential,
             verify: aplan_evidence::VerifyOptions {
+                version: None,
+                traces_root: None,
                 config_file: None,
                 test_runner: None,
                 ..policy(dir.path(), None).verify
@@ -614,4 +619,119 @@ fn close_tool_properties() -> serde_json::Map<String, serde_json::Value> {
         .as_object()
         .cloned()
         .expect("properties")
+}
+
+/// **A release records the version it produced on this surface too** (`A1-339`).
+///
+/// One question deserves one answer on both (`A1-104`), and a closure that wrote
+/// a different file through MCP than through the command would be two tools
+/// wearing one name. An agent has no stderr to read, so the number -- and `null`
+/// when none could be derived -- comes back in the payload (`A1-173`).
+#[test]
+fn closing_a_release_through_mcp_records_the_version_it_produced() {
+    let dir = tempfile::Builder::new()
+        .tempdir_in(aplan_core::fixture::fixture_root())
+        .expect("tempdir");
+    let root = dir.path();
+    std::fs::create_dir_all(root.join("aplan/tasks")).expect("mkdir");
+    std::fs::write(root.join("version.sh"), "echo 1.0.0\n").expect("version.sh");
+    std::fs::write(
+        root.join("aplan/tasks/W-1.md"),
+        "---\nid: W-1\ntitle: a break\nphase: 1\nstatus: done\neffort_days: 1\n\
+         version_impact: breaking\nevidence:\n  - kind: note\n    ref: shipped\n    \
+         captured: 2026-09-24\n---\n\nbody\n",
+    )
+    .expect("task");
+    std::fs::write(
+        root.join("aplan/tasks/M-r.md"),
+        "---\nid: M-r\ntitle: the release\nphase: 1\nstatus: todo\n\
+         tags:\n  - milestone\n  - release\nblocked_by:\n  - W-1\n---\n\nbody\n",
+    )
+    .expect("release");
+    common::git(root, &["init", "-q", "."]);
+    common::git(root, &["config", "user.email", "t@example.invalid"]);
+    common::git(root, &["config", "user.name", "t"]);
+    common::git(root, &["add", "-A"]);
+    common::git(root, &["commit", "-q", "-m", "the plan"]);
+    common::git(root, &["tag", "v1.0.0"]);
+    std::fs::write(root.join("version.sh"), "echo 2.0.0\n").expect("bump");
+    common::git(root, &["add", "-A"]);
+    common::git(root, &["commit", "-q", "-m", "bump"]);
+
+    let mut p = policy(root, None);
+    p.verify.version = Some(aplan_config::VersionPolicy {
+        require_impact: None,
+        release_tag: None,
+        current: Some(aplan_config::DeclaredCommand {
+            command: vec!["sh".to_string(), "./version.sh".to_string()],
+            timeout_seconds: None,
+            max_memory: None,
+            max_processes: None,
+            wrap: None,
+        }),
+        check: None,
+        levels: Some(aplan_config::LevelFloors {
+            task: None,
+            cut: Some(aplan_core::task::VersionImpact::None),
+            release: None,
+        }),
+    });
+    let out = aplan_mcp::tools::close(
+        &root.join("aplan"),
+        "M-r",
+        &["file:version.sh".to_string()],
+        &p,
+    )
+    .expect("the release closes");
+    assert_eq!(out["version"], "2.0.0", "{out}");
+    let written = std::fs::read_to_string(root.join("aplan/tasks/M-r.md")).expect("read");
+    assert!(written.contains("version: 2.0.0"), "{written}");
+
+    // **And a window that declined to be measured records nothing, with the
+    // reason in the payload** (`A1-339`, audit). An agent has no stderr to read,
+    // so a `null` with no explanation cannot be told from "this is not a
+    // release".
+    for id in ["M-r2", "M-r3"] {
+        std::fs::write(
+            root.join(format!("aplan/tasks/{id}.md")),
+            format!(
+                "---\nid: {id}\ntitle: another release\nphase: 1\nstatus: todo\n\
+                 tags:\n  - milestone\n  - release\nblocked_by:\n  - W-1\n---\n\nbody\n"
+            ),
+        )
+        .expect("release");
+    }
+    let out = aplan_mcp::tools::close(
+        &root.join("aplan"),
+        "M-r2",
+        &["file:version.sh".to_string()],
+        &p,
+    )
+    .expect("the closure goes through");
+    assert!(out["version"].is_null(), "{out}");
+    assert!(
+        out["version_not_recorded"]
+            .as_str()
+            .is_some_and(|w| w.contains("open releases")),
+        "the reason has to reach the agent: {out}"
+    );
+    for id in ["M-r2", "M-r3"] {
+        std::fs::remove_file(root.join(format!("aplan/tasks/{id}.md"))).expect("rm");
+    }
+
+    // And an ordinary task records nothing, because the field is a release's.
+    std::fs::write(
+        root.join("aplan/tasks/W-2.md"),
+        "---\nid: W-2\ntitle: ordinary\nphase: 1\nstatus: todo\neffort_days: 1\n\
+         paths:\n- version.sh\n---\n\nbody\n",
+    )
+    .expect("task");
+    let out = aplan_mcp::tools::close(
+        &root.join("aplan"),
+        "W-2",
+        &["file:version.sh".to_string()],
+        &p,
+    )
+    .expect("the task closes");
+    assert!(out["version"].is_null(), "{out}");
 }

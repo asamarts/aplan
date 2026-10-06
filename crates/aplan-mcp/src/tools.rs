@@ -112,6 +112,39 @@ pub const TOOLS: &[ToolSpec] = &[
                       in `unchecked` rather than left looking like a pass. `aplan_verify` \
                       resolves the whole plan.",
     },
+    ToolSpec {
+        name: "aplan_claim",
+        description: "Record that you are working on a task, so other agents sharing this \
+                      repository can see it and `aplan_ready` can be filtered to what nobody \
+                      holds. Two agents cannot both be told they hold one task: the write is \
+                      a compare-and-swap, and the second is refused rather than overwriting \
+                      the first. Taking a task somebody holds needs `from` naming them, which \
+                      is checked. The name comes from `as`, else `APLAN_OWNER`, else the \
+                      repository's git user, else the operating system's; it is never read \
+                      from `.aplan.yml`, because several actors share one repository.",
+    },
+    ToolSpec {
+        name: "aplan_release",
+        description: "Drop a claim, reporting whose it was. Any caller may release, because a \
+                      claim lasts until it is released or taken over and an abandoned one has \
+                      to be clearable by somebody else; the record of who held it is in the \
+                      diff. Releasing a task nobody holds changes nothing and says so.",
+    },
+    ToolSpec {
+        name: "aplan_start",
+        description: "Record that work on a task has begun, setting `in_progress`. A claim \
+                      rather than a proof, and checked like one: `aplan_verify` reports \
+                      `APLAN053` where the repository holds nothing matching the task's \
+                      `paths`, so a status nobody acted on does not pass as progress. Refuses \
+                      a task that is already terminal, because nothing reopens finished work.",
+    },
+    ToolSpec {
+        name: "aplan_stop",
+        description: "Record that work on a task has stopped, returning it to `todo`. Not a \
+                      closure: it claims nothing about what was done, which is what \
+                      `aplan_close` is for. Refuses a task that is not `in_progress`, since \
+                      there is then nothing to stop.",
+    },
 ];
 
 /// One tool's identity, kept minimal for the same reason the surface is.
@@ -205,6 +238,19 @@ pub struct ReadyTask {
     /// is precisely the field the task wanted a consumer to be able to sort by.
     #[serde(default)]
     pub prefers_to_follow: Vec<String>,
+    /// Who holds this task, when somebody does (`A1-359`).
+    ///
+    /// The coordination signal a fleet needs *before* any commit exists, and
+    /// the reason it is a field here rather than a line the human renderer
+    /// composes: an agent picking work has to be able to skip what another
+    /// agent already holds, and it can only do that if the answer is in the
+    /// payload it reads. `ready --unclaimed` filters on the same value, so the
+    /// list and the filter cannot disagree (`A1-182`).
+    ///
+    /// Absent rather than empty when nobody holds it, because that is how the
+    /// model spells unassigned.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub held_by: Option<String>,
 }
 
 /// What `why` reports about one blocker.
@@ -262,6 +308,9 @@ pub fn ready_of(plan: &aplan_core::load::Plan) -> Ready {
         releases: 0,
         critical: false,
         prefers_to_follow: Vec::new(),
+        // Set for every row, including a closeable cut: a cut a repository has
+        // given an owner is a cut somebody is answerable for closing.
+        held_by: t.owner.clone(),
     };
     let releases = graph.releases_all();
     let ranked = graph.ready_ranked();
@@ -459,17 +508,17 @@ pub fn check(root: &Path, policy: &crate::Policy) -> Result<serde_json::Value, T
     let report = validate(&plan, &policy.options);
     let mut payload = report_payload(&report, &policy.verdict);
     let left = aplan_core::unresolved_by_check(&plan);
-    if left.any() {
-        if let Some(map) = payload.as_object_mut() {
-            map.insert(
-                "evidence_unresolved".to_string(),
-                serde_json::json!({
-                    "citations": left.citations,
-                    "tasks": left.tasks,
-                    "resolved_by": "verify",
-                }),
-            );
-        }
+    if left.any()
+        && let Some(map) = payload.as_object_mut()
+    {
+        map.insert(
+            "evidence_unresolved".to_string(),
+            serde_json::json!({
+                "citations": left.citations,
+                "tasks": left.tasks,
+                "resolved_by": "verify",
+            }),
+        );
     }
     Ok(payload)
 }
@@ -510,6 +559,11 @@ fn report_payload(report: &aplan_core::Report, policy: &aplan_core::Verdict) -> 
             "column": d.location.map(|l| l.column),
             "message": d.message,
             "agent_instruction": d.agent_instruction,
+            // The evidence a finding carries, as the array the CLI's JSON
+            // gives (`A1-365`). An agent that cannot see why a cited test
+            // failed is the actor this was built for: it has no terminal to
+            // rerun the command in.
+            "detail": d.detail,
         })).collect::<Vec<_>>(),
     })
 }
@@ -565,6 +619,8 @@ pub fn show(root: &Path, id: &str, policy: &crate::Policy) -> Result<serde_json:
     }
     let mut report = validate(&plan, &policy.options);
     let opts = aplan_evidence::VerifyOptions {
+        version: None,
+        traces_root: None,
         config_file: None,
         execute: false,
         ..policy.verify.clone()
@@ -603,6 +659,8 @@ pub fn verify(root: &Path, policy: &crate::Policy) -> Result<serde_json::Value, 
         return Ok(report_payload(&report, &policy.verdict));
     }
     let opts = aplan_evidence::VerifyOptions {
+        version: None,
+        traces_root: None,
         config_file: None,
         execute: false,
         ..policy.verify.clone()
@@ -661,6 +719,36 @@ fn locate<'p>(
         .ok_or_else(|| ToolError::Args(format!("no task `{id}` in this plan")))
 }
 
+/// The version to write into a release as it closes, and why it could not be
+/// (`A1-339`, ADR-0038).
+///
+/// The command's decision, from the same place: one question deserves one answer
+/// on both surfaces (`A1-104`), and two copies of this had the window's own
+/// refusals missing from both -- a plan with two open releases recorded a number
+/// the command refuses to give.
+///
+/// `Err` carries the reason rather than being swallowed, because an agent has no
+/// stderr to read and a `null` with no explanation cannot be told from "this is
+/// not a release" (`A1-173`).
+fn recorded_version(
+    plan: &aplan_core::load::Plan,
+    task: &aplan_core::task::Task,
+    policy: &crate::Policy,
+) -> Option<Result<String, String>> {
+    if !task.is_release() {
+        return None;
+    }
+    let version = policy.verify.version.clone().unwrap_or_default();
+    let tasks: Vec<_> = plan.tasks.iter().map(|lt| &lt.task).collect();
+    let graph = aplan_core::graph::Graph::new(tasks.iter().copied());
+    Some(aplan_evidence::version::version_for_release(
+        &policy.repo_root,
+        plan,
+        &graph,
+        &version,
+    ))
+}
+
 pub fn close(
     root: &Path,
     id: &str,
@@ -710,17 +798,24 @@ pub fn close(
     };
     // Structural refusals first, exactly as the CLI orders them: an already-closed
     // task must be told that, not told its citation would fail `verify`.
-    let updated = aplan_core::close(&source, &parsed, &fingerprints).map_err(|e| {
-        // The same remedy the command gives, from the same place: an agent
-        // cannot close through MCP what the command refuses, and that includes
-        // being told the same way (`A1-131`, `A1-265`). The invocation named is
-        // the command's, because `amend` has no tool -- which is the honest
-        // answer rather than inventing one.
-        ToolError::Refused(match aplan_core::close::advice(&e, id) {
-            Some(advice) => format!("{e}. {advice}"),
-            None => e.to_string(),
-        })
-    })?;
+    // **A release records the version it produced, on this surface too**
+    // (`A1-339`). An agent has no stderr to read, so what was recorded -- and
+    // `null` when nothing could be -- comes back in the payload instead of a
+    // note (`A1-173`).
+    let recorded = recorded_version(&plan, &target.task, policy);
+    let number = recorded.as_ref().and_then(|r| r.as_ref().ok());
+    let updated = aplan_core::close(&source, &parsed, &fingerprints, number.map(String::as_str))
+        .map_err(|e| {
+            // The same remedy the command gives, from the same place: an agent
+            // cannot close through MCP what the command refuses, and that includes
+            // being told the same way (`A1-131`, `A1-265`). The invocation named is
+            // the command's, because `amend` has no tool -- which is the honest
+            // answer rather than inventing one.
+            ToolError::Refused(match aplan_core::close::advice(&e, id) {
+                Some(advice) => format!("{e}. {advice}"),
+                None => e.to_string(),
+            })
+        })?;
 
     // The same gate the CLI applies, through the same function, for the reason
     // this whole surface exists to respect: an agent must not be able to close
@@ -735,6 +830,8 @@ pub fn close(
     // "An agent cannot close through MCP what it could not close here" has to
     // hold in both directions (`A1-131`).
     let closing = aplan_evidence::VerifyOptions {
+        version: None,
+        traces_root: None,
         config_file: None,
         url_check: None,
         ..policy.verify.clone()
@@ -780,6 +877,12 @@ pub fn close(
         "closed": id,
         "file": target.path.display().to_string(),
         "evidence": evidence,
+        // What a release recorded, `null` for everything else, and why when a
+        // release could not record one: an agent has no stderr to read, and a
+        // `null` with no explanation cannot be told from "this is not a
+        // release" (`A1-339`, `A1-173`).
+        "version": number,
+        "version_not_recorded": recorded.as_ref().and_then(|r| r.as_ref().err()),
         // Named rather than implied: a caller cannot tell a citation that was
         // checked from one nothing could check, and silence reads as passed.
         "unchecked": resolution.unchecked_names(),
@@ -872,6 +975,200 @@ pub fn dep(
     }))
 }
 
+/// `aplan_claim`: record who holds a task (`A1-359`).
+///
+/// **This tool is why `start` and `stop` exist at all.** `A1-077` refused a
+/// status setter as "write surface bought with no invariant to maintain", and
+/// that reasoning assumed an actor with a text editor. An agent reaching aplan
+/// through this server has tools and no way to edit a file, so for it
+/// "hand-editing is fine as it is" is simply false. The commands and the tools
+/// therefore land together rather than CLI-first.
+///
+/// The mutual exclusion is the compare-and-swap in `save_task`, exactly as in
+/// the CLI: two agents that both read "unassigned" cannot both be told they
+/// hold it. The holder is read from the bytes about to be swapped rather than from
+/// the plan snapshot, which is the race the CLI's own concurrency test caught.
+pub fn claim(
+    root: &Path,
+    id: &str,
+    as_name: Option<&str>,
+    from: Option<&str>,
+    policy: &crate::Policy,
+) -> Result<serde_json::Value, ToolError> {
+    let plan = load_plan(root);
+    if !plan.load_diagnostics.is_empty() {
+        return Err(ToolError::Plan(
+            "the plan does not load cleanly; fix it before recording who holds what".to_string(),
+        ));
+    }
+    let target = locate(&plan, id)?;
+    let who =
+        aplan_interop::identity::resolve(&aplan_interop::identity::from_environment(as_name, root))
+            .map_err(|e| ToolError::Args(e.to_string()))?;
+
+    let original = std::fs::read_to_string(&target.path)
+        .map_err(|e| ToolError::Plan(format!("reading {}: {e}", target.path.display())))?;
+    let current = aplan_core::mutation::task_of(&original)
+        .map_err(|e| ToolError::Plan(format!("`{id}`: {e}")))?;
+    match (current.owner.as_deref(), from) {
+        (Some(holder), None) => {
+            return Err(ToolError::Refused(format!(
+                "`{id}` is held by `{holder}`; pass `from` naming them to take it, or \
+                 release it first"
+            )));
+        }
+        (Some(holder), Some(named)) if holder != named => {
+            return Err(ToolError::Refused(format!(
+                "`{id}` is held by `{holder}`, not `{named}`; `from` is checked rather \
+                 than taken on trust"
+            )));
+        }
+        (None, Some(named)) => {
+            return Err(ToolError::Args(format!(
+                "`{id}` is held by nobody, so there is nothing to take it from `{named}`"
+            )));
+        }
+        _ => {}
+    }
+
+    let updated = aplan_core::close::set_owner(&original, Some(&who))
+        .map_err(|e| ToolError::Plan(format!("`{id}`: {e}")))?;
+    let notes = refuse_if_worse(&plan, id, &updated, policy, &format!("claim `{id}`"))?;
+    save_task(&target.path, &original, &updated, "aplan_claim")?;
+    Ok(serde_json::json!({
+        "id": id,
+        "held_by": who,
+        "taken_from": current.owner,
+        "file": target.path.display().to_string(),
+        "notes": notes,
+    }))
+}
+
+/// `aplan_release`: drop a claim, naming whose it was (`A1-359`).
+///
+/// Any caller may release, for the reason the CLI does: a claim with no expiry
+/// needs a way out that does not depend on the holder being reachable, and the
+/// record of who held it is in the diff and in this answer.
+pub fn release(
+    root: &Path,
+    id: &str,
+    policy: &crate::Policy,
+) -> Result<serde_json::Value, ToolError> {
+    let plan = load_plan(root);
+    if !plan.load_diagnostics.is_empty() {
+        return Err(ToolError::Plan(
+            "the plan does not load cleanly; fix it before recording who holds what".to_string(),
+        ));
+    }
+    let target = locate(&plan, id)?;
+    let original = std::fs::read_to_string(&target.path)
+        .map_err(|e| ToolError::Plan(format!("reading {}: {e}", target.path.display())))?;
+    let current = aplan_core::mutation::task_of(&original)
+        .map_err(|e| ToolError::Plan(format!("`{id}`: {e}")))?;
+    let Some(holder) = current.owner.clone() else {
+        // The outcome the caller asked for, reported rather than refused.
+        return Ok(serde_json::json!({ "id": id, "changed": false, "held_by": null }));
+    };
+
+    let updated = aplan_core::close::set_owner(&original, None)
+        .map_err(|e| ToolError::Plan(format!("`{id}`: {e}")))?;
+    let notes = refuse_if_worse(&plan, id, &updated, policy, &format!("release `{id}`"))?;
+    save_task(&target.path, &original, &updated, "aplan_release")?;
+    Ok(serde_json::json!({
+        "id": id,
+        "changed": true,
+        "was_held_by": holder,
+        "file": target.path.display().to_string(),
+        "notes": notes,
+    }))
+}
+
+/// `aplan_start` and `aplan_stop`: set and clear `in_progress` (`A1-359`).
+///
+/// A stored claim, and `APLAN053` is what keeps it honest: `verify` reports an
+/// `in_progress` the repository holds nothing for. The premise is not "do not
+/// store claims", it is "do not take claims on trust".
+pub fn working(
+    root: &Path,
+    id: &str,
+    starting: bool,
+    policy: &crate::Policy,
+) -> Result<serde_json::Value, ToolError> {
+    let plan = load_plan(root);
+    if !plan.load_diagnostics.is_empty() {
+        return Err(ToolError::Plan(
+            "the plan does not load cleanly; fix it before changing what is under way".to_string(),
+        ));
+    }
+    let target = locate(&plan, id)?;
+    let want = if starting {
+        Status::InProgress
+    } else {
+        Status::Todo
+    };
+    let original = std::fs::read_to_string(&target.path)
+        .map_err(|e| ToolError::Plan(format!("reading {}: {e}", target.path.display())))?;
+    let current = aplan_core::mutation::task_of(&original)
+        .map_err(|e| ToolError::Plan(format!("`{id}`: {e}")))?;
+    if current.status == want {
+        return Ok(serde_json::json!({ "id": id, "status": want.to_string(), "changed": false }));
+    }
+    if current.status.is_terminal() {
+        return Err(ToolError::Refused(format!(
+            "`{id}` is `{}`, a terminal state, and nothing returns it to being worked",
+            current.status
+        )));
+    }
+    if !starting && current.status != Status::InProgress {
+        return Err(ToolError::Refused(format!(
+            "`{id}` is `{}`, not `in_progress`, so there is nothing to stop",
+            current.status
+        )));
+    }
+
+    let updated = aplan_core::close::set_status(&original, want)
+        .map_err(|e| ToolError::Plan(format!("`{id}`: {e}")))?;
+    let verb = if starting { "start" } else { "stop" };
+    let notes = refuse_if_worse(&plan, id, &updated, policy, &format!("{verb} `{id}`"))?;
+    save_task(&target.path, &original, &updated, "aplan_working")?;
+    Ok(serde_json::json!({
+        "id": id,
+        "status": want.to_string(),
+        "changed": true,
+        "held_by": current.owner,
+        "file": target.path.display().to_string(),
+        "notes": notes,
+    }))
+}
+
+/// The post-state gate, as the four coordination tools need it (`A1-359`).
+///
+/// The same judgement every writing tool makes, in one place because four of
+/// them make it identically: run the rules against the plan this edit would
+/// produce and refuse one that adds a finding. It is not a formality here --
+/// a `policy` scope may select on `owner`, so a claim can move a task into a
+/// stricter evidence standard.
+fn refuse_if_worse(
+    plan: &aplan_core::load::Plan,
+    id: &str,
+    updated: &str,
+    policy: &crate::Policy,
+    what: &str,
+) -> Result<Vec<String>, ToolError> {
+    let produced = aplan_core::mutation::task_of(updated)
+        .map_err(|e| ToolError::Plan(format!("`{id}`: {e}")))?;
+    let after = aplan_core::mutation::with_replaced(plan, id, produced);
+    let delta = aplan_core::mutation::delta(plan, &after, &policy.options);
+    if delta.refuses(&policy.verdict) {
+        return Err(ToolError::Refused(format!(
+            "cannot {what}: it would add {} finding(s) `check` reports: {}",
+            delta.added.len(),
+            delta.lines().join("; ")
+        )));
+    }
+    Ok(delta.lines())
+}
+
 /// Parse `kind:ref` evidence the way the CLI does.
 fn parse_evidence(raw: &[String]) -> Result<Vec<aplan_core::Evidence>, ToolError> {
     raw.iter()
@@ -952,6 +1249,8 @@ fn test_policy(
             advisory: Vec::new(),
         },
         verify: aplan_evidence::VerifyOptions {
+            version: None,
+            traces_root: None,
             config_file: None,
             execute: false,
             test_runner: None,
@@ -1049,6 +1348,8 @@ mod tests {
             options: aplan_core::validate::Options::default(),
             verdict: aplan_core::Verdict::default(),
             verify: aplan_evidence::VerifyOptions {
+                version: None,
+                traces_root: None,
                 config_file: None,
                 execute: false,
                 test_runner: runner,
@@ -1073,6 +1374,7 @@ mod tests {
         // Absent rather than zero once the configuration covers it, so a plan
         // that was always fine reads exactly as it did.
         let runner = aplan_evidence::TestRunners::One(aplan_evidence::TestRunner {
+            output_lines: None,
             max_memory: None,
             max_processes: None,
             wrap: None,
@@ -1104,6 +1406,8 @@ mod tests {
             options: aplan_core::validate::Options::default(),
             verdict: aplan_core::Verdict::default(),
             verify: aplan_evidence::VerifyOptions {
+                version: None,
+                traces_root: None,
                 config_file: None,
                 execute: false,
                 test_runner: None,
@@ -1153,6 +1457,8 @@ mod tests {
             options: aplan_core::validate::Options::default(),
             verdict: aplan_core::Verdict::default(),
             verify: aplan_evidence::VerifyOptions {
+                version: None,
+                traces_root: None,
                 config_file: None,
                 execute: false,
                 test_runner: None,
@@ -1197,13 +1503,20 @@ mod tests {
     /// context an agent pays for on every call, so growth must be a reviewed
     /// decision rather than a side effect of a convenient refactor.
     ///
-    /// `aplan_identity` is the ninth, and the only one that answers about the
-    /// *server* rather than about a plan: `p0000014` spent a pass diagnosing a
-    /// defect its checkout had already fixed, because a configured MCP process
-    /// may be a different executable from the CLI beside it and nothing could
-    /// say so (`A1-259`).
+    /// `aplan_identity` is the only one that answers about the *server* rather
+    /// than about a plan: `p0000014` spent a pass diagnosing a defect its
+    /// checkout had already fixed, because a configured MCP process may be a
+    /// different executable from the CLI beside it and nothing could say so
+    /// (`A1-259`).
+    ///
+    /// The last four are `A1-359`'s, and they are the growth this test is
+    /// hardest on: four tools is a real cost on every call. They earn it
+    /// because the agent they serve is the one that cannot do this another way.
+    /// `A1-077` refused a status setter on the ground that hand-editing a
+    /// status is fine, which is true of an actor with an editor and false of
+    /// one reaching aplan through this server.
     #[test]
-    fn the_tool_surface_is_exactly_these_nine() {
+    fn the_tool_surface_is_exactly_these_thirteen() {
         let names: Vec<&str> = TOOLS.iter().map(|t| t.name).collect();
         assert_eq!(
             names,
@@ -1217,6 +1530,10 @@ mod tests {
                 "aplan_show",
                 "aplan_dep",
                 "aplan_close",
+                "aplan_claim",
+                "aplan_release",
+                "aplan_start",
+                "aplan_stop",
             ],
             "the MCP tool surface changed; that is a deliberate decision, not a refactor"
         );
@@ -1298,6 +1615,8 @@ mod tests {
             options: aplan_core::validate::Options::default(),
             verdict: aplan_core::Verdict::default(),
             verify: aplan_evidence::VerifyOptions {
+                version: None,
+                traces_root: None,
                 config_file: None,
                 execute: false,
                 test_runner: None,
@@ -1362,6 +1681,8 @@ mod tests {
             options: aplan_core::validate::Options::default(),
             verdict: aplan_core::Verdict::default(),
             verify: aplan_evidence::VerifyOptions {
+                version: None,
+                traces_root: None,
                 config_file: None,
                 execute: false,
                 test_runner: None,
@@ -1417,6 +1738,8 @@ mod tests {
             },
             verdict: aplan_core::Verdict::default(),
             verify: aplan_evidence::VerifyOptions {
+                version: None,
+                traces_root: None,
                 config_file: None,
                 execute: false,
                 test_runner: None,
@@ -1512,6 +1835,8 @@ mod tests {
             options: aplan_core::validate::Options::default(),
             verdict: aplan_core::Verdict::default(),
             verify: aplan_evidence::VerifyOptions {
+                version: None,
+                traces_root: None,
                 config_file: None,
                 execute: false,
                 test_runner: None,
@@ -1837,6 +2162,7 @@ mod tests {
         let mut policy = super::test_policy(dir.path(), false, validate::Options::default());
         policy.verify.test_runner = Some(aplan_evidence::TestRunners::One(
             aplan_evidence::TestRunner {
+                output_lines: None,
                 max_memory: None,
                 max_processes: None,
                 wrap: None,
@@ -2288,6 +2614,8 @@ pub fn add(
         effort_days: args.effort_days,
         blocked_by: args.blocked_by.clone(),
         prefer_after: Vec::new(),
+        ratified_by: Vec::new(),
+        contains: Vec::new(),
         evidence: Vec::new(),
         // Repeats removed on both surfaces, in one place (`A1-116`).
         paths: emit::deduped(&args.paths),
@@ -2297,6 +2625,7 @@ pub fn add(
         revisit_at: None,
         version_impact: None,
         version_impact_reason: None,
+        version: None,
     };
 
     // The whole post-state, through the same shared path the command uses, or
@@ -2468,6 +2797,8 @@ mod adding {
                 },
                 verdict: aplan_core::Verdict::default(),
                 verify: aplan_evidence::VerifyOptions {
+                    version: None,
+                    traces_root: None,
                     config_file: None,
                     execute: false,
                     test_runner: None,
@@ -2559,6 +2890,8 @@ mod adding {
             options: aplan_core::validate::Options::default(),
             verdict: aplan_core::Verdict::default(),
             verify: aplan_evidence::VerifyOptions {
+                version: None,
+                traces_root: None,
                 config_file: None,
                 execute: false,
                 test_runner: None,
@@ -2684,5 +3017,337 @@ mod adding {
                 "refused, and still wrote a file: {expected}"
             );
         }
+    }
+}
+
+#[cfg(test)]
+mod coordinating {
+    use super::*;
+
+    /// A plan with one free task, one held task and one closed task.
+    fn plan(dir: &std::path::Path) {
+        std::fs::create_dir_all(dir.join("tasks")).expect("mkdir");
+        for (id, status, extra) in [
+            ("T-free", "todo", ""),
+            ("T-spare", "todo", ""),
+            ("T-held", "todo", "owner: ada\n"),
+            // Parked. `stop` on a `todo` task reports "already there" rather
+            // than refusing, so this is the only status that reaches the
+            // "not `in_progress`" refusal.
+            ("T-parked", "blocked", ""),
+            (
+                "T-done",
+                "done",
+                "evidence:\n  - kind: note\n    ref: shipped\n    captured: 2026-10-01\n",
+            ),
+        ] {
+            std::fs::write(
+                dir.join(format!("tasks/{id}.md")),
+                format!(
+                    "---\nid: {id}\ntitle: task {id}\nphase: 0\nstatus: {status}\n\
+                     effort_days: 1\n{extra}---\n\nbody\n"
+                ),
+            )
+            .expect("task");
+        }
+    }
+
+    fn fixture() -> tempfile::TempDir {
+        let dir = tempfile::Builder::new()
+            .tempdir_in(aplan_core::fixture::fixture_root())
+            .expect("tempdir");
+        plan(dir.path());
+        dir
+    }
+
+    fn policy() -> crate::Policy {
+        crate::Policy {
+            id_strategy: aplan_core::IdStrategy::Sequential,
+            options: aplan_core::validate::Options::default(),
+            verdict: aplan_core::Verdict::default(),
+            verify: aplan_evidence::VerifyOptions {
+                version: None,
+                traces_root: None,
+                config_file: None,
+                execute: false,
+                test_runner: None,
+                max_unrelated_files: None,
+                url_check: None,
+            },
+            repo_root: std::path::PathBuf::from("."),
+        }
+    }
+
+    /// The owner line of a task, or `None`.
+    fn owner_of(root: &std::path::Path, id: &str) -> Option<String> {
+        let text = std::fs::read_to_string(root.join(format!("tasks/{id}.md"))).expect("read");
+        text.lines()
+            .find(|l| l.starts_with("owner:"))
+            .map(|l| l.trim_start_matches("owner:").trim().to_string())
+    }
+
+    /// **Every refusal `claim` makes, on this surface** (`A1-359`).
+    ///
+    /// The CLI and this server must refuse the same things -- `mcp_parity`
+    /// asserts they leave the same file -- and the refusals are where the two
+    /// are most easily allowed to drift, because each one is a separate branch
+    /// nothing forces a caller to exercise.
+    #[test]
+    fn claim_refuses_what_the_command_refuses() {
+        let dir = fixture();
+        let root = dir.path();
+
+        let out = claim(root, "T-free", Some("ada"), None, &policy()).expect("a free task");
+        assert_eq!(out["held_by"], "ada");
+        assert_eq!(owner_of(root, "T-free").as_deref(), Some("ada"));
+
+        // Held, and no `from`.
+        let e = claim(root, "T-held", Some("grace"), None, &policy())
+            .expect_err("a held task needs `from`");
+        assert!(e.to_string().contains("held by `ada`"), "{e}");
+
+        // Held, and the wrong `from`.
+        let e = claim(root, "T-held", Some("grace"), Some("bob"), &policy())
+            .expect_err("a wrong `from` must be refused");
+        assert!(e.to_string().contains("not `bob`"), "{e}");
+        assert_eq!(owner_of(root, "T-held").as_deref(), Some("ada"), "it moved");
+
+        // `from` against a task nobody holds. `T-spare`, because `T-free` was
+        // claimed above and is no longer free -- which is the whole point of
+        // reading the holder from the file rather than from a snapshot.
+        let e = claim(root, "T-spare", Some("x"), Some("nobody"), &policy())
+            .expect_err("there is nothing to take it from");
+        assert!(e.to_string().contains("held by nobody"), "{e}");
+
+        // The named takeover works, and says what it displaced.
+        let out = claim(root, "T-held", Some("grace"), Some("ada"), &policy()).expect("takeover");
+        assert_eq!(out["taken_from"], "ada");
+        assert_eq!(owner_of(root, "T-held").as_deref(), Some("grace"));
+
+        // An id that is not there.
+        assert!(claim(root, "GHOST", Some("x"), None, &policy()).is_err());
+    }
+
+    /// **`release` names whose claim it dropped, and says so when there was
+    /// none** (`A1-359`).
+    #[test]
+    fn release_reports_the_claim_it_dropped() {
+        let dir = fixture();
+        let root = dir.path();
+
+        let out = release(root, "T-held", &policy()).expect("a held task");
+        assert_eq!(out["was_held_by"], "ada");
+        assert_eq!(out["changed"], true);
+        assert_eq!(owner_of(root, "T-held"), None, "the key was left behind");
+
+        // Again: the outcome the caller asked for, reported rather than refused.
+        let out = release(root, "T-held", &policy()).expect("already released");
+        assert_eq!(out["changed"], false);
+        assert!(out["held_by"].is_null());
+
+        assert!(release(root, "GHOST", &policy()).is_err());
+    }
+
+    /// **`start` and `stop` move the status, and refuse what cannot move**
+    /// (`A1-359`).
+    #[test]
+    fn starting_and_stopping_refuse_what_the_command_refuses() {
+        let dir = fixture();
+        let root = dir.path();
+
+        let out = working(root, "T-free", true, &policy()).expect("start");
+        assert_eq!(out["status"], "in_progress");
+        assert_eq!(out["changed"], true);
+
+        // Already there: reported, not refused, and nothing written.
+        let out = working(root, "T-free", true, &policy()).expect("already started");
+        assert_eq!(out["changed"], false);
+
+        let out = working(root, "T-free", false, &policy()).expect("stop");
+        assert_eq!(out["status"], "todo");
+
+        // A `todo` task is already where `stop` would put it, so that is
+        // reported rather than refused.
+        let out = working(root, "T-held", false, &policy()).expect("already todo");
+        assert_eq!(out["changed"], false);
+
+        // Parked is the status that is neither, and the one the refusal is for.
+        let e = working(root, "T-parked", false, &policy()).expect_err("nothing to stop");
+        assert!(e.to_string().contains("not `in_progress`"), "{e}");
+
+        // Terminal: nothing reopens finished work.
+        let e = working(root, "T-done", true, &policy()).expect_err("a closed task");
+        assert!(e.to_string().contains("terminal"), "{e}");
+
+        assert!(working(root, "GHOST", true, &policy()).is_err());
+    }
+
+    /// **None of the four writes into a plan that does not load** (`A1-359`,
+    /// and `A1-124`'s rule for this surface).
+    ///
+    /// The task in the file that failed is the one that could make the edit
+    /// wrong, so every mutating tool refuses here. `aplan_dep` shipped without
+    /// this guard once, which is why it is asserted for each of the four rather
+    /// than for one of them.
+    #[test]
+    fn none_of_them_writes_into_a_plan_that_does_not_load() {
+        let dir = fixture();
+        let root = dir.path();
+        std::fs::write(root.join("tasks/broken.md"), "---\nid: B\nnot: a task\n").expect("broken");
+        let before = std::fs::read_to_string(root.join("tasks/T-free.md")).expect("read");
+
+        for e in [
+            claim(root, "T-free", Some("x"), None, &policy()).err(),
+            release(root, "T-held", &policy()).err(),
+            working(root, "T-free", true, &policy()).err(),
+            working(root, "T-held", false, &policy()).err(),
+        ] {
+            let e = e.expect("a plan that does not load must refuse every write");
+            assert!(e.to_string().contains("does not load cleanly"), "{e}");
+        }
+        assert_eq!(
+            before,
+            std::fs::read_to_string(root.join("tasks/T-free.md")).expect("read"),
+            "a refusal wrote anyway"
+        );
+    }
+}
+
+#[cfg(test)]
+mod coordination_gate {
+    use super::*;
+
+    /// **A claim can move a task into a stricter evidence standard, and the
+    /// gate catches it** (`A1-359`).
+    ///
+    /// This is the reason `claim` runs the post-state rules at all, and the
+    /// reason is easy to disbelieve: `owner` looks inert. It is not. A `policy`
+    /// scope may select on `owners`, so naming a different holder can change
+    /// which `require_min_strength` a closed task is held to -- and a task that
+    /// closed cleanly on a note becomes `APLAN017` the moment it is claimed by
+    /// somebody the stricter scope covers.
+    ///
+    /// Written as a test rather than left as an assertion in a comment, because
+    /// a gate nobody has seen refuse is a gate nobody knows is wired up.
+    #[test]
+    fn claiming_into_a_stricter_policy_scope_is_refused() {
+        let dir = tempfile::Builder::new()
+            .tempdir_in(aplan_core::fixture::fixture_root())
+            .expect("tempdir");
+        let root = dir.path();
+        std::fs::create_dir_all(root.join("tasks")).expect("mkdir");
+        // Closed on a note, which is fine under the whole-plan default.
+        std::fs::write(
+            root.join("tasks/T-1.md"),
+            "---\nid: T-1\ntitle: closed on a note\nphase: 0\nstatus: done\n\
+             effort_days: 1\nevidence:\n  - kind: note\n    ref: agreed\n    \
+             captured: 2026-10-01\n---\n\nbody\n",
+        )
+        .expect("task");
+
+        // `ada`'s work must close on something a machine can check.
+        let mut options = aplan_core::validate::Options::default();
+        options
+            .evidence_scopes
+            .push(aplan_core::validate::EvidenceScope {
+                selector: aplan_core::select::Selector {
+                    owners: vec!["ada".to_string()],
+                    ..aplan_core::select::Selector::default()
+                },
+                named_dimensions: 1,
+                require_min_strength: Some(vec![aplan_core::EvidenceKind::Commit]),
+                exempt_tags: None,
+            });
+        let policy = crate::Policy {
+            id_strategy: aplan_core::IdStrategy::Sequential,
+            options,
+            verdict: aplan_core::Verdict::default(),
+            verify: aplan_evidence::VerifyOptions {
+                version: None,
+                traces_root: None,
+                config_file: None,
+                execute: false,
+                test_runner: None,
+                max_unrelated_files: None,
+                url_check: None,
+            },
+            repo_root: std::path::PathBuf::from("."),
+        };
+
+        let before = std::fs::read_to_string(root.join("tasks/T-1.md")).expect("read");
+        let e = claim(root, "T-1", Some("ada"), None, &policy)
+            .expect_err("the claim introduces a finding, so it must be refused");
+        assert!(
+            e.to_string().contains("APLAN017") || e.to_string().contains("finding"),
+            "the refusal does not say what it would have added: {e}"
+        );
+        assert_eq!(
+            before,
+            std::fs::read_to_string(root.join("tasks/T-1.md")).expect("read"),
+            "a refused claim wrote anyway"
+        );
+
+        // And somebody the scope does not cover may still claim it, which is
+        // what keeps the gate a gate rather than a ban.
+        claim(root, "T-1", Some("grace"), None, &policy).expect("an uncovered holder is fine");
+    }
+
+    /// **An `owner` the writer will not guess at is refused on this surface
+    /// too** (`A1-359`).
+    ///
+    /// The one reachable failure of `set_owner`: a block-form value, which
+    /// `rewrite_scalar_line` declines rather than mangle. The CLI reports it
+    /// and so must this, or an agent would see a different outcome from the
+    /// same plan.
+    #[test]
+    fn a_block_form_owner_is_refused_rather_than_mangled() {
+        let dir = tempfile::Builder::new()
+            .tempdir_in(aplan_core::fixture::fixture_root())
+            .expect("tempdir");
+        let root = dir.path();
+        std::fs::create_dir_all(root.join("tasks")).expect("mkdir");
+        std::fs::write(
+            root.join("tasks/T-1.md"),
+            "---\nid: T-1\ntitle: odd owner\nphase: 0\nstatus: todo\n\
+             effort_days: 1\nowner: >\n  ada\n---\n\nbody\n",
+        )
+        .expect("task");
+        let before = std::fs::read_to_string(root.join("tasks/T-1.md")).expect("read");
+
+        let policy = crate::Policy {
+            id_strategy: aplan_core::IdStrategy::Sequential,
+            options: aplan_core::validate::Options::default(),
+            verdict: aplan_core::Verdict::default(),
+            verify: aplan_evidence::VerifyOptions {
+                version: None,
+                traces_root: None,
+                config_file: None,
+                execute: false,
+                test_runner: None,
+                max_unrelated_files: None,
+                url_check: None,
+            },
+            repo_root: std::path::PathBuf::from("."),
+        };
+        // `release` is the path that reaches the writer: it reads the holder
+        // only to report it, so nothing intervenes.
+        let e = release(root, "T-1", &policy).expect_err("a value this cannot swap is refused");
+        assert!(
+            e.to_string().contains("change it by hand"),
+            "the refusal does not say what to do: {e}"
+        );
+
+        // `claim` is refused earlier and for a different reason, which is worth
+        // pinning rather than glossing: a block scalar keeps its newline, so the
+        // holder reads as `ada\n` and `from: ada` genuinely does not name it.
+        // The holder comparison is doing its job; it simply gets there first.
+        let e = claim(root, "T-1", Some("grace"), Some("ada"), &policy)
+            .expect_err("the named holder does not match");
+        assert!(e.to_string().contains("not `ada`"), "{e}");
+        assert_eq!(
+            before,
+            std::fs::read_to_string(root.join("tasks/T-1.md")).expect("read"),
+            "a refusal rewrote the file"
+        );
     }
 }

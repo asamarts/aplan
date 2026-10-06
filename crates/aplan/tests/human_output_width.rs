@@ -165,6 +165,9 @@ const HUMAN: &[(&[&str], &str)] = &[
     (&["deprecations"], "announced in"),
     (&["paths"], "commit(s) sampled"),
     (&["critical-path"], "critical path:"),
+    // The target-bounded form puts an id a reader chose into the header, so the
+    // line's length stopped being the renderer's alone (`A1-345`).
+    (&["critical-path", "T-002"], "critical path to"),
     (&["tasks"], "status"),
     (&["tree", "T-002"], "waits on:"),
     (&["show", "T-001"], "phase 0"),
@@ -190,7 +193,19 @@ const HUMAN: &[(&[&str], &str)] = &[
 /// omission from one.
 const NOT_PROSE: &[(&str, &str)] = &[
     ("add", "writes a task and prints its path"),
+    (
+        "version",
+        "one word from a closed vocabulary, or a version number: there is nothing to \
+         re-flow, and a substituted answer must not gain a line break",
+    ),
     ("amend", "writes a task and prints its path"),
+    // `A1-359`'s four: each edits one task and prints the id, the new state and
+    // the path. The one variable-length part is a name somebody chose, and
+    // re-flowing a path is what the width gate exists to prevent elsewhere.
+    ("claim", "writes a task and prints its path"),
+    ("release", "writes a task and prints its path"),
+    ("start", "writes a task and prints its path"),
+    ("stop", "writes a task and prints its path"),
     (
         "attest",
         "prints a signed digest, which must not be re-flowed",
@@ -206,6 +221,12 @@ const NOT_PROSE: &[(&str, &str)] = &[
          gated by a_refusal_folds_and_keeps_the_shape_it_was_written_with",
     ),
     ("drop", "writes a task and prints its path"),
+    (
+        "tag",
+        "writes a task and prints one sentence naming what the reader typed; its \
+         refusal is the shared mutation refusal, gated by \
+         a_refusal_folds_and_keeps_the_shape_it_was_written_with",
+    ),
     ("export", "writes a document in somebody else's shape"),
     ("export-agents-md", "writes a document"),
     ("export-roadmap-json", "a machine format"),

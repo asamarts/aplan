@@ -1,0 +1,16 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "additionalProperties": false,
+  "description": "The parsed per-user file. Every field is optional, and every field is about\nthe actor or their terminal.\n\nUnknown keys are rejected rather than ignored, for the reason `.aplan.yml`\nrejects them: a key that is quietly dropped is a setting somebody believes\nis in effect.",
+  "properties": {
+    "me": {
+      "description": "Who you are, for `claim`, `release` and the holder `ready` reports.\n\nRead between `APLAN_OWNER` and `git config user.name`: an environment\nvariable is something the caller set for this run and wins over a file,\nand git's name is a guess this exists to replace.",
+      "type": [
+        "string",
+        "null"
+      ]
+    }
+  },
+  "title": "UserConfig",
+  "type": "object"
+}

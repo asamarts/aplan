@@ -46,20 +46,7 @@ fn test_sources() -> Vec<(String, String)> {
 }
 
 /// A file may name the binary without spawning it, and one does.
-const NAMES_THE_BINARY_WITHOUT_RUNNING_IT: &[(&str, &str)] = &[
-    (
-        "attest.rs",
-        "hashes the binary's bytes to check the provenance document names the build \
-         that produced it; it reads the file and never starts a process",
-    ),
-    (
-        "build_identity.rs",
-        "hashes the binary's bytes for the same reason one rung down: `facts --identity` \
-         reports the digest of the running image, and the only way to check it names *this* \
-         artifact is to read the artifact. Every command it runs goes through `common` \
-         (`A1-256`)",
-    ),
-];
+const NAMES_THE_BINARY_WITHOUT_RUNNING_IT: &[(&str, &str)] = &[];
 
 /// The environment variable cargo sets to the binary's path, spelled in two
 /// halves so that **this file does not contain it**.
@@ -129,6 +116,43 @@ fn no_test_file_reaches_for_the_binary_itself() {
         offenders.len(),
         offenders.join("\n  "),
         common::RECORD_TO
+    );
+}
+
+/// Cargo may replace its executable path while an integration-test process is
+/// still running. The helper holds the inode it first saw, not merely that
+/// mutable path, and every process resolves that build to the same hard link
+/// rather than copying its hundreds of megabytes (`A1-242`, `A1-399`).
+#[test]
+fn the_binary_under_test_is_a_snapshot_not_a_mutable_cargo_path() {
+    use std::os::unix::fs::MetadataExt as _;
+
+    let dir = tempfile::Builder::new()
+        .tempdir_in(aplan_core::fixture::fixture_root())
+        .expect("tempdir");
+    let source = dir.path().join("aplan-source");
+    std::fs::write(&source, b"first build").expect("write first build");
+
+    let first = common::BinarySnapshot::capture(&source);
+    let second = common::BinarySnapshot::capture(&source);
+    let source_metadata = source.metadata().expect("source metadata");
+    let snapshot_metadata = first.path().metadata().expect("snapshot metadata");
+
+    assert_eq!(first.path(), second.path(), "one inode gets one cache path");
+    assert_eq!(
+        (source_metadata.dev(), source_metadata.ino()),
+        (snapshot_metadata.dev(), snapshot_metadata.ino()),
+        "the snapshot must be a hard link, not a second allocation"
+    );
+
+    let replacement = dir.path().join("aplan-replacement");
+    std::fs::write(&replacement, b"second build").expect("write second build");
+    std::fs::rename(&replacement, &source).expect("replace the source path atomically");
+
+    assert_eq!(
+        std::fs::read(first.path()).expect("read snapshot"),
+        b"first build",
+        "a rebuild replaced the source path, not the artifact this test process resolved"
     );
 }
 

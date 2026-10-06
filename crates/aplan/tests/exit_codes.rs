@@ -15,9 +15,11 @@
 //! producer is `CloseError::Produced`, which means `close` built frontmatter it
 //! could not read back, and that is a bug in `aplan` rather than anything a
 //! plan can ask for. Which is why the mapping was all anyone had tested. The
-//! probe below therefore rides on a real one (`A1-250`): the writer emits list
-//! entries as plain YAML scalars, so an argument that a plain scalar cannot
-//! carry does not round-trip. When that is fixed the probe stops producing `3`
+//! probe below therefore rides on a real one (`A1-213`): a task whose
+//! `blocked_by` carries a YAML anchor that another field aliases loads
+//! perfectly well, and rewriting that list orphans the alias, so what the
+//! writer produced no longer parses. When that is fixed the probe stops
+//! producing `3`
 //! and this file fails -- which is the point. The gate enumerates the codes
 //! from `facts`, so the repair is to find the next route to `3`, not to delete
 //! the probe: dropping it fails the same assertion from the other side.
@@ -97,11 +99,27 @@ const PROBES: &[Probe] = &[
     Probe {
         code: "internal",
         says: "bug in aplan",
-        what: "`dep add --after` naming an id that loads and cannot be written back \
-               (`A1-250`)",
+        // The previous route here was an argument a plain scalar could not carry
+        // (`A1-250`), which stopped producing `3` once list entries were
+        // serialised rather than pasted: an id the plan does not know is now
+        // `APLAN003`, which is the plan's problem and not aplan's (`A1-213`,
+        // audit). An anchor is the honest remainder -- valid YAML that this tool
+        // accepts and cannot rewrite.
+        what: "`dep add --after` on a task whose `blocked_by` carries a YAML anchor \
+               another field aliases, which `aplan` loads and cannot rewrite (`A1-213`)",
         invoke: |dir| {
-            plan(dir, "");
-            common::run(dir, &["dep", "add", "T-1", "--after", "  spaced"])
+            plan(dir, "blocked_by: &d\n  - T-2\ntags: *d\n");
+            for id in ["T-2", "T-3"] {
+                std::fs::write(
+                    dir.join(format!("aplan/{id}.md")),
+                    format!(
+                        "---\nid: {id}\ntitle: a task\nphase: 1\nstatus: todo\n\
+                         effort_days: 1\n---\n\n## Why\n\nBecause.\n"
+                    ),
+                )
+                .expect("task");
+            }
+            common::run(dir, &["dep", "add", "T-1", "--after", "T-3"])
         },
     },
 ];
@@ -208,9 +226,14 @@ fn the_published_codes_are_distinct() {
 /// happened, and what happened here is that `aplan` failed its own self-check.
 #[test]
 fn the_internal_code_says_it_is_aplans_fault_and_not_the_plans() {
+    // The same route the gate above enumerates, so there is one place to repair
+    // when it stops producing `3` rather than two that can disagree.
+    let probe = PROBES
+        .iter()
+        .find(|p| p.code == "internal")
+        .expect("an `internal` probe");
     let dir = scratch();
-    plan(dir.path(), "");
-    let out = common::run(dir.path(), &["dep", "add", "T-1", "--after", "  spaced"]);
+    let out = (probe.invoke)(dir.path());
     assert_eq!(out.code, 3, "{}", out.text());
     let text = out.text();
     assert!(

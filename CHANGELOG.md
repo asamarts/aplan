@@ -6,7 +6,871 @@ to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
-Nothing yet.
+## [0.4.0] - 2026-10-06
+
+### Fixed
+
+- **The release workflow now checks out the history its version gate reads** (`A1-402`). The first
+  `v0.4.0` tag build reached `aplan version` with checkout's one-commit default, so no prior release
+  tag was reachable and the gate correctly refused to guess what had closed since it. The checkout
+  now fetches full history and tags before building; an executable repository test binds that
+  requirement to the release step.
+
+- **A tagged release is refused before building when `CHANGELOG.md` has no section for its
+  version** (`A1-321`). The release runbook now closes the changelog and runs the exact workflow
+  gate before creating or pushing the tag. A matching heading inside a fenced example does not
+  satisfy it, and a refusal names both the version and file to repair.
+
+- **Integration tests hold one immutable executable even when Cargo rebuilds underneath them**
+  (`A1-242`, `A1-399`). Identity and attestation tests previously launched commands on opposite
+  sides of Cargo replacing `target/debug/aplan`, so the same test process could observe different
+  source commits and binary digests. The first fix copied the binary per integration-test process;
+  an instrumented coverage run then found `Text file busy` failures and 328 leaked copies consuming
+  64 GB, because static destructors do not run at process exit. The final snapshot is a hard link
+  keyed by device and inode: every process testing one build shares the same artifact without a
+  second byte allocation, and Cargo's target cleanup owns its lifetime.
+
+### Added
+
+- **A mutation causing an effect outside the plan is now a gate rather than a decision.** ADR-0043
+  said that closing a task writes plan files and spawns only the observing commands trusted
+  configuration names, and nothing would have noticed that stopping. Two halves now measure it: a
+  source scan naming every place production code starts a process, and a measurement that drives
+  every command against configuration naming a recording script in every place configuration can
+  name a command. Of the twelve commands that write the plan, none reaches a configured command as
+  the census drives it; the three that do are reporting commands asking the artifact its version.
+  The one mutation allowed to reach one is `close` citing a test, which asks the runner which tests
+  exist in order to **refuse** a citation `verify` would reject, and the refusal is asserted beside
+  the spawn. `verify --execute` is the control that keeps the rest falsifiable.
+
+- **A failed cited test says why** (`A1-365`). A pilot's first hosted `verify --execute` did the
+  important part -- it rejected two cited tests that failed only inside its nested-Podman runner --
+  and its entire actionable output was `test ... failed under --execute` with the instruction to
+  make the test pass. Both streams had been captured and then thrown away, so the cause could only
+  be found by entering the runner and invoking each selector by hand, which turned out to expose
+  five independent boundary faults. None of them was distinguishable from that instruction.
+
+  `APLAN014` now carries a bounded tail of what the runner printed: eight lines across both streams
+  by default, stderr first then stdout, each stream named, each line cut at 200 characters, and
+  every omission stated out loud -- truncation that cannot be seen is worse than truncation.
+
+  **Present by default, which is a decision with a recorded cost.** `test.list` has retained one
+  line of stderr for a launch failure since it was written, and this is that precedent applied to
+  the other half; an opt-in would reproduce the pilot's experience exactly, since they met the
+  opaque failure first and would only then have discovered a key existed. The cost is that a CI log
+  can contain a little output nobody explicitly asked for. Three things bound it: the default is
+  small, every line goes through the sanitizer a generated document uses, and recognisable
+  credential shapes are masked -- including a credential embedded in a URL, which is what a failing
+  `git clone` prints, and a session cookie. **That masking is a best-effort filter over shapes that
+  look like credentials, not a secret scanner**, and it deliberately leaves bare hex and base64 alone
+  because commit shas, image digests and test hashes are what an adopter reads this output to find. A
+  repository whose tests print secrets in an unrecognisable shape sets `test.output_lines: 0`.
+
+  The lines arrive as a new `detail` field rather than as newlines inside the message, because a
+  message is prose every surface folds to its own width and this is captured text whose line breaks
+  carry meaning: an array in JSON and over MCP, inside `message.text` in SARIF, unfolded in a
+  terminal. One failing test cited by many tasks shows its output once and the other findings point
+  at it -- on one adopter's plan that is 86 citations over nine names. A launch failure, a cap stop,
+  a test the runner claims it skips and a plain failure remain four different statements: reading an
+  excerpt into any of the first three would turn "unverified" into "disproved".
+
+- **A per-user settings file, holding one key** (`A1-364`).
+  `~/.config/aplan/config.yml`, or `$XDG_CONFIG_HOME/aplan/config.yml`, with `me: <name>`: who
+  `aplan claim` records, for every repository on the machine. Absent on every machine that does not
+  write one, and every command behaves as it did without it.
+
+  **It is a second type, not a second place to put the first one.** `.aplan.yml` has 76 keys among
+  them `deny_warnings`, `advisory` and `evidence.require_min_strength`; a per-user file that
+  accepted those would let anybody turn a repository's gate down on their own machine and still
+  pass it, silently, exactly where nobody reviews. So the two share no key, a test keeps them
+  disjoint, and each per-user key has to say why a repository could not reasonably require it of
+  everybody. Precedence is therefore not a rule anybody maintains: there is nothing in this file for
+  a repository to lose an argument with.
+
+  Identity now resolves `--as`, then `APLAN_OWNER`, then this file, then `git config user.name`,
+  then the operating system's user, and a refusal names all five. The variable comes first because
+  it is set for this run; the file comes before git's name because replacing that guess is what it
+  is for. A key `.aplan.yml` takes is refused here by name; a file that will not parse is reported
+  on stderr and the next source is used, because somebody wrote it and believes it is in effect,
+  while an absent file is the ordinary case and says nothing.
+
+  **No `.env` support, as a decision rather than a gap**: `APLAN_OWNER` already covers "set it for
+  this shell", and a dotenv is in the wrong place twice -- committed it is shared between actors,
+  which is what a repository-level name was rejected for, and ignored it is per-machine
+  configuration in a directory that is not per-machine.
+
+### Fixed
+
+- **`run_selects` was published with no documentation, and `max_memory` was published with
+  `run_selects`'s.** The paragraph was written; it sat above `max_memory` with no blank line
+  between the two blocks, so Rust read them as one comment and the schema gave the memory cap an
+  opening paragraph about test selection. Both keys look documented in the source, and the change
+  that did it moved a field rather than a comment, which is why the generated artifact is where it
+  showed. A gate now asserts that every key the config schema publishes carries its own
+  description.
+
+- **Four findings from auditing `A1-359`**, none of them corrupting a plan and all of them wrong
+  about what they told a reader.
+
+  **`release` and `start`/`stop` decided from the plan snapshot rather than from the file they were
+  about to write.** The snapshot is taken before the file is read, so a release could report
+  dropping a claim that was already gone, or name a holder a concurrent takeover had replaced; and
+  `start`/`stop` could report success for a change they did not make, or refuse a stop that was
+  legal. The write was never wrong -- the compare-and-swap refuses an interleaving it cannot
+  account for, measured at five of eight under contention -- but the record of what was displaced
+  is what these commands exist to leave. `claim` was already fixed during the task, by its own
+  concurrency test; its two siblings were not, and the MCP tools had been right all along, so the
+  surfaces disagreed in a way `mcp_parity` cannot see because it runs single-threaded.
+
+  **`APLAN053` gave advice that could not work on a bare-directory glob.** `paths: [src]` with
+  `src/a.rs` tracked matches nothing, and the rule said "`git add` them" to an author who already
+  had. `APLAN019` has offered the one-character remedy since `A1-022` and is silent here, because a
+  task that is merely under way cites nothing for its globs to bind. The diagnosis is now one
+  function shared by both rules, so they cannot drift on it.
+
+  **`APLAN053` was invisible to `aplan vacuity`.** It declared neither what it applies to nor what
+  it binds against, so the report that exists to say how much of the gate is really running left it
+  out -- which is the green-by-construction shape this tool hunts. It now declares `in_progress` and
+  `paths`, and `vacuity` reports it: subjects, how many were checked, and how many it could not have
+  failed on.
+
+  **A blank name was taken as an absence.** `--as ""` is almost always `--as "$SOMEVAR"` against an
+  unset variable, and it attributed the claim to whatever this machine's git config said. `--owner
+  ""` was worse and older: it wrote `owner: ''`, a third state the model does not have, so
+  `ready --unclaimed` passed over the task and `ready` printed an empty `[]` beside it. Both are
+  refused now, which is the stance `--tag ""` already had. A blank from `APLAN_OWNER` or
+  `git config user.name` still means unset, because nobody typed it at this command.
+
+### Added
+
+- **`aplan claim`, `release`, `start` and `stop`, and `APLAN053`** (`A1-359`, ADR-0044). Two agents
+  sharing a repository had no way to say "I am on this": `owner` existed and no command wrote it
+  after creation. And `Status` had five values of which three were reachable -- `in_progress` and
+  `blocked` arrived only from `import --format roadmap-json`, carried across from another tool, so
+  a status could appear as an unverifiable claim, be reasoned about by every rule that reads it,
+  and never be corrected, only ended.
+
+  **Two concepts, not one.** `owner` answers "who holds this, now", which is a coordination signal
+  needed before any commit exists, so it is recorded: `claim` writes it through
+  `save::replace`, a compare-and-swap, so of eight simultaneous claimants exactly one is told it
+  holds the task. That is an invariant hand-editing cannot maintain, which is the bar `A1-077` set
+  for a write surface. Taking a held task needs `--from` naming the holder and the name is checked;
+  `release` may be run by anybody, because a claim with no expiry needs a way out that does not
+  depend on the holder being reachable.
+
+  **`start` and `stop` earn their place by a different argument**, which ADR-0044 records: `A1-077`
+  refused a status setter because hand-editing a status breaks no invariant, and that is true of an
+  actor with a text editor and false of an agent reaching aplan through its MCP server, which has
+  tools and no way to edit a file. So all four land on both surfaces in one change, and the tool
+  count goes from nine to thirteen.
+
+  **The stored claim is checked rather than trusted**, which is what keeps this consistent with the
+  premise. `APLAN053`, a warning, reports an `in_progress` whose declared `paths` match nothing the
+  repository tracks. Read from the index, so a file written and staged counts and a task started a
+  minute ago that has created what it owns is silent; silent too where the task declares no `paths`,
+  since there is then nothing to judge the claim by. The premise is not "do not store claims", it
+  is "do not take claims on trust".
+
+  **Identity** resolves `--as`, then `APLAN_OWNER`, then `git config user.name`, then the operating
+  system's user, and a refusal names all four. Never from `.aplan.yml`: several actors share one
+  repository, so a name recorded there would be the wrong one. Measured on one machine the three
+  derived sources disagree, which is why the explicit forms come first.
+
+  `ready` and `stale` now name the holder, and `--unclaimed` selects work nobody holds. **The
+  default set is unchanged**, deliberately: a caller reading `ready` today does not silently start
+  seeing less.
+
+### Fixed
+
+- **Sequential ids serialised creation, so most of a fleet's writes were refused** (`A1-230`).
+  Eight agents running `aplan add` at once against one plan: three landed, five were told
+  `already exists`. Each one read the plan, saw the highest id, derived the next, and wrote it, so
+  all but the first found the file already there. At twenty-four agents it was two of twenty-four.
+  Nothing was lost -- the refusal is correct, and `emit` has always declined to overwrite -- but a
+  fleet of agents sharing a repository is the case this tool opens with, and serialising every
+  creation in it is not the tool working.
+
+  `add`, `add-from` and `supersede` now re-read the plan and mint again when another writer takes
+  the id first, with jittered exponential backoff to a five-second deadline. Re-reading is the
+  whole mechanism: the colliding id is now taken, so minting from the plan as it *is* finds the
+  next free one. Measured after, five runs of each: eight of eight every time, the slowest writer
+  taking about 40ms over at most five attempts, and twenty-four of twenty-four every time, the
+  slowest about 160ms over at most ten. A run that had to try more than once says so, naming the
+  attempts and the milliseconds, because contention a fleet cannot see is contention it never
+  fixes.
+
+  **Where it stops**, measured rather than left to be discovered: 48 and 64 simultaneous writers
+  all land, and 128 lands 113, the other 15 running out the deadline. That is the designed
+  degradation -- each one refuses with the id it lost and nothing written, and the plan afterwards
+  loads clean -- and the backoff is deliberately tuned for the handful-of-agents case rather than
+  that one. Two alternatives were measured and both cost the ordinary case more than they were
+  worth; `race_window` records what they were and what they scored.
+
+  Two things deliberately did not change. A supplied `--id` is never retried -- re-minting is the
+  remedy for an id this tool chose, and `--id T0000` against an existing `T0000` is the same
+  collision five seconds later -- and it still refuses in about 40ms. And `sequential` stays the
+  default: readable ids are worth keeping, and `id_strategy: ulid` remains the answer for authors
+  minting in *separate* checkouts, where no retry can see the other writer's file. Neither the note
+  nor the refusal recommends that key (ADR-0024); `docs/upgrading.md` is where that choice lives,
+  and its row said ULIDs were for anyone not "minting ids through one process", which was the wrong
+  axis and is now corrected.
+
+  The cost is named rather than hidden: `add` is no longer a pure function of the plan it read, so
+  a script that predicts the id it will be given was already wrong and is now observably wrong.
+  Pin the behaviour with `aplan facts --require ids.sequential_survives_concurrent_writers`.
+
+- **The `evidence_kinds` census now reads the file back** (`A1-361`, audit). Its writable half
+  asserted only that `close` exited zero, which a command that wrote nothing would satisfy. The
+  removal half already read the file; both do now.
+
+- **`aplan mv` could write a plan that does not load** (`A1-363`). Taking the last member out of a
+  cut whose `blocked_by` was written in block form left the key with no value: YAML reads that as
+  `null`, the schema wants an array, and the file stopped loading. The flow form was unaffected, it
+  rewriting to `blocked_by: []`. The key now goes with the last member, as the frontmatter writer
+  has always done for the same situation.
+
+  The guard that exists for this did not catch it. It reads its own output back before writing,
+  because "a rewrite that cannot be parsed again is a corrupted file", but it parses into a probe
+  whose `blocked_by` is a defaulted `Vec<String>` -- weaker than the loader's schema, so it accepts
+  what the loader rejects -- and it only asserted the *removed* ids were absent, which an empty list
+  satisfies. It now asserts the remaining membership is exactly what was intended, and judges the
+  rewrite with `aplan_core::load::frontmatter_is_loadable`, which runs the loader's own sequence
+  (YAML to JSON, schema, then types) rather than a typed read that is weaker than it.
+
+- **A member could not be moved out of a settled cut** (`A1-362`). `cut::resolve` carried "never
+  extend a settled cut" and is shared by three callers, one of which removes rather than adds. So
+  moving finished work out of a finished cut was refused, and told the caller that "adding an
+  unfinished task to a settled cut would break it" about the cut it was leaving. The guard now sits
+  on a wrapper the two extending callers use; extending a settled cut is refused exactly as before.
+
+  It also reinstated a refusal `A1-134` removed deliberately: emptying a cut is a warning, so
+  `deny_warnings` decides and `APLAN021` reports it accurately. A guard answered first, in the wrong
+  words.
+
+- **A `note` citation could be neither written nor removed** (`A1-361`). `close` refuses to record
+  one, saying to add it by hand; `amend` refused to take one away, so for one of the five evidence
+  kinds `facts` advertises, hand-editing was the only route in *and* out -- which is the thing
+  `amend` exists to remove.
+
+  Two causes. The shared `kind:ref` parser refused `note` for every mode, though only the modes that
+  *write* a citation have anything to say about a kind `close` will not record: a removal, and the
+  `from` side of a replacement, name something already in the file. And the match compared the whole
+  `Evidence` including `captured`, a date a caller naming a citation cannot supply, so even after
+  the parser accepted it the task was reported as citing no such thing. A citation is now matched by
+  `kind:ref`, which is how it is addressed on every surface and what the refusals already printed.
+
+  Adding a `note` is still refused, which is the half the rule was right about. Every citation in
+  this repository carries no date, so nothing here would have found this; `import
+  --implemented-as done` writes note-level provenance *with* a date, which is where the two
+  comparisons part.
+
+  The refusal to record one now says why rather than reading as a limit of the flag: a note needs a
+  `captured` date, the only date `close` could supply is the moment it ran, and that is not when the
+  thing happened. `crates/aplan/tests/evidence_kinds.rs` is the census that would have caught the
+  original defect -- every kind `EvidenceKind::ALL` advertises is writable or excused with a reason,
+  and every kind, writable or not, can be taken away.
+
+  The ambiguity refusal is worded for both operations. It is raised by a removal as well as a
+  replacement and said "which one to replace" to somebody who had asked to remove: one message
+  serving two operations, which is the defect above in the words rather than in the code.
+
+- **The coverage gate credited a file with more coverable lines than it has** (`A1-352`, audit).
+  `cargo llvm-cov` keeps its instrumented objects in `llvm-cov-target`, and where that directory
+  is shared across commits -- this repository's CI mounts one `CARGO_TARGET_DIR` for every job --
+  builds of the same crate from several commits sit there together. Each carries its own coverage
+  mapping for the same source file; llvm-cov merges them into one entry per filename and **adds**
+  the counts.
+
+  So the percentage was wrong rather than missing, which is the failure a floor exists to prevent.
+  `aplan-evidence` read **64.5%** against 98.1% on the commit before, with every test passing and
+  the covered count unchanged to four lines. Four crates failed and the six nobody had edited
+  agreed exactly, because only a file whose content changed has two different mappings.
+
+  The CI script now removes `llvm-cov-target` before measuring -- `cargo llvm-cov clean` cannot,
+  because it refuses a target directory outside the project, which is precisely this arrangement.
+  And `xtask` refuses any file credited with more coverable lines than the file has, which is
+  impossible and is what gave this away: `src/lib.rs` reporting 6,761 lines in a 5,594-line file.
+
+### Added
+
+- **`aplan import` can satisfy a plan's own vocabulary, and says when it cannot** (`A1-357`). A
+  repository declaring a `tag_families` entry with `require: exactly-one` could not import into its
+  own plan: the imported tasks carried no member, `check` reported `APLAN030` against every one of
+  them, and there was no flag to say otherwise. The run's notices named the two other dials that
+  decide whether an import is acceptable -- cut membership and `effort_days` -- and were silent
+  about this one, which is the only one of the three that makes `check` *fail* rather than warn.
+
+  New repeatable `--tag` sets the tags on every imported task, deduplicated, refusing a blank one in
+  the same words `add`, `supersede` and `tag` use. The run now names any declared family the import
+  would leave unsatisfied, and goes quiet when the invocation answers it.
+
+  Found re-auditing closures older than the increment that added `A1-356`, with that task's
+  question: which commands make a promise the command beside them makes? `import` takes `--cut`, so
+  the membership it warns about was already fixable in the same invocation. The vocabulary was not.
+
+- **A guarantee this tool makes in one command is checked in all of them** (`A1-356`).
+  `crates/aplan/tests/guarantees.rs` names each promise, the commands it binds and a probe for
+  each, so a command that stops keeping one fails by name rather than silently. Five promises are
+  carried there, all of them defects found in a single increment: work is not taken out of a cut
+  without being put somewhere, a placement `--cut` makes is part of the plan the gate judges, a
+  value the caller supplied is never reported as this tool's bug, a tag is never written twice, and
+  a tag is a word.
+
+  `mutation_policy.rs` now refuses a command classified neither as running the post-state gate nor
+  as not running it, with a reason, so a new command obliges an answer. That check found `tag`
+  missing from the list of commands that must take `--deny-warnings`, where it had been since the
+  command was written: it carried the flags, so nothing was broken, but the guarantee was never
+  checked -- and the comment above the list claimed the set was read off clap's tree, when only the
+  flags were.
+
+- **`aplan supersede` can file a successor that a strict plan accepts** (`A1-251`). Two things
+  stopped it. The successor carried no tags, so a `tag_families` entry declared `exactly-one`
+  refused the write with `APLAN030` and no invocation could satisfy it; and the milestone edit
+  `--cut` performs was applied after the mutation gate rather than inside the plan it judged, so a
+  successor the caller had just placed was reported as belonging to no cut (`APLAN022`). A plan with
+  both dials on, which is what an adopter with a real vocabulary has, could not use the command its
+  own `APLAN018` remedy names.
+
+  The successor now inherits the predecessor's tags, as it already inherited `paths` and `traces`
+  and for the same reason: they are the predecessor's own answers to the same questions. The five
+  reserved words are not inherited, because a tag says what work is *about* and a reserved word says
+  what a task *is* to the plan's structure. `release`, `deprecation` and `removal` place a task in a
+  runway, and a successor is not at the same point in a schedule. **`cross-cutting` is not inherited
+  either**: it reads like a membership answer and is really a deliberate waiver of `APLAN022`, so
+  inheriting it would let a successor escape a check nobody waived for it, and on a plan with no cuts
+  would quietly file a second uncut task where `A1-252` exists to say there is no cut yet. Say it
+  again with `--tag cross-cutting`.
+
+  New repeatable `--tag` sets the successor's tags outright, replacing what would have been
+  inherited, as `add --tag` sets a new task's. The command now names what the successor carries and
+  whether it was inherited, because inheritance is otherwise invisible and a tag decides both cut
+  membership and family cardinality.
+
+  Named as the behaviour `supersede.successor_is_placed_and_classified`, since neither half is
+  visible to `--require supersede`.
+
+  Inherited tags are deduplicated. A predecessor carrying one twice is a file `check` accepts, and
+  inheriting it faithfully put the mistake into a file this command wrote itself, which `add` and
+  `tag rename` both already refused to do.
+
+- **A blank tag is refused by every command that takes one** (`A1-251`, audit). `tag add <id> ""`
+  has said "a tag is a word" since that command existed; `aplan add --tag ""` and the new
+  `supersede --tag ""` wrote `tags: ['']` instead, a tag no rule reports and nobody meant. One
+  argument reached two answers depending on which command took it. Whitespace is not a word either.
+
+- **`aplan tag add`, `tag rm` and `tag rename`** (`A1-213`). Tags were written at creation and never
+  again, so maintaining a declared vocabulary meant editing frontmatter by hand and running `check`
+  afterwards to find out what it broke. `A1-077` scoped mutations to the ones where hand editing can
+  break an invariant, and a tag qualified the moment `A1-133` gave a family a cardinality:
+  `APLAN030` is an error.
+
+  The edit is judged before it writes, which is the whole value over hand editing -- removing a
+  required family member refuses instead of writing and then reporting. `rename` changes a word on
+  every task that carries it as one change through the same locked, compare-and-swap writer `mv` and
+  `drop` use, so it is all of them or none, and an edit made to one of those files while it ran
+  refuses the rename rather than overwriting it. A rename onto a word a task already carries leaves
+  one of it.
+
+  `rename` refuses the five words that decide what a plan is, on either side: renaming `milestone`
+  away dissolves every cut at once, and the only thing `check` then reports is that the former cuts
+  carry no estimate. `add`, `mv` and `drop` change what a task is.
+
+  `tag rm` refuses to take `milestone` off a cut that still holds work, naming how many tasks would
+  be left in no cut. Use `mv` to move them or `drop --cut` to cancel the cut. An empty cut untags
+  freely.
+
+  A list entry is written as a serialised YAML scalar rather than pasted in, so a tag holding a
+  comma, or opening with `*`, `&` or `!`, is written as the value it is. `add` never had the problem,
+  because it serialises the whole task; the edit path pasted, and the disagreement surfaced as
+  `close` reporting its own output as a bug in `aplan`. The author's `[a, b]` form is kept wherever
+  it still reads back unchanged.
+
+  **Exit code change.** `aplan dep add T-1 --after "  spaced"` exited `3` ("this is a bug in aplan,
+  please report it"); it now exits `2` and reports `APLAN003: blocked_by references unknown task`.
+  An id this plan does not know is the plan's problem, and `3` is reserved for `aplan` failing its
+  own self-check. A script branching on `3` to mean "bad argument" should branch on `2`.
+
+  `owner` deliberately does not move with it: it is free text and breaks no invariant, so by
+  `A1-077`'s own test it does not qualify yet.
+
+- **`APLAN051` and `APLAN052`: the five words that change what this tool does are a vocabulary**
+  (`A1-212`, ADR-0014). `milestone` makes a task a cut, `release` makes it a checkpoint over cuts,
+  `deprecation` and `removal` drive the runway rules, and `cross-cutting` waives `APLAN022`. Nothing
+  declared them and they share a namespace with an adopter's own tags, so a typo did not misname
+  anything -- it changed what the plan *is*. Measured on two-task plans: `deprecatoin` makes `aplan
+  deprecations` answer "this plan declares no deprecation runway" at exit `0`, and `milestne`
+  dissolves the cut, after which `check` advises an `effort_days` estimate on what it no longer
+  knows is a checkpoint.
+
+  `APLAN051` reports a tag one edit from one of the five, and reports the other direction too: a
+  `tag_families` entry listing one of them is declaring a vocabulary over a word the tool already
+  acts on, said once against the configuration rather than once per task.
+
+  `APLAN052` reports `cross-cutting` on a task that *is* in a cut, where the tag claims what the
+  task's own membership contradicts. On a task in **no** cut the same tag is what `APLAN022` reads
+  it as, and is silent: "belongs to no cut" and "concerns several components" are indistinguishable
+  by looking, and a rule that asks a question about forty-odd tasks is a rule people switch off.
+  That asymmetry is the decision, not an omission.
+
+  **`APLAN022`'s waiver is narrowed to the case the tag describes**, which is a behaviour change
+  and the more important half. It took the tag as the answer whatever the membership, so a task in
+  *two* cuts -- an error, and a real defect -- passed as clean on any repository that had not set
+  `deny_warnings`. The tag now waives belonging to no cut and nothing else, so that task is
+  reported as the error it is.
+
+  Both are warnings, for `APLAN026`'s reason -- `releases` is one edit from `release` -- and
+  `deny_warnings` is how a repository says it wants them to block. **No prefix**, decided against
+  with the cost measured: 37 reserved-word tags in this plan and the same words across 18 pilot
+  repositories, against a collision that is now reportable. This repository's own 43 `APLAN052`
+  instances are fixed rather than held.
+
+- **`critical-path` says how much of a chain is left** (`A1-352`). The total counted finished work
+  and read as work remaining: this repository's own plan has a 22.0-day chain of which 19.0 days
+  are already done. The header now carries both numbers -- `22.0 days across 11 task(s), 6.0d of it
+  not yet done across 3 task(s)` -- and `--format json` gains `remaining_effort_days` and
+  `remaining`.
+
+  **It is re-walked, not subtracted, and that is the point.** The live tail of the longest chain is
+  not a bound on what is left: a chain that is mostly finished can be the longest one while a
+  shorter all-live chain is the real constraint. On this plan the longest chain leaves 3.0d on it
+  and the longest *remaining* chain is 6.0d, running through a task that is not on the longest
+  chain at all.
+
+  A `done` task becomes a zero-weight passthrough, exactly as a milestone already is -- a weight,
+  not a filter, so every edge survives and no chain is shortened by removing a constraint. That is
+  what keeps it sound where `A1-214` refuses selection.
+
+  **What is left is decided by status, never by weight.** A `todo` task with no `effort_days`
+  weighs nothing and is still work left, so it is counted as a row and reported: `APLAN009` calls a
+  missing estimate a warning precisely because plans carry them, and reading zero days as
+  "finished" would hide exactly the work a new plan has most of.
+
+  A chain with nothing left says so; a chain with nothing finished says one number rather than the
+  same number twice. The roadmap's `crit` column is unchanged, because its row already pairs the
+  number with `(Xw left)`.
+
+### Fixed
+
+- **`APLAN048` reported nothing on a version it could not read** (`A1-316`, audit of the
+  versioning cut). The comparison parsed with `?` on an `Option`, so any input it could not do
+  arithmetic on returned "no diagnostic" and `verify` printed `ok`. The realistic way in is not
+  exotic: a `version.current.command` one careless `grep` away from printing `version = "0.3.1"`
+  instead of `0.3.1` switched off the gate the whole feature exists for, silently.
+
+  **`aplan version` already refused those inputs**, with exit 2 and a sentence naming what it
+  got. The gate now says the same thing, because two surfaces answering one question differently
+  is the defect this repository keeps finding.
+
+- **A release tag that spells no version was passed over in silence** (`A1-316`). Refusing to do
+  arithmetic on a name this tool does not understand is right -- it is ADR-0034's `CalVer` refusal
+  one layer out -- and saying nothing about it is a different thing: the adopter had declared the
+  key, closed the work, and the gate was off because of how a tag is spelled, with nothing else
+  able to tell them. It is now reported against the tag and the pattern that selected it, never as
+  the tree being behind, because that is where the remedy is.
+
+- **A leading `v` is stripped only when a version follows it** (`A1-316`). `strip_prefix('v')`
+  was unconditional, so `version = "0.3.1"` came back as `ersion = "0.3.1"` -- and the finding
+  above quotes what the command printed, so it would have sent a reader looking for a string
+  nothing produced.
+
+### Changed
+
+- **A borrowing row's `crit` in `aplan roadmap` is the chain that ends at it** (`A1-345`).
+  It was the longest chain among the work the release *borrows*, and the two differ exactly
+  where cuts are sequenced: the member-induced view cannot see the milestone nodes that carry
+  cut order, so two cuts that run one after the other read as running side by side. On the
+  sixth pilot's plan the row said `82.0d` while the chain that actually controls the release ran
+  through cuts the release does not hold.
+
+  The row now reads `crit 2.0d to here`, and `--format json` gains `critical_path_to` per cut:
+  the row's own id where the chain is bounded by it, `null` for a cut. A **cut**'s number is
+  unchanged and stays member-induced, because a cut's row asks how much work is in this bucket
+  rather than what leads to it -- two scopes, and now two labels.
+
+  **Keyed on borrowing, not on being a release.** A container declaring `contains` holds the
+  same relationship to the work beneath it (ADR-0042), so keying on the narrower word would have
+  left the defect in place for exactly the plans that took up the newer field.
+
+  The report computes **one** walk for every bounded row rather than one per row, which it was
+  doing at first: 472ms against 214ms for the same plan with no releases, measured at 4,870
+  tasks. The walk does not depend on the endpoint, only the trace back through it does.
+
+- **The weighted walk reads `contains` as an ordering edge** (`A1-345`). On a plan `check`
+  accepts this changes nothing, because `APLAN047` already requires a container to list what it
+  holds in `blocked_by` too -- "this checkpoint does not wait for what it holds". It matters on a
+  plan part-way through adopting `contains`, which `critical-path` and `roadmap` still render
+  because a report is not a gate: the rollup descends `contains` regardless, so reading only
+  `blocked_by` put `crit 0.0d` beside the held work's real effort.
+
+  A consequence worth knowing: a **loop in `contains`** now leaves the chain undefined, so
+  `critical-path` refuses instead of printing a number, and a bounded roadmap row reads `0.0d`.
+  `APLAN047` already rejects such a plan as an error, and the refusal now names containment
+  alongside dependencies so a reader looks in the right place.
+
+- **A cut's heading and its rollup are two lines in `aplan roadmap`** (`A1-341`). They were one
+  line of up to 126 characters, and at eighty columns it folded at a hanging indent of two --
+  which is the *member-row* indent, so the tail of a cut's rollup read as a task inside it. The
+  break point was arbitrary as well: it separated a number from the word that labels it.
+
+  The rollup now sits on its own line, and **no header line is indented at all** -- which is
+  the invariant rather than a chosen depth: a row of work is always indented and a header line
+  never is. A plan setting `roadmap.group_by` puts group labels at two and member rows at
+  *four*, so any indent for the rollup would have collided with one of the two layouts.
+  Measured on this repository's own plan at a real eighty-column terminal, the widest header
+  line is 61 characters and the widest rollup 80: neither folds, and nothing in the document
+  exceeds eighty.
+
+  **`--format markdown` and `--format json` do not move**, which matters because the markdown
+  form is a committed, gated artifact. All six numbers stay: splitting the line removed the
+  pressure that made this a defect, and each answers a different question.
+
+### Added
+
+- **`aplan critical-path <ID>`: what must finish before one checkpoint can** (`A1-345`). The
+  command answered one question -- the longest chain in the plan -- and a reader asking "what is
+  on the way to the v0.9 release" had no way to ask it. Name a task, a cut, a container or a
+  release and the chain ends there instead, reaching the work a checkpoint holds at any depth.
+
+  **This is an endpoint, not a filter,** which is the reason `--cut` stays refused (`A1-214`).
+  Selecting a subset first turns a fragment into a false path: a chain whose blockers were
+  removed reads as shorter than it is. Naming an endpoint removes nothing -- every edge is kept,
+  including prerequisites that cross a cut boundary -- and only the chain's end is chosen. The
+  help says so, so the pair does not read as an inconsistency.
+
+  **Every row says its status**, which the unqualified form now does too: a chain ending at a late
+  checkpoint runs through work that is already finished -- five of seven rows on this repository's
+  own plan -- and a total with no status beside it reads as work remaining.
+
+  A target that is `dropped` is refused with its reason rather than answered with `0.0d`, and a
+  checkpoint with no live ancestry reports an empty chain and says why.
+
+  Human output names the target, and says out loud when a checkpoint has no live ancestry rather
+  than printing nothing. JSON gains `to`, the checkpoint the chain ends at and `null` for the
+  whole plan: the numbers alone do not say which question was asked. An unknown id is refused
+  and named. The unqualified command is unchanged.
+
+- **`aplan version`: the plan decides the number** (`A1-313`, ADR-0034, ADR-0038, ADR-0040,
+  ADR-0041). A task declares what it did to the released artifact, a level supplies a floor for the
+  tasks that declare nothing, and the answer is the strongest of those -- so a `breaking` claim on
+  one task raises the cut that holds it and the release that closes the cut.
+
+  **The rung follows the argument, which the caller can see.** `aplan version <ID>` answers what a
+  task, a cut or a release owes, from the plan alone, at `check`'s rung. The bare form asks what
+  the *next release* must be, which reads the repository: the window over history, and the version
+  shipping today.
+
+  **The window is everything closed since the nearest release tag reachable from `HEAD`** --
+  reachability, not recency, so a tag on a side branch cannot become the baseline by being cut an
+  hour later. Where the plan models an open release node, that node is the window instead. The bare
+  form names which of the two it used, on stderr, because stdout is a version somebody is piping
+  into a release command and the two windows give different answers.
+
+  **The version shipping today is read by a command you declare** (`version.current.command`),
+  never parsed. This tool does not know what a `pyproject.toml` means, which of a monorepo's
+  manifests is the one that ships, or what a `version` key in one of four build backends refers to,
+  and a guess about any of those is a wrong number stated confidently. Without the key the bare
+  form refuses and names it; `aplan version <ID>` still answers, because what a node owes needs
+  nothing outside the plan.
+
+  **A staged number is a floor the plan raises, never one it replaces.** What the plan demands is
+  demanded of the version that *shipped*: `0.4.0-dev` owing `breaking` since `0.3.0` is `0.4.0`,
+  the release being prepared, and not `0.5.0`. Below 1.0 a breaking change raises the *minor*,
+  because cargo reads `0.x.y` as `0.INCOMPATIBLE.COMPATIBLE`. A scheme this does not understand
+  gets no answer rather than a guess: a leading zero is refused, so `2026.09.1` is `CalVer` and not
+  a triple that happens to parse.
+
+- **This repository declares what its own work did to the version** (`A1-315`). `require_impact`
+  is on here, the cut floor is `none`, and thirteen of 361 tasks carry a hand-written
+  `breaking` -- the number the shipped default map has to be judged on, and half what ADR-0034
+  estimated from `CHANGELOG.md` headings.
+
+  **The heading was wrong in both directions**, which is the part worth an adopter's attention:
+  of 29 tasks under a *Changed* heading, 8 are breaking, and 5 breaking changes are filed under
+  *Added* instead -- two new error rules, a machine-schema bump, a timeout that has to be
+  declared before upgrading, and a changed default. A changelog section answers "what kind of
+  work was this"; an impact answers "what does an unchanged consumer have to do". Reading the
+  second off the first gets both wrong.
+
+  **Turning `require_impact` on costs nothing.** `APLAN044` fires only on a closed task that
+  claims *less* than its level implies and says nowhere why, so a plan with no declarations at
+  all judges clean. The expensive-sounding key is the cheap one.
+
+  **The rule used to decide**, for anyone backfilling their own plan: an unchanged adopter, on
+  an unchanged plan and config, exits non-zero where they did not, or their data or output
+  silently changes. A new *warning* fails no default build, so it is a feature; a new *error*
+  is breaking only where it can fire without a new opt-in -- a rule behind a config key or a
+  field that did not exist cannot fire on a plan nobody touched. `A1-315` has the workings,
+  including the case where this repository's own upgrade guide disagrees with it.
+
+- **A release records the version it produced, and `APLAN050` keeps the record honest**
+  (`A1-339`, ADR-0038). Closing a release writes the derived number into the node as `version`,
+  so a later run can ask what a release contained **without re-deriving from a plan that has
+  since moved**. Measured: after editing a task the release closed, the recorded answer is
+  unchanged while a fresh derivation has moved from `breaking` to `none`. A closed release
+  whose answer changes when somebody edits its work is not a record.
+
+  `aplan version <release>` answers with the record where there is one, and `--format json`
+  carries both the record and what the plan would derive today. `aplan_close` returns it as
+  `version`, because an agent has no stderr to read.
+
+  **A closure is never refused for it.** No `version.current`, a checkout that cannot answer
+  the window, a plan modelling two open releases, a scheme this tool does not read: each closes
+  without the field and says which,
+  because holding a finished release hostage to an optional config key would be a worse answer
+  than closing without a number. What *is* refused is a release that already records a
+  different version -- one of the two is wrong, and which is not this tool's to decide, so both
+  are named.
+
+  `APLAN050`, an error, refuses a `version` on anything that is not a release -- a cut is a
+  planning bucket rather than a delivery, and the field on one reads as a claim that it shipped
+  -- and one that is not a version this tool can read back, since the point of writing it down
+  is that a later run compares against it.
+
+- **`APLAN049`: the artifact is asked whether the plan is telling the truth** (`A1-314`,
+  ADR-0034). Every rung above this takes the author's word -- `APLAN044` checks the claim is
+  well formed and `APLAN048` checks the number moved far enough for the claims made, and a task
+  that removed a public function and wrote `fix` passes both. That is the gap between a field
+  being filled in and the field being true, which is what this whole tool is about.
+
+  **It runs the checker you declare and reports what it said.** `version.check` is argv that
+  **exits zero when this artifact is compatible with its last release** -- which is what
+  `cargo semver-checks check-release` already does natively, and other ecosystems have
+  equivalents. Nothing here diffs an API, exactly as nothing here runs its own tests. The
+  question is asked that way on purpose: a command that had to print `none|fix|feature|breaking`
+  would be this project teaching an ecosystem its vocabulary, which is the refusal `A1-037`
+  makes about `vN.N` one layer along.
+
+  **It fires in one direction.** A checker finding a break where the plan claims less is an
+  error; one finding none where the plan claims `breaking` is silent, because claiming more than
+  a floor is always allowed and an API differ cannot see a behavioural break at all. A checker
+  that could not be *asked* -- not installed, stopped at a declared cap, out of time -- is
+  reported as the configuration fault it is, and no claim is called false on the strength of it.
+
+  Bounded like every other declared command (`version.check.timeout_seconds`, default ten
+  minutes, plus `max_memory`, `max_processes` and `wrap`): an API differ is exactly the kind of
+  command that compiles a workspace twice. What it cost reaches the run report like every other
+  one, so the limit can be sized against a number rather than guessed at.
+
+  **A command killed rather than exited answers nothing**, which now holds for every declared
+  command. `ExitStatus::success()` is false for a process the kernel killed, and this rule's
+  "no" means *the artifact broke* -- so a checker that segfaulted would have reported a break
+  that was not there.
+
+- **A release accounts for the work no cut claims** (`A1-348`). A release's members are cuts
+  (ADR-0022) and a `cross-cutting` task is in none of them, so the aggregation never reached
+  one: a plan with a release, a cut, and a `cross-cutting` task declaring `breaking` answered
+  `fix` and would have shipped a patch release carrying an incompatible change.
+
+  `aplan version` now takes the stronger of what the release's members owe and what closed
+  since the last release tag that those members do not claim. **A union, not a wider walk**:
+  sweeping every unclaimed task in the plan would raise every release forever on a break that
+  shipped once, and the tag is the only thing that can tell the two apart. The hierarchy walk
+  is untouched, so a cut and the release above it still cannot disagree about what the cut
+  holds.
+
+  `aplan version <release>` still answers about the members, because it is answered from the
+  plan alone and cannot know which unclaimed tasks ship now -- and it says so, on stderr and as
+  `unclaimed_by_any_cut` in `--format json`. A *cut* says nothing, because a cut genuinely does
+  not contain a cross-cutting task and its own answer is right.
+
+  **`APLAN048` measures the window the number is derived over**, which it did not: the rule took
+  the tag window unconditionally while the command preferred a release node, so a plan whose
+  release held an unfinished break had `aplan version` say `2.0.0` while `verify` reported `ok`
+  on a tree declaring `1.0.1`. A plan modelling two open releases is now a finding from the rule
+  rather than a silent fall-back.
+
+  **A finding names the claim, not the cut holding it.** A release whose cut owes `breaking`
+  reported "`M-c` is `breaking`", which reads as though the cut had declared it and sends the
+  reader one walk short of the task that did.
+
+- **`APLAN048`: a version that did not move as far as the release requires** (`A1-313`, ADR-0038).
+  A breaking change that shipped in a patch release is not discovered by reading the tag; it is
+  discovered by a consumer. This reports it while it is still preventable, naming both numbers, the
+  window they were measured over, and the task that demanded the larger one.
+
+  **It fires on a version that moved and did not move far enough**, never on one that has not
+  moved. Between releases a tree ordinarily carries the number it last shipped, and reporting that
+  would light the rule on every commit after the first closed task. A release that was never
+  prepared at all is `ci/scripts/release.sh`'s refusal at tag time, where the tag is the thing
+  making the claim.
+
+  **It also refuses a version that went backwards.** A tree declaring a number *below* the tag it
+  descends from names both readings, because the remedies have nothing in common: a reverted
+  manifest, or a `version.release_tag` glob matching tags from another numbering space -- which
+  makes every version derived here wrong, and which nothing else would ever say.
+
+  **An error, and off unless `version.current` is declared** -- the same opt-in `url.check` and
+  `test.list` have. A command that could not be run is reported as a fault of the configuration and
+  no version is called behind on the strength of it; a shallow clone says so once, before the
+  command is spawned, rather than passing silently.
+
+- **`contains`, and `APLAN047`: a checkpoint may hold other checkpoints** (`A1-333`, `A1-332`,
+  ADR-0042). A milestone declaring `contains` rolls up the work beneath it at any depth, each task
+  counted once, and is no longer reported as an empty cut.
+
+  **Nothing changes for a plan that does not write it.** A milestone in `blocked_by` still
+  *sequences* two cuts (ADR-0013), which is what every plan written so far means and what was
+  never the defect. The defect was that the same edge meant two things and nothing said which: an
+  author who wrote containment got sequencing, a rollup of `0.0d` over real work, and a warning
+  that their cut was empty, with nothing anywhere using the word "sequence". ADR-0025's shape, and
+  the answer ADR-0025 and ADR-0036 already gave -- a second meaning earns a second field.
+
+  `APLAN047` refuses a `contains` that names nothing, names a task rather than a milestone, closes
+  a loop, or is declared by something that is not a checkpoint. **An error**, because a rollup over
+  a loop has no defensible answer: whichever checkpoint is walked first swallows the other, and the
+  number changes with iteration order.
+
+  **If you sum rollup rows yourself, switch from skipping `release` to skipping `borrows`.** A
+  container borrows its members the way a release does, and `Cut::release` can no longer answer
+  that question -- the header double-counted the moment containment worked, reporting `4 task(s),
+  10.0d` for a plan with two tasks and five days.
+
+  This supersedes ADR-0022's "read one level through", which existed because a release of releases
+  would double-count; a walk that visits each descendant once cannot.
+
+- **The declared MSRV is now true, and gated** (`A1-327`). `rust-version` is raised from `1.85` to
+  `1.88`, which is what the locked graph has required for as long as that lockfile has existed:
+  `darling 0.23`, reached through `rmcp-macros`, needs 1.88. **If you build from source on a
+  compiler between 1.85 and 1.87, you could not build this revision before either** -- the
+  declaration was wrong, not the requirement. P0000019 found it the way an adopter does, by
+  attempting the reproducible build the metadata promised (pre-public adoption evidence item 15).
+
+  `cargo xtask msrv` compares the declaration against every package's declared floor and fails
+  naming the packages that set it. No toolchain required: cargo has already resolved the graph and
+  every package states what it needs, so the check is arithmetic over `cargo metadata`. It runs in
+  the `spec` gate.
+
+  What it deliberately does not check is that this workspace's own source compiles at that floor,
+  which needs the compiler itself. `A1-330` is that half, named rather than left to the gate's name
+  to imply.
+
+  **An untested contract gets reasoned from, which is the sharper half.** `rmcp` was held at 2.x
+  with a comment explaining that 3.x needs 1.88 "and this workspace commits to 1.85". The 2.x it
+  stayed on pulls `darling 0.23`, so the workspace was already at 1.88 and the constraint bought
+  nothing while costing an SDK major. `A1-331` revisits that choice on current evidence.
+
+- **A generated artifact names the build that wrote it** (`A1-325`, ADR-0037). `ROADMAP.status.md`
+  and the generated `AGENTS.md` block carry one line -- `<!-- written by aplan <version>, surface
+  <12 hex digits> -->` -- and every drift gate names the running build when it reports a stale
+  file. Assertable as `aplan facts --require generated.names_the_build_that_wrote_it`.
+
+  The check that compares a generated artifact regenerates it with the build that is running, so
+  where both sides are the same build it is green whatever the build. It is only *not* the same
+  build somewhere else: in CI, or in a repository where a pinned release regenerates a file a newer
+  binary wrote. The third pilot's local check passed and CI failed on a thirty-line diff with
+  nothing explaining it. This is `A1-209`'s and `A1-210`'s shape on a committed artifact -- a check
+  that cannot fail where it is run.
+
+  Version *and* surface digest: the version is what a human recognises, but every build from `main`
+  carries the same one, so alone it cannot tell two development builds apart. The digest is taken
+  over this build's facts document **and its rendering of a fixed canonical roadmap and agent
+  contract**, so it moves when what the build *writes* moves -- a renderer is not in the facts
+  document, and a digest of the advertised surface alone left a heading reword byte-identical in
+  the banner. `facts_sha256` is unchanged and keeps its published meaning for `attest` and
+  `facts --identity`.
+
+  **`APLAN041` now reports a build difference as well as a policy difference**, because the block it
+  compares contains the build. That is the defect being surfaced rather than a new one, and it says
+  which of the two it found: a block that matches the policy and names another author is reported
+  as the build, because telling the reader their policy changed would send them looking for a
+  change that did not happen. `advisory: [APLAN041]` is the way out for a repository that runs
+  mixed builds on purpose.
+
+  `schemas/v1` deliberately carries no banner -- its stability is a promise, and a surface digest
+  would churn it whenever anything unrelated changed -- and is covered by its gate instead. The rule
+  catalogue carries none because only this repository's own test suite writes it, so a different
+  build cannot have. `facts.json` already names its version. `coverage.json` and `cli-surface.json`
+  are ratchets rather than byte comparisons, and carry no banner because neither file has anywhere
+  to put a comment that is not part of the data; both now name the build in their refusal, as every
+  drift gate does.
+
+- **`ratified_by`, and `APLAN046`** (`A1-306`, ADR-0036). `blocked_by` was carrying two
+  relationships that behave nothing alike: a **producer** edge, where the task consumes what the
+  blocker makes and genuinely cannot start, and a **ratification**, where somebody must bless the
+  result and the work can be built, tested and gated today. The sixth pilot drew eleven of the
+  second kind as the first. `ready` reported none of them and was right to, because nothing in the
+  file said which was meant -- five of those artefacts already existed and were gated in CI while
+  the plan called them blocked, which cost two days of wrong belief.
+
+  `ratified_by` is a field, following `prefer_after`'s precedent exactly (ADR-0025): when one edge
+  is asked to mean two things, the answer is a second field that means one of them. `ready`,
+  `critical-path`, `why` and `graph` do **not** read it, so a ratification can never hide startable
+  work. `APLAN046` refuses `done` while a ratifier is unfinished, which is the mirror of `APLAN007`
+  for the other half -- and it is also where the release gate now lives, rather than being inherited
+  by accident from a cut edge that happened to cover it.
+
+  **Optional and absent from every existing task file**, added the way `version_impact` was, so no
+  plan migrates and a plan that never writes it cannot tell the difference.
+
+  The lint the pilot proposed was measured and rejected: judging "a blocker it does not consume" by
+  `paths` overlap marks 42% of 5,091 edges disjoint and would fire on 927 live tasks, while finding
+  **zero** in the plan that actually had the problem. It measures plan style, not edge meaning.
+
+- **`APLAN045`: a live task whose traced section moved while it waited** (`A1-301`). `APLAN018`
+  watches a *closed* task's traced section against the stamp taken at closure. A live task has no
+  stamp -- one is taken at `close` -- so nothing watched it at all, and a task can sit for months
+  describing a document that has since said something else. A five-repository audit found three live
+  tasks tracking work that had already shipped, all passing `check` and `verify`, and it took a human
+  reading code to see them. A warning, and on the `verify` rung because it needs the repository.
+
+  **Measured before it was built.** Across 2,271 task files in thirteen plans, every cheap structural
+  signal for "this task is already done" has *no subjects at all*: no live task cites evidence, none
+  carries a trace stamp, none has all its acceptance criteria ticked. This is the one signal with a
+  real population, and it is narrow -- about a quarter of live traced anchors have moved, where
+  comparing whole documents instead would have fired on 91% of them.
+
+  **The baseline is the commit that last touched the task, not the one that created it**, so
+  re-reading a task and recording that clears the finding, the way `--restamp` clears `APLAN018`. An
+  uncommitted edit counts too: an author who follows the instruction and re-runs should not be told
+  again. A task file that was never committed has no baseline and is left alone.
+
+- **A `traces` anchor can address a YAML or JSON node** (`A1-191`, ADR-0035), so a repository whose
+  source of truth is a spec file can put it under drift detection instead of tracing the prose that
+  narrates it -- a second copy of the fact, in a tool whose argument is that second copies drift.
+  Two spellings, each self-identifying by its first character: a JSON Pointer
+  (`spec.yaml#/states/provisioning`, RFC 6901) or a JSONPath (`api.json#$.paths['/users'].get`,
+  RFC 9535). The document's extension picks the resolver, so nothing about `#` becomes ambiguous
+  and no existing markdown trace changes meaning. Assert it with
+  `aplan facts --require traces.structured_documents`.
+
+  **Only JSONPath expressions that address one node.** RFC 9535 calls these singular queries, and
+  it is the only shape a fingerprint can be taken of. A wildcard, descendant segment, slice, union
+  or filter is refused **by name**, with the reason, because "invalid anchor" teaches nobody which
+  half of their expression was wrong. An index counted from the end is refused too: it addresses a
+  different element whenever the array grows, and a stored anchor has to keep meaning what it meant.
+
+  **The fingerprint is of the value, not of the bytes.** Reindenting a file, reordering two keys or
+  reflowing a comment is not drift; changing, adding or removing a value is. Hashing the source text
+  would re-open every closed task that traced into a file somebody ran a formatter over, which is
+  the false positive that teaches a repository to switch drift off.
+
+  `APLAN008` gains three sentences rather than one, because the remedies differ: the document is not
+  addressable, the anchor is not an address, or it addresses nothing. The last carries a near miss,
+  offered in whichever spelling the author was already using.
+
+  Source symbols and line ranges were considered and declined, with the reasons recorded in
+  ADR-0035.
+
+### Changed
+
+- **`APLAN028` no longer exempts a task that stamps none of its traces** (`A1-297`), which is the
+  same sentence it already reports about a task that stamps some of them: drift is not checked for
+  that section, so it can change and nothing will say so. **This can newly fail a build** where
+  `detect_drift` is on and a task was closed before it was enabled; `aplan close <id> --restamp`
+  repairs each one, and `advisory: [APLAN028]` reports it without failing while you work through
+  them. Assert the behaviour with `aplan facts --require traces.unstamped_is_reported`.
+
+  The exemption was deliberate and is recorded on the rule: a task closed before `detect_drift`
+  existed carries traces and no fingerprints, and treating that as unverifiable rather than in
+  violation is why adopters leave drift on (`A1-098`). It was measured before it was removed.
+  Across 2,410 task files in thirteen plans, every one of them running `detect_drift`, the partial
+  case the rule was written for occurs **zero** times and the exempted case occurs nine. The rule
+  was firing on the shape nobody has and silent on the only shape that happens.
+
+  **Only traces that can be stamped are required**, which also corrects the partial case. A stamp
+  covers a trace that names an anchor and resolves, so a whole-file trace like `docs/x.md` could
+  never be stamped and reporting it would be an error that `--restamp` provably cannot clear.
+  Whether a trace drift can never watch deserves its own finding is a separate question.
 
 ## [0.3.0] - 2026-09-16
 

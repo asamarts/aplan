@@ -32,9 +32,14 @@ pub enum CloseError {
     /// rather than something to guess at.
     #[error("this task cites no `{0}`")]
     NoSuchEvidence(String),
-    /// The citation to be replaced appears more than once, so replacing "it" is
-    /// not a defined operation.
-    #[error("this task cites `{0}` {1} times, so which one to replace is ambiguous")]
+    /// The citation named appears more than once, so naming it does not pick one.
+    ///
+    /// Worded for the operation-neutral case (`A1-361`, audit): this is raised by
+    /// a removal as well as a replacement, and said "which one to replace" to
+    /// somebody who had asked to remove. One message serving two operations is
+    /// the defect this increment kept finding in the code; it is the same defect
+    /// in the words.
+    #[error("this task cites `{0}` {1} times, so naming it does not pick one of them")]
     AmbiguousEvidence(String, usize),
     /// The replacement is already on the task, so the repair would collapse two
     /// citations into one and silently drop proof.
@@ -44,6 +49,19 @@ pub enum CloseError {
     Terminal(Status),
     #[error("the task already has an `evidence:` block; `close` only adds a task's first evidence")]
     HasEvidence,
+    /// The node already records a version, and it is not the one the plan now
+    /// derives (`A1-339`). Naming both is what makes the disagreement
+    /// actionable: one of the two is wrong and this tool cannot tell which.
+    #[error(
+        "this release already records `version: {recorded}`, and the plan now derives \
+         `{derived}`. One of the two is wrong, and which is not this tool's to decide"
+    )]
+    VersionDisagrees {
+        /// What the node already says.
+        recorded: String,
+        /// What the plan derives today.
+        derived: String,
+    },
     #[error(
         "no top-level `{0}:` line this edit can rewrite: it is absent, or its value is a shape \
          (written below the key, or carrying a YAML tag, anchor or alias) that would have to be \
@@ -114,6 +132,7 @@ pub fn close(
     file: &str,
     evidence: &[Evidence],
     fingerprints: &BTreeMap<String, String>,
+    version: Option<&str>,
 ) -> Result<String, CloseError> {
     let bom = leading_bom(file);
     let (frontmatter, body) = split_frontmatter(file).ok_or(CloseError::NotATask)?;
@@ -139,10 +158,28 @@ pub fn close(
         return Err(CloseError::HasEvidence);
     }
 
+    // **A record already there and disagreeing is refused, naming both**
+    // (`A1-339`). A reopened release, or one edited by hand: overwriting would
+    // erase a number somebody wrote down, and keeping the old one silently would
+    // leave the node claiming a version the plan no longer derives. Neither is a
+    // record, so the closure stops and says which two numbers it is between.
+    if let (Some(recorded), Some(derived)) = (task.version.as_deref(), version)
+        && recorded != derived
+    {
+        return Err(CloseError::VersionDisagrees {
+            recorded: recorded.to_string(),
+            derived: derived.to_string(),
+        });
+    }
+
     let nl = newline(file, bom);
+    // Already present and agreeing: leave the file's own line alone rather than
+    // writing a second key, which would be a duplicate-key document.
+    let version = version.filter(|_| task.version.is_none());
     let new_frontmatter = format!(
-        "{}{}{}",
+        "{}{}{}{}",
         set_status_in(frontmatter, Status::Done)?,
+        version.map_or_else(String::new, |v| format!("version: {v}{nl}")),
         evidence_block(evidence, nl)?,
         fingerprint_block(fingerprints, nl)?,
     );
@@ -154,9 +191,10 @@ pub fn close(
     if parsed.status != Status::Done
         || parsed.evidence.as_slice() != evidence
         || &parsed.trace_fingerprints != fingerprints
+        || (version.is_some() && parsed.version.as_deref() != version)
     {
         return Err(CloseError::Produced(
-            "the status, evidence, or fingerprints did not round-trip".to_string(),
+            "the status, evidence, version or fingerprints did not round-trip".to_string(),
         ));
     }
 
@@ -200,6 +238,150 @@ pub fn set_status(file: &str, to: Status) -> Result<String, CloseError> {
         ));
     }
     Ok(format!("{bom}---{nl}{new_frontmatter}---{nl}{body}"))
+}
+
+/// Record or clear `owner`, leaving everything else untouched (`A1-359`).
+///
+/// The same surgical shape as [`set_status`], and for the same reason: the task
+/// file is a document somebody wrote, and rewriting it through serde would
+/// reflow comments, reorder keys and requote scalars that were fine. So the
+/// value token is swapped in place where the key exists, a line is inserted
+/// where it does not, and the line goes away entirely when the claim is
+/// dropped -- because `owner` is `Option<String>` with
+/// `skip_serializing_if`, so absent is how the model spells unassigned, and
+/// `owner:` with nothing after it is a `null` the schema refuses (the shape
+/// `A1-363` found one layer down in `blocked_by`).
+///
+/// **No terminal check here**, unlike `set_status`. Refusing to reopen a closed
+/// task is a model invariant (ADR-0020); `owner` on a closed task is ordinary
+/// and this plan has 228 of them. Whether claiming finished work makes sense is
+/// a question for the command, which can word it, rather than for a text
+/// rewriter.
+pub fn set_owner(file: &str, to: Option<&str>) -> Result<String, CloseError> {
+    let bom = leading_bom(file);
+    let (frontmatter, body) = split_frontmatter(file).ok_or(CloseError::NotATask)?;
+    // Parsed before anything is rewritten, so a file that does not load is
+    // reported as that rather than as a failed rewrite.
+    let _: Task =
+        serde_yaml_ng::from_str(frontmatter).map_err(|e| CloseError::Frontmatter(e.to_string()))?;
+
+    let nl = newline(file, bom);
+    let new_frontmatter = set_owner_in(frontmatter, to, nl)?;
+    // The same read-back `close` and `set_status` do. A rewrite that cannot be
+    // parsed again is a corrupted file, and the one that matters here is a name
+    // that needs quoting: this plan already carries an `owner` holding an ANSI
+    // escape, from `A1-290`'s fixture.
+    let parsed = reparse(&new_frontmatter)?;
+    if parsed.owner.as_deref() != to {
+        return Err(CloseError::Produced(format!(
+            "`owner` did not round-trip: asked for {to:?} and read back {:?}",
+            parsed.owner
+        )));
+    }
+    Ok(format!("{bom}---{nl}{new_frontmatter}---{nl}{body}"))
+}
+
+/// `owner` set, replaced or removed in `frontmatter`.
+///
+/// Inserted after `status:` when the key is absent, because that is where every
+/// file this tool has written puts it and a diff that moves a key reads as a
+/// bigger change than it is. Appended when there is no `status:` either, which
+/// is a file `check` already rejects.
+fn set_owner_in(frontmatter: &str, to: Option<&str>, nl: &str) -> Result<String, CloseError> {
+    // **Three states, not two, and conflating the middle one appended a second
+    // key** (`A1-359`, audit). The first draft fell back to appending whenever
+    // it had not rewritten a line, which is right when the key is absent and
+    // wrong when the key is there in a form it declines to swap -- it produced
+    // a `duplicate field` error, caught by the read-back and reported as though
+    // this had a bug. `NoScalar` is the refusal that already says the true
+    // thing: the value would have to be guessed at, so change it by hand.
+    let line_to_change = frontmatter
+        .split_inclusive('\n')
+        .find(|line| is_owner_line(line));
+    if let Some(line) = line_to_change
+        && rewrite_scalar_line(line, "owner", "x").is_none()
+        && !is_bare_key(line, "owner")
+    {
+        return Err(CloseError::NoScalar("owner"));
+    }
+
+    let Some(name) = to else {
+        // Dropping the claim: the key goes, rather than being left holding an
+        // empty value, which the schema reads as `null`.
+        let mut out = String::with_capacity(frontmatter.len());
+        for line in frontmatter.split_inclusive('\n') {
+            if !is_owner_line(line) {
+                out.push_str(line);
+            }
+        }
+        return Ok(out);
+    };
+
+    let value = yaml_scalar(name);
+    let mut out = String::with_capacity(frontmatter.len() + value.len() + 8);
+    let mut done = false;
+    for line in frontmatter.split_inclusive('\n') {
+        if !done && is_owner_line(line) {
+            if let Some(rewritten) = rewrite_scalar_line(line, "owner", &value) {
+                out.push_str(&rewritten);
+            } else {
+                // A bare `owner:` carrying nothing: the whole line is replaced,
+                // because there is no token in it to swap.
+                out.push_str("owner: ");
+                out.push_str(&value);
+                out.push_str(nl);
+            }
+            done = true;
+            continue;
+        }
+        out.push_str(line);
+        if !done && line_to_change.is_none() && is_scalar_key(line, "status") {
+            out.push_str("owner: ");
+            out.push_str(&value);
+            out.push_str(nl);
+            done = true;
+        }
+    }
+    if !done {
+        out.push_str("owner: ");
+        out.push_str(&value);
+        out.push_str(nl);
+    }
+    Ok(out)
+}
+
+/// Whether `line` declares `owner` at the top level, in any form.
+///
+/// Deliberately broader than "a value this can swap": finding the key is how
+/// the three states above are told apart, and a shape this will not rewrite has
+/// to be *recognised* before it can be refused.
+fn is_owner_line(line: &str) -> bool {
+    let content = line.trim_end_matches(['\r', '\n']);
+    content
+        .strip_prefix("owner")
+        .is_some_and(|rest| rest.trim_start_matches([' ', '\t']).starts_with(':'))
+}
+
+/// Whether `line` declares `key` at the top level with no value on it.
+///
+/// `rewrite_scalar_line` returns `None` for this shape deliberately -- there is
+/// no token to swap -- so removing a key has to recognise it separately, or
+/// `release` would leave `owner:` behind and the schema would read it as
+/// `null`.
+fn is_bare_key(line: &str, key: &str) -> bool {
+    let content = line.trim_end_matches(['\r', '\n']);
+    let Some(after) = content.strip_prefix(key) else {
+        return false;
+    };
+    let after = after.trim_start_matches([' ', '\t']);
+    after
+        .strip_prefix(':')
+        .is_some_and(|rest| rest.trim().is_empty())
+}
+
+/// Whether `line` is the top-level `key:` line with a value this can sit after.
+fn is_scalar_key(line: &str, key: &str) -> bool {
+    rewrite_scalar_line(line, key, "x").is_some()
 }
 
 /// Add or remove one `blocked_by` edge, leaving everything else untouched.
@@ -278,6 +460,79 @@ pub fn set_phase(file: &str, to: u32) -> Result<String, CloseError> {
 /// Whatever [`set_blocked_by`] returns, for the same reasons.
 pub fn set_prefer_after(file: &str, prefer_after: &[String]) -> Result<String, CloseError> {
     set_id_list(file, "prefer_after", prefer_after, |t| &t.prefer_after)
+}
+
+/// The same for `tags`, the vocabulary (`A1-213`).
+///
+/// Through `set_id_list` despite the name: what that function does is replace a
+/// top-level list of scalars while keeping the form the file already used, and
+/// nothing in it is about ids. A second copy for tags would be a second place
+/// for the flow-versus-block rule to be got wrong, which is the reason it was
+/// one function for two edges in the first place (`A1-150`).
+///
+/// # Errors
+///
+/// Whatever [`set_blocked_by`] returns, for the same reasons.
+pub fn set_tags(file: &str, tags: &[String]) -> Result<String, CloseError> {
+    set_id_list(file, "tags", tags, |t| &t.tags)
+}
+
+/// One list entry, quoted exactly as far as YAML needs and no further.
+///
+/// The writer used to emit the value raw, which is right for every id this plan
+/// actually carries and wrong for anything that opens a YAML construct: `*` is
+/// an alias, `&` an anchor, `!` a tag, and none of them survives being written
+/// literally in either the flow form or the block one. `add` never had the
+/// problem because it serialises the whole task, so the asymmetry was between
+/// two commands rather than between two values (`A1-213`, audit).
+///
+/// Serialising the scalar is what keeps them agreeing. It leaves ordinary ids
+/// alone, so the author's `[cli, backend]` is still written back unquoted.
+fn yaml_scalar(value: &str) -> String {
+    let rendered = serde_yaml_ng::to_string(value).map_or_else(
+        // Unreachable for a string, and a raw value is what the caller asked
+        // for: the round-trip guard below is what refuses to write it.
+        |_| value.to_string(),
+        |rendered| rendered.trim_end_matches('\n').to_string(),
+    );
+    if !rendered.contains('\n') {
+        return rendered;
+    }
+    // A value carrying a newline is rendered as a `|-` block, which is a
+    // perfectly good scalar and cannot be embedded in one list line. YAML's
+    // double-quoted form escapes the same characters JSON does, so the JSON
+    // rendering is one -- and it keeps a value nobody should type from becoming
+    // an error that blames the tool for it.
+    serde_json::to_string(value).unwrap_or(rendered)
+}
+
+/// Whether writing `candidate` as `key`'s value yields frontmatter that loads
+/// and reads back as exactly `ids`.
+///
+/// Asked rather than predicted (`A1-213`, audit). Which values a YAML flow list
+/// can hold unquoted is a question about the grammar -- flow indicators, but
+/// also the indicators only a *leading* character makes special, `*` and `&` and
+/// `!` among them -- and a predicate enumerating them is a list of the cases its
+/// author thought of. The parser already knows the answer, so it is asked, and
+/// the fallback is the block form that `add` writes.
+///
+/// **This narrows the round-trip guard, deliberately.** A flow candidate that
+/// does not read back used to reach that guard and be reported; now it quietly
+/// becomes a block list. What the guard loses is a class of *cosmetic* defect
+/// -- a bug in the spacing or trailing-comment capture would reformat the line
+/// rather than refuse -- and what it keeps is the whole of correctness, because
+/// the block form is checked by the same guard on the way out. Trading a loud
+/// failure about formatting for a quiet correct write is the right way round in
+/// a tool whose refusal tells the reader to report a bug.
+fn holds(
+    frontmatter: &str,
+    key: &str,
+    candidate: &str,
+    ids: &[String],
+    read_back: fn(&Task) -> &Vec<String>,
+) -> bool {
+    reparse(&replace_top_level_block(frontmatter, key, candidate))
+        .is_ok_and(|task| read_back(&task) == ids)
 }
 
 /// Replace one top-level list of task ids, and prove it round-tripped.
@@ -372,35 +627,56 @@ fn set_id_list(
         serde_yaml_ng::from_str(frontmatter).map_err(|e| CloseError::Frontmatter(e.to_string()))?;
 
     let nl = newline(file, bom);
-    let block = if ids.is_empty() {
-        String::new()
-    } else if let Some(found) = inline_list_line(frontmatter, key) {
-        // The form the file already used, with the spacing and any trailing
-        // comment it had. A rewrite that changes what it found is a diff nobody
-        // asked for, in a file this tool claims to own carefully -- and `dep`'s
-        // whole argument was that hand-editing should not be necessary, not that
-        // the tool would reformat instead (`A1-179`). `mv` has kept the author's
-        // form since it was written; this is the same promise, one command over.
-        format!(
-            "{}{}[{}]{}{nl}",
-            found.key,
-            found.spacing,
-            ids.join(", "),
-            found.trailing
-        )
-    } else {
-        // Indented, like `evidence:` and `trace_fingerprints:` beside it, because
-        // `replace_top_level_block` ends a block at the first line that does not
-        // start with whitespace: an unindented `- B` is not skipped, so replacing
-        // a list left the old entries behind it. The round-trip check caught that
-        // before anything was written, which is what it is for.
+    // Indented, like `evidence:` and `trace_fingerprints:` beside it, because
+    // `replace_top_level_block` ends a block at the first line that does not
+    // start with whitespace: an unindented `- B` is not skipped, so replacing a
+    // list left the old entries behind it. The round-trip check caught that
+    // before anything was written, which is what it is for.
+    let block_form = || {
         let mut out = format!("{key}:{nl}");
         for id in ids {
             out.push_str("  - ");
-            out.push_str(id);
+            out.push_str(&yaml_scalar(id));
             out.push_str(nl);
         }
         out
+    };
+
+    // The form the file already used, with the spacing and any trailing comment
+    // it had. A rewrite that changes what it found is a diff nobody asked for, in
+    // a file this tool claims to own carefully -- and `dep`'s whole argument was
+    // that hand-editing should not be necessary, not that the tool would
+    // reformat instead (`A1-179`). `mv` has kept the author's form since it was
+    // written; this is the same promise, one command over.
+    //
+    // **But keeping it is a promise about cosmetics, not about correctness**
+    // (`A1-213`, audit). A flow list separates on commas and ends at a bracket,
+    // so a value carrying one cannot be written in it -- and `aplan add --tag
+    // "a, b"` produces exactly that, in block form, where it is a perfectly
+    // ordinary scalar. Writing it into `[...]` anyway split one tag into two,
+    // which the round-trip guard caught and reported as an internal fault: the
+    // tool blaming itself, and telling the reader to file a bug, for a value its
+    // own creation path accepts. So the form is kept where it survives and the
+    // block form wins where it does not. Refusing the value instead would make
+    // two commands disagree about what a tag is.
+    let block = if ids.is_empty() {
+        String::new()
+    } else {
+        inline_list_line(frontmatter, key)
+            .map(|found| {
+                format!(
+                    "{}{}[{}]{}{nl}",
+                    found.key,
+                    found.spacing,
+                    ids.iter()
+                        .map(|id| yaml_scalar(id))
+                        .collect::<Vec<_>>()
+                        .join(", "),
+                    found.trailing
+                )
+            })
+            .filter(|candidate| holds(frontmatter, key, candidate, ids, read_back))
+            .unwrap_or_else(block_form)
     };
     let new_frontmatter = replace_top_level_block(frontmatter, key, &block);
 
@@ -495,6 +771,22 @@ pub fn add_evidence(file: &str, add: &Evidence) -> Result<String, CloseError> {
     Ok(format!("{bom}---{nl}{new_frontmatter}---{nl}{body}"))
 }
 
+/// Whether two citations name the same thing: kind and reference, not the whole
+/// record (`A1-361`).
+///
+/// A citation is addressed as `kind:ref` on every surface -- it is what the
+/// flags take and what `NoSuchEvidence` and `AmbiguousEvidence` print -- so it
+/// is what "the same citation" has to mean. Comparing the whole `Evidence`
+/// compared `captured` too, which a caller naming a citation has no way to
+/// supply: `kind:ref` has no room for a date. Every citation in this repository
+/// happens to carry none, so the two comparisons agreed here and nowhere else.
+/// An imported plan is where they part -- `import --implemented-as done` records
+/// note-level provenance *with* a date -- and there the citation could be named
+/// in the message and never matched by the code that printed it.
+fn names_same(a: &Evidence, b: &Evidence) -> bool {
+    a.kind == b.kind && a.reference == b.reference
+}
+
 /// Replace one evidence citation on a `done` task with another, in place.
 ///
 /// `test` evidence is cited by name, so a rename leaves every citing task
@@ -544,7 +836,7 @@ pub fn remove_evidence(file: &str, drop: &Evidence) -> Result<String, CloseError
     }
 
     let label = |e: &Evidence| format!("{}:{}", e.kind.as_str(), e.reference);
-    match task.evidence.iter().filter(|e| *e == drop).count() {
+    match task.evidence.iter().filter(|e| names_same(e, drop)).count() {
         0 => return Err(CloseError::NoSuchEvidence(label(drop))),
         1 => {}
         n => return Err(CloseError::AmbiguousEvidence(label(drop), n)),
@@ -553,7 +845,7 @@ pub fn remove_evidence(file: &str, drop: &Evidence) -> Result<String, CloseError
     let remaining: Vec<Evidence> = task
         .evidence
         .iter()
-        .filter(|e| *e != drop)
+        .filter(|e| !names_same(e, drop))
         .cloned()
         .collect();
     // `APLAN005` is the rule with an opinion about a `done` task citing nothing,
@@ -598,20 +890,26 @@ pub fn replace_evidence(file: &str, from: &Evidence, to: &Evidence) -> Result<St
     }
 
     let label = |e: &Evidence| format!("{}:{}", e.kind.as_str(), e.reference);
-    let matches = task.evidence.iter().filter(|e| *e == from).count();
+    let matches = task.evidence.iter().filter(|e| names_same(e, from)).count();
     match matches {
         0 => return Err(CloseError::NoSuchEvidence(label(from))),
         1 => {}
         n => return Err(CloseError::AmbiguousEvidence(label(from), n)),
     }
-    if task.evidence.iter().any(|e| e == to) {
+    if task.evidence.iter().any(|e| names_same(e, to)) {
         return Err(CloseError::DuplicateEvidence(label(to)));
     }
 
     let repaired: Vec<Evidence> = task
         .evidence
         .iter()
-        .map(|e| if e == from { to.clone() } else { e.clone() })
+        .map(|e| {
+            if names_same(e, from) {
+                to.clone()
+            } else {
+                e.clone()
+            }
+        })
         .collect();
 
     let nl = newline(file, bom);
@@ -745,12 +1043,10 @@ fn set_status_in(frontmatter: &str, to: Status) -> Result<String, CloseError> {
     let mut out = String::with_capacity(frontmatter.len() + 8);
     let mut changed = false;
     for line in frontmatter.split_inclusive('\n') {
-        if !changed {
-            if let Some(rewritten) = rewrite_scalar_line(line, "status", &to.to_string()) {
-                out.push_str(&rewritten);
-                changed = true;
-                continue;
-            }
+        if !changed && let Some(rewritten) = rewrite_scalar_line(line, "status", &to.to_string()) {
+            out.push_str(&rewritten);
+            changed = true;
+            continue;
         }
         out.push_str(line);
     }
@@ -838,7 +1134,7 @@ pub fn trace_fingerprints(
     for trace in &task.traces {
         if let Some((rel, anchor)) = trace.split_once('#')
             && let Ok(text) = std::fs::read_to_string(root.join(rel))
-            && let Some(fp) = crate::anchor_fingerprint(&text, anchor)
+            && let Some(fp) = crate::anchor::fingerprint_in(rel, &text, anchor)
         {
             out.insert(trace.clone(), fp);
         }
@@ -850,6 +1146,183 @@ pub fn trace_fingerprints(
 mod tests {
     use super::*;
     use crate::task::EvidenceKind;
+
+    /// The author's flow list is kept, and the block form wins where flow
+    /// cannot hold the value (`A1-213`, audit).
+    ///
+    /// `aplan add --tag "a, b"` writes that tag in block form, where it is an
+    /// ordinary scalar. Writing it back into `[...]` split one tag into two, and
+    /// the round-trip guard reported it as an internal fault -- the tool blaming
+    /// itself for a value the creation path accepts.
+    #[test]
+    fn a_flow_list_is_kept_until_it_cannot_hold_the_value() {
+        let file = |tags: &str| {
+            format!("---\nid: W-1\ntitle: W-1\nphase: 0\nstatus: todo\n{tags}---\n\nbody\n")
+        };
+        let tags_of = |written: &str| -> Vec<String> {
+            let task: Task =
+                serde_yaml_ng::from_str(split_frontmatter(written).expect("frontmatter").0)
+                    .expect("parses");
+            task.tags
+        };
+
+        // Ordinary values keep the form, its spacing and its trailing comment.
+        let kept = set_tags(
+            &file("tags: [cli, backend]   # why\n"),
+            &["cli".into(), "backend".into(), "docs".into()],
+        )
+        .expect("writes");
+        assert!(
+            kept.contains("tags: [cli, backend, docs]   # why"),
+            "the author's form was rewritten: {kept}"
+        );
+
+        // **Every value reachable through `add --tag` survives, whichever form
+        // that takes.** The characters worth listing are the ones a predicate
+        // would have had to know about: the flow indicators, and the ones only a
+        // *leading* position makes special -- `*` opens an alias, `&` an anchor,
+        // `!` a tag -- which is why the form is proved rather than predicted.
+        for value in [
+            "cli",
+            "a, b",
+            "a[b",
+            "a]b",
+            "a{b",
+            "a}b",
+            "a#b",
+            "a\"b",
+            "a'b",
+            "*",
+            "*a",
+            "&a",
+            "!a",
+            "|a",
+            ">a",
+            "%a",
+            "@a",
+            "`a",
+            "?a",
+            ":a",
+            "-a",
+            "a b",
+            "a:b",
+            "artifact:accepted",
+            "priority-p0",
+            "v1.2.3",
+            // Nothing should type these, and the point is that typing one is a
+            // refusal about the value or nothing at all, never the round-trip
+            // guard telling the reader to report a bug in `aplan`.
+            "",
+            " ",
+            "a\tb",
+            "a\nb",
+            "\u{a0}x",
+        ] {
+            let written = set_tags(&file("tags: [cli]\n"), &["cli".into(), value.into()])
+                .unwrap_or_else(|e| panic!("`{value}` could not be written at all: {e}"));
+            assert_eq!(
+                tags_of(&written),
+                vec!["cli".to_string(), value.to_string()],
+                "`{value}` did not survive the form chosen for it: {written}"
+            );
+        }
+
+        // And the fallback really is the block form, not a mangled flow one.
+        let widened = set_tags(&file("tags: [cli]\n"), &["cli".into(), "a, b".into()])
+            .expect("writes rather than refusing a value `add --tag` accepts");
+        assert!(
+            widened.contains("tags:\n  - cli\n  - 'a, b'\n")
+                || widened.contains("tags:\n  - cli\n  - \"a, b\"\n")
+                || widened.contains("tags:\n  - cli\n  - a, b\n"),
+            "expected the block form: {widened}"
+        );
+    }
+
+    /// **Every printable ASCII character, in every position that makes one
+    /// special, survives being written into a list** (`A1-250`, audit).
+    ///
+    /// The fixed list beside this one is the set of values somebody thought of,
+    /// which is exactly the shape of the defect that list was written for: the
+    /// first fix here was a predicate enumerating the characters a flow list
+    /// cannot hold, and it let `*` through. A sweep cannot think of nothing.
+    ///
+    /// Position matters because YAML's indicators are positional: `*` opens an
+    /// alias only as the first character, `#` starts a comment only after a
+    /// space, and `:` ends a key only before one.
+    #[test]
+    fn every_printable_character_survives_in_every_position() {
+        let file = |tags: &str| {
+            format!("---\nid: W-1\ntitle: W-1\nphase: 0\nstatus: todo\n{tags}---\n\nbody\n")
+        };
+        let mut checked = 0usize;
+        for byte in 0x20u8..=0x7e {
+            let c = byte as char;
+            for value in [
+                c.to_string(),
+                format!("{c}x"),
+                format!("x{c}"),
+                format!("a{c}b"),
+                format!("a {c} b"),
+            ] {
+                // Both forms: the author's flow list and a block one, because
+                // the writer chooses between them and each has its own hazards.
+                for existing in ["tags: [cli]\n", "tags:\n  - cli\n"] {
+                    let written = set_tags(&file(existing), &["cli".into(), value.clone()])
+                        .unwrap_or_else(|e| {
+                            panic!("{value:?} (byte {byte:#04x}) could not be written: {e}")
+                        });
+                    let back: Task = serde_yaml_ng::from_str(
+                        split_frontmatter(&written).expect("frontmatter").0,
+                    )
+                    .unwrap_or_else(|e| panic!("{value:?} produced frontmatter that fails: {e}"));
+                    assert_eq!(
+                        back.tags,
+                        vec!["cli".to_string(), value.clone()],
+                        "{value:?} (byte {byte:#04x}) came back changed: {written}"
+                    );
+                    checked += 1;
+                }
+            }
+        }
+        assert!(checked >= 900, "the sweep did not run: {checked}");
+    }
+
+    /// A value long enough that a serialiser might fold it, and a few shapes
+    /// that are not ASCII at all (`A1-250`, audit).
+    ///
+    /// `serde_yaml_ng` does not wrap, but nothing in this file's contract says
+    /// it may not, and a folded scalar cannot sit in one list line. The
+    /// fallback to the double-quoted form is what makes that a non-event, so it
+    /// is worth a test that would notice.
+    #[test]
+    fn a_long_or_non_ascii_value_survives_too() {
+        let file = "---\nid: W-1\ntitle: W-1\nphase: 0\nstatus: todo\ntags: [cli]\n---\n\nbody\n";
+        for value in [
+            "x".repeat(200),
+            "long value with spaces ".repeat(40),
+            "a\nb\nc".to_string(),
+            "\u{1f600}".to_string(),
+            "\u{a0}leading-nbsp".to_string(),
+            "tab\there".to_string(),
+            "\u{0}".to_string(),
+            "\u{7f}".to_string(),
+            "\u{feff}".to_string(),
+            "ending-newline\n".to_string(),
+            " ".to_string(),
+            String::new(),
+        ] {
+            let written = set_tags(file, &["cli".into(), value.clone()])
+                .unwrap_or_else(|e| panic!("{value:?} could not be written: {e}"));
+            let back: Task =
+                serde_yaml_ng::from_str(split_frontmatter(&written).expect("frontmatter").0)
+                    .unwrap_or_else(|e| panic!("{value:?} produced frontmatter that fails: {e}"));
+            assert_eq!(
+                back.tags,
+                vec!["cli".to_string(), value.clone()],
+                "{value:?} came back changed: {written}"
+            );
+        }
+    }
 
     fn ev(kind: EvidenceKind, reference: &str) -> Evidence {
         Evidence {
@@ -1280,7 +1753,7 @@ mod tests {
 
     /// `close` with no trace fingerprints, the common case in these tests.
     fn close_ev(file: &str, evidence: &[Evidence]) -> Result<String, CloseError> {
-        close(file, evidence, &BTreeMap::new())
+        close(file, evidence, &BTreeMap::new(), None)
     }
 
     fn fps(pairs: &[(&str, &str)]) -> BTreeMap<String, String> {
@@ -1444,6 +1917,7 @@ Because.
             TASK,
             &[commit("abc1234")],
             &fps(&[("HLD.md#x", "deadbeef")]),
+            None,
         )
         .unwrap();
         assert!(out.contains("trace_fingerprints:"), "{out}");
@@ -1458,9 +1932,70 @@ Because.
         assert!(!plain.contains("trace_fingerprints"));
     }
 
+    /// **A release records the version it produced when it closes** (`A1-339`,
+    /// ADR-0038), and a record already there and disagreeing stops the closure.
+    #[test]
+    fn closing_a_release_records_the_version_it_produced() {
+        let release = "---\nid: M-r\ntitle: r\nphase: 0\nstatus: todo\n\
+                       tags:\n  - milestone\n  - release\n---\n\nbody\n";
+        let out = close(
+            release,
+            &[commit("abc1234")],
+            &BTreeMap::new(),
+            Some("2.0.0"),
+        )
+        .unwrap();
+        let (fm, _) = split_frontmatter(&out).unwrap();
+        let task: Task = serde_yaml_ng::from_str(fm).unwrap();
+        assert_eq!(task.version.as_deref(), Some("2.0.0"));
+        assert_eq!(task.status, Status::Done);
+
+        // Already recorded and agreeing: the file's own line is left alone
+        // rather than written twice, which would be a duplicate-key document.
+        let agreeing = "---\nid: M-r\ntitle: r\nphase: 0\nstatus: todo\n\
+                        tags:\n  - milestone\n  - release\nversion: 2.0.0\n---\n\nbody\n";
+        let out = close(
+            agreeing,
+            &[commit("abc1234")],
+            &BTreeMap::new(),
+            Some("2.0.0"),
+        )
+        .unwrap();
+        assert_eq!(
+            out.matches("version:").count(),
+            1,
+            "a second `version:` key would not load: {out}"
+        );
+
+        // Already recorded and disagreeing: refused, with both numbers named.
+        // One of the two is wrong and this tool cannot tell which.
+        let disagreeing = "---\nid: M-r\ntitle: r\nphase: 0\nstatus: todo\n\
+                           tags:\n  - milestone\n  - release\nversion: 1.5.0\n---\n\nbody\n";
+        let err = close(
+            disagreeing,
+            &[commit("abc1234")],
+            &BTreeMap::new(),
+            Some("2.0.0"),
+        )
+        .expect_err("a disagreement is not this tool's to resolve");
+        let said = err.to_string();
+        assert!(said.contains("1.5.0") && said.contains("2.0.0"), "{said}");
+
+        // And nothing is written for a closure that derives no version, which is
+        // every ordinary task.
+        let out = close(release, &[commit("abc1234")], &BTreeMap::new(), None).unwrap();
+        assert!(!out.contains("version:"), "{out}");
+    }
+
     #[test]
     fn restamp_replaces_the_block_on_a_done_task() {
-        let done = close(TASK, &[commit("abc1234")], &fps(&[("HLD.md#x", "0000")])).unwrap();
+        let done = close(
+            TASK,
+            &[commit("abc1234")],
+            &fps(&[("HLD.md#x", "0000")]),
+            None,
+        )
+        .unwrap();
         let fresh = restamp(&done, &fps(&[("HLD.md#x", "ffff")])).unwrap();
         let (fm, _) = split_frontmatter(&fresh).unwrap();
         let task: Task = serde_yaml_ng::from_str(fm).unwrap();
@@ -1612,25 +2147,33 @@ Because.
         }
     }
 
-    /// An id that cannot survive being written as a bare YAML scalar is refused
-    /// rather than written.
+    /// An id is written as asked, whatever it is made of.
     ///
-    /// This guard is what caught the real defect while `set_blocked_by` was being
-    /// built: the list was written unindented, `replace_top_level_block` ends a
-    /// block at the first line not starting with whitespace, and the old entries
-    /// survived underneath the new ones. What the writer produced was not what it
-    /// was asked to write, and the only way to know that is to read it back
-    /// (`A1-124`).
+    /// These seven are the values that defeated the writer while `set_blocked_by`
+    /// was being built: three that do not parse as bare scalars at all, and four
+    /// that parse into something other than what was asked for. They were refused
+    /// then, because the writer emitted them raw and reading the result back was
+    /// the only way to notice (`A1-124`).
+    ///
+    /// They are *written* now, because the scalar is serialised rather than
+    /// pasted (`A1-213`, audit). Whether `a: b` names a task is a question about
+    /// the plan's vocabulary, which `check` answers with `APLAN002`; refusing it
+    /// here answered it with "this is a bug in `aplan`, please report it", about
+    /// a value the caller had supplied. The round-trip guard stays exactly where
+    /// it was -- it is what caught that original defect, and what would catch the
+    /// next one -- but it now guards the writer rather than the vocabulary.
     #[test]
-    fn an_id_that_would_not_round_trip_is_refused() {
+    fn an_id_is_written_as_asked_whatever_it_is_made_of() {
         let file = "---\nid: A\ntitle: T\nphase: 1\nstatus: todo\n---\n\nbody\n";
-        // The first three do not parse at all; the last four parse into something
-        // that is not what was asked for, which only reading it back can catch.
-        for bad in ["a\nb", "a: b", "[a", "#c", "a #c", " a", "a "] {
-            let out = set_blocked_by(file, &[bad.to_string()]);
-            assert!(
-                matches!(out, Err(CloseError::Produced(_))),
-                "`{bad}` was written: {out:?}"
+        for awkward in ["a\nb", "a: b", "[a", "#c", "a #c", " a", "a "] {
+            let out = set_blocked_by(file, &[awkward.to_string()])
+                .unwrap_or_else(|e| panic!("`{awkward}` was refused: {e}"));
+            let (fm, _) = split_frontmatter(&out).expect("frontmatter");
+            let task: Task = serde_yaml_ng::from_str(fm).expect("loads");
+            assert_eq!(
+                task.blocked_by,
+                vec![awkward.to_string()],
+                "`{awkward}` came back changed: {out}"
             );
         }
     }
@@ -1691,5 +2234,136 @@ Because.
         let task: Task = serde_yaml_ng::from_str(fm).expect("the result loads");
         assert!(task.blocked_by.is_empty(), "{out}");
         assert_eq!(task.tags, vec!["x".to_string()], "{out}");
+    }
+
+    /// **A claim is recorded, replaced and dropped without touching anything
+    /// else** (`A1-359`).
+    ///
+    /// The three shapes a claim writer has to handle, and the third is the one
+    /// that bites: `owner` is `Option<String>` with `skip_serializing_if`, so
+    /// unassigned is the key being *absent*. Leaving `owner:` behind with no
+    /// value is a `null` the schema refuses, which is the defect `A1-363` found
+    /// in `blocked_by` one layer down.
+    #[test]
+    fn an_owner_is_recorded_replaced_and_dropped() {
+        let unowned = "---\nid: A1-001\ntitle: t\nphase: 1\nstatus: todo\n\
+                       effort_days: 1\n---\n\nbody\n";
+        let claimed = set_owner(unowned, Some("ada")).expect("record");
+        assert!(claimed.contains("owner: ada"), "{claimed}");
+        // Placed where every file this tool writes puts it, so the diff is one
+        // line rather than a reordering.
+        let keys: Vec<&str> = claimed
+            .lines()
+            .filter_map(|l| l.split(':').next())
+            .filter(|k| ["status", "owner", "effort_days"].contains(k))
+            .collect();
+        assert_eq!(keys, vec!["status", "owner", "effort_days"], "{claimed}");
+
+        let taken = set_owner(&claimed, Some("grace")).expect("replace");
+        assert!(
+            taken.contains("owner: grace") && !taken.contains("ada"),
+            "{taken}"
+        );
+
+        let released = set_owner(&taken, None).expect("drop");
+        assert!(
+            !released.contains("owner"),
+            "the key is left behind, which the schema reads as null:\n{released}"
+        );
+        // And it still loads, which is the whole point of removing the line
+        // rather than emptying it.
+        let (fm, _) = split_frontmatter(&released).expect("frontmatter");
+        let task: Task = serde_yaml_ng::from_str(fm).expect("a released task still loads");
+        assert_eq!(task.owner, None);
+        assert_eq!(task.status, Status::Todo, "something else moved");
+    }
+
+    /// **A name that needs quoting survives, and one that cannot is refused**
+    /// (`A1-359`).
+    ///
+    /// This plan already carries an `owner` holding an ANSI escape, from
+    /// `A1-290`'s fixture, so a writer that interpolates the name raw would
+    /// produce a file that does not load. The round-trip check is what catches
+    /// it, and `yaml_scalar` is what makes it unnecessary.
+    #[test]
+    fn an_owner_that_needs_quoting_round_trips() {
+        for name in [
+            "ada",
+            "ada lovelace",
+            "a: b",
+            "#ada",
+            "- ada",
+            "\u{1b}[41mada",
+            "null",
+            "true",
+            "123",
+            "*anchor",
+            "ада",
+            "ada\"s",
+            "'ada'",
+            "@ada",
+            "  padded  ",
+        ] {
+            let file = "---\nid: A1-001\ntitle: t\nphase: 1\nstatus: todo\n---\n\nbody\n";
+            let out =
+                set_owner(file, Some(name)).unwrap_or_else(|e| panic!("`{name}` was refused: {e}"));
+            let (fm, _) = split_frontmatter(&out).expect("frontmatter");
+            let task: Task = serde_yaml_ng::from_str(fm)
+                .unwrap_or_else(|e| panic!("`{name}` produced unloadable frontmatter: {e}\n{out}"));
+            assert_eq!(
+                task.owner.as_deref(),
+                Some(name),
+                "`{name}` did not survive:\n{out}"
+            );
+        }
+    }
+
+    /// **An `owner` this cannot swap is refused by name, not appended beside**
+    /// (`A1-359`, audit).
+    ///
+    /// The defect this pins: the writer fell back to appending whenever it had
+    /// not rewritten a line, which is correct when the key is absent and wrong
+    /// when it is present in block form -- it wrote a second `owner:` and the
+    /// read-back reported a `duplicate field` error, which reads as a bug in
+    /// this module rather than as a file it declines to guess at. `NoScalar`
+    /// already says the right thing.
+    #[test]
+    fn an_owner_written_as_a_block_is_refused_by_name() {
+        let block = "---\nid: A1-001\ntitle: t\nphase: 1\nstatus: todo\nowner: >\n  ada\n\
+                     ---\n\nbody\n";
+        for to in [Some("grace"), None] {
+            let e = set_owner(block, to).expect_err("a block-form owner must be refused");
+            assert!(
+                matches!(e, CloseError::NoScalar("owner")),
+                "refused as {e:?} rather than as a value it will not guess at"
+            );
+            let said = e.to_string();
+            assert!(
+                said.contains("change it by hand") && said.contains("written below the key"),
+                "the refusal does not say what to do: {said}"
+            );
+        }
+    }
+
+    /// **A bare `owner:` is a claim that can still be made** (`A1-359`).
+    ///
+    /// `owner:` with nothing after it loads as `null`, which is what the model
+    /// means by unassigned, so claiming such a task must work rather than
+    /// refuse: there is no value to guess at, only a line to replace.
+    #[test]
+    fn a_bare_owner_key_can_be_claimed_and_dropped() {
+        let bare = "---\nid: A1-001\ntitle: t\nphase: 1\nstatus: todo\nowner:\n---\n\nbody\n";
+        let claimed = set_owner(bare, Some("ada")).expect("claim over a null owner");
+        let (fm, _) = split_frontmatter(&claimed).expect("frontmatter");
+        let task: Task = serde_yaml_ng::from_str(fm).expect("loads");
+        assert_eq!(task.owner.as_deref(), Some("ada"), "{claimed}");
+        assert_eq!(
+            claimed.matches("owner").count(),
+            1,
+            "a second key:\n{claimed}"
+        );
+
+        let released = set_owner(bare, None).expect("drop a null owner");
+        assert!(!released.contains("owner"), "{released}");
     }
 }

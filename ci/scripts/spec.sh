@@ -14,6 +14,27 @@ cargo run -q -p xtask -- gen-schema --check
 echo "==> cargo xtask gen-roadmap --check"
 cargo run -q -p xtask -- gen-roadmap --check
 
+# `rust-version` is a consumer contract and nothing checked it: it read 1.85
+# while the locked graph needed 1.88, so the reviewed revision did not build
+# with the compiler its own metadata promised (A1-327, pre-public adoption evidence
+# item 15). This is the half that needs no toolchain -- every package declares
+# the compiler it wants, so the floor is arithmetic over `cargo metadata`.
+#
+# It does NOT prove this workspace's own source compiles at that floor, which
+# needs the compiler itself and so needs the runner image to carry it. A1-330
+# is that half; saying so here rather than letting the gate's name imply more
+# than it checks.
+echo "==> cargo xtask msrv"
+cargo run -q -p xtask -- msrv
+
+# Do the install pins in the documents that instruct an adopter name the newest
+# release? HLD section 17 promised this and it did not exist (A1-318,
+# ADR-0039). Narrower than that promise on purpose: the unit is an occurrence,
+# not a file, and a record of an instruction is not an instruction -- both
+# measured on this repository's own text, and both written up in the script.
+echo "==> ci/scripts/check-version-pins.sh"
+bash ci/scripts/check-version-pins.sh
+
 # `gen-roadmap` gates the generated companion; this gates the hand-written
 # prose beside it: ROADMAP.md's narrative and the pilot logs in pre-public adoption evidence v0.6 closed while its prose claimed seven deliverables that
 # were never tasks, because nothing compared the two (A1-042, ADR-0009's deferred

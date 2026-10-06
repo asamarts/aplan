@@ -264,6 +264,8 @@ fn build(
             effort_days: None,
             blocked_by: Vec::new(),
             prefer_after: Vec::new(),
+            ratified_by: Vec::new(),
+            contains: Vec::new(),
             evidence,
             paths: Vec::new(),
             traces: Vec::new(),
@@ -272,6 +274,7 @@ fn build(
             revisit_at: None,
             version_impact: None,
             version_impact_reason: None,
+            version: None,
         });
     }
 

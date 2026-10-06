@@ -78,9 +78,12 @@ fn capped(
     max_processes: Option<u32>,
 ) -> VerifyOptions {
     VerifyOptions {
+        version: None,
+        traces_root: None,
         config_file: None,
         execute: true,
         test_runner: Some(TestRunners::One(TestRunner {
+            output_lines: None,
             max_memory: max_memory.map(ToString::to_string),
             max_processes,
             wrap: None,
@@ -110,6 +113,8 @@ fn done_task(id: &str, evidence: Vec<Evidence>) -> Task {
         effort_days: None,
         blocked_by: Vec::new(),
         prefer_after: Vec::new(),
+        ratified_by: Vec::new(),
+        contains: Vec::new(),
         evidence,
         paths: Vec::new(),
         traces: Vec::new(),
@@ -118,6 +123,7 @@ fn done_task(id: &str, evidence: Vec<Evidence>) -> Task {
         revisit_at: None,
         version_impact: None,
         version_impact_reason: None,
+        version: None,
     }
 }
 
@@ -279,6 +285,8 @@ fn a_url_checker_stopped_at_its_cap_is_a_configuration_fault() {
         &plan_of(task),
         dir.path(),
         &VerifyOptions {
+            version: None,
+            traces_root: None,
             config_file: None,
             execute: false,
             test_runner: None,

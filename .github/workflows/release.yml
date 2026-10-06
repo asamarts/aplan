@@ -21,10 +21,33 @@ permissions:
 jobs:
   release:
     name: build + publish
+    # **Unreachable by an untrusted event, by refusal rather than by
+    # redirection** (`A1-117`). Routing would keep this job reachable and merely
+    # move it; the property wanted is that it does not run.
+    #
+    # **A job condition, not a step** -- proved, not assumed. Written as a step
+    # first, and a real fork pull request on the proof fixture showed why that is
+    # wrong: a step cannot run until the job has been assigned a runner, so the
+    # job sat queued against the box's label, waiting for the box to pick up
+    # untrusted work in order to refuse it. Here, where that runner is
+    # registered, it would have been picked up. A job-level `if` is evaluated
+    # before any assignment, and the job is skipped without ever being queued.
+    # Stated as an allow-list of the events this workflow is for, not as an
+    # exclusion of the two that are dangerous today. An exclusion admits every
+    # event type nobody has thought of yet; naming what is permitted means a new
+    # trigger is refused until somebody decides it should not be.
+    if: github.event_name == 'push' || github.event_name == 'workflow_dispatch'
+    # Why this one refuses: a pull request has no business publishing a release under any label.
     runs-on: [self-hosted, linux, aplan]
     timeout-minutes: 30
     steps:
       - uses: actions/checkout@v7
+        # `aplan version` derives the required release from the last reachable
+        # tag and the tasks closed since it. Checkout's one-commit default has
+        # neither, so the release gate would correctly refuse the shallow tree
+        # after spending the time to build it (`A1-402`).
+        with:
+          fetch-depth: 0
 
       # The artifact is statically linked (musl), so it runs on a consumer's
       # runner whatever glibc that image ships. `release.sh` refuses a tag that

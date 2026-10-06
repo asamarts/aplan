@@ -40,7 +40,7 @@ fn extra_args(command: &str) -> Vec<&'static str> {
         // reached at all: without it clap refuses first, every format looks
         // accepted, and this file silently stops testing the gate for that
         // command. `why` did exactly that when it gained the flag.
-        "show" | "why" => vec!["T-001"],
+        "show" | "why" | "version" => vec!["T-001"],
         "check-docs" => vec!["DOC.md"],
         _ => Vec::new(),
     }

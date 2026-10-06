@@ -448,6 +448,8 @@ fn corpus() -> Vec<Scenario> {
     let mut all = loader_and_identity_rules();
     all.extend(graph_edge_rules());
     all.extend(evidence_and_trace_rules());
+    all.extend(ratification_rules());
+    all.extend(structured_trace_rules());
     all.extend(effort_note_and_deadlock_rules());
     all.extend(external_trace_rules());
     all.extend(emptied_cut_rules());
@@ -458,6 +460,7 @@ fn corpus() -> Vec<Scenario> {
     all.extend(interpolated_reason_branches());
     all.extend(partial_stamp_rules());
     all.extend(body_criteria_rules());
+    all.extend(reserved_tag_rules());
     all
 }
 
@@ -560,7 +563,7 @@ fn interpolated_reason_branches() -> Vec<Scenario> {
     ]
 }
 
-/// `APLAN028`: a closed task stamps every trace it stamps any of.
+/// `APLAN028`: a closed task stamps every trace that can be stamped.
 fn partial_stamp_rules() -> Vec<Scenario> {
     let doc_body = "# Intro\n\n| 7 | a |\n| 11 | b |\n";
     let good = aplan_core::anchor_fingerprint(doc_body, "intro").expect("fingerprint");
@@ -570,7 +573,7 @@ fn partial_stamp_rules() -> Vec<Scenario> {
         // plan was clean and drift was off for the task.
         scen(
             "partial-trace-stamp-fires",
-            Rule::PartialTraceStamp,
+            Rule::UnstampedTrace,
             Fires,
             vec![
                 tf(
@@ -589,7 +592,7 @@ fn partial_stamp_rules() -> Vec<Scenario> {
         // written rather than by a later audit.
         scen(
             "partial-trace-stamp-several-fires",
-            Rule::PartialTraceStamp,
+            Rule::UnstampedTrace,
             Fires,
             vec![
                 tf(
@@ -607,7 +610,7 @@ fn partial_stamp_rules() -> Vec<Scenario> {
         // rule firing here would make `close` unusable.
         scen(
             "partial-trace-stamp-silent",
-            Rule::PartialTraceStamp,
+            Rule::UnstampedTrace,
             Silent,
             vec![
                 tf(
@@ -618,6 +621,42 @@ fn partial_stamp_rules() -> Vec<Scenario> {
                          traces:\n  - DOC.md#intro\n\
                          trace_fingerprints:\n  DOC.md#intro: '{good}'"
                     ),
+                ),
+                doc("DOC.md", doc_body),
+            ],
+        )
+        .drift(),
+        // Stamps nothing at all, which used to be exempt: the same sentence
+        // about every trace instead of about one. Measured at nine live cases
+        // against zero for the partial shape above (`A1-297`).
+        scen(
+            "no-trace-stamp-fires",
+            Rule::UnstampedTrace,
+            Fires,
+            vec![
+                tf(
+                    "a",
+                    "id: A-1\ntitle: A-1\nphase: 0\nstatus: done\n\
+                     evidence:\n  - kind: commit\n    ref: abc1234\n\
+                     traces:\n  - DOC.md#intro",
+                ),
+                doc("DOC.md", doc_body),
+            ],
+        )
+        .drift(),
+        // A trace with no anchor, which `close --restamp` cannot stamp: silent,
+        // because the fix this rule names provably would not clear it. The near
+        // miss that keeps the removal of the exemption honest (`A1-297`).
+        scen(
+            "unstampable-trace-silent",
+            Rule::UnstampedTrace,
+            Silent,
+            vec![
+                tf(
+                    "a",
+                    "id: A-1\ntitle: A-1\nphase: 0\nstatus: done\n\
+                     evidence:\n  - kind: commit\n    ref: abc1234\n\
+                     traces:\n  - DOC.md",
                 ),
                 doc("DOC.md", doc_body),
             ],
@@ -657,6 +696,29 @@ fn drift_rules() -> Vec<Scenario> {
             Rule::TraceDrift,
             Silent,
             vec![tf("a", &stamped(&good)), doc("DOC.md", doc_body)],
+        )
+        .drift(),
+        // The same rule over a structured document, which says `node` rather
+        // than `section` (`A1-191`). Its own scenario because a rule with two
+        // wordings and one scenario leaves the less-travelled one unpinned,
+        // which is what `A1-088`'s audit found.
+        scen(
+            "trace-drift-node-fires",
+            Rule::TraceDrift,
+            Fires,
+            vec![
+                tf(
+                    "a",
+                    "id: A-1\ntitle: A-1\nphase: 0\nstatus: done\n\
+                     evidence:\n  - kind: commit\n    ref: abc1234\n\
+                     traces:\n  - spec.yaml#/states/provisioning\n\
+                     trace_fingerprints:\n  spec.yaml#/states/provisioning: '0000000000000000'",
+                ),
+                doc(
+                    "spec.yaml",
+                    "states:\n  provisioning:\n    timeout_s: 300\n",
+                ),
+            ],
         )
         .drift(),
     ]
@@ -773,6 +835,271 @@ fn graph_edge_rules() -> Vec<Scenario> {
                     "id: A-1\ntitle: A-1\nphase: 0\nstatus: todo\nblocked_by: [A-2]",
                 ),
                 tf("b", "id: A-2\ntitle: A-2\nphase: 0\nstatus: todo"),
+            ],
+        ),
+    ]
+}
+
+/// `APLAN008` over a structured document (`A1-191`, ADR-0035).
+///
+/// Its own group for the reason the others have one: the function above is at
+/// the line limit, and these are a coherent set rather than an overflow.
+fn structured_trace_rules() -> Vec<Scenario> {
+    vec![
+        // The three structured-document branches (`A1-191`, ADR-0035). Each is a
+        // different sentence because each has a different remedy, which is the
+        // whole reason they are told apart: fix the document, fix the anchor's
+        // shape, or fix which node it names.
+        scen(
+            "structured-anchor-addresses-nothing-fires",
+            Rule::DanglingTrace,
+            Fires,
+            vec![
+                tf(
+                    "a",
+                    "id: A-1\ntitle: A-1\nphase: 0\nstatus: todo\ntraces:\n  - spec.yaml#/states/provisionng",
+                ),
+                doc("spec.yaml", "states:\n  provisioning:\n    timeout_s: 300\n"),
+            ],
+        )
+        .traces(),
+        scen(
+            "structured-anchor-is-not-an-address-fires",
+            Rule::DanglingTrace,
+            Fires,
+            vec![
+                tf(
+                    "a",
+                    "id: A-1\ntitle: A-1\nphase: 0\nstatus: todo\ntraces:\n  - spec.yaml#$.states[*]",
+                ),
+                doc("spec.yaml", "states:\n  provisioning:\n    timeout_s: 300\n"),
+            ],
+        )
+        .traces(),
+        scen(
+            "structured-document-is-unaddressable-fires",
+            Rule::DanglingTrace,
+            Fires,
+            vec![
+                tf(
+                    "a",
+                    "id: A-1\ntitle: A-1\nphase: 0\nstatus: todo\ntraces:\n  - spec.yaml#/states",
+                ),
+                doc("spec.yaml", "states: [unclosed\n"),
+            ],
+        )
+        .traces(),
+        // And the pair's silent half in both spellings, since a resolver that
+        // refused everything would pass the three above on its own.
+        scen(
+            "structured-anchor-silent",
+            Rule::DanglingTrace,
+            Silent,
+            vec![
+                tf(
+                    "a",
+                    "id: A-1\ntitle: A-1\nphase: 0\nstatus: todo\ntraces:\n  - spec.yaml#/states/provisioning\n  - api.json#$.paths['/users'].get",
+                ),
+                doc("spec.yaml", "states:\n  provisioning:\n    timeout_s: 300\n"),
+                doc("api.json", "{\"paths\": {\"/users\": {\"get\": {\"summary\": \"list\"}}}}"),
+            ],
+        )
+        .traces(),
+    ]
+}
+
+/// `APLAN051` and `APLAN052`: the five words that change what this tool does
+/// (`A1-212`, ADR-0014).
+///
+/// Its own group for the reason the one below gives, and because the pair belongs
+/// together: one is about a word spelled wrongly and the other about a word used
+/// where it cannot mean what the rule reads it as.
+fn reserved_tag_rules() -> Vec<Scenario> {
+    vec![
+        // APLAN051, a tag one edit from a word that changes what this tool does
+        // (`A1-212`). `milestne` does not misname a cut -- it dissolves one, and
+        // `check` then advises an estimate on what it no longer knows is a
+        // checkpoint.
+        scen(
+            "reserved-tag-near-miss-fires",
+            Rule::ReservedTagNearMiss,
+            Fires,
+            vec![
+                tf(
+                    "a",
+                    "id: M-1\ntitle: M-1\nphase: 0\nstatus: todo\n\
+                 tags:\n  - milestne\nblocked_by:\n  - W-1",
+                ),
+                tf(
+                    "b",
+                    "id: W-1\ntitle: W-1\nphase: 0\nstatus: todo\neffort_days: 1",
+                ),
+            ],
+        ),
+        // The shape it must not touch: the word spelled correctly, and an
+        // ordinary tag that is nowhere near one of the five.
+        scen(
+            "reserved-tag-near-miss-silent",
+            Rule::ReservedTagNearMiss,
+            Silent,
+            vec![
+                tf(
+                    "a",
+                    "id: M-1\ntitle: M-1\nphase: 0\nstatus: todo\n\
+                 tags:\n  - milestone\n  - backend\nblocked_by:\n  - W-1",
+                ),
+                tf(
+                    "b",
+                    "id: W-1\ntitle: W-1\nphase: 0\nstatus: todo\neffort_days: 1",
+                ),
+            ],
+        ),
+        // APLAN052, `cross-cutting` on a task that is in a cut (`A1-212`). The
+        // tag cannot mean "belongs to no cut" here, and it switches `APLAN022`
+        // off for a task that satisfies it anyway.
+        scen(
+            "cross-cutting-in-a-cut-fires",
+            Rule::CrossCuttingInACut,
+            Fires,
+            vec![
+                tf(
+                    "a",
+                    "id: M-1\ntitle: M-1\nphase: 0\nstatus: todo\n\
+                 tags:\n  - milestone\nblocked_by:\n  - W-1",
+                ),
+                tf(
+                    "b",
+                    "id: W-1\ntitle: W-1\nphase: 0\nstatus: todo\neffort_days: 1\n\
+                 tags:\n  - cross-cutting",
+                ),
+            ],
+        ),
+        // The shape it exists to allow, and the asymmetry `A1-212` turned on: on
+        // a task in no cut the same tag is what `APLAN022` reads it as, and
+        // "belongs to no cut" and "concerns several components" are
+        // indistinguishable by looking. Silent.
+        scen(
+            "cross-cutting-in-a-cut-silent",
+            Rule::CrossCuttingInACut,
+            Silent,
+            vec![tf(
+                "a",
+                "id: W-1\ntitle: W-1\nphase: 0\nstatus: todo\neffort_days: 1\n\
+                 tags:\n  - cross-cutting",
+            )],
+        ),
+    ]
+}
+
+/// `APLAN046`: a ratification constrains counting done, not starting (`A1-306`,
+/// ADR-0036).
+///
+/// Its own group so the function above stays under the line limit, which is the
+/// reason every other group here exists.
+fn ratification_rules() -> Vec<Scenario> {
+    vec![
+        // APLAN046, a ratification constrains counting done (`A1-306`, ADR-0036).
+        scen(
+            "unratified-fires",
+            Rule::Unratified,
+            Fires,
+            vec![
+                tf(
+                    "a",
+                    "id: A-1\ntitle: A-1\nphase: 0\nstatus: done\n\
+                     evidence:\n  - kind: commit\n    ref: abc1234\n\
+                     ratified_by:\n  - A-2",
+                ),
+                tf("b", "id: A-2\ntitle: A-2\nphase: 0\nstatus: todo"),
+            ],
+        ),
+        // The near miss that is the whole point: the ratifier is unfinished and
+        // the work is *not* blocked by it, so nothing should report the task as
+        // unstartable. Only its `done` claim is refused.
+        scen(
+            "unratified-silent",
+            Rule::Unratified,
+            Silent,
+            vec![
+                tf(
+                    "a",
+                    "id: A-1\ntitle: A-1\nphase: 0\nstatus: todo\n\
+                     ratified_by:\n  - A-2",
+                ),
+                tf("b", "id: A-2\ntitle: A-2\nphase: 0\nstatus: todo"),
+            ],
+        ),
+        // APLAN047, a `contains` that closes a loop (`A1-333`, ADR-0042). Two
+        // checkpoints each claiming the other's work: the rollup has no answer,
+        // because whichever is walked first swallows the other.
+        scen(
+            "contains-unusable-fires",
+            Rule::ContainsUnusable,
+            Fires,
+            vec![
+                tf(
+                    "a",
+                    "id: M-1\ntitle: M-1\nphase: 0\nstatus: todo\n\
+                     tags:\n  - milestone\ncontains:\n  - M-2\nblocked_by:\n  - M-2",
+                ),
+                tf(
+                    "b",
+                    "id: M-2\ntitle: M-2\nphase: 0\nstatus: todo\n\
+                     tags:\n  - milestone\ncontains:\n  - M-1\nblocked_by:\n  - W-1",
+                ),
+                tf(
+                    "c",
+                    "id: W-1\ntitle: W-1\nphase: 0\nstatus: todo\neffort_days: 1",
+                ),
+            ],
+        ),
+        // APLAN050, a recorded `version` on something that is not a release
+        // (`A1-339`, ADR-0038). A cut is a planning bucket rather than a
+        // delivery, and a version on one reads as a claim that it shipped.
+        scen(
+            "version-record-unusable-fires",
+            Rule::VersionRecordUnusable,
+            Fires,
+            vec![tf(
+                "a",
+                "id: M-1\ntitle: M-1\nphase: 0\nstatus: todo\n\
+                 tags:\n  - milestone\nversion: 1.2.3",
+            )],
+        ),
+        // The shape it exists to allow: the same field on the node that really
+        // does ship, carrying a version this tool can read back.
+        scen(
+            "version-record-unusable-silent",
+            Rule::VersionRecordUnusable,
+            Silent,
+            vec![tf(
+                "a",
+                "id: M-1\ntitle: M-1\nphase: 0\nstatus: todo\n\
+                 tags:\n  - milestone\n  - release\nversion: 1.2.3",
+            )],
+        ),
+        // The shape this rule must not touch: a checkpoint containing a real
+        // checkpoint, which is the whole point of ADR-0042 and the case a
+        // stricter rule would have refused.
+        scen(
+            "contains-unusable-silent",
+            Rule::ContainsUnusable,
+            Silent,
+            vec![
+                tf(
+                    "a",
+                    "id: M-1\ntitle: M-1\nphase: 0\nstatus: todo\n\
+                     tags:\n  - milestone\ncontains:\n  - M-2\nblocked_by:\n  - M-2",
+                ),
+                tf(
+                    "b",
+                    "id: M-2\ntitle: M-2\nphase: 0\nstatus: todo\n\
+                     tags:\n  - milestone\nblocked_by:\n  - W-1",
+                ),
+                tf(
+                    "c",
+                    "id: W-1\ntitle: W-1\nphase: 0\nstatus: todo\neffort_days: 1",
+                ),
             ],
         ),
     ]
@@ -1602,6 +1929,9 @@ struct VerifyCase {
     /// The configured `url` checker, for `APLAN016`. `None` leaves `url`
     /// evidence at L0, which is every other case.
     url_check: Option<aplan_config::UrlCheck>,
+    /// The `version` policy, for `APLAN048`. `None` leaves the version
+    /// unjudged, which is every other case and the shipped default.
+    version: Option<aplan_config::VersionPolicy>,
 }
 
 /// A git-backed case (commit/file rules); no runner, no execution.
@@ -1619,6 +1949,65 @@ fn git_case(
         runner: None,
         execute: false,
         url_check: None,
+        version: None,
+    }
+}
+
+/// An `APLAN049` case: the same repository, plus a declared compatibility
+/// checker whose exit status is the whole answer (`A1-314`).
+///
+/// `true` and `false` are the checker, because what is under test is the rule
+/// and not an API differ. That is the same substitution `APLAN016` makes for the
+/// network.
+fn compat_case(name: &'static str, expect: Expect, declares: &str, compatible: bool) -> VerifyCase {
+    let mut case = version_case(name, expect, v048_silent, declares);
+    case.rule = Rule::ImpactContradicted;
+    if let Some(v) = case.version.as_mut() {
+        v.check = Some(aplan_config::DeclaredCommand {
+            command: vec![if compatible { "true" } else { "false" }.to_string()],
+            timeout_seconds: None,
+            max_memory: None,
+            max_processes: None,
+            wrap: None,
+        });
+    }
+    case
+}
+
+/// An `APLAN048` case: a git repository with a release tag, and a declared
+/// command that prints the version the tree claims to ship (`A1-313`).
+///
+/// The command is `echo`, spawned with no shell exactly as an adopter's would
+/// be. What it prints is the whole variable: the plan and the tag are the same
+/// in both halves of the pair, and only the number the repository declares, and
+/// the impact one task claims, move.
+fn version_case(
+    name: &'static str,
+    expect: Expect,
+    build: fn(&Repository) -> Vec<Task>,
+    declares: &str,
+) -> VerifyCase {
+    VerifyCase {
+        name,
+        rule: Rule::VersionBehind,
+        expect,
+        build,
+        runner: None,
+        execute: false,
+        url_check: None,
+        version: Some(aplan_config::VersionPolicy {
+            require_impact: None,
+            levels: None,
+            release_tag: None,
+            check: None,
+            current: Some(aplan_config::DeclaredCommand {
+                command: vec!["echo".to_string(), declares.to_string()],
+                timeout_seconds: None,
+                max_memory: None,
+                max_processes: None,
+                wrap: None,
+            }),
+        }),
     }
 }
 
@@ -1639,6 +2028,7 @@ fn test_case(
         runner: Some(runner),
         execute,
         url_check: None,
+        version: None,
     }
 }
 
@@ -1669,6 +2059,40 @@ fn verify_corpus() -> Vec<VerifyCase> {
             Rule::CommitIrrelevant,
             Silent,
             v012_silent,
+        ),
+        // APLAN048, the released version against what closed since the last
+        // release tag (`A1-313`, ADR-0038). A `breaking` task closed on top of
+        // `v0.3.0`, and the tree declares `0.3.1`: a patch release carrying an
+        // incompatible change, which is the failure this whole feature exists
+        // to prevent and the last moment it is still preventable.
+        version_case("version-behind-fires", Fires, v048_fires, "0.3.1"),
+        // The near miss, and the reason the pair is worth having: the same tree,
+        // the same tag, the same bump, and the task claims `fix`. `0.3.1` is
+        // then exactly what the plan requires, and a rule that merely noticed
+        // "a version moved" would report it.
+        version_case("version-behind-silent", Silent, v048_silent, "0.3.1"),
+        // The other message this rule has, and the reason it is a branch rather
+        // than a second rule: a version *older* than the tag it descends from is
+        // the same subject and a completely different remedy. Without a scenario
+        // the catalogue would record one of the two wordings and an adopter
+        // would meet the other in their CI log (`APLAN021`'s lesson).
+        version_case("version-behind-older-fires", Fires, v048_silent, "0.2.0"),
+        // APLAN049, the artifact against the claim (`A1-314`). The checker says
+        // the artifact is not compatible with its last release, and the window
+        // claims a `fix`: a break shipping in a compatible release, which is the
+        // gap between a field being filled in and the field being true.
+        compat_case("impact-contradicted-fires", Fires, "0.3.1", false),
+        // The near miss the pair exists for: the same plan, the same claim, and
+        // a checker that found no break. A rule that merely noticed "a checker
+        // was configured" would report it.
+        compat_case("impact-contradicted-silent", Silent, "0.3.1", true),
+        // APLAN045, a live task's traced section moved while it waited (`A1-301`).
+        git_case("stale-premise-fires", Rule::StalePremise, Fires, v045_fires),
+        git_case(
+            "stale-premise-silent",
+            Rule::StalePremise,
+            Silent,
+            v045_silent,
         ),
         // APLAN024, the citation is about this task rather than mostly other work.
         git_case(
@@ -1840,6 +2264,7 @@ fn verify_corpus() -> Vec<VerifyCase> {
             runner: None,
             execute: false,
             url_check: Some(url_check(false)),
+            version: None,
         },
         VerifyCase {
             name: "url-unreachable-silent",
@@ -1849,6 +2274,7 @@ fn verify_corpus() -> Vec<VerifyCase> {
             runner: None,
             execute: false,
             url_check: Some(url_check(true)),
+            version: None,
         },
         // No checker configured is the default, and must reach no verdict at all:
         // `check` is hermetic by contract and a default run touches no network.
@@ -1860,6 +2286,7 @@ fn verify_corpus() -> Vec<VerifyCase> {
             runner: None,
             execute: false,
             url_check: None,
+            version: None,
         },
         // The https-only branch: a citation naming another scheme is reported as
         // *not checked*, and the checker never sees it (`A1-041`, audit).
@@ -1871,6 +2298,7 @@ fn verify_corpus() -> Vec<VerifyCase> {
             runner: None,
             execute: false,
             url_check: Some(url_check(true)),
+            version: None,
         },
         // APLAN019, each `paths` glob matches a tracked file.
         git_case(
@@ -1907,6 +2335,38 @@ fn verify_corpus() -> Vec<VerifyCase> {
             Rule::PathsUnmatched,
             Fires,
             v019_bare_directory,
+        ),
+        // APLAN053, a stored `in_progress` the repository can contradict
+        // (`A1-359`). Beside `APLAN019` because both read the tracked set.
+        git_case(
+            "unstarted-in-progress-fires",
+            Rule::UnstartedInProgress,
+            Fires,
+            v053_fires,
+        ),
+        git_case(
+            "unstarted-in-progress-silent",
+            Rule::UnstartedInProgress,
+            Silent,
+            v053_silent,
+        ),
+        git_case(
+            "unstarted-in-progress-bare-directory-fires",
+            Rule::UnstartedInProgress,
+            Fires,
+            v053_fires_on_a_bare_directory,
+        ),
+        git_case(
+            "unstarted-in-progress-silent-no-paths",
+            Rule::UnstartedInProgress,
+            Silent,
+            v053_silent_no_paths,
+        ),
+        git_case(
+            "unstarted-in-progress-silent-not-started",
+            Rule::UnstartedInProgress,
+            Silent,
+            v053_silent_not_started,
         ),
         // APLAN013, the runner lists a test with that name.
         test_case(
@@ -2063,6 +2523,7 @@ fn filter_runner(lists: &str, declares_selective: Option<bool>) -> TestRunner {
                   [ $hit = 1 ] && echo ''Tests  1 passed (2)'' || echo ''Tests  2 skipped (2)''"
         .replace("''", "\"");
     TestRunner {
+        output_lines: None,
         max_memory: None,
         max_processes: None,
         wrap: None,
@@ -2092,6 +2553,7 @@ fn filter_runner(lists: &str, declares_selective: Option<bool>) -> TestRunner {
 /// different fixes and used to be indistinguishable.
 fn silent_runner(expect_tests: Option<bool>) -> TestRunner {
     TestRunner {
+        output_lines: None,
         max_memory: None,
         max_processes: None,
         wrap: None,
@@ -2113,6 +2575,7 @@ fn silent_runner(expect_tests: Option<bool>) -> TestRunner {
 fn list_runner(name: &str, passes: bool) -> TestRunner {
     let run_program = if passes { "true" } else { "false" };
     TestRunner {
+        output_lines: None,
         max_memory: None,
         max_processes: None,
         wrap: None,
@@ -2237,6 +2700,52 @@ fn v019_fires(repo: &Repository) -> Vec<Task> {
 /// the tree a later cut will create has forward-looking globs by construction,
 /// and nothing is bound to them yet, so the rule's own stated consequence cannot
 /// occur (pre-public adoption evidence item 24).
+/// `APLAN053` fires: a task says work has started and the repository holds
+/// nothing matching the `paths` it claims (`A1-359`).
+fn v053_fires(repo: &Repository) -> Vec<Task> {
+    git_commit(repo, &[("src/a.rs", "x")], "init");
+    let mut t = done("A", Vec::new(), vec!["src/not-yet/**".to_string()]);
+    t.status = aplan_core::Status::InProgress;
+    vec![t]
+}
+/// `APLAN053` silent: the same claim, with the work present. Read from the
+/// index, so a file written and staged counts -- which is what keeps the rule
+/// off a task started a minute ago that has created what it owns.
+fn v053_silent(repo: &Repository) -> Vec<Task> {
+    git_commit(repo, &[("src/started.rs", "x")], "init");
+    let mut t = done("A", Vec::new(), vec!["src/started.rs".to_string()]);
+    t.status = aplan_core::Status::InProgress;
+    vec![t]
+}
+/// `APLAN053` fires with the remedy that fits: the glob names a tracked
+/// directory, so the work may well exist and the declaration is what matches
+/// nothing (`A1-359`, audit). Here so the *wording* is pinned in the catalogue,
+/// because it is the one an adopter acts on and `APLAN019`'s equivalent has
+/// been met by every pilot.
+fn v053_fires_on_a_bare_directory(repo: &Repository) -> Vec<Task> {
+    git_commit(repo, &[("src/a.rs", "x")], "init");
+    let mut t = done("A", Vec::new(), vec!["src".to_string()]);
+    t.status = aplan_core::Status::InProgress;
+    vec![t]
+}
+/// `APLAN053` silent: `in_progress` with no `paths` at all. There is then
+/// nothing to judge the claim by, and `APLAN023` already asks for them, so a
+/// finding here would be that rule said twice.
+fn v053_silent_no_paths(repo: &Repository) -> Vec<Task> {
+    git_commit(repo, &[("src/a.rs", "x")], "init");
+    let mut t = done("A", Vec::new(), Vec::new());
+    t.status = aplan_core::Status::InProgress;
+    vec![t]
+}
+/// `APLAN053` silent: a `todo` task whose globs match nothing. The rule is
+/// about a claim that work has *started*; a plan that names the tree a later
+/// cut will create is what a plan is (`APLAN019`'s own scope, `A1-138`).
+fn v053_silent_not_started(repo: &Repository) -> Vec<Task> {
+    git_commit(repo, &[("src/a.rs", "x")], "init");
+    let mut t = done("A", Vec::new(), vec!["src/not-yet/**".to_string()]);
+    t.status = aplan_core::Status::Todo;
+    vec![t]
+}
 fn v019_silent(repo: &Repository) -> Vec<Task> {
     git_commit(repo, &[("src/a.rs", "x")], "init");
     let mut t = done("A", Vec::new(), vec!["src/gone/**".to_string()]);
@@ -2369,6 +2878,7 @@ fn v031_catch_all(repo: &Repository) -> Vec<Task> {
 /// about which code it covers.
 fn rooted_runner(name: &str, dir: &str) -> TestRunner {
     TestRunner {
+        output_lines: None,
         max_memory: None,
         max_processes: None,
         wrap: None,
@@ -2396,6 +2906,7 @@ fn runner_name(covers: &str) -> String {
 
 fn covering_runner(name: &str, covers: &str) -> TestRunner {
     TestRunner {
+        output_lines: None,
         max_memory: None,
         max_processes: None,
         wrap: None,
@@ -2420,6 +2931,7 @@ fn covering_runner(name: &str, covers: &str) -> TestRunner {
 /// name the subset it matched rather than the runner's own claim.
 fn subset_runner(name: &str, covers: &str) -> TestRunner {
     TestRunner {
+        output_lines: None,
         max_memory: None,
         max_processes: None,
         wrap: None,
@@ -2443,6 +2955,7 @@ fn subset_runner(name: &str, covers: &str) -> TestRunner {
 /// covers only its own component.
 fn invariant_runner(name: &str, covers: &str) -> TestRunner {
     TestRunner {
+        output_lines: None,
         max_memory: None,
         max_processes: None,
         wrap: None,
@@ -2580,6 +3093,8 @@ fn done(id: &str, evidence: Vec<Evidence>, paths: Vec<String>) -> Task {
         effort_days: None,
         blocked_by: Vec::new(),
         prefer_after: Vec::new(),
+        ratified_by: Vec::new(),
+        contains: Vec::new(),
         evidence,
         paths,
         traces: Vec::new(),
@@ -2588,7 +3103,118 @@ fn done(id: &str, evidence: Vec<Evidence>, paths: Vec<String>) -> Task {
         revisit_at: None,
         version_impact: None,
         version_impact_reason: None,
+        version: None,
     }
+}
+
+/// A live task tracing one anchored section, for `APLAN045` (`A1-301`).
+///
+/// The task's own file is committed by the fixture, because the baseline this
+/// rule reads is the commit that last touched it.
+fn live_tracing(id: &str, trace: &str) -> Task {
+    let mut t = done(id, Vec::new(), Vec::new());
+    t.status = Status::Todo;
+    t.traces = vec![trace.to_string()];
+    t
+}
+
+/// A repository that released `v0.3.0`, then closed one task (`A1-313`).
+///
+/// The task file is committed *before* the tag with `status: todo` and after it
+/// with `status: done`, because that is what "closed since the last release"
+/// means and what the window reads: a plan held only in memory would make every
+/// task look newly closed, which is the shape that would have made this pair
+/// pass without measuring anything.
+fn v048_repo(repo: &Repository, impact: &str) -> Vec<Task> {
+    git_commit(
+        repo,
+        &[
+            ("src/a.rs", "x"),
+            (
+                "plan/tasks/x.md",
+                "---\nid: A-1\ntitle: A-1\nphase: 0\nstatus: todo\n---\n",
+            ),
+        ],
+        "the plan, before the release",
+    );
+    let sig = git2::Signature::now("Test", "test@example.com").unwrap();
+    let head = repo.head().unwrap().peel_to_commit().unwrap();
+    repo.tag("v0.3.0", head.as_object(), &sig, "release", false)
+        .expect("tag");
+    let sha = git_commit(
+        repo,
+        &[
+            ("src/a.rs", "y"),
+            (
+                "plan/tasks/x.md",
+                "---\nid: A-1\ntitle: A-1\nphase: 0\nstatus: done\n---\n",
+            ),
+        ],
+        "the work",
+    );
+    let mut task = done(
+        "A-1",
+        vec![Evidence {
+            kind: EvidenceKind::Commit,
+            reference: sha,
+            captured: None,
+        }],
+        vec!["src/**".to_string()],
+    );
+    task.version_impact = Some(match impact {
+        "breaking" => aplan_core::task::VersionImpact::Breaking,
+        _ => aplan_core::task::VersionImpact::Fix,
+    });
+    vec![task]
+}
+
+fn v048_fires(repo: &Repository) -> Vec<Task> {
+    v048_repo(repo, "breaking")
+}
+
+fn v048_silent(repo: &Repository) -> Vec<Task> {
+    v048_repo(repo, "fix")
+}
+
+/// The section moved after the task was last touched, which is the finding.
+fn v045_fires(repo: &Repository) -> Vec<Task> {
+    git_commit(
+        repo,
+        &[
+            ("DOC.md", "# Intro\n\nthe ground as it was\n"),
+            ("plan/tasks/x.md", "the task, as committed"),
+        ],
+        "the task, written against the document",
+    );
+    git_commit(
+        repo,
+        &[("DOC.md", "# Intro\n\nthis has since been built\n")],
+        "the document moved",
+    );
+    vec![live_tracing("A", "DOC.md#intro")]
+}
+
+/// The document moved and the traced *section* did not, which is the near miss
+/// that keeps this from being the 91%-of-everything rule a file-level
+/// comparison would have been (`A1-301`, measured).
+fn v045_silent(repo: &Repository) -> Vec<Task> {
+    git_commit(
+        repo,
+        &[
+            ("DOC.md", "# Intro\n\nthe ground\n\n# Other\n\nelsewhere\n"),
+            ("plan/tasks/x.md", "the task, as committed"),
+        ],
+        "the task, written against the document",
+    );
+    git_commit(
+        repo,
+        &[(
+            "DOC.md",
+            "# Intro\n\nthe ground\n\n# Other\n\nelsewhere, rewritten\n",
+        )],
+        "a different section moved",
+    );
+    vec![live_tracing("A", "DOC.md#intro")]
 }
 
 fn commit_ev(sha: &str) -> Evidence {
@@ -2660,6 +3286,8 @@ fn verify_run_with_plan(
         unloadable: std::collections::BTreeMap::new(),
     };
     let opts = aplan_evidence::VerifyOptions {
+        version: case.version.clone(),
+        traces_root: None,
         config_file: None,
         execute: case.execute,
         test_runner: case.runner.clone().map(TestRunners::One),
@@ -3106,7 +3734,13 @@ fn backticked(text: &str) -> Vec<String> {
         let after = &rest[open + 1..];
         match after.find('`') {
             Some(close) => {
-                out.push(after[..close].to_string());
+                out.push(
+                    after[..close]
+                        .lines()
+                        .map(str::trim)
+                        .collect::<Vec<_>>()
+                        .join(" "),
+                );
                 rest = &after[close + 1..];
             }
             None => break,
@@ -3214,6 +3848,12 @@ fn backticks_are_read_in_pairs_and_an_unclosed_one_ends_the_scan() {
     assert_eq!(backticked("no ticks here"), Vec::<String>::new());
     assert_eq!(backticked("an `unclosed span"), Vec::<String>::new());
     assert_eq!(backticked("``"), vec![""]);
+    assert_eq!(backticked("`a  b`"), vec!["a  b"]);
+    assert_eq!(
+        backticked("run `aplan check\r\n    --format json` now"),
+        vec!["aplan check --format json"],
+        "terminal wrapping is presentation, not part of the invocation"
+    );
 }
 
 /// Every rule that names a field places its finding on that field (`A1-202`).

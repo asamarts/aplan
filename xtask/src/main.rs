@@ -35,10 +35,18 @@ type SchemaFn = fn() -> serde_json::Value;
 const SCHEMAS: &[(&str, SchemaFn)] = &[
     ("schemas/v1/task.json", aplan_core::load::derived_schema),
     ("schemas/v1/config.json", aplan_config::derived_schema),
+    // The per-user file is a second schema because it is a second *type*, not a
+    // subset of the first: it holds nothing any rule reads, which is what keeps
+    // it from weakening a repository's policy (`A1-364`).
+    (
+        "schemas/v1/user-config.json",
+        aplan_config::user::derived_schema,
+    ),
     ("schemas/v1/tasks.json", aplan_core::export::derived_schema),
 ];
 
 mod cli_surface;
+mod msrv;
 
 fn main() -> Result<()> {
     let mut args = std::env::args().skip(1);
@@ -54,12 +62,13 @@ fn main() -> Result<()> {
         Some("check-docs") => check_docs(),
         Some("cli-surface") => cli_surface_gate(check),
         Some("coverage") => coverage(check, allow_regression),
+        Some("msrv") => msrv::gate(&workspace_root()?),
         Some(other) => bail!(
-            "unknown xtask `{other}` (expected: gen-schema [--check], gen-roadmap [--check], lint, check-docs, coverage [--check | --allow-regression])"
+            "unknown xtask `{other}` (expected: gen-schema [--check], gen-roadmap [--check], lint, check-docs, msrv, coverage [--check | --allow-regression])"
         ),
         None => {
             eprintln!(
-                "usage: cargo xtask <gen-schema [--check] | gen-roadmap [--check] | lint | check-docs | coverage [--check | --allow-regression]>"
+                "usage: cargo xtask <gen-schema [--check] | gen-roadmap [--check] | lint | check-docs | msrv | coverage [--check | --allow-regression]>"
             );
             Ok(())
         }
@@ -139,7 +148,11 @@ fn coverage(check: bool, allow_regression: bool) -> Result<()> {
     let committed = read_floors(&root)?;
     let problems = compare_floors(&measured_pct, &committed);
     if !problems.is_empty() {
-        bail!("coverage floors not met:\n  {}", problems.join("\n  "));
+        bail!(
+            "coverage floors not met:\n  {}\n{}",
+            problems.join("\n  "),
+            checked_by()
+        );
     }
     println!(
         "coverage: {} crates at or just above their floors",
@@ -247,6 +260,28 @@ fn measure_coverage(root: &Path) -> Result<std::collections::BTreeMap<String, (u
         .and_then(serde_json::Value::as_array)
         .context("cargo llvm-cov produced no per-file data")?;
 
+    total_per_crate(files, root)
+}
+
+/// How many lines a measured file actually has, or `None` if it cannot be read.
+///
+/// `None` rather than an error: a file llvm-cov names and this process cannot
+/// open is not a coverage defect, and refusing on it would make the gate fail
+/// for a reason that has nothing to do with coverage.
+fn physical_lines(filename: &str) -> Option<u64> {
+    let text = std::fs::read_to_string(filename).ok()?;
+    u64::try_from(text.lines().count()).ok()
+}
+
+/// Sum llvm-cov's per-file line counts into per-crate totals.
+///
+/// Split from the measurement above so the summing is testable without an
+/// instrumented build, which is the same division `coverage` already makes
+/// between reading numbers and deciding about them.
+fn total_per_crate(
+    files: &[serde_json::Value],
+    root: &Path,
+) -> Result<std::collections::BTreeMap<String, (u64, u64)>> {
     let mut per_crate: std::collections::BTreeMap<String, (u64, u64)> =
         std::collections::BTreeMap::new();
     for f in files {
@@ -265,6 +300,34 @@ fn measure_coverage(root: &Path) -> Result<std::collections::BTreeMap<String, (u
             .and_then(|l| l.get("covered"))
             .and_then(serde_json::Value::as_u64);
         if let (Some(count), Some(covered)) = (count, covered) {
+            // **A file cannot have more coverable lines than lines** (`A1-352`,
+            // audit). `cargo llvm-cov` keeps its objects in `llvm-cov-target`,
+            // and where that directory is shared across commits -- this
+            // repository's CI mounts one `CARGO_TARGET_DIR` for every job --
+            // builds of the same crate from several commits sit there together.
+            // Each carries its own coverage mapping for the same source file,
+            // and llvm-cov merges them into one entry per filename and adds the
+            // counts.
+            //
+            // It is a *wrong* number rather than a missing one, which is the
+            // failure this repository refuses everywhere else, and it is
+            // invisible in the per-crate totals: `aplan-evidence` read 64.5%
+            // against 98.1% with every test passing and the covered count
+            // unchanged to four lines. What gave it away is the impossibility
+            // this checks -- `src/lib.rs` reporting 6,761 coverable lines for a
+            // 5,594-line file -- so that is what is checked, rather than the
+            // duplicate filename llvm-cov does not produce.
+            if let Some(lines) = physical_lines(name)
+                && count > lines
+            {
+                bail!(
+                    "`cargo llvm-cov` reports {count} coverable lines in `{name}`, which \
+                     has {lines}. That happens when its target directory holds builds of \
+                     the same crate from more than one commit: the mappings are merged \
+                     and the counts added, so every percentage measured here is wrong \
+                     rather than missing. Remove `llvm-cov-target` and measure again"
+                );
+            }
             let e = per_crate.entry(krate).or_default();
             e.0 += covered;
             e.1 += count;
@@ -447,9 +510,14 @@ fn gen_roadmap(check: bool) -> Result<()> {
     // generator that quietly produces a different document is the failure this
     // repository gates everything else against.
     let per_week = aplan_config::load_config(&root)?.effort_days_per_week;
+    let wb = aplan::written_by();
     let rendered = aplan_output::render_roadmap_markdown(
         &graph.roadmap().with_throughput(per_week),
         Some("cargo xtask gen-roadmap"),
+        Some(&aplan_output::WrittenBy {
+            version: &wb.0,
+            surface: &wb.1,
+        }),
     );
     write_or_check(&root, "ROADMAP.status.md", &rendered, check, "gen-roadmap")
 }
@@ -457,15 +525,41 @@ fn gen_roadmap(check: bool) -> Result<()> {
 /// Write a generated file, or (with `check`) fail if the committed copy differs.
 /// The one shape every generated-and-gated artifact shares (ADR-0009): a whole-file
 /// compare, regenerated with a documented command.
+/// Which build is doing the checking, as a sentence a gate can append
+/// (`A1-325`, ADR-0037).
+///
+/// Every gate that compares a committed artifact against a freshly computed one
+/// is green by construction wherever both sides come from the same build, which
+/// is always on the machine where it is run. The number it reports is only
+/// comparable to the committed one if the same `aplan` produced both, so the
+/// gate that reports a difference says which `aplan` it is. Shared so the three
+/// gates cannot drift into three phrasings of one fact.
+fn checked_by() -> String {
+    let (version, surface) = aplan::written_by();
+    format!(
+        "This is aplan {version}, surface {surface}. If the committed copy was written by a \
+         different build, that is the likely cause rather than an edit: check what wrote it \
+         before rewriting it."
+    )
+}
+
 fn write_or_check(root: &Path, rel: &str, rendered: &str, check: bool, regen: &str) -> Result<()> {
     let path = root.join(rel);
     if check {
         let on_disk = std::fs::read_to_string(&path)
             .with_context(|| format!("reading {}", path.display()))?;
         if on_disk != rendered {
+            // Which build is complaining. A generated artifact regenerated by a
+            // *different* build produces a diff of everything whose shape
+            // changed, with nothing saying why, and the comparison is green by
+            // construction wherever both sides are the same build -- which is
+            // always, on the machine where it is run. Naming the build here
+            // costs one line and turns "thirty lines changed" into a question
+            // somebody can answer (`A1-325`, pre-public adoption evidence item 13).
             bail!(
                 "{rel} is stale: the committed copy and its generated form disagree.\n\
-                 Run `cargo xtask {regen}` and commit the result."
+                 Run `cargo xtask {regen}` and commit the result.\n{}",
+                checked_by()
             );
         }
         println!("{rel} is up to date");
@@ -949,10 +1043,10 @@ fn paragraphs(text: &str) -> Vec<(usize, String)> {
     for (index, line) in aplan_core::anchor::unfenced_lines(text) {
         // A blank line ends a paragraph, and so does a fence: `unfenced_lines`
         // skips what is inside one, so a gap in the indices is a gap in prose.
-        if line.trim().is_empty() || previous.is_some_and(|p| index != p + 1) {
-            if let Some((start, lines)) = current.take() {
-                out.push((start, lines.join("\n")));
-            }
+        if (line.trim().is_empty() || previous.is_some_and(|p| index != p + 1))
+            && let Some((start, lines)) = current.take()
+        {
+            out.push((start, lines.join("\n")));
         }
         if !line.trim().is_empty() {
             match &mut current {
@@ -1244,14 +1338,16 @@ fn cli_surface_verdict(now: usize, floor: usize) -> Result<String> {
     if now > floor {
         bail!(
             "the unexercised surface grew from {floor} to {now}. Exercise what you added, or \
-             hold it in {CLI_SURFACE} with a reason."
+             hold it in {CLI_SURFACE} with a reason.\n{}",
+            checked_by()
         );
     }
     if now < floor {
         bail!(
             "the unexercised surface shrank from {floor} to {now}, which is good news the \
              ratchet has not been told about. Run `cargo xtask cli-surface` and commit \
-             {CLI_SURFACE}."
+             {CLI_SURFACE}.\n{}",
+            checked_by()
         );
     }
     Ok(format!("cli-surface: at its floor of {now}"))
@@ -2027,6 +2123,65 @@ mod tests {
             None,
             "an ignored file is no surprise to CI, and a file that is not a task is not \
              this note's business -- so there is nothing to say at all"
+        );
+    }
+
+    /// A file measured twice is refused rather than summed (`A1-352`, audit).
+    ///
+    /// The CI runner mounts one `CARGO_TARGET_DIR` for every job, so
+    /// `llvm-cov-target` carries profiles from earlier commits. A file whose
+    /// content changed then has two line mappings and summing them halves the
+    /// percentage -- `aplan-evidence` read 64.5% against 98.1% on the commit
+    /// before, with the covered count unchanged to four lines and every test
+    /// passing. A wrong number is worse than a missing one, so this says so.
+    #[test]
+    fn more_coverable_lines_than_lines_is_refused_rather_than_measured() {
+        // A real file, because the check compares against what it has. This
+        // source file is the one at hand.
+        let here = concat!(env!("CARGO_MANIFEST_DIR"), "/src/main.rs");
+        let entry = |covered: u64, count: u64| {
+            serde_json::json!({
+                "filename": here,
+                "summary": {"lines": {"covered": covered, "count": count}},
+            })
+        };
+
+        // The workspace root, so the path relativises to `xtask/src/main.rs`.
+        let root = Path::new(env!("CARGO_MANIFEST_DIR"))
+            .parent()
+            .expect("xtask sits in the workspace");
+
+        let plausible = [entry(9, 10)];
+        assert_eq!(
+            total_per_crate(&plausible, root).expect("a measurable file"),
+            [("xtask".to_string(), (9, 10))].into_iter().collect()
+        );
+
+        let impossible = [entry(10, 10_000_000)];
+        let err =
+            total_per_crate(&impossible, root).expect_err("more coverable lines than the file has");
+        let said = err.to_string();
+        assert!(said.contains("main.rs"), "it names the file: {said}");
+        assert!(said.contains("llvm-cov-target"), "and the remedy: {said}");
+    }
+
+    /// Files outside the workspace are skipped, not counted as a crate.
+    #[test]
+    fn coverage_counts_only_files_inside_the_workspace() {
+        let root = Path::new("/w");
+        let files = [
+            serde_json::json!({
+                "filename": "/home/x/.cargo/registry/src/serde/lib.rs",
+                "summary": {"lines": {"covered": 1, "count": 1000}},
+            }),
+            serde_json::json!({
+                "filename": "/w/xtask/src/main.rs",
+                "summary": {"lines": {"covered": 5, "count": 10}},
+            }),
+        ];
+        assert_eq!(
+            total_per_crate(&files, root).expect("the workspace file counts"),
+            [("xtask".to_string(), (5, 10))].into_iter().collect()
         );
     }
 

@@ -483,6 +483,8 @@ mod tests {
             effort_days: Some(1.0),
             blocked_by: Vec::new(),
             prefer_after: Vec::new(),
+            ratified_by: Vec::new(),
+            contains: Vec::new(),
             evidence: Vec::new(),
             paths: Vec::new(),
             traces: Vec::new(),
@@ -491,6 +493,7 @@ mod tests {
             revisit_at: None,
             version_impact: None,
             version_impact_reason: None,
+            version: None,
         }
     }
 

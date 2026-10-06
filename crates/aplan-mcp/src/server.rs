@@ -16,8 +16,8 @@ use std::path::PathBuf;
 use std::sync::Arc;
 
 use rmcp::model::{
-    CallToolRequestParams, CallToolResult, ContentBlock, Implementation, InitializeResult,
-    ListToolsResult, PaginatedRequestParams, ServerCapabilities, Tool,
+    CallToolRequestParams, CallToolResponse, CallToolResult, ContentBlock, Implementation,
+    InitializeResult, ListToolsResult, PaginatedRequestParams, ServerCapabilities, Tool,
 };
 use rmcp::service::RequestContext;
 use rmcp::{ErrorData as McpError, RoleServer, ServerHandler};
@@ -136,6 +136,34 @@ impl AplanServer {
                 let id = str_arg("id").ok_or("`id` is required")?;
                 tools::show(&root, &id, &self.policy).map_err(|e| e.to_string())
             }
+            // `A1-359`'s four. They land on this surface in the same change as
+            // the commands, because the actor the status pair is justified by
+            // reaches aplan only through here: an agent with tools and no
+            // editor cannot hand-edit a status, which is what `A1-077`'s
+            // refusal assumed it could.
+            "aplan_claim" => {
+                let id = str_arg("id").ok_or("`id` is required")?;
+                tools::claim(
+                    &root,
+                    &id,
+                    str_arg("as").as_deref(),
+                    str_arg("from").as_deref(),
+                    &self.policy,
+                )
+                .map_err(|e| e.to_string())
+            }
+            "aplan_release" => {
+                let id = str_arg("id").ok_or("`id` is required")?;
+                tools::release(&root, &id, &self.policy).map_err(|e| e.to_string())
+            }
+            "aplan_start" => {
+                let id = str_arg("id").ok_or("`id` is required")?;
+                tools::working(&root, &id, true, &self.policy).map_err(|e| e.to_string())
+            }
+            "aplan_stop" => {
+                let id = str_arg("id").ok_or("`id` is required")?;
+                tools::working(&root, &id, false, &self.policy).map_err(|e| e.to_string())
+            }
             "aplan_dep" => {
                 let id = str_arg("id").ok_or("`id` is required")?;
                 let after = str_arg("after").ok_or("`after` is required")?;
@@ -166,7 +194,7 @@ impl AplanServer {
 
 /// The JSON Schema for a tool's arguments.
 ///
-/// Written out rather than derived, because the surface is eight tools and the
+/// Written out rather than derived, because the surface is nine tools and the
 /// schema *is* the contract an agent reads. `close` is the one that matters: its
 /// only inputs are a task id and evidence citations, and there is deliberately
 /// no field through which a caller could assert completion.
@@ -290,6 +318,51 @@ fn other_schema(name: &str, root: &serde_json::Value) -> serde_json::Value {
             "required": ["id", "evidence"],
             "additionalProperties": false,
         }),
+        // `A1-359`'s four. **Each needs its own entry**: the fallback below
+        // allows `root` alone with `additionalProperties: false`, so a tool
+        // that takes an `id` and is left to it advertises a schema that
+        // rejects its own required argument.
+        "aplan_claim" => serde_json::json!({
+            "type": "object",
+            "properties": {
+                "id": { "type": "string", "description": "The task to claim." },
+                "as": {
+                    "type": "string",
+                    "description": "The name to record. Otherwise `APLAN_OWNER`, then this \
+                                    repository's `git config user.name`, then the operating \
+                                    system's user. Never read from `.aplan.yml`.",
+                },
+                "from": {
+                    "type": "string",
+                    "description": "Who the task is being taken from. Required when somebody \
+                                    holds it, and checked rather than taken on trust.",
+                },
+                "root": root,
+            },
+            "required": ["id"],
+            "additionalProperties": false,
+        }),
+        "aplan_release" => serde_json::json!({
+            "type": "object",
+            "properties": {
+                "id": { "type": "string", "description": "The task to release." },
+                "root": root,
+            },
+            "required": ["id"],
+            "additionalProperties": false,
+        }),
+        "aplan_start" | "aplan_stop" => serde_json::json!({
+            "type": "object",
+            "properties": {
+                "id": {
+                    "type": "string",
+                    "description": "The task whose `in_progress` status is being set or cleared.",
+                },
+                "root": root,
+            },
+            "required": ["id"],
+            "additionalProperties": false,
+        }),
         // `ready`, `check` and `verify` take only the optional root.
         _ => serde_json::json!({
             "type": "object",
@@ -357,7 +430,13 @@ impl ServerHandler for AplanServer {
         &self,
         request: CallToolRequestParams,
         _context: RequestContext<RoleServer>,
-    ) -> impl std::future::Future<Output = Result<CallToolResult, McpError>> + Send {
+        // `rmcp` 3.x widened the reply to an enum, so a handler can also say
+        // "I need input first" or "I made you a task" (`A1-331`). This one
+        // never does either: every tool here answers now or refuses now, and
+        // `CallToolResponse::Complete` is what that is. Named rather than
+        // `.into()`d at each site so the choice is visible to whoever adds a
+        // tool that does want to ask a question back.
+    ) -> impl std::future::Future<Output = Result<CallToolResponse, McpError>> + Send {
         let args = request
             .arguments
             .map_or_else(|| serde_json::json!({}), serde_json::Value::Object);
@@ -367,10 +446,14 @@ impl ServerHandler for AplanServer {
         // it as a transport failure would leave an agent unable to tell "I may
         // not do that" from "the server broke".
         let out = match self.dispatch(&request.name, &args) {
-            Ok(value) => Ok(CallToolResult::success(vec![ContentBlock::text(
-                serde_json::to_string_pretty(&value).unwrap_or_else(|e| e.to_string()),
-            )])),
-            Err(message) => Ok(CallToolResult::error(vec![ContentBlock::text(message)])),
+            Ok(value) => Ok(CallToolResponse::Complete(CallToolResult::success(vec![
+                ContentBlock::text(
+                    serde_json::to_string_pretty(&value).unwrap_or_else(|e| e.to_string()),
+                ),
+            ]))),
+            Err(message) => Ok(CallToolResponse::Complete(CallToolResult::error(vec![
+                ContentBlock::text(message),
+            ]))),
         };
         std::future::ready(out)
     }

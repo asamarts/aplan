@@ -724,3 +724,84 @@ fn a_word_that_starts_like_the_marker_is_not_replaced() {
         "the adopter's own comment was replaced by the generated block"
     );
 }
+
+/// The written block names the build that wrote it, inside the block
+/// (`A1-325`, ADR-0037).
+///
+/// Proves the named behaviour `generated.names_the_build_that_wrote_it`.
+///
+/// Without this the provenance line is green by construction, which is the
+/// failure the whole task is about: delete the line from the renderer,
+/// regenerate `AGENTS.md`, and `--check` compares the new generator against its
+/// own new output and passes. The three assertions are separable on purpose --
+/// that a line is there, that it is *this* build's, and that it is below the
+/// marker rather than in it, since `A1-294` made that marker a literal an
+/// adopter copies by hand.
+#[test]
+fn the_written_block_names_the_build_that_wrote_it() {
+    let dir = tempfile::Builder::new()
+        .tempdir_in(aplan_core::fixture::fixture_root())
+        .expect("tempdir");
+    fixture(dir.path());
+    let path = dir.path().join("AGENTS.md");
+
+    let (out, code) = common::aplan(dir.path(), &["export-agents-md", "--write", "AGENTS.md"]);
+    assert_eq!(code, 0, "{out}");
+    let after = std::fs::read_to_string(&path).expect("AGENTS.md");
+
+    let (version, surface) = aplan::written_by();
+    let expected = format!("<!-- written by aplan {version}, surface {surface} -->");
+    assert!(
+        after.contains(&expected),
+        "the block does not name the build that wrote it; wanted\n  {expected}\nin\n{after}"
+    );
+
+    let lines: Vec<&str> = after.lines().collect();
+    let marker = lines
+        .iter()
+        .position(|l| l.starts_with(aplan_core::contract::BEGIN_PREFIX))
+        .expect("a begin marker");
+    assert_eq!(
+        lines[marker],
+        aplan_output::AGENTS_BEGIN,
+        "the build leaked into the marker an adopter copies by hand"
+    );
+    assert_eq!(
+        lines[marker + 1],
+        expected,
+        "the provenance line is not the first line inside the block"
+    );
+}
+
+/// Two builds disagreeing is what `--check` now reports, and it reports it as a
+/// build difference rather than as thirty lines of unexplained diff
+/// (`A1-325`).
+///
+/// Driven by editing the provenance line in a file this build just wrote, which
+/// is what a foreign build's output looks like from here: everything else about
+/// the block is byte-identical, so the diff is the one line.
+#[test]
+fn a_block_written_by_another_build_is_reported_as_that() {
+    let dir = tempfile::Builder::new()
+        .tempdir_in(aplan_core::fixture::fixture_root())
+        .expect("tempdir");
+    fixture(dir.path());
+    let path = dir.path().join("AGENTS.md");
+    let (out, code) = common::aplan(dir.path(), &["export-agents-md", "--write", "AGENTS.md"]);
+    assert_eq!(code, 0, "{out}");
+
+    let (version, surface) = aplan::written_by();
+    let mine = format!("<!-- written by aplan {version}, surface {surface} -->");
+    let theirs = "<!-- written by aplan 0.0.1, surface 000000000000 -->";
+    let doctored = std::fs::read_to_string(&path)
+        .expect("AGENTS.md")
+        .replace(&mine, theirs);
+    std::fs::write(&path, &doctored).expect("AGENTS.md");
+
+    let (out, code) = common::aplan(dir.path(), &["export-agents-md", "--check", "AGENTS.md"]);
+    assert_ne!(code, 0, "a foreign build's block passed the gate: {out}");
+    assert!(
+        out.contains(&version),
+        "the report does not name the build doing the checking: {out}"
+    );
+}

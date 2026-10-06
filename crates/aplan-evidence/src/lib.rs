@@ -24,10 +24,12 @@
 //! [`verify`]. `url` reachability stays absent: it is opt-in, non-deterministic,
 //! and needs config keys that are v0.4.
 
+pub mod excerpt;
 mod repo;
 mod resolve;
+pub mod version;
 
-pub use repo::{Breadth, Repo};
+pub use repo::{Breadth, ReleaseTag, Repo};
 pub use resolve::claims_locality;
 pub use resolve::report_dilution;
 pub use resolve::{Breach, Cost, Unenforced};
@@ -69,6 +71,15 @@ pub enum Error {
 /// Options for a verification run.
 #[derive(Debug, Default, Clone)]
 pub struct VerifyOptions {
+    /// Where `traces` paths resolve from, as `.aplan.yml` declares it (`A1-301`).
+    ///
+    /// `None` means the repository root, which is the default and what every
+    /// plan measured so far uses. It is carried here because `APLAN045` reads a
+    /// traced document out of git, and a rule that looked in the wrong place
+    /// would not be wrong out loud -- it would find nothing and say nothing,
+    /// which is the silently-switched-off gate this project reports on
+    /// everywhere else (`A1-269`).
+    pub traces_root: Option<std::path::PathBuf>,
     /// Run `test` evidence (rung L3), not just resolve it. Off by default, and
     /// CI must not enable it for pull requests from forks (HLD §5.5).
     pub execute: bool,
@@ -90,6 +101,13 @@ pub struct VerifyOptions {
     /// annotation lands on the file in the diff rather than being a
     /// locationless sentence). `None` where there is no config to blame.
     pub config_file: Option<std::path::PathBuf>,
+    /// What the repository says about versions (`A1-313`, ADR-0040).
+    ///
+    /// `None`, or a block with no `current`, leaves `APLAN048` silent: there is
+    /// no version to compare the plan against, and this tool will not go looking
+    /// for one in a manifest it does not understand. The same opt-in `url.check`
+    /// has, for the same reason.
+    pub version: Option<aplan_config::VersionPolicy>,
 }
 
 /// The full SHA of `HEAD` in the repository at `repo_root`, for `aplan close` to
@@ -189,6 +207,498 @@ pub fn unresolved_by_verify(plan: &Plan, repo_root: &Path, opts: &VerifyOptions)
 /// constructed in thirty-two places and serialised into every output format, so
 /// widening it would be a consumer contract change for a number most consumers
 /// do not want. A caller that wants the figure asks for it.
+/// `APLAN045`: a live task whose traced section moved while it waited
+/// (`A1-301`).
+///
+/// One history walk for every task asked about, which is why this is here rather
+/// than inside the per-task loop below: the baseline is the commit that last
+/// touched each task file, and asking git that question once per task on a plan
+/// with nine hundred of them is nine hundred walks.
+///
+/// Silent for a task file with no commit -- a task written and not yet committed
+/// has no baseline, and inventing one would report every new task on the day it
+/// is written.
+fn report_stale_premises(
+    repo: &Repo,
+    repo_root: &Path,
+    plan: &Plan,
+    opts: &VerifyOptions,
+    out: &mut Vec<aplan_core::Diagnostic>,
+) -> Result<(), Error> {
+    let live: Vec<&aplan_core::load::LoadedTask> = plan
+        .tasks
+        .iter()
+        .filter(|lt| !lt.task.status.is_terminal())
+        .filter(|lt| lt.task.traces.iter().any(|t| t.contains('#')))
+        .collect();
+    if live.is_empty() {
+        return Ok(());
+    }
+    let paths: Vec<std::path::PathBuf> = live.iter().map(|lt| lt.path.clone()).collect();
+    let born = repo.last_touched_commit(&paths)?;
+
+    // A shallow clone cannot answer when a task was last touched: every path is
+    // "added" by the graft commit, so the baseline is HEAD and nothing can ever
+    // differ from it. Measured: a depth-1 clone of a repository where this fires
+    // reports nothing at all. Said once, because a gate that cannot run is worse
+    // when it is silent about it than when it is absent -- the same sentence the
+    // commit resolver makes about the same checkout (`A1-253`, `A1-301`).
+    if repo.is_shallow() {
+        out.push(
+            aplan_core::Diagnostic::warning(
+                aplan_core::diagnostic::code::STALE_PREMISE,
+                format!(
+                    "this is a shallow clone, so the {} live traced task(s) here could not \
+                     be checked: when a task was last touched is not in this checkout. \
+                     That is a fact about the checkout, not about the plan",
+                    live.len()
+                ),
+            )
+            .with_agent_instruction(
+                "Check out the full history and run this again: `fetch-depth: 0` on \
+                 `actions/checkout`, or `git fetch --unshallow` locally.",
+            ),
+        );
+        return Ok(());
+    }
+
+    for lt in live {
+        let Some(rev) = born.get(&lt.path) else {
+            continue;
+        };
+        // Being edited right now counts as having been looked at. Without this
+        // the instruction below is false where it matters most: an author who
+        // re-reads the task and records it, then re-runs, would still be told
+        // the ground had moved, because the baseline is a commit and their edit
+        // is not one yet (`A1-301`, found by dogfooding it).
+        let on_disk = std::fs::read_to_string(repo_root.join(&lt.path)).ok();
+        let at_head = repo
+            .text_at(None, &lt.path.to_string_lossy())
+            .ok()
+            .flatten();
+        if let (Some(disk), Some(head)) = (&on_disk, &at_head)
+            && disk != head
+        {
+            continue;
+        }
+        for trace in &lt.task.traces {
+            let Some((doc, anchor)) = trace.split_once('#') else {
+                continue;
+            };
+            // What the document said when the task was last touched, and what it
+            // says now. A trace that does not resolve at either end is
+            // `APLAN008`'s to report, not this one's.
+            // Joined onto `traces_root`, the way `APLAN018` joins it: under
+            // `traces_root: docs` a trace of `d.md#x` is `docs/d.md` in the
+            // repository, and reading `d.md` would find nothing and report
+            // nothing (`A1-301`, audit).
+            // `traces_root` arrives absolute, and git wants a repository-relative
+            // path, so the repository root is stripped back off. Where the two
+            // are the same -- which is every plan measured so far -- this is the
+            // trace's own spelling.
+            let at = match &opts.traces_root {
+                Some(root) => root
+                    .strip_prefix(repo_root)
+                    .unwrap_or(std::path::Path::new(""))
+                    .join(doc)
+                    .to_string_lossy()
+                    .into_owned(),
+                None => doc.to_string(),
+            };
+            let Ok(Some(then)) = repo.text_at(Some(rev), &at) else {
+                continue;
+            };
+            let Ok(Some(now)) = repo.text_at(None, &at) else {
+                continue;
+            };
+            let (Some(a), Some(b)) = (
+                aplan_core::anchor::fingerprint_in(doc, &then, anchor),
+                aplan_core::anchor::fingerprint_in(doc, &now, anchor),
+            ) else {
+                continue;
+            };
+            if a == b {
+                continue;
+            }
+            out.push(
+                aplan_core::Diagnostic::warning(
+                    aplan_core::diagnostic::code::STALE_PREMISE,
+                    format!(
+                        "is still open and `{trace}` has changed since this task was last \
+                         touched: the ground it was written on has moved"
+                    ),
+                )
+                .with_task(&lt.task.id)
+                .with_file(&lt.path)
+                .with_agent_instruction(format!(
+                    "Re-read `{trace}` against this task. If the work is already done, close \
+                     it with the evidence; if the task still holds, editing it records that \
+                     somebody looked and clears this."
+                )),
+            );
+        }
+    }
+    Ok(())
+}
+
+/// `APLAN048`: the version the artifact declares against the version the tasks
+/// closed since the last release require (`A1-313`, ADR-0038, ADR-0040).
+///
+/// Silent unless `version.current` is declared, because without it there is no
+/// version to compare and this tool will not guess one out of a manifest.
+///
+/// **It fires on a version that moved and did not move far enough**, never on
+/// one that has not moved. Between releases a tree ordinarily carries the number
+/// it last shipped, and calling that a defect would light this rule on every
+/// commit after the first closed task. A release that was never prepared at all
+/// is the release script's refusal at tag time, where the tag is the thing
+/// making the claim.
+///
+/// A fault reading the version is a fault of the configuration, reported as
+/// itself and never as a version that is behind -- the distinction `A1-066` and
+/// `A1-300` both turn on.
+fn report_version_behind(
+    repo: &Repo,
+    repo_root: &Path,
+    plan: &Plan,
+    opts: &VerifyOptions,
+    spend: &mut Vec<(String, Cost)>,
+    out: &mut Vec<aplan_core::Diagnostic>,
+) -> Result<(), Error> {
+    let Some(policy) = &opts.version else {
+        return Ok(());
+    };
+    // **Either key, not just `current`.** Gating the whole function on
+    // `version.current` made `version.check` alone do nothing at all, silently:
+    // a repository that declared only the compatibility checker got no finding
+    // and no explanation, which is the switched-off-without-saying-so shape this
+    // project exists to catch (`A1-314`, audit).
+    if policy.current.is_none() && policy.check.is_none() {
+        return Ok(());
+    }
+    // The window is what both rules rest on, so a checkout that cannot answer it
+    // is reported against whichever of them the repository asked for -- and
+    // before any command is spawned, since the answer could not have been used.
+    let about_the_window = if policy.current.is_some() {
+        aplan_core::diagnostic::code::VERSION_BEHIND
+    } else {
+        aplan_core::diagnostic::code::IMPACT_CONTRADICTED
+    };
+    if repo.is_shallow() {
+        out.push(
+            aplan_core::Diagnostic::error(
+                about_the_window,
+                "this is a shallow clone, so what the plan claims about the released \
+                 version could not be judged: no release tag is reachable and what closed \
+                 since the last one is not in this checkout. That is a fact about the \
+                 checkout, not about the plan"
+                    .to_string(),
+            )
+            .with_agent_instruction(
+                "Check out the full history and run this again: `fetch-depth: 0` on \
+                 `actions/checkout`, or `git fetch --unshallow` locally.",
+            ),
+        );
+        return Ok(());
+    }
+    let tasks: Vec<&aplan_core::task::Task> = plan.tasks.iter().map(|lt| &lt.task).collect();
+    let graph = aplan_core::graph::Graph::new(tasks.iter().copied());
+    let next = version::next_release(
+        repo,
+        repo_root,
+        plan,
+        &graph,
+        policy.floors(),
+        policy.release_tag(),
+    )?;
+    if let version::Chosen::Ambiguous { ids } = &next.window {
+        out.push(
+            aplan_core::Diagnostic::error(
+                about_the_window,
+                format!(
+                    "what the plan claims about the released version could not be judged: \
+                     this plan models {} open releases ({}), so which one ships next is its \
+                     question rather than this tool's",
+                    ids.len(),
+                    ids.join(", ")
+                ),
+            )
+            .with_agent_instruction(
+                "Close the releases that have shipped, so exactly one is open and the work \
+                 it closes is the window this is measured over.",
+            ),
+        );
+        return Ok(());
+    }
+    // `APLAN049` needs only the window, so it runs whether or not a version can
+    // be read and whether or not the tag's *name* spells one -- the checker
+    // compares the built artifact against its last release and does not care
+    // how this tool reads a tag (`A1-314`, audit).
+    report_impact_contradicted(repo_root, policy, &next, spend, out);
+    let Some(declared) = &policy.current else {
+        return Ok(());
+    };
+    let current = match version::current_version(declared, repo_root) {
+        Ok(v) => v,
+        Err(why) => {
+            let mut d = aplan_core::Diagnostic::error(
+                aplan_core::diagnostic::code::VERSION_BEHIND,
+                format!(
+                    "the version this artifact ships could not be read, so nothing was \
+                     compared against the plan: {why}"
+                ),
+            )
+            .with_agent_instruction(
+                "Fix `version.current.command` in `.aplan.yml` so it prints this \
+                 repository's current version and exits zero, or remove the key.",
+            );
+            // The finding is about the *configuration*, so it lands on the file
+            // that configured it rather than being a locationless sentence
+            // (`A1-066`, on `APLAN029`'s reasoning).
+            if let Some(file) = &opts.config_file {
+                d = d.with_file(file.clone());
+            }
+            out.push(d);
+            return Ok(());
+        }
+    };
+    // No tag to measure from is a first release, where every number is
+    // defensible and there is nothing to be behind. An unmeasurable checkout is
+    // reported above, before the command is spawned.
+    let Some(tag) = &next.since else {
+        return Ok(());
+    };
+    let Some(since) = tag.version() else {
+        // **Not guessed at, and not passed over in silence either** (`A1-316`,
+        // audit of the versioning cut). Refusing to do arithmetic on a name this
+        // tool does not understand is ADR-0034's `CalVer` refusal one layer out
+        // and it is right. Saying nothing about it is a different thing: the
+        // adopter has declared the key, closed the work, and the gate is off
+        // because of how a tag is spelled -- and nothing else would ever tell
+        // them. The remedy is the tag or the pattern, never the tree, so this
+        // says so rather than reporting the tree as behind.
+        out.push(unmeasurable_tag(&tag.name));
+        return Ok(());
+    };
+    if let Some(d) = version_verdict(&current, since, &tag.name, &next, &next.owed) {
+        out.push(d);
+    }
+    Ok(())
+}
+
+/// `APLAN049`: the artifact against what the plan claims about compatibility
+/// (`A1-314`).
+///
+/// Every rung above this takes the author's word. `APLAN044` checks the claim is
+/// well formed and `APLAN048` checks the number moved far enough for the claims
+/// made -- but a task that removed a public function and wrote `fix` passes
+/// both.
+///
+/// **One direction only.** A checker that finds a break where the plan claims
+/// less is a finding; one that finds none where the plan claims `breaking` is
+/// silent, because ADR-0034 allows claiming more than a floor and because an API
+/// differ cannot see a behavioural break at all. Reporting an over-claim would
+/// punish the one habit that is always safe.
+fn report_impact_contradicted(
+    repo_root: &Path,
+    policy: &aplan_config::VersionPolicy,
+    next: &version::NextRelease,
+    spend: &mut Vec<(String, Cost)>,
+    out: &mut Vec<aplan_core::Diagnostic>,
+) {
+    let Some(declared) = &policy.check else {
+        return;
+    };
+    let compatible = match version::artifact_is_compatible(declared, repo_root) {
+        Ok((compatible, cost)) => {
+            // What the most expensive command this tool can spawn actually cost.
+            // Its own documentation leans on being bounded because an API differ
+            // compiles a workspace twice, and an adopter sizing `max_memory` had
+            // no number to size it by (`A1-309`, `A1-314` audit).
+            spend.push(("`version.check`".to_string(), cost));
+            compatible
+        }
+        Err(why) => {
+            // A checker that could not be *launched* has answered nothing, and
+            // calling a claim false on the strength of it is the mistake
+            // `A1-066` and `A1-300` both name.
+            out.push(
+                aplan_core::Diagnostic::error(
+                    aplan_core::diagnostic::code::IMPACT_CONTRADICTED,
+                    format!(
+                        "the configured compatibility checker could not be asked, so no \
+                         version claim here was checked against the artifact: {why}"
+                    ),
+                )
+                .with_agent_instruction(
+                    "Fix `version.check.command` in `.aplan.yml` so it runs and exits zero \
+                     when this artifact is compatible with its last release, or remove the \
+                     key.",
+                ),
+            );
+            return;
+        }
+    };
+    if compatible || next.owed.impact >= aplan_core::task::VersionImpact::Breaking {
+        return;
+    }
+    let mut d = aplan_core::Diagnostic::error(
+        aplan_core::diagnostic::code::IMPACT_CONTRADICTED,
+        format!(
+            "the configured checker found this artifact is not compatible with its last \
+             release, and the plan claims `{}`, {}",
+            next.owed.impact,
+            next.said()
+        ),
+    )
+    .with_agent_instruction(
+        "Declare `version_impact: breaking` on the task that made the incompatible change, \
+         or correct the artifact if the break was not intended. The checker compared the \
+         built artifact; the plan is what disagrees with it.",
+    );
+    if let Some(id) = &next.owed.raised_by {
+        d = d.with_task(id.clone());
+    }
+    out.push(d);
+}
+
+/// The verdict on one reading: what the tree declares, what shipped last, and
+/// what has closed between them (`A1-313`).
+///
+/// Separated from the reading above because the measurement is I/O and this is
+/// policy -- the same split `cargo xtask coverage` makes for the same reason.
+/// Every branch here is a sentence an adopter acts on, and each is asserted
+/// against values rather than against a repository that has to be built into
+/// the shape that produces it.
+/// What the gate says about a release tag it cannot measure from.
+///
+/// Its own sentence rather than the one below, because the remedy is different:
+/// the tree's number may be perfectly good while the *pattern* is selecting tags
+/// that do not name this artifact's releases (`A1-316`, audit).
+fn unmeasurable_tag(name: &str) -> aplan_core::Diagnostic {
+    aplan_core::Diagnostic::error(
+        aplan_core::diagnostic::code::VERSION_BEHIND,
+        format!(
+            "the last release tag reachable from HEAD is `{name}`, which spells no version \
+             this tool can measure from, so what this artifact ships was not compared \
+             against the plan"
+        ),
+    )
+    .with_agent_instruction(
+        "Narrow `version.release_tag` in `.aplan.yml` so it matches only tags that name \
+         this artifact's releases, or rename the tag to `major.minor.patch` with an \
+         optional leading `v`."
+            .to_string(),
+    )
+}
+
+/// What the gate says about a version it cannot do arithmetic on.
+///
+/// The same sentence `aplan version` refuses with, because a reader who meets
+/// one and then the other must not have to work out that they are the same
+/// problem (`A1-316`, audit).
+fn unreadable_version(what: &str) -> aplan_core::Diagnostic {
+    aplan_core::Diagnostic::error(
+        aplan_core::diagnostic::code::VERSION_BEHIND,
+        format!(
+            "`{what}` is not a version this tool can do arithmetic on, so what this \
+             artifact ships was not compared against the plan. It understands \
+             `major.minor.patch`, with or without a pre-release suffix"
+        ),
+    )
+    .with_agent_instruction(
+        "Make `version.current.command` print the bare version and nothing else: \
+         `0.3.1`, not `version = \"0.3.1\"` and not a line of TOML or JSON."
+            .to_string(),
+    )
+}
+
+fn version_verdict(
+    current: &str,
+    since: &str,
+    tag: &str,
+    next: &version::NextRelease,
+    owed: &aplan_core::version::Owed,
+) -> Option<aplan_core::Diagnostic> {
+    // **A number this tool cannot read is a finding, not a silence** (`A1-316`,
+    // audit of the versioning cut). These were `?` on an `Option`, so every
+    // unparseable input returned "no diagnostic" -- and `version.current`
+    // printing `version = "0.3.1"` instead of `0.3.1`, which is one careless
+    // `grep` away, switched this rule off with `verify` still reporting `ok`.
+    // The command already refuses that input in the same words; the gate saying
+    // nothing about it is the two surfaces disagreeing, which is the defect
+    // `A1-348` fixed one axis along.
+    let Some(staged) = aplan_core::version::triple(current) else {
+        return Some(unreadable_version(current));
+    };
+    // `ReleaseTag::version` returns a name only when it parses, and the caller
+    // reports the tag that does not -- so this cannot fail, and the fallback says
+    // that rather than inventing a second message for an unreachable case.
+    let since_parts = aplan_core::version::triple(since).unwrap_or(staged);
+    // Not re-parsed: `required` returns either a version it parsed itself or the
+    // `major.minor.patch` prefix of `current`, which parsed above -- so a third
+    // `triple` here could only ever be a branch nothing reaches, and a defensive
+    // arm on an impossible case reads as evidence the case exists.
+    let required = version::required(current, Some(since), owed.impact)?;
+    let required_parts = aplan_core::version::triple(&required).unwrap_or(staged);
+
+    // **A version *older* than the last release is its own defect**, and not the
+    // one this rule's ordinary message describes (`A1-313`, audit). Two things
+    // produce it and the adopter has to be told both, because the remedy differs
+    // completely: a manifest that was reverted, or a `version.release_tag` glob
+    // matching tags that do not name this artifact's releases -- a monorepo
+    // whose repository-wide tags sit in a different numbering space from the
+    // component being versioned. The second makes every number here wrong, and
+    // nothing else would ever say so.
+    if staged < since_parts {
+        return Some(
+            aplan_core::Diagnostic::error(
+                aplan_core::diagnostic::code::VERSION_BEHIND,
+                format!(
+                    "this tree declares version `{current}`, which is older than `{tag}` -- \
+                     the last release tag reachable from HEAD. Either the version was \
+                     reverted, or `version.release_tag` is matching tags that do not name \
+                     this artifact's releases, in which case every version this derives is \
+                     measured from the wrong place"
+                ),
+            )
+            .with_agent_instruction(format!(
+                "Set this repository's version to something at or above `{since}`, or narrow \
+                 `version.release_tag` in `.aplan.yml` so it matches only the tags that name \
+                 this artifact's releases."
+            )),
+        );
+    }
+    // Not bumped yet is not behind: see the doc comment above.
+    if staged == since_parts || staged >= required_parts {
+        return None;
+    }
+    // **What raised it, and `None` when the levels did.** Naming whichever task
+    // the walk reached first reads as an accusation of one that claimed nothing,
+    // and "the 2 tasks closed here imply it" beside "2 tasks closed since v1.0.0"
+    // said the same thing twice and neither usefully (`A1-313`, audit).
+    let because = owed.raised_by.as_deref().map_or_else(
+        || format!("their levels imply `{}`", owed.impact),
+        |id| format!("`{id}` is `{}`", owed.impact),
+    );
+    let mut d = aplan_core::Diagnostic::error(
+        aplan_core::diagnostic::code::VERSION_BEHIND,
+        format!(
+            "this tree declares version `{current}` and the plan requires `{required}`, \
+             {}: {because}",
+            next.said()
+        ),
+    )
+    .with_agent_instruction(format!(
+        "Set this repository's version to `{required}` before tagging, or change the \
+         impact the window declares if `{current}` is the honest number."
+    ));
+    if let Some(id) = &owed.raised_by {
+        d = d.with_task(id.clone());
+    }
+    Some(d)
+}
+
 pub fn verify_measured(
     plan: &Plan,
     repo_root: &Path,
@@ -222,11 +732,17 @@ fn verify_inner(
     };
 
     let mut diagnostics = Vec::new();
+    report_stale_premises(&repo, repo_root, plan, opts, &mut diagnostics)?;
+    report_version_behind(&repo, repo_root, plan, opts, spend, &mut diagnostics)?;
     for lt in &plan.tasks {
         // Independent of evidence: a task's ownership claim can be dead whether
         // or not it cites anything, and catching it on a `todo` task is the point
         // (`APLAN019`, `A1-022`).
         resolve::report_unmatched_paths(&repo, &lt.task, &lt.path, &tracked, &mut diagnostics)?;
+        // Also independent of evidence, and for the mirror-image reason: a
+        // stored `in_progress` is a claim with nothing to resolve, so the only
+        // thing that can check it is the repository (`APLAN053`, `A1-359`).
+        resolve::report_unstarted_in_progress(&lt.task, &lt.path, &tracked, &mut diagnostics);
         for ev in &lt.task.evidence {
             for r in &resolvers {
                 if r.kind() == ev.kind {
@@ -513,6 +1029,8 @@ mod tests {
             effort_days: None,
             blocked_by: Vec::new(),
             prefer_after: Vec::new(),
+            ratified_by: Vec::new(),
+            contains: Vec::new(),
             evidence,
             paths,
             traces: Vec::new(),
@@ -521,6 +1039,7 @@ mod tests {
             revisit_at: None,
             version_impact: None,
             version_impact_reason: None,
+            version: None,
         }
     }
 
@@ -550,6 +1069,7 @@ mod tests {
 
     fn runner(list: &[&str], run: &[&str]) -> TestRunner {
         TestRunner {
+            output_lines: None,
             max_memory: None,
             max_processes: None,
             wrap: None,
@@ -686,6 +1206,331 @@ mod tests {
             load_diagnostics: Vec::new(),
             unloadable: std::collections::BTreeMap::new(),
         }
+    }
+
+    /// `APLAN045`: the premise under a live task moved while it waited
+    /// (`A1-301`).
+    ///
+    /// Four cases in one, because the rule is only worth having if the three
+    /// silences hold: the section moved, a *different* section moved, the task
+    /// was touched after the document, and the task was never committed.
+    #[test]
+    fn a_live_tasks_traced_section_moving_is_reported_and_nothing_else_is() {
+        let (dir, repo) = init();
+        let live = |trace: &str| {
+            let mut t = done_task("A-1", Vec::new(), Vec::new());
+            t.status = Status::Todo;
+            t.traces = vec![trace.to_string()];
+            plan_of(t)
+        };
+        let run = |plan: &Plan| {
+            verify(plan, dir.path(), &VerifyOptions::default())
+                .expect("verify runs")
+                .diagnostics
+        };
+        let two_sections =
+            |intro: &str, other: &str| format!("# Intro\n\n{intro}\n\n# Other\n\n{other}\n");
+
+        commit(
+            &repo,
+            &[
+                ("DOC.md", &two_sections("the ground", "elsewhere")),
+                ("plan/tasks/x.md", "the task as committed"),
+            ],
+            "the task, written against the document",
+        );
+
+        // Nothing has moved yet.
+        assert!(
+            !run(&live("DOC.md#intro"))
+                .iter()
+                .any(|d| d.code == code::STALE_PREMISE),
+            "nothing had changed and it spoke anyway"
+        );
+
+        // A different section moves: not this task's premise. This is the near
+        // miss that makes the rule narrow -- comparing whole documents instead
+        // would fire on 91% of live traced tasks (`A1-301`, measured).
+        commit(
+            &repo,
+            &[(
+                "DOC.md",
+                &two_sections("the ground", "elsewhere, rewritten"),
+            )],
+            "a different section",
+        );
+        assert!(
+            !run(&live("DOC.md#intro"))
+                .iter()
+                .any(|d| d.code == code::STALE_PREMISE),
+            "a change elsewhere in the document is not this task's drift"
+        );
+
+        // The traced section itself moves: the finding.
+        commit(
+            &repo,
+            &[(
+                "DOC.md",
+                &two_sections("this has since been built", "elsewhere, rewritten"),
+            )],
+            "the ground moved",
+        );
+        let found = run(&live("DOC.md#intro"));
+        let d = found
+            .iter()
+            .find(|d| d.code == code::STALE_PREMISE)
+            .expect("the premise moved and nothing said so");
+        assert_eq!(d.severity, aplan_core::diagnostic::Severity::Warning);
+        assert!(
+            d.message.contains("DOC.md#intro") && d.message.contains("last touched"),
+            "it names the trace and what it is measured against: {}",
+            d.message
+        );
+        assert!(
+            d.agent_instruction
+                .as_deref()
+                .is_some_and(|i| i.contains("close it with the evidence")),
+            "and offers the reading this exists for -- it may already be done: {:?}",
+            d.agent_instruction
+        );
+
+        // Touching the task after the document is how an author says they looked,
+        // and it has to clear the finding or the instruction is a lie.
+        commit(
+            &repo,
+            &[("plan/tasks/x.md", "re-read, still holds")],
+            "looked",
+        );
+        assert!(
+            !run(&live("DOC.md#intro"))
+                .iter()
+                .any(|d| d.code == code::STALE_PREMISE),
+            "re-reading the task did not clear it"
+        );
+
+        // A task file git has never seen has no baseline, so there is nothing to
+        // compare and nothing to say. Otherwise every task reports on the day it
+        // is written.
+        let (dir2, repo2) = init();
+        commit(
+            &repo2,
+            &[("DOC.md", &two_sections("the ground", "elsewhere"))],
+            "a document, and no task file",
+        );
+        let plan = live("DOC.md#intro");
+        let fresh = verify(&plan, dir2.path(), &VerifyOptions::default())
+            .expect("verify runs")
+            .diagnostics;
+        assert!(
+            !fresh.iter().any(|d| d.code == code::STALE_PREMISE),
+            "an uncommitted task has no baseline and must be left alone: {fresh:?}"
+        );
+    }
+
+    /// A shallow clone cannot answer this rule's question, and says so
+    /// (`A1-301`, audit).
+    ///
+    /// Measured before it was written: a depth-1 clone of a repository where the
+    /// rule fires reported *nothing at all*. Every path is "added" by the graft
+    /// commit, so the baseline is HEAD and nothing can differ from it. A gate
+    /// that cannot run is worse silent than absent, which is the sentence the
+    /// commit resolver already makes about the same checkout (`A1-253`).
+    #[test]
+    fn a_shallow_clone_is_told_it_could_not_be_checked() {
+        let (dir, repo) = init();
+        let mut task = done_task("A-1", Vec::new(), Vec::new());
+        task.status = Status::Todo;
+        task.traces = vec!["DOC.md#intro".to_string()];
+        let plan = plan_of(task);
+
+        commit(
+            &repo,
+            &[
+                ("DOC.md", "# Intro\n\nthe ground\n"),
+                ("plan/tasks/x.md", "the task"),
+            ],
+            "one",
+        );
+        commit(&repo, &[("DOC.md", "# Intro\n\nsince built\n")], "two");
+
+        // Full history: the finding.
+        let full = verify(&plan, dir.path(), &VerifyOptions::default())
+            .expect("verify runs")
+            .diagnostics;
+        let d = full
+            .iter()
+            .find(|d| d.code == code::STALE_PREMISE)
+            .expect("the premise moved");
+        assert!(
+            d.message.contains("DOC.md#intro"),
+            "the full-history finding names the trace: {}",
+            d.message
+        );
+
+        // Shallow: one sentence about the checkout, and no per-task findings,
+        // because none of them could be judged.
+        let shallow_dir = tempfile::Builder::new()
+            .tempdir_in(aplan_core::fixture::fixture_root())
+            .expect("tempdir");
+        let dest = shallow_dir.path().join("clone");
+        let out = std::process::Command::new("git")
+            .args(["clone", "--quiet", "--depth", "1"])
+            .arg(format!("file://{}", dir.path().display()))
+            .arg(&dest)
+            .output()
+            .expect("git clone runs");
+        assert!(out.status.success(), "clone failed: {out:?}");
+
+        let shallow = verify(&plan, &dest, &VerifyOptions::default())
+            .expect("verify runs")
+            .diagnostics;
+        let said = shallow
+            .iter()
+            .find(|d| d.code == code::STALE_PREMISE)
+            .expect("a gate that cannot run must say so");
+        assert!(
+            said.message.contains("shallow clone") && said.task.is_none(),
+            "it is one fact about the checkout, not a finding against a task: {said:?}"
+        );
+        assert_eq!(
+            shallow
+                .iter()
+                .filter(|d| d.code == code::STALE_PREMISE)
+                .count(),
+            1,
+            "said once, not once per task"
+        );
+    }
+
+    /// The traced document is read through `traces_root`, not from the
+    /// repository root (`A1-301`, audit).
+    ///
+    /// The bug this pins was a *silence*: the rule looked for `d.md` where the
+    /// plan meant `docs/d.md`, found nothing, and reported nothing -- a gate
+    /// switched off without saying so, which is the shape `A1-269` exists to
+    /// report. Every plan measured so far leaves `traces_root` at the default,
+    /// so this had no live subjects and no way of being noticed.
+    #[test]
+    fn the_traced_document_is_read_through_the_traces_root() {
+        let (dir, repo) = init();
+        let mut task = done_task("A-1", Vec::new(), Vec::new());
+        task.status = Status::Todo;
+        task.traces = vec!["d.md#intro".to_string()];
+        let plan = plan_of(task);
+
+        // The document lives under `docs/`, and the trace is spelled relative to
+        // that root.
+        commit(
+            &repo,
+            &[
+                ("docs/d.md", "# Intro\n\nthe ground\n"),
+                ("plan/tasks/x.md", "the task"),
+            ],
+            "a document under the traces root",
+        );
+        commit(
+            &repo,
+            &[("docs/d.md", "# Intro\n\nsince built\n")],
+            "the ground moved",
+        );
+
+        let with_root = VerifyOptions {
+            traces_root: Some(dir.path().join("docs")),
+            ..VerifyOptions::default()
+        };
+        let found = verify(&plan, dir.path(), &with_root)
+            .expect("verify runs")
+            .diagnostics;
+        assert!(
+            found.iter().any(|d| d.code == code::STALE_PREMISE),
+            "the document moved under `traces_root` and nothing said so: {found:?}"
+        );
+
+        // And without the root it cannot resolve the document at all, which is
+        // exactly the silence: not a wrong answer, no answer.
+        let without = verify(&plan, dir.path(), &VerifyOptions::default())
+            .expect("verify runs")
+            .diagnostics;
+        assert!(
+            !without.iter().any(|d| d.code == code::STALE_PREMISE),
+            "reading from the wrong root should find nothing, not something"
+        );
+    }
+
+    /// The shapes `APLAN045` deliberately says nothing about (`A1-301`).
+    ///
+    /// Each is a way the comparison cannot be made, and a rule that guessed at
+    /// any of them would report a task whose premise nobody can show has moved.
+    #[test]
+    fn a_premise_that_cannot_be_compared_is_left_alone() {
+        let (dir, repo) = init();
+        let live = |trace: &str| {
+            let mut t = done_task("A-1", Vec::new(), Vec::new());
+            t.status = Status::Todo;
+            t.traces = vec![trace.to_string()];
+            plan_of(t)
+        };
+        let spoke = |plan: &Plan| {
+            verify(plan, dir.path(), &VerifyOptions::default())
+                .expect("verify runs")
+                .diagnostics
+                .iter()
+                .any(|d| d.code == code::STALE_PREMISE)
+        };
+
+        commit(
+            &repo,
+            &[
+                ("DOC.md", "# Intro\n\nthe ground\n"),
+                ("plan/tasks/x.md", "the task"),
+            ],
+            "a document and a task",
+        );
+        commit(
+            &repo,
+            &[
+                ("DOC.md", "# Intro\n\nmoved\n"),
+                ("LATER.md", "# Intro\n\nborn after the task\n"),
+            ],
+            "the document moves, and another is born",
+        );
+
+        // No anchor: a whole-file trace names no section, and there is nothing
+        // to take a fingerprint of. `A1-191` owns whether that deserves its own
+        // finding.
+        assert!(!spoke(&live("DOC.md")), "a whole-file trace was compared");
+
+        // The document did not exist when the task was last touched, so there is
+        // no "before" to compare against.
+        assert!(
+            !spoke(&live("LATER.md#intro")),
+            "a document younger than the task has no baseline"
+        );
+
+        // The anchor resolves in neither version.
+        assert!(
+            !spoke(&live("DOC.md#nothing-like-this")),
+            "an anchor that resolves nowhere is `APLAN008`'s, not this rule's"
+        );
+
+        // And the sanity check that the fixture can fire at all, so the three
+        // silences above are silences rather than a rule that never speaks.
+        assert!(spoke(&live("DOC.md#intro")), "the fixture cannot fire");
+    }
+
+    /// The history walk's two empty answers (`A1-301`).
+    #[test]
+    fn asking_about_no_paths_or_a_repo_with_no_commits_walks_nothing() {
+        let (dir, _git) = init();
+        let repo = Repo::discover(dir.path()).expect("discover");
+        assert!(
+            repo.last_touched_commit(&[]).expect("no paths").is_empty(),
+            "asking about nothing should not walk history"
+        );
+        let unborn = repo
+            .last_touched_commit(&[PathBuf::from("plan/tasks/x.md")])
+            .expect("a repo with no commits is an answer, not an error");
+        assert!(unborn.is_empty(), "nothing has been committed yet");
     }
 
     fn codes(report: &Report) -> Vec<&str> {
@@ -1660,6 +2505,7 @@ mod tests {
     /// `A1-054`: a repository whose tests are not reachable from one command.
     fn named_runner(name: &str, dir: Option<&str>, list: &[&str], run: &[&str]) -> TestRunner {
         TestRunner {
+            output_lines: None,
             max_memory: None,
             max_processes: None,
             wrap: None,
@@ -1683,6 +2529,8 @@ mod tests {
         // fell back to weaker kinds, quietly eroding `require_min_strength`.
         let (dir, _repo) = init();
         let opts = VerifyOptions {
+            version: None,
+            traces_root: None,
             config_file: None,
             execute: true,
             test_runner: Some(TestRunners::Many(vec![
@@ -1756,6 +2604,8 @@ mod tests {
     fn each_distinct_cited_test_runs_once_however_many_tasks_cite_it() {
         let (dir, _repo) = init();
         let opts = VerifyOptions {
+            version: None,
+            traces_root: None,
             config_file: None,
             execute: true,
             test_runner: Some(TestRunners::One(counting_runner(dir.path(), true))),
@@ -1789,6 +2639,8 @@ mod tests {
     fn a_failing_test_fails_every_citation_without_running_twice() {
         let (dir, _repo) = init();
         let opts = VerifyOptions {
+            version: None,
+            traces_root: None,
             config_file: None,
             execute: true,
             test_runner: Some(TestRunners::One(counting_runner(dir.path(), false))),
@@ -1862,6 +2714,8 @@ mod tests {
     fn a_second_verify_runs_the_tests_again() {
         let (dir, _repo) = init();
         let opts = VerifyOptions {
+            version: None,
+            traces_root: None,
             config_file: None,
             execute: true,
             test_runner: Some(TestRunners::One(counting_runner(dir.path(), true))),
@@ -2700,6 +3554,8 @@ mod tests {
         // possible flake. There is no file to be busy now.
         let script = format!("echo x >> {}; printf 'alpha\\nbeta\\n'", counter.display());
         let opts = VerifyOptions {
+            version: None,
+            traces_root: None,
             config_file: None,
             execute: false,
             test_runner: Some(TestRunners::One(runner(
@@ -2750,6 +3606,8 @@ mod tests {
             std::fs::create_dir_all(tmp.path().join(d)).unwrap();
         }
         let opts = VerifyOptions {
+            version: None,
+            traces_root: None,
             config_file: None,
             execute: false,
             test_runner: Some(TestRunners::One(TestRunner {
@@ -2858,6 +3716,8 @@ mod tests {
         let (tmp, _repo) = init();
         std::fs::create_dir_all(tmp.path().join("server")).unwrap();
         let opts = VerifyOptions {
+            version: None,
+            traces_root: None,
             config_file: None,
             execute: false,
             test_runner: Some(TestRunners::One(named_runner(
@@ -3035,6 +3895,8 @@ mod tests {
         // would fail the build for it.
         let (tmp, _repo) = init();
         let opts = VerifyOptions {
+            version: None,
+            traces_root: None,
             config_file: None,
             execute: false,
             test_runner: Some(TestRunners::Many(vec![
@@ -3083,6 +3945,8 @@ mod tests {
         // covering the task, is exactly the borrowed proof the rule is for.
         let (tmp, _repo) = init();
         let opts = VerifyOptions {
+            version: None,
+            traces_root: None,
             config_file: None,
             execute: false,
             test_runner: Some(TestRunners::Many(vec![
@@ -3144,6 +4008,8 @@ mod tests {
         // and the rule reports only what it can demonstrate.
         let (tmp, _repo) = init();
         let opts = VerifyOptions {
+            version: None,
+            traces_root: None,
             config_file: None,
             execute: false,
             test_runner: Some(TestRunners::Many(vec![
@@ -3217,6 +4083,8 @@ mod tests {
         // true, and `APLAN024` is what asks for such tests in the first place.
         let (tmp, _repo) = init();
         let opts = VerifyOptions {
+            version: None,
+            traces_root: None,
             config_file: None,
             execute: false,
             test_runner: Some(TestRunners::One(invariant_runner())),
@@ -3243,6 +4111,8 @@ mod tests {
         // was built for still fires from the very same runner.
         let (tmp, _repo) = init();
         let opts = VerifyOptions {
+            version: None,
+            traces_root: None,
             config_file: None,
             execute: false,
             test_runner: Some(TestRunners::One(invariant_runner())),
@@ -3283,6 +4153,8 @@ mod tests {
             ..invariant_runner()
         };
         let opts = VerifyOptions {
+            version: None,
+            traces_root: None,
             config_file: None,
             execute: false,
             test_runner: Some(TestRunners::One(runner)),
@@ -3339,6 +4211,8 @@ mod tests {
             )
         };
         let opts = VerifyOptions {
+            version: None,
+            traces_root: None,
             config_file: None,
             execute: false,
             test_runner: Some(TestRunners::One(runner)),
@@ -3391,6 +4265,8 @@ mod tests {
             )
         };
         let opts = VerifyOptions {
+            version: None,
+            traces_root: None,
             config_file: None,
             execute: false,
             test_runner: Some(TestRunners::One(runner)),
@@ -3412,6 +4288,8 @@ mod tests {
         // file. The message has to name both, or the author cannot act on it.
         let (dir, _repo) = init();
         let opts = VerifyOptions {
+            version: None,
+            traces_root: None,
             config_file: None,
             execute: false,
             test_runner: Some(TestRunners::Many(vec![
@@ -3449,6 +4327,8 @@ mod tests {
         std::fs::create_dir_all(&sub).unwrap();
         std::fs::write(sub.join("names.txt"), "only_here\n").unwrap();
         let opts = VerifyOptions {
+            version: None,
+            traces_root: None,
             config_file: None,
             execute: false,
             // `cat names.txt` resolves only if the process runs in `web/`.
@@ -3480,6 +4360,8 @@ mod tests {
         // `list` prints two names, one per line; `run` passes (`true`).
         let good = runner(&["printf", "alpha\nbeta\n"], &["true", PLACEHOLDER]);
         let opts = VerifyOptions {
+            version: None,
+            traces_root: None,
             config_file: None,
             execute: true,
             test_runner: Some(TestRunners::One(good.clone())),
@@ -3508,6 +4390,8 @@ mod tests {
         // Exists but the runner exits non-zero under --execute -> APLAN014.
         let failing = runner(&["printf", "alpha\n"], &["false", PLACEHOLDER]);
         let opts_fail = VerifyOptions {
+            version: None,
+            traces_root: None,
             config_file: None,
             execute: true,
             test_runner: Some(TestRunners::One(failing.clone())),
@@ -3529,6 +4413,8 @@ mod tests {
 
         // Without --execute the test is never run: only existence (L1) is checked.
         let opts_noexec = VerifyOptions {
+            version: None,
+            traces_root: None,
             config_file: None,
             execute: false,
             test_runner: Some(TestRunners::One(failing)),
@@ -3927,6 +4813,8 @@ mod tests {
         // The runner lists the payload as valid so resolution reaches --execute.
         let list_arg = format!("{payload}\n");
         let opts = VerifyOptions {
+            version: None,
+            traces_root: None,
             config_file: None,
             execute: true,
             test_runner: Some(TestRunners::One(runner(
@@ -3946,6 +4834,768 @@ mod tests {
         assert!(
             !sentinel.exists(),
             "the test name was interpreted as a command"
+        );
+    }
+}
+
+#[cfg(test)]
+mod version_behind_tests {
+    use super::*;
+    use aplan_core::code;
+    use aplan_core::task::{Evidence, EvidenceKind, Status, Task, VersionImpact};
+    use aplan_core::{Plan, load::LoadedTask};
+    use git2::{Repository, Signature};
+
+    fn commit(repo: &Repository, files: &[(&str, &str)], msg: &str) -> String {
+        let workdir = repo.workdir().expect("non-bare repo").to_path_buf();
+        for (p, contents) in files {
+            let full = workdir.join(p);
+            std::fs::create_dir_all(full.parent().expect("a parent")).expect("mkdir");
+            std::fs::write(full, contents).expect("write");
+        }
+        let mut index = repo.index().expect("index");
+        index
+            .add_all(["*"].iter(), git2::IndexAddOption::DEFAULT, None)
+            .expect("add");
+        index.write().expect("write index");
+        let tree = repo
+            .find_tree(index.write_tree().expect("tree"))
+            .expect("find tree");
+        let sig = Signature::now("Test", "test@example.com").expect("sig");
+        let parent = repo.head().ok().and_then(|h| h.peel_to_commit().ok());
+        let parents: Vec<&git2::Commit> = parent.iter().collect();
+        repo.commit(Some("HEAD"), &sig, &sig, msg, &tree, &parents)
+            .expect("commit")
+            .to_string()
+    }
+
+    fn task(id: &str, sha: &str, impact: Option<VersionImpact>) -> Task {
+        Task {
+            id: id.to_string(),
+            title: id.to_string(),
+            phase: 0,
+            status: Status::Done,
+            owner: None,
+            effort_days: None,
+            blocked_by: Vec::new(),
+            prefer_after: Vec::new(),
+            ratified_by: Vec::new(),
+            contains: Vec::new(),
+            evidence: vec![Evidence {
+                kind: EvidenceKind::Commit,
+                reference: sha.to_string(),
+                captured: None,
+            }],
+            paths: vec!["src/**".to_string()],
+            traces: Vec::new(),
+            trace_fingerprints: std::collections::BTreeMap::new(),
+            tags: Vec::new(),
+            revisit_at: None,
+            version_impact: impact,
+            version_impact_reason: None,
+            version: None,
+        }
+    }
+
+    fn policy(declares: &str) -> aplan_config::VersionPolicy {
+        aplan_config::VersionPolicy {
+            require_impact: None,
+            levels: None,
+            release_tag: None,
+            check: None,
+            current: Some(aplan_config::DeclaredCommand {
+                command: vec!["echo".to_string(), declares.to_string()],
+                timeout_seconds: None,
+                max_memory: None,
+                max_processes: None,
+                wrap: None,
+            }),
+        }
+    }
+
+    /// A repository that shipped `v0.3.0` and has since closed `A-1`.
+    fn released(repo: &Repository) -> String {
+        released_at(repo, "v0.3.0")
+    }
+
+    /// The same, at a tag the caller names.
+    fn released_at(repo: &Repository, tag: &str) -> String {
+        commit(
+            repo,
+            &[
+                ("src/a.rs", "x"),
+                (
+                    "plan/tasks/x.md",
+                    "---\nid: A-1\ntitle: A-1\nphase: 0\nstatus: todo\n---\n",
+                ),
+            ],
+            "before the release",
+        );
+        let sig = Signature::now("Test", "test@example.com").expect("sig");
+        let head = repo.head().expect("head").peel_to_commit().expect("commit");
+        repo.tag(tag, head.as_object(), &sig, "release", false)
+            .expect("tag");
+        commit(
+            repo,
+            &[
+                ("src/a.rs", "y"),
+                (
+                    "plan/tasks/x.md",
+                    "---\nid: A-1\ntitle: A-1\nphase: 0\nstatus: done\n---\n",
+                ),
+            ],
+            "the work",
+        )
+    }
+
+    fn run(
+        dir: &std::path::Path,
+        tasks: Vec<Task>,
+        version: Option<aplan_config::VersionPolicy>,
+    ) -> Vec<aplan_core::Diagnostic> {
+        let plan = Plan {
+            tasks: tasks
+                .into_iter()
+                .map(|task| LoadedTask {
+                    task,
+                    path: "plan/tasks/x.md".into(),
+                    fields: aplan_core::load::FieldLines::new(),
+                    criteria: aplan_core::load::Criteria::default(),
+                })
+                .collect(),
+            load_diagnostics: Vec::new(),
+            unloadable: std::collections::BTreeMap::new(),
+        };
+        let opts = VerifyOptions {
+            version,
+            ..VerifyOptions::default()
+        };
+        verify(&plan, dir, &opts).expect("verify runs").diagnostics
+    }
+
+    /// **A number this gate cannot read is a finding, not a silence**
+    /// (`A1-316`, audit of the versioning cut).
+    ///
+    /// `version_verdict` parsed with `?` on an `Option`, so anything it could
+    /// not do arithmetic on returned "no diagnostic" and `verify` reported
+    /// `ok`. The realistic input is not exotic: a `current-version.sh` one
+    /// careless `grep` away from printing the whole assignment.
+    ///
+    /// **The command already refuses these**, with exit 2 and a sentence that
+    /// names the input. The gate agreeing is the point: two surfaces answering
+    /// one question differently is the defect `A1-348` fixed on the window, and
+    /// this is the same shape on the number.
+    #[test]
+    fn a_version_the_gate_cannot_read_is_reported_rather_than_skipped() {
+        for printed in [
+            "not-a-version",
+            "version = \"0.3.1\"",
+            // Leading zeroes are refused so `CalVer` cannot be mistaken for a
+            // triple and handed back respelled (`A1-313`).
+            "2026.09.1",
+            "v",
+        ] {
+            let dir = tempfile::Builder::new()
+                .tempdir_in(aplan_core::fixture::fixture_root())
+                .expect("tempdir");
+            let repo = Repository::init(dir.path()).expect("init");
+            let sha = released(&repo);
+            let found = run(
+                dir.path(),
+                vec![task("A-1", &sha, Some(VersionImpact::Breaking))],
+                Some(policy(printed)),
+            );
+            let d = found
+                .iter()
+                .find(|d| d.code == code::VERSION_BEHIND)
+                .unwrap_or_else(|| panic!("`{printed}` was compared against nothing, silently"));
+            assert_eq!(d.severity, aplan_core::diagnostic::Severity::Error);
+            assert!(
+                d.message.contains(printed),
+                "the finding must quote what the command printed, so a reader can \
+                 search for it: {}",
+                d.message
+            );
+            assert!(
+                d.agent_instruction
+                    .as_ref()
+                    .is_some_and(|i| i.contains("bare version")),
+                "and say what to print instead: {:?}",
+                d.agent_instruction
+            );
+        }
+    }
+
+    /// A release **tag** that is not a version is its own finding.
+    ///
+    /// The other half of the silence above, and a different remedy: the tree's
+    /// number may be perfectly good while `version.release_tag` matches
+    /// something that is not a version -- `vNEXT`, a monorepo's
+    /// component-agnostic tags -- and then every number derived from it is
+    /// measured from the wrong place. Reporting it as "the tree is behind" would
+    /// send the adopter to edit the one file that is right (`A1-316`, audit).
+    #[test]
+    fn a_release_tag_that_is_not_a_version_says_so_about_the_tag() {
+        let dir = tempfile::Builder::new()
+            .tempdir_in(aplan_core::fixture::fixture_root())
+            .expect("tempdir");
+        let repo = Repository::init(dir.path()).expect("init");
+        let sha = released_at(&repo, "vNEXT");
+        let mut policy = policy("0.3.1");
+        policy.release_tag = Some("v*".to_string());
+        let found = run(
+            dir.path(),
+            vec![task("A-1", &sha, Some(VersionImpact::Breaking))],
+            Some(policy),
+        );
+        let d = found
+            .iter()
+            .find(|d| d.code == code::VERSION_BEHIND)
+            .expect("a tag that is not a version was measured from silently");
+        assert!(
+            d.message.contains("vNEXT") && d.message.contains("spells no version"),
+            "it must name the tag rather than blame the tree: {}",
+            d.message
+        );
+        assert!(
+            !d.message.contains("requires"),
+            "and must not read as the tree being behind: {}",
+            d.message
+        );
+        assert!(
+            d.agent_instruction
+                .as_ref()
+                .is_some_and(|i| i.contains("release_tag")),
+            "and point at the key that selected it: {:?}",
+            d.agent_instruction
+        );
+    }
+
+    /// The `v` a tag carries is stripped; the `v` of the word `version` is not.
+    ///
+    /// Stripping unconditionally made `version = "0.3.1"` come back as
+    /// `ersion = "0.3.1"`, so the finding above quoted a string nothing printed
+    /// and sent the reader looking for it (`A1-316`, audit).
+    #[test]
+    fn a_leading_v_is_stripped_only_when_a_version_follows_it() {
+        let dir = tempfile::Builder::new()
+            .tempdir_in(aplan_core::fixture::fixture_root())
+            .expect("tempdir");
+        for (printed, expected) in [
+            ("v0.4.0", "0.4.0"),
+            ("0.4.0", "0.4.0"),
+            ("version = \"0.3.1\"", "version = \"0.3.1\""),
+            ("v", "v"),
+        ] {
+            let declared = aplan_config::DeclaredCommand {
+                command: vec!["echo".to_string(), printed.to_string()],
+                timeout_seconds: None,
+                max_memory: None,
+                max_processes: None,
+                wrap: None,
+            };
+            assert_eq!(
+                version::current_version(&declared, dir.path()).expect("the command ran"),
+                expected,
+                "reading `{printed}`"
+            );
+        }
+    }
+
+    /// **What the finding has to say to be worth having** (`A1-313`).
+    ///
+    /// Both numbers, so the reader does not have to re-derive either; the window
+    /// it was measured over, because "the plan requires 0.4.0" is unanswerable
+    /// without knowing since when; and the task that demanded it, because that
+    /// is the claim to argue with if the number is wrong.
+    #[test]
+    fn a_version_behind_the_plan_names_both_numbers_and_the_claim() {
+        let dir = tempfile::Builder::new()
+            .tempdir_in(aplan_core::fixture::fixture_root())
+            .expect("tempdir");
+        let repo = Repository::init(dir.path()).expect("init");
+        let sha = released(&repo);
+        let found = run(
+            dir.path(),
+            vec![task("A-1", &sha, Some(VersionImpact::Breaking))],
+            Some(policy("0.3.1")),
+        );
+        let d = found
+            .iter()
+            .find(|d| d.code == code::VERSION_BEHIND)
+            .expect("a breaking change is shipping in a patch release");
+        assert_eq!(d.severity, aplan_core::diagnostic::Severity::Error);
+        assert_eq!(d.task.as_deref(), Some("A-1"), "it lands on the claim");
+        for wanted in ["0.3.1", "0.4.0", "v0.3.0", "A-1", "breaking"] {
+            assert!(
+                d.message.contains(wanted),
+                "the message must name {wanted}: {}",
+                d.message
+            );
+        }
+        assert!(
+            d.agent_instruction
+                .as_deref()
+                .is_some_and(|i| i.contains("0.4.0")),
+            "the fix names the number to set: {:?}",
+            d.agent_instruction
+        );
+    }
+
+    /// The three silences, each of which was a plausible place to speak.
+    #[test]
+    fn it_is_silent_where_it_has_nothing_to_say() {
+        let dir = tempfile::Builder::new()
+            .tempdir_in(aplan_core::fixture::fixture_root())
+            .expect("tempdir");
+        let repo = Repository::init(dir.path()).expect("init");
+        let sha = released(&repo);
+
+        // The bump is large enough.
+        assert!(
+            !run(
+                dir.path(),
+                vec![task("A-1", &sha, Some(VersionImpact::Breaking))],
+                Some(policy("0.4.0")),
+            )
+            .iter()
+            .any(|d| d.code == code::VERSION_BEHIND),
+            "0.4.0 is exactly what a break on top of 0.3.0 requires"
+        );
+
+        // Nothing declared it: the same opt-in `url.check` has.
+        assert!(
+            !run(
+                dir.path(),
+                vec![task("A-1", &sha, Some(VersionImpact::Breaking))],
+                None,
+            )
+            .iter()
+            .any(|d| d.code == code::VERSION_BEHIND),
+            "with no `version.current` there is nothing to compare"
+        );
+
+        // **The tree has not been bumped at all**, which is every commit between
+        // releases. A rule that fired here could not be left on.
+        assert!(
+            !run(
+                dir.path(),
+                vec![task("A-1", &sha, Some(VersionImpact::Breaking))],
+                Some(policy("0.3.0")),
+            )
+            .iter()
+            .any(|d| d.code == code::VERSION_BEHIND),
+            "a version that has not moved is a release not yet prepared"
+        );
+    }
+
+    /// **A version older than the last release is its own finding** (`A1-313`,
+    /// audit).
+    ///
+    /// The guard for "not bumped yet" swallowed it: a tree declaring a number
+    /// below the tag it descends from was silent, and the message for a version
+    /// that is merely short would have been wrong about it anyway. Both readings
+    /// are named because the remedies have nothing in common -- a reverted
+    /// manifest, or a `release_tag` glob matching tags from another numbering
+    /// space, which makes every derived version wrong and nothing else says so.
+    #[test]
+    fn a_version_older_than_the_last_release_says_which_two_things_cause_it() {
+        let dir = tempfile::Builder::new()
+            .tempdir_in(aplan_core::fixture::fixture_root())
+            .expect("tempdir");
+        let repo = Repository::init(dir.path()).expect("init");
+        let sha = released(&repo);
+        let found = run(
+            dir.path(),
+            vec![task("A-1", &sha, Some(VersionImpact::Fix))],
+            Some(policy("0.2.0")),
+        );
+        let d = found
+            .iter()
+            .find(|d| d.code == code::VERSION_BEHIND)
+            .expect("0.2.0 is older than the v0.3.0 it descends from");
+        for wanted in ["0.2.0", "v0.3.0", "older than", "version.release_tag"] {
+            assert!(
+                d.message.contains(wanted),
+                "the message must name {wanted}: {}",
+                d.message
+            );
+        }
+        assert!(
+            d.agent_instruction
+                .as_deref()
+                .is_some_and(|i| i.contains("0.3.0") && i.contains("release_tag")),
+            "the fix branches with the message: {:?}",
+            d.agent_instruction
+        );
+        // And the ordinary message is *not* used for it: "has not moved far
+        // enough" is false of a version that moved backwards.
+        assert!(!d.message.contains("requires"), "{}", d.message);
+    }
+
+    /// **The levels are named when no task declared anything** (`A1-313`,
+    /// audit).
+    ///
+    /// It read "2 tasks closed since `v0.3.0`, and the 2 tasks closed here imply
+    /// it" -- the same clause twice, neither of them saying what was implied.
+    #[test]
+    fn a_floor_raised_finding_names_the_level_rather_than_a_task() {
+        let dir = tempfile::Builder::new()
+            .tempdir_in(aplan_core::fixture::fixture_root())
+            .expect("tempdir");
+        let repo = Repository::init(dir.path()).expect("init");
+        let sha = released_at(&repo, "v1.0.0");
+        // A cut closing in the window owes `feature` from its level alone, which
+        // above 1.0 is a minor and therefore more than a patch bump.
+        let mut cut = task("M-c", &sha, None);
+        cut.tags = vec![aplan_core::task::MILESTONE_TAG.to_string()];
+        let found = run(dir.path(), vec![cut], Some(policy("1.0.1")));
+        let d = found
+            .iter()
+            .find(|d| d.code == code::VERSION_BEHIND)
+            .expect("a cut closed and the tree bumped only a patch");
+        assert!(
+            d.message.contains("their levels imply `feature`"),
+            "{}",
+            d.message
+        );
+        assert_eq!(
+            d.task, None,
+            "nothing claimed this, so no task is accused of it"
+        );
+    }
+
+    /// **A shallow clone is reported before the command runs** (`A1-177`,
+    /// `A1-301`).
+    ///
+    /// Its history stops at the graft, so no tag is reachable and nothing can be
+    /// measured. Said once, and said *before* spawning the adopter's command,
+    /// because the answer could not have been used.
+    #[test]
+    fn a_shallow_clone_is_reported_rather_than_judged() {
+        let dir = tempfile::Builder::new()
+            .tempdir_in(aplan_core::fixture::fixture_root())
+            .expect("tempdir");
+        let repo = Repository::init(dir.path()).expect("init");
+        let sha = released(&repo);
+        let head = repo
+            .head()
+            .expect("head")
+            .peel_to_commit()
+            .expect("commit")
+            .id()
+            .to_string();
+        std::fs::write(dir.path().join(".git/shallow"), format!("{head}\n")).expect("shallow");
+        // A command that would *fail* if it ran, so the assertion is that it did
+        // not: a shallow clone is answered without spending a subprocess.
+        let mut never = policy("0.3.1");
+        never
+            .current
+            .as_mut()
+            .expect("the command")
+            .command
+            .clone_from(&vec!["no-such-program-anywhere-4f2a".to_string()]);
+        let found = run(
+            dir.path(),
+            vec![task("A-1", &sha, Some(VersionImpact::Breaking))],
+            Some(never),
+        );
+        let d = found
+            .iter()
+            .find(|d| d.code == code::VERSION_BEHIND)
+            .expect("a shallow clone is reported");
+        assert!(
+            d.message.contains("shallow clone") && d.message.contains("about the checkout"),
+            "{}",
+            d.message
+        );
+        assert!(
+            !d.message.contains("could not be read"),
+            "the command must not have been run at all: {}",
+            d.message
+        );
+    }
+
+    /// **The artifact against the claim, in both directions** (`A1-314`).
+    ///
+    /// The rule fires one way only: a checker finding a break where the plan
+    /// claims less is a finding, and one finding none where the plan claims
+    /// `breaking` is silent. ADR-0034 allows claiming more than a floor, and an
+    /// API differ cannot see a behavioural break at all, so reporting an
+    /// over-claim would punish the one habit that is always safe.
+    #[test]
+    fn a_checker_that_contradicts_the_claim_names_both_of_them() {
+        let dir = tempfile::Builder::new()
+            .tempdir_in(aplan_core::fixture::fixture_root())
+            .expect("tempdir");
+        let repo = Repository::init(dir.path()).expect("init");
+        let sha = released(&repo);
+        let with = |impact, compatible: bool| {
+            let mut p = policy("0.3.1");
+            p.check = Some(aplan_config::DeclaredCommand {
+                command: vec![if compatible { "true" } else { "false" }.to_string()],
+                timeout_seconds: None,
+                max_memory: None,
+                max_processes: None,
+                wrap: None,
+            });
+            run(dir.path(), vec![task("A-1", &sha, impact)], Some(p))
+        };
+
+        // A break the plan did not claim.
+        let found = with(Some(VersionImpact::Fix), false);
+        let d = found
+            .iter()
+            .find(|d| d.code == code::IMPACT_CONTRADICTED)
+            .expect("the checker found a break the plan does not claim");
+        assert_eq!(d.severity, aplan_core::diagnostic::Severity::Error);
+        assert_eq!(d.task.as_deref(), Some("A-1"), "it lands on the claim");
+        for wanted in ["not compatible", "`fix`", "v0.3.0"] {
+            assert!(
+                d.message.contains(wanted),
+                "the message must name {wanted}: {}",
+                d.message
+            );
+        }
+
+        // The claim the checker agrees with, and the over-claim it cannot see.
+        for (impact, compatible) in [
+            (Some(VersionImpact::Breaking), false),
+            (Some(VersionImpact::Fix), true),
+            (Some(VersionImpact::Breaking), true),
+        ] {
+            assert!(
+                !with(impact, compatible)
+                    .iter()
+                    .any(|d| d.code == code::IMPACT_CONTRADICTED),
+                "{impact:?} against compatible={compatible} should be silent"
+            );
+        }
+    }
+
+    /// A checker that could not be asked is a fault of the configuration, and no
+    /// claim is called false on the strength of it (`A1-066`, `A1-300`).
+    #[test]
+    fn a_checker_that_cannot_be_asked_contradicts_nothing() {
+        let dir = tempfile::Builder::new()
+            .tempdir_in(aplan_core::fixture::fixture_root())
+            .expect("tempdir");
+        let repo = Repository::init(dir.path()).expect("init");
+        let sha = released(&repo);
+        let mut p = policy("0.3.1");
+        p.check = Some(aplan_config::DeclaredCommand {
+            command: vec!["no-such-checker-anywhere-4f2a".to_string()],
+            timeout_seconds: None,
+            max_memory: None,
+            max_processes: None,
+            wrap: None,
+        });
+        let found = run(
+            dir.path(),
+            vec![task("A-1", &sha, Some(VersionImpact::Fix))],
+            Some(p),
+        );
+        let d = found
+            .iter()
+            .find(|d| d.code == code::IMPACT_CONTRADICTED)
+            .expect("a checker that cannot be asked is reported");
+        assert!(
+            d.message.contains("could not be asked") && d.message.contains("version.check"),
+            "it blames the configuration: {}",
+            d.message
+        );
+        assert!(
+            !d.message.contains("not compatible"),
+            "no claim may be called false on the strength of a checker that never ran: {}",
+            d.message
+        );
+        assert_eq!(d.task, None, "no task is accused of it");
+    }
+
+    /// **The checker runs on its own key, and on the windows `APLAN048` gives
+    /// up on** (`A1-314`, audit).
+    ///
+    /// Three ways it was silently off: gated behind `version.current`, which it
+    /// does not need; skipped when the tag's *name* spells no version, which the
+    /// checker does not care about because it compares the built artifact
+    /// against its last release; and skipped on a first release, where the
+    /// window is still perfectly measurable. A rule that is off in three
+    /// configurations and says so in none of them is the defect this project is
+    /// named for.
+    #[test]
+    fn the_checker_is_not_gated_behind_the_version_reader() {
+        let dir = tempfile::Builder::new()
+            .tempdir_in(aplan_core::fixture::fixture_root())
+            .expect("tempdir");
+        let repo = Repository::init(dir.path()).expect("init");
+        let sha = released_at(&repo, "release-2026-09");
+        let checker = |current: Option<&str>, release_tag: Option<&str>| {
+            let mut p = current.map_or_else(
+                || aplan_config::VersionPolicy {
+                    require_impact: None,
+                    levels: None,
+                    release_tag: None,
+                    current: None,
+                    check: None,
+                },
+                policy,
+            );
+            p.release_tag = release_tag.map(ToString::to_string);
+            p.check = Some(aplan_config::DeclaredCommand {
+                command: vec!["false".to_string()],
+                timeout_seconds: None,
+                max_memory: None,
+                max_processes: None,
+                wrap: None,
+            });
+            run(
+                dir.path(),
+                vec![task("A-1", &sha, Some(VersionImpact::Fix))],
+                Some(p),
+            )
+        };
+        // No `version.current` at all: there is no number to judge, and the
+        // checker's question does not involve one.
+        assert!(
+            checker(None, Some("release-*"))
+                .iter()
+                .any(|d| d.code == code::IMPACT_CONTRADICTED),
+            "declaring only the checker must not be inert"
+        );
+        // A tag matching the pattern whose name spells no version. `APLAN048`
+        // has nothing to measure from; this rule never needed it.
+        assert!(
+            checker(Some("0.3.1"), Some("release-*"))
+                .iter()
+                .any(|d| d.code == code::IMPACT_CONTRADICTED),
+            "an unreadable tag name is not this rule's problem"
+        );
+    }
+
+    /// **What the most expensive command this tool spawns actually cost**
+    /// (`A1-309`, `A1-314` audit).
+    ///
+    /// Its own documentation leans on being bounded because an API differ
+    /// compiles a workspace twice, and an adopter sizing `max_memory` had
+    /// nothing to size it by: the spend was collected for every other declared
+    /// command and not for this one.
+    #[test]
+    fn the_checker_reports_what_it_spent() {
+        let dir = tempfile::Builder::new()
+            .tempdir_in(aplan_core::fixture::fixture_root())
+            .expect("tempdir");
+        let repo = Repository::init(dir.path()).expect("init");
+        let sha = released(&repo);
+        let mut p = policy("0.3.1");
+        p.check = Some(aplan_config::DeclaredCommand {
+            command: vec!["true".to_string()],
+            timeout_seconds: None,
+            max_memory: None,
+            max_processes: None,
+            wrap: None,
+        });
+        let plan = Plan {
+            tasks: vec![LoadedTask {
+                task: task("A-1", &sha, Some(VersionImpact::Fix)),
+                path: "plan/tasks/x.md".into(),
+                fields: aplan_core::load::FieldLines::new(),
+                criteria: aplan_core::load::Criteria::default(),
+            }],
+            load_diagnostics: Vec::new(),
+            unloadable: std::collections::BTreeMap::new(),
+        };
+        let opts = VerifyOptions {
+            version: Some(p),
+            ..VerifyOptions::default()
+        };
+        let (_, spend) = verify_measured(&plan, dir.path(), &opts).expect("verify runs");
+        assert!(
+            spend.iter().any(|(what, _)| what.contains("version.check")),
+            "the checker's cost must reach the run report: {spend:?}"
+        );
+    }
+
+    /// **A checker killed rather than exited answered nothing** (`A1-314`,
+    /// audit).
+    ///
+    /// `ExitStatus::success()` is false for a command the kernel killed, and
+    /// `version.check`'s "no" means *the artifact is incompatible* -- so a
+    /// checker that segfaulted reported a break that was not there. An API
+    /// differ crashing is exactly the shape that produces it.
+    #[test]
+    fn a_checker_the_kernel_killed_contradicts_nothing() {
+        let dir = tempfile::Builder::new()
+            .tempdir_in(aplan_core::fixture::fixture_root())
+            .expect("tempdir");
+        let repo = Repository::init(dir.path()).expect("init");
+        let sha = released(&repo);
+        let mut p = policy("0.3.1");
+        p.check = Some(aplan_config::DeclaredCommand {
+            command: vec![
+                "sh".to_string(),
+                "-c".to_string(),
+                "kill -SEGV $$".to_string(),
+            ],
+            timeout_seconds: None,
+            max_memory: None,
+            max_processes: None,
+            wrap: None,
+        });
+        let found = run(
+            dir.path(),
+            vec![task("A-1", &sha, Some(VersionImpact::Fix))],
+            Some(p),
+        );
+        let d = found
+            .iter()
+            .find(|d| d.code == code::IMPACT_CONTRADICTED)
+            .expect("a checker that died is reported");
+        assert!(
+            d.message.contains("killed rather than exiting"),
+            "it must not read as an answer: {}",
+            d.message
+        );
+        assert!(
+            !d.message.contains("not compatible"),
+            "no break may be claimed on the strength of a crash: {}",
+            d.message
+        );
+    }
+
+    /// A command that could not be run is a fault of the configuration, never a
+    /// version that is behind (`A1-066`, `A1-300`).
+    #[test]
+    fn a_broken_command_is_reported_as_itself() {
+        let dir = tempfile::Builder::new()
+            .tempdir_in(aplan_core::fixture::fixture_root())
+            .expect("tempdir");
+        let repo = Repository::init(dir.path()).expect("init");
+        let sha = released(&repo);
+        let mut broken = policy("0.3.1");
+        broken
+            .current
+            .as_mut()
+            .expect("the command")
+            .command
+            .clone_from(&vec!["no-such-program-anywhere-4f2a".to_string()]);
+        let found = run(
+            dir.path(),
+            vec![task("A-1", &sha, Some(VersionImpact::Breaking))],
+            Some(broken),
+        );
+        let d = found
+            .iter()
+            .find(|d| d.code == code::VERSION_BEHIND)
+            .expect("a checker that cannot run is reported");
+        assert!(
+            d.message.contains("could not be read") && d.message.contains("version.current"),
+            "it blames the configuration, not the version: {}",
+            d.message
+        );
+        assert!(
+            !d.message.contains("requires"),
+            "no number may be claimed on the strength of a command that never ran: {}",
+            d.message
         );
     }
 }

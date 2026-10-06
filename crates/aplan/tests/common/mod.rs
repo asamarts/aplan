@@ -29,9 +29,14 @@
 //! otherwise warn about the one it did not need.
 #![allow(dead_code)]
 
+pub mod census;
+pub mod sources;
+
 use std::io::Write as _;
-use std::path::Path;
+use std::os::unix::fs::MetadataExt as _;
+use std::path::{Path, PathBuf};
 use std::process::Command;
+use std::sync::OnceLock;
 
 /// The environment variable naming the file invocations are recorded to.
 ///
@@ -45,6 +50,113 @@ pub struct Run {
     pub stdout: String,
     pub stderr: String,
     pub code: i32,
+}
+
+/// One immutable copy of the binary an integration-test process exercises.
+///
+/// Cargo gives every integration test the same path in `target/debug`, and a
+/// rebuild may atomically replace that path while the workspace suite is still
+/// running. Holding the path therefore does not hold the artifact. The copy is
+/// kept for the process lifetime so two commands in one test cannot silently
+/// execute builds from opposite sides of a concurrent commit (`A1-242`).
+pub struct BinarySnapshot {
+    path: PathBuf,
+}
+
+/// Old binary snapshots outlive any test process that could still name them.
+const KEEP_BINARY_SNAPSHOTS_FOR: std::time::Duration = std::time::Duration::from_secs(60 * 60);
+
+impl BinarySnapshot {
+    /// Hold the inode at `source` under one cache path shared by this build.
+    ///
+    /// A hard link is the snapshot: Cargo may replace its path, but it cannot
+    /// change the inode already linked here. Keying the cache by device and
+    /// inode makes every integration-test process reuse the same link instead
+    /// of allocating another roughly 200 MB instrumented executable. The
+    /// cache is inside Cargo's target tree, so coverage cleanup and `cargo
+    /// clean` remove it; an age sweep bounds ordinary rebuilds (`A1-399`).
+    #[must_use]
+    pub fn capture(source: &Path) -> Self {
+        let root = source
+            .parent()
+            .expect("the binary has a parent directory")
+            .join(".aplan-test-binaries");
+        std::fs::create_dir_all(&root).expect("create the binary snapshot cache");
+        let staging = tempfile::Builder::new()
+            .prefix("aplan-binary-stage-")
+            .tempdir_in(&root)
+            .expect("create the binary snapshot staging directory");
+        let name = source.file_name().expect("the binary has a file name");
+        let staged = staging.path().join(name);
+        std::fs::hard_link(source, &staged).expect("hard-link the binary under test");
+
+        let metadata = staged
+            .metadata()
+            .expect("read the binary snapshot metadata");
+        let dir = root.join(format!(
+            "aplan-binary-{}-{}",
+            metadata.dev(),
+            metadata.ino()
+        ));
+        std::fs::create_dir_all(&dir).expect("create the stable binary snapshot directory");
+        let path = dir.join(name);
+        match std::fs::hard_link(&staged, &path) {
+            Ok(()) => {}
+            Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => {
+                let existing = path
+                    .metadata()
+                    .expect("read the shared binary snapshot metadata");
+                assert_eq!(
+                    (existing.dev(), existing.ino()),
+                    (metadata.dev(), metadata.ino()),
+                    "the cache path for one binary inode names another inode"
+                );
+            }
+            Err(error) => panic!("cache the binary snapshot: {error}"),
+        }
+        clear_old_binary_snapshots(&root, &dir);
+        Self { path }
+    }
+
+    /// The immutable executable path.
+    #[must_use]
+    pub fn path(&self) -> &Path {
+        &self.path
+    }
+}
+
+/// Retire builds old enough that no integration-test process can still need
+/// one. A new build may start while an old suite is running -- the race this
+/// cache exists for -- so freshness, not merely being a different inode, is
+/// the safety boundary.
+fn clear_old_binary_snapshots(root: &Path, current: &Path) {
+    let Ok(entries) = std::fs::read_dir(root) else {
+        return;
+    };
+    let cutoff = std::time::SystemTime::now() - KEEP_BINARY_SNAPSHOTS_FOR;
+    for entry in entries.flatten() {
+        let path = entry.path();
+        let is_snapshot = entry
+            .file_name()
+            .to_str()
+            .is_some_and(|name| name.starts_with("aplan-binary-"));
+        let old = entry
+            .metadata()
+            .and_then(|metadata| metadata.modified())
+            .is_ok_and(|modified| modified < cutoff);
+        if path != current && is_snapshot && old {
+            let _ = std::fs::remove_dir_all(path);
+        }
+    }
+}
+
+/// The binary this integration-test process exercises, resolved once.
+#[must_use]
+pub fn binary() -> &'static Path {
+    static BINARY: OnceLock<BinarySnapshot> = OnceLock::new();
+    BINARY
+        .get_or_init(|| BinarySnapshot::capture(Path::new(env!("CARGO_BIN_EXE_aplan"))))
+        .path()
 }
 
 impl Run {
@@ -83,9 +195,31 @@ impl Run {
 /// the argument vector belongs in this call.
 pub fn command(dir: &Path, args: &[&str]) -> Command {
     record(args);
-    let mut cmd = Command::new(env!("CARGO_BIN_EXE_aplan"));
+    let mut cmd = Command::new(binary());
     cmd.args(args).current_dir(dir);
+    colour_baseline(&mut cmd);
     cmd
+}
+
+/// Give colour-sensitive fixtures one known parent environment (`A1-346`).
+///
+/// A contributor's `NO_COLOR` is a valid preference for commands they run. It
+/// is not an input to an integration test unless that test supplies it: the
+/// colour suite asserts both sides of the environment contract and its default
+/// terminal cases otherwise change meaning under the caller's shell profile.
+/// `TERM=dumb` matters independently of `NO_COLOR`, so merely removing the
+/// three policy variables is not enough.
+///
+/// Callers deliberately retain the last word. [`command`] returns the prepared
+/// value for a test to extend, and the pty launcher applies its explicit `env`
+/// after this function.
+fn colour_baseline(command: &mut Command) {
+    command
+        .env_remove("NO_COLOR")
+        .env_remove("CLICOLOR")
+        .env_remove("CLICOLOR_FORCE")
+        .env("TERM", "xterm-256color")
+        .env("COLORTERM", "truecolor");
 }
 
 /// Run one `git` command for a fixture, fail closed, and never leave the
@@ -314,7 +448,7 @@ fn on_a_terminal_full(
     args: &[&str],
     stderr_piped: bool,
 ) -> Option<String> {
-    let binary = env!("CARGO_BIN_EXE_aplan");
+    let binary = binary().display();
     let quoted: Vec<String> = args.iter().map(|a| format!("'{a}'")).collect();
     let redirect = if stderr_piped { " 2>/dev/null" } else { "" };
     let inner = format!(
@@ -323,6 +457,7 @@ fn on_a_terminal_full(
     );
 
     let mut command = Command::new("script");
+    colour_baseline(&mut command);
     command
         .args(["-qc", &inner, "/dev/null"])
         .current_dir(dir)

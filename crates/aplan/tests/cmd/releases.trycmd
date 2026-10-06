@@ -14,14 +14,17 @@ rather than repeating the rows of the cuts it closes:
 $ aplan roadmap
 roadmap: 2 cut(s), 1 release(s), 2 task(s), 3.0d effort
 
-v0.1 (release)  The first release  [todo]  0/2 done, 2 ready, 0 blocked, crit 2.0d, 3.0d effort
+v0.1 (release)  The first release  [todo]
+0/2 done, 2 ready, 0 blocked, crit 2.0d to here, 3.0d effort
   closes s0 (M-s0)
   closes s1 (M-s1)
 
-s0  First cut  [todo]  0/1 done, 1 ready, 0 blocked, crit 1.0d, 1.0d effort
+s0  First cut  [todo]
+0/1 done, 1 ready, 0 blocked, crit 1.0d, 1.0d effort
   IP-1        todo          Work in the first cut
 
-s1  Second cut  [todo]  0/1 done, 1 ready, 0 blocked, crit 2.0d, 2.0d effort
+s1  Second cut  [todo]
+0/1 done, 1 ready, 0 blocked, crit 2.0d, 2.0d effort
   IP-2        todo          Work in the second cut
 
 (statuses are as claimed in the plan and gated by `aplan verify` in CI)

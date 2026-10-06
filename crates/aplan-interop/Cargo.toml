@@ -9,6 +9,7 @@ repository.workspace = true
 authors.workspace = true
 
 [dependencies]
+aplan-config.workspace = true
 aplan-core.workspace = true
 # For `sanitize`, the one defence a generated document needs and this crate does
 # not own: text a plan supplied is untrusted wherever it lands, and a second copy

@@ -14,6 +14,11 @@ workspace = true
 [dependencies]
 aplan-core.workspace = true
 aplan-config.workspace = true
+# For `sanitize`, which this crate does not own: a failed command's output is
+# untrusted text, and a second copy of that filter here would be the drift this
+# tool exists to report (`A1-365`, the reason `aplan-interop` took the same
+# dependency in `A1-189`).
+aplan-output.workspace = true
 git2 = { version = "0.21", default-features = false }
 globset = "0.4"
 thiserror.workspace = true

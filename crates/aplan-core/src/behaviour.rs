@@ -290,6 +290,42 @@ pub const ALL: &[Behaviour] = &[
             "a_cut_is_named_by_its_id_or_by_its_label",
         ],
     },
+    // `A1-251`. `supersede` gained `--tag`, which is assertable on its own, so
+    // the flag is not what is named here. What a name is owed is the *default*:
+    // a successor now inherits the predecessor's tags, minus the words that
+    // place a task in a runway, and its `--cut` is part of the plan the mutation
+    // gate judges rather than something applied afterwards. Neither is visible
+    // to `--require supersede`, which passes on the build where the command
+    // exists and refuses every repair in a plan with a mandatory family.
+    Behaviour {
+        name: "supersede.successor_is_placed_and_classified",
+        what: "a successor inherits the predecessor's subject tags and is judged in the cut \
+               `--cut` names, so `supersede` itself can repair a plan that requires a tag \
+               family and a cut membership",
+        proof: &[
+            "a_successor_satisfies_a_mandatory_family_and_the_cut_it_is_given",
+            "an_explicit_tag_replaces_what_would_have_been_inherited",
+            "a_runway_role_is_not_inherited_but_the_subject_is",
+            "cross_cutting_is_not_inherited_because_it_is_a_waiver",
+        ],
+    },
+    // `A1-357`. `--tag` is a flag, and a flag is not advertised in `facts`, so a
+    // consumer cannot tell the build that takes it from the build that does not:
+    // `--require import` passes on both, and on the older one every import into a
+    // plan with a declared vocabulary fails `APLAN030` with no way to prevent it.
+    // The notice half is the same story -- what a run *says* is not a rule, a
+    // command or a format.
+    Behaviour {
+        name: "import.carries_the_plans_vocabulary",
+        what: "`import` gives every task it writes the tags the invocation names, and says \
+               which declared `tag_families` member the import would otherwise leave \
+               missing, so a plan with a mandatory vocabulary can be imported into",
+        proof: &[
+            "an_import_names_the_family_it_cannot_satisfy_and_takes_the_answer",
+            "a_plan_with_no_family_is_told_nothing_new",
+            "the_tag_reaches_every_imported_task_and_is_written_once",
+        ],
+    },
     // `A1-146`, ADR-0022. A milestone tagged `release` is a checkpoint over
     // cuts: `APLAN021` stops calling it an emptied cut, and `roadmap` rolls up
     // the work of the cuts it closes instead of reporting `0/0`. No rule code,
@@ -529,6 +565,46 @@ pub const ALL: &[Behaviour] = &[
             "the_machine_formats_carry_no_colour_when_it_is_forced",
         ],
     },
+    // `A1-191`, ADR-0035. Same shape as the entry below and as `traces.table_rows`
+    // above: a rule accepting more than it did, with nothing new in `facts` to
+    // see it by.
+    Behaviour {
+        name: "traces.structured_documents",
+        what: "a `traces` anchor may address a node of a YAML or JSON document, as a JSON \
+               Pointer (`#/states/provisioning`) or a JSONPath (`#$.states.provisioning`)",
+        proof: &[
+            "both_spellings_address_the_same_node",
+            "every_construct_that_could_match_more_than_one_node_is_refused_by_name",
+            "layout_is_not_drift_and_a_value_is",
+            "a_yaml_node_is_traceable_and_drifts_when_its_value_changes",
+        ],
+    },
+    // `A1-297`. The widening has no new rule code, command, config key, format or
+    // evidence kind, so `facts` reported the same surface before and after it and
+    // an adopter had no way to ask which behaviour their binary has.
+    Behaviour {
+        name: "traces.unstamped_is_reported",
+        what: "a `done` task that stamps none of its anchored `traces` is reported by \
+               `APLAN028`, rather than exempt as a task closed before drift was enabled",
+        proof: &["a_closed_task_that_stamps_nothing_is_reported_but_an_unstampable_trace_is_not"],
+    },
+    // `A1-325`, ADR-0037. No new rule code, command, config key, format or
+    // evidence kind: the same artifacts, one line longer, and the same
+    // `APLAN041` reporting a difference it could not previously name. A
+    // consumer pinning a build in CI and regenerating locally is exactly the
+    // reader who needs to ask which of the two writes the line, and before
+    // this name there was nothing in `facts` that changed.
+    Behaviour {
+        name: "generated.names_the_build_that_wrote_it",
+        what: "a generated `ROADMAP.status.md` and `AGENTS.md` block carry a comment naming \
+               the version and surface that wrote them, and a drift report names the build \
+               doing the checking",
+        proof: &[
+            "the_committed_roadmap_says_which_build_wrote_it",
+            "the_written_block_names_the_build_that_wrote_it",
+            "a_block_written_by_another_build_is_reported_as_a_build_difference",
+        ],
+    },
     Behaviour {
         name: "why.cut_bounded_by_default",
         what: "`aplan why` reports an unfinished cut as itself rather than walking into its \
@@ -538,6 +614,50 @@ pub const ALL: &[Behaviour] = &[
             "a_late_task_names_its_own_blockers_and_the_cut_in_front_of_it",
             "a_chain_of_ordinary_tasks_is_walked_whole",
             "the_json_names_the_traversal_and_what_was_folded",
+        ],
+    },
+    // `A1-230`. No new command, flag, rule or config key: the same `add`,
+    // returning the same shape, and a build predating it refuses most of a
+    // fleet's writes *confidently* -- `already exists` is a true sentence about
+    // a file, so there is nothing to notice and nothing in the surface that
+    // says which answer a binary gives. Measured at three of eight agents
+    // landing before and eight of eight after. A consumer running agents
+    // against a shared checkout is the reader who has to ask, and the id
+    // strategy they would otherwise reach for costs a readable id in every
+    // `blocked_by` and every filename.
+    // `A1-364`. The shape this list exists for, by its own test at the top of
+    // the file: no new command, no new flag, no new rule, no new config key in
+    // `.aplan.yml` -- and a build without it resolves a claimant's identity from
+    // a different set of sources, confidently, with nothing in the surface to
+    // say which. An adopter who writes the file and finds it ignored has no way
+    // to tell an old binary from a misplaced file.
+    Behaviour {
+        name: "identity.reads_a_per_user_file",
+        what: "a claimant's name may come from a per-user file outside the repository, read \
+               between the environment variable and git's `user.name`, and holding nothing a \
+               rule reads",
+        proof: &[
+            "the_user_file_loses_to_the_environment_and_beats_git",
+            "every_field_is_about_the_actor_and_not_the_plan",
+            "a_relative_or_empty_variable_names_no_file_rather_than_one_in_the_repository",
+        ],
+    },
+    Behaviour {
+        name: "ids.sequential_survives_concurrent_writers",
+        what: "a command that mints an id re-reads the plan and mints again when another \
+               writer takes it first, so concurrent writers do not serialise on the id",
+        proof: &[
+            "no_two_concurrent_writers_are_given_the_same_id",
+            "eight_concurrent_writers_all_land",
+            "a_lost_id_leaves_nothing_behind_in_the_cut",
+            // The other writer. `add` reports a collision as
+            // `EmitError::Exists` and these two as `SaveError::Exists`, down a
+            // separate branch -- which this list covered for one of them and
+            // not the other two until the audit asked (`A1-230`).
+            "eight_concurrent_supersedes_all_land",
+            "eight_concurrent_manifests_all_land_whole",
+            "a_supplied_id_that_is_taken_is_refused_without_waiting",
+            "a_failed_draw_waits_the_whole_window",
         ],
     },
 ];

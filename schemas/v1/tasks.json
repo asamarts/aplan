@@ -95,6 +95,13 @@
           },
           "type": "array"
         },
+        "contains": {
+          "description": "The checkpoints this one contains, whose work rolls up into it at any\ndepth (ADR-0042). Not a dependency either: a milestone in `blocked_by`\n*sequences* two cuts (ADR-0013), and the two meanings are what this\nseparates.",
+          "items": {
+            "type": "string"
+          },
+          "type": "array"
+        },
         "cut": {
           "description": "The label of the cut this task belongs to, e.g. `v0.8` or `s3`.\n\nA task belongs to exactly one cut where the repository sets\n`require_cut_membership`, which `APLAN022` then enforces in both\ndirections. Where it does not, a task may be listed by several\nmilestones, and this reports the first in roadmap order: deterministic,\nbut a rollup by cut on such a plan will under-count, and the plan has not\nasked the tool to stop it.",
           "type": [
@@ -165,6 +172,13 @@
             "null"
           ]
         },
+        "ratified_by": {
+          "description": "Who must bless this task before it counts as finished, which is not a\ndependency either (ADR-0036): `ready` does not read it, and `APLAN046`\nrefuses `done` while a ratifier is unfinished.",
+          "items": {
+            "type": "string"
+          },
+          "type": "array"
+        },
         "ready": {
           "description": "Whether every blocker is `done`, including the inherited cut edges. The\nsame answer `aplan ready` gives, so a consumer cannot derive a different\none.",
           "type": "boolean"
@@ -202,6 +216,13 @@
           },
           "type": "array"
         },
+        "version": {
+          "description": "The version a **release** produced, written when it closed, `null`\neverywhere else (`A1-339`, ADR-0038).\n\nCarried because it is a *record* rather than a derivation: a consumer\nasking what a release contained reads this instead of re-deriving from a\nplan that has since moved, which is the whole argument for the field\nexisting. `APLAN050` is the rule that keeps it on a release and readable.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
         "version_impact": {
           "anyOf": [
             {
@@ -234,6 +255,8 @@
         "paths",
         "traces",
         "prefer_after",
+        "ratified_by",
+        "contains",
         "trace_fingerprints"
       ],
       "type": "object"

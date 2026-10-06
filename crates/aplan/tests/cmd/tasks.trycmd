@@ -55,10 +55,13 @@ $ aplan tasks --format json
       ],
       "traces": [],
       "prefer_after": [],
+      "ratified_by": [],
+      "contains": [],
       "trace_fingerprints": {},
       "revisit_at": null,
       "version_impact": null,
-      "version_impact_reason": null
+      "version_impact_reason": null,
+      "version": null
     },
     {
       "id": "A-002",
@@ -82,10 +85,13 @@ $ aplan tasks --format json
       "paths": [],
       "traces": [],
       "prefer_after": [],
+      "ratified_by": [],
+      "contains": [],
       "trace_fingerprints": {},
       "revisit_at": null,
       "version_impact": null,
-      "version_impact_reason": null
+      "version_impact_reason": null,
+      "version": null
     },
     {
       "id": "B-001",
@@ -109,10 +115,13 @@ $ aplan tasks --format json
       "paths": [],
       "traces": [],
       "prefer_after": [],
+      "ratified_by": [],
+      "contains": [],
       "trace_fingerprints": {},
       "revisit_at": null,
       "version_impact": null,
-      "version_impact_reason": null
+      "version_impact_reason": null,
+      "version": null
     },
     {
       "id": "C-001",
@@ -134,10 +143,13 @@ $ aplan tasks --format json
       "paths": [],
       "traces": [],
       "prefer_after": [],
+      "ratified_by": [],
+      "contains": [],
       "trace_fingerprints": {},
       "revisit_at": null,
       "version_impact": null,
-      "version_impact_reason": null
+      "version_impact_reason": null,
+      "version": null
     }
   ]
 }

@@ -127,6 +127,10 @@ fn the_server_initializes_and_lists_exactly_its_tools() {
             "aplan_show",
             "aplan_dep",
             "aplan_close",
+            "aplan_claim",
+            "aplan_release",
+            "aplan_start",
+            "aplan_stop",
         ],
         "the surface an agent sees changed. This list is deliberately short: a tool \
          earns a place by being on the loop an agent must complete, which is why \
@@ -135,6 +139,57 @@ fn the_server_initializes_and_lists_exactly_its_tools() {
          `critical-path` are not. `dep` earned its place because an agent that can \
          create tasks could say which comes first only at creation, and afterwards \
          not at all (`A1-124`)"
+    );
+}
+
+/// **The whole agent-facing surface, pinned byte for byte** (`A1-331`).
+///
+/// The test above asserts the nine tool *names*. That is the half a reader
+/// checks; the half an agent breaks on is the `inputSchema` beside each one,
+/// and nothing compared it. `A1-331` moved this server across an SDK major
+/// version on the strength of "the existing MCP tests pass", and the existing
+/// MCP tests would have passed with every schema silently reshaped.
+///
+/// Measured rather than assumed, which is the reason this exists: the `rmcp`
+/// 2.x and 3.x servers were run side by side and every reply, including the
+/// refusal for an unknown tool, came back byte-identical. That comparison was
+/// done by hand once. This is it committed, so the next SDK bump answers the
+/// same question without anybody remembering to ask.
+///
+/// Same bargain as `docs/rule-catalogue.md`: changing what an agent is told
+/// becomes a reviewable diff rather than something a consumer finds in their
+/// own logs. Regenerate with
+/// `APLAN_MCP_SURFACE=overwrite cargo test -p aplan --test mcp`.
+#[test]
+fn the_tool_surface_is_committed_and_current() {
+    let dir = plan();
+    let mut reqs = initialize();
+    reqs.push(serde_json::json!({ "jsonrpc": "2.0", "id": 2, "method": "tools/list" }));
+    let replies = talk(dir.path(), &reqs);
+    let tools = &reply(&replies, 2)["result"]["tools"];
+
+    let generated = format!(
+        "{}\n",
+        serde_json::to_string_pretty(tools).expect("the tool list is JSON")
+    );
+    let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/mcp-surface.json");
+
+    if std::env::var("APLAN_MCP_SURFACE").as_deref() == Ok("overwrite") {
+        std::fs::write(&path, &generated).expect("writing the surface fixture");
+        return;
+    }
+    let committed = std::fs::read_to_string(&path).unwrap_or_else(|e| {
+        panic!(
+            "cannot read {}: {e}. Regenerate with `APLAN_MCP_SURFACE=overwrite cargo test \
+             -p aplan --test mcp`",
+            path.display()
+        )
+    });
+    assert_eq!(
+        committed, generated,
+        "the surface an agent sees has changed. If that is deliberate, regenerate with \
+         `APLAN_MCP_SURFACE=overwrite cargo test -p aplan --test mcp` and let the diff be \
+         reviewed; if it is not, an SDK bump has reshaped the contract underneath you"
     );
 }
 
@@ -293,11 +348,19 @@ fn the_server_reports_the_same_identity_the_command_prints() {
          question a mismatch makes urgent"
     );
     assert_eq!(over_the_wire["schema"], "aplan/tool-identity/v1");
-    // The four facts the pilot needed, rather than only the shape.
-    for field in ["version", "source", "facts_sha256", "binary_sha256"] {
+    // The facts that this build can always report, rather than only the shape.
+    for field in ["version", "facts_sha256", "binary_sha256"] {
         assert!(
             over_the_wire[field].as_str().is_some_and(|s| !s.is_empty()),
-            "`{field}` is missing from an identity built in a checkout: {over_the_wire}"
+            "`{field}` is missing from the identity: {over_the_wire}"
+        );
+    }
+    // The build script may have run without a discoverable checkout even when
+    // this test now runs inside one; unknown provenance must stay absent.
+    if let Some(source) = over_the_wire.get("source") {
+        assert!(
+            source.as_str().is_some_and(|s| !s.is_empty()),
+            "a present source must name a commit: {over_the_wire}"
         );
     }
 }
@@ -400,4 +463,93 @@ fn a_config_this_build_cannot_read_still_answers_which_build_it_is() {
             "{how}: refused without saying what can still be asked: {said}"
         );
     }
+}
+
+/// **A per-user file this build cannot read does not corrupt the protocol**
+/// (`A1-364`, audit).
+///
+/// The server talks JSON-RPC on stdout, and `A1-364` made it read a file
+/// outside the repository that may be unreadable, unparseable, or hold a key
+/// `.aplan.yml` takes. Each of those produces a `note:` -- deliberately, because
+/// somebody wrote the file and believes it is in effect -- and a note on the
+/// wrong stream would be a line a client cannot parse, in the middle of a
+/// session, for a reason unrelated to anything it asked for.
+///
+/// **This test spawns its own server rather than using `talk`**, because that
+/// helper drops lines it cannot parse (`filter_map(..ok())`) and so cannot see
+/// the defect this is about: corruption would look identical to silence.
+///
+/// The agent reaching aplan through this server is the actor `A1-359` and
+/// `A1-364` exist for, so "the note goes to stderr" is a property of the
+/// feature rather than a detail of the implementation.
+#[test]
+fn a_bad_per_user_file_leaves_the_protocol_stream_intact() {
+    let dir = plan();
+    let home = tempfile::Builder::new()
+        .tempdir_in(aplan_core::fixture::fixture_root())
+        .expect("tempdir");
+    std::fs::create_dir_all(home.path().join(".config/aplan")).expect("mkdir");
+    // A key `.aplan.yml` takes: refused by name, which is the loudest of the
+    // three failures and therefore the one most likely to reach stdout.
+    std::fs::write(
+        home.path().join(".config/aplan/config.yml"),
+        "deny_warnings: false\n",
+    )
+    .expect("write");
+
+    let root = dir.path().display().to_string();
+    let mut child = common::command(std::path::Path::new("."), &["mcp", "--root", &root])
+        .env("HOME", home.path())
+        .env_remove("XDG_CONFIG_HOME")
+        .env_remove("APLAN_OWNER")
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .expect("spawn aplan mcp");
+
+    {
+        let mut stdin = child.stdin.take().expect("stdin");
+        for r in initialize() {
+            writeln!(stdin, "{r}").expect("write");
+        }
+        writeln!(
+            stdin,
+            "{}",
+            serde_json::json!({
+                "jsonrpc": "2.0", "id": 2, "method": "tools/call",
+                "params": { "name": "aplan_claim", "arguments": { "id": "A-1", "as": "ada" } }
+            })
+        )
+        .expect("write");
+    }
+    let out = child.wait_with_output().expect("wait");
+
+    // Every line, not the ones that happen to parse.
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    let lines: Vec<&str> = stdout.lines().filter(|l| !l.trim().is_empty()).collect();
+    assert!(!lines.is_empty(), "the server said nothing at all");
+    for line in &lines {
+        let parsed: serde_json::Value = serde_json::from_str(line)
+            .unwrap_or_else(|e| panic!("a line on the protocol stream is not JSON: {e}\n{line}"));
+        assert_eq!(
+            parsed["jsonrpc"], "2.0",
+            "a line on the protocol stream is not JSON-RPC:\n{line}"
+        );
+    }
+
+    // And the note did happen, on the stream that is for notes.
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert!(
+        stderr.contains("never a repository's policy"),
+        "the unreadable per-user file was not reported at all: {stderr}"
+    );
+
+    // The tool still did its job: a per-user file nobody can read is not a
+    // reason to refuse a claim that named its own holder.
+    let held = std::fs::read_to_string(dir.path().join("tasks/A-1.md")).expect("read");
+    assert!(
+        held.contains("owner: ada"),
+        "the claim did not go through:\n{held}"
+    );
 }

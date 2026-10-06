@@ -39,6 +39,10 @@ run_gate clippy
 run_gate doc
 run_gate test
 run_gate spec
+# The declared `rust-version` compiled, not just compared (`A1-330`). Cheap
+# after the first run: its own target directory, so switching compilers never
+# invalidates the stable build beside it.
+run_gate msrv-build
 run_gate style
 run_gate coverage
 run_gate dogfood

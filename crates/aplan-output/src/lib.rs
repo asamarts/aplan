@@ -493,10 +493,20 @@ fn sarif_level(severity: Severity) -> &'static str {
 /// The message a dashboard shows: the diagnostic, prefixed by the task it
 /// concerns, since a SARIF result carries no `task` field of its own.
 fn sarif_message(d: &Diagnostic) -> String {
-    match &d.task {
+    let head = match &d.task {
         Some(task) => format!("{task}: {}", d.message),
         None => d.message.clone(),
+    };
+    if d.detail.is_empty() {
+        return head;
     }
+    // **In the message, not a property bag** (`A1-365`). SARIF has
+    // `properties` for a tool's own data, and a dashboard is free to ignore it;
+    // what a reviewer sees is the message. A failed test's output is the reason
+    // the finding exists, so it goes where the reviewer will read it, and the
+    // newlines are the ones the command printed -- `message.text` is defined as
+    // plain text and carries them.
+    format!("{head}\n{}", d.detail.join("\n"))
 }
 
 /// A SARIF artifact URI: forward slashes on every platform.
@@ -576,6 +586,27 @@ fn render_human(report: &Report, kind: Kind<'_>, policy: &Verdict) -> std::io::R
             })
             .into_owned();
             writeln!(out, "  {dim}--> {at}{dim:#}")?;
+        }
+        // **Folded, like every other line this tool prints** (`A1-365`, audit).
+        //
+        // The first version printed these raw, reasoning that reflowing a
+        // captured line would rearrange it. That overstated the harm: `fold`
+        // breaks at whitespace and never splits an unbreakable token, so a long
+        // path survives whole and only prose wraps -- which is what a reader
+        // wants at eighty columns. Printing up to two hundred columns raw is
+        // precisely the defect `A1-206` was filed about, and the width census
+        // could not catch it here: it measures `check`, and `APLAN014` is a
+        // `verify` rule, so these lines were the widest thing the tool emitted
+        // and the only thing that gate could not see.
+        //
+        // Each captured line stays its own logical line; folding adds
+        // continuations under it rather than merging it with the next.
+        for line in &d.detail {
+            writeln!(
+                out,
+                "{dim}{}{dim:#}",
+                fold::row("  ", &sanitize::visible(line))
+            )?;
         }
         if let Some(ai) = &d.agent_instruction {
             if instructed.insert(d.code) {
@@ -675,6 +706,19 @@ fn render_json(
             });
             if agent && let Some(ai) = &d.agent_instruction {
                 o["agent_instruction"] = serde_json::Value::String(ai.clone());
+            }
+            // An array rather than a joined string, so a consumer reads the
+            // lines it was given instead of splitting a sentence back up
+            // (`A1-365`). Present in both shapes, not only under `agent`: a
+            // failed test's output is the finding's evidence, and a machine
+            // reading the plan's results has the same need for it a person has.
+            if !d.detail.is_empty() {
+                o["detail"] = serde_json::Value::Array(
+                    d.detail
+                        .iter()
+                        .map(|l| serde_json::Value::String(l.clone()))
+                        .collect(),
+                );
             }
             o
         })
@@ -985,26 +1029,95 @@ fn render_summary_json(summary: &Summary) -> std::io::Result<()> {
 
 /// Render a [`CriticalPath`] to stdout: an aligned table for `human`, a stable
 /// JSON document for every other format.
-pub fn render_critical_path(path: &CriticalPath, format: Format) -> std::io::Result<()> {
+pub fn render_critical_path(
+    path: &CriticalPath,
+    remaining: Option<&CriticalPath>,
+    to: Option<&str>,
+    format: Format,
+) -> std::io::Result<()> {
     match format {
-        Format::Human => render_critical_path_human(path),
-        _ => render_critical_path_json(path),
+        Format::Human => render_critical_path_human(path, remaining, to),
+        _ => render_critical_path_json(path, remaining, to),
     }
 }
 
-fn render_critical_path_human(path: &CriticalPath) -> std::io::Result<()> {
+/// How much of a chain is still to do, as a clause for the header.
+///
+/// **A second number, not a flag** (`A1-352`). A flag makes a reader choose
+/// before they know there are two quantities to choose between, and the total
+/// alone reads as work remaining: this repository's own plan has a 22.0-day
+/// chain of which 19.0 days are finished. The roadmap already pairs an effort
+/// total with a `left` companion on one line, and this is that shape one rung
+/// down.
+fn remaining_clause(path: &CriticalPath, remaining: Option<&CriticalPath>) -> String {
+    let Some(left) = remaining else {
+        return String::new();
+    };
+    if left.tasks.is_empty() {
+        return ", and none of it is left".to_string();
+    }
+    // **Asked of the rows, not of the totals** (`A1-352`, audit). This compared
+    // the two numbers with `f64::EPSILON`, which is the gap either side of 1.0
+    // and far smaller than the gap between two sums of days -- so it was both
+    // the wrong tolerance and a proxy for the wrong question. What suppresses
+    // the clause is that nothing on the chain is finished, which is exact and
+    // needs no comparison: with no finished row the two weightings agree
+    // everywhere, so the second number would say the first again.
+    if path
+        .tasks
+        .iter()
+        .all(|t| t.status != aplan_core::Status::Done)
+    {
+        return String::new();
+    }
+    format!(
+        ", {:.1}d of it not yet done across {} task(s)",
+        left.total_effort_days,
+        left.tasks.len()
+    )
+}
+
+fn render_critical_path_human(
+    path: &CriticalPath,
+    remaining: Option<&CriticalPath>,
+    to: Option<&str>,
+) -> std::io::Result<()> {
     let mut out = anstream::stdout().lock();
     let bold = crate::style::HEADING;
+    // **The target is named, and so is the reason there is no chain** (`A1-345`).
+    // A checkpoint with no live ancestry is a real answer -- nothing has to
+    // finish before it -- and printing nothing reads as a command that failed.
+    let subject = to.map_or_else(
+        || "critical path".to_string(),
+        |id| format!("critical path to `{id}`"),
+    );
+    // Folded, because naming the target put an id a reader chose into a line
+    // whose length used to be the renderer's alone (`A1-345`). Not hung: a
+    // continuation at the row indent of two would read as a task on the chain.
     if path.tasks.is_empty() {
-        return writeln!(out, "critical path: none (no tasks)");
+        let why = if to.is_some() {
+            "nothing it waits on carries effort"
+        } else {
+            "no tasks"
+        };
+        let line = format!("{subject}: none ({why})");
+        return writeln!(out, "{}", fold::fold(&line, fold::out_width(), 0));
     }
-    writeln!(
-        out,
-        "{bold}critical path: {:.1} days across {} task(s){bold:#}",
+    let head = format!(
+        "{bold}{subject}: {:.1} days across {} task(s){}{bold:#}",
         path.total_effort_days,
-        path.tasks.len()
-    )?;
+        path.tasks.len(),
+        remaining_clause(path, remaining)
+    );
+    writeln!(out, "{}", fold::fold(&head, fold::out_width(), 0))?;
     for t in &path.tasks {
+        // **The status is on the row** (`A1-345`). A chain ending at a late
+        // checkpoint runs through work that is already finished -- on this
+        // repository's own plan, five of the seven rows -- and a total with no
+        // status beside it reads as work remaining. The column the roadmap's
+        // member rows use, so the two line up; `dropped` never appears, being
+        // excluded from the graph.
+        //
         // The title is the trailing column, so it folds under itself rather
         // than under the id (`A1-206`).
         writeln!(
@@ -1012,11 +1125,13 @@ fn render_critical_path_human(path: &CriticalPath) -> std::io::Result<()> {
             "{}",
             fold::row(
                 &format!(
-                    "  {id}{:<8}{id:#}  {dim}{:>5.1}d{dim:#}  ",
+                    "  {id}{:<8}{id:#}  {dim}{:>5.1}d{dim:#}  {st}{:<12}{st:#}  ",
                     t.id,
                     t.effort_days,
+                    t.status.to_string(),
                     id = crate::style::ID,
-                    dim = crate::style::DIM
+                    dim = crate::style::DIM,
+                    st = crate::style::status(&t.status.to_string()),
                 ),
                 &sanitize::visible(&t.title)
             )
@@ -1025,7 +1140,11 @@ fn render_critical_path_human(path: &CriticalPath) -> std::io::Result<()> {
     Ok(())
 }
 
-fn render_critical_path_json(path: &CriticalPath) -> std::io::Result<()> {
+fn render_critical_path_json(
+    path: &CriticalPath,
+    remaining: Option<&CriticalPath>,
+    to: Option<&str>,
+) -> std::io::Result<()> {
     let tasks: Vec<serde_json::Value> = path
         .tasks
         .iter()
@@ -1040,7 +1159,19 @@ fn render_critical_path_json(path: &CriticalPath) -> std::io::Result<()> {
         .collect();
     let doc = serde_json::json!({
         "schema": "aplan/critical-path/v1",
+        // The checkpoint the chain ends at, `null` for the whole plan. A
+        // consumer cannot tell the two questions apart from the numbers
+        // (`A1-345`).
+        "to": to,
         "total_effort_days": path.total_effort_days,
+        // What is still to do, re-walked with `done` weighing nothing rather
+        // than subtracted from the chain above -- the two ordinarily end at
+        // different tasks (`A1-352`). `null` only where it could not be
+        // computed, which is where the total could not be either.
+        "remaining_effort_days": remaining.map(|r| r.total_effort_days),
+        "remaining": remaining.map(|r| {
+            r.tasks.iter().map(|t| t.id.clone()).collect::<Vec<_>>()
+        }),
         "tasks": tasks,
     });
     let mut out = std::io::stdout().lock();
@@ -1972,19 +2103,22 @@ pub fn render_roadmap(roadmap: &Roadmap, format: Format) -> String {
 /// assumption every duration below it divides by.
 fn roadmap_header(r: &Roadmap) -> String {
     let mut s = String::new();
-    // Releases borrow their cuts' work for their own rollup, so counting them
-    // here would count that work twice (`A1-146`).
+    // A borrowing row's members come from beneath it, so counting it here would
+    // count that work twice (`A1-146`, and `A1-333` for the second kind).
+    // `borrows` rather than `release`: a milestone declaring `contains` borrows
+    // too, and a four-level plan with two real tasks reported `4 task(s)` until
+    // this stopped asking the wrong question (ADR-0042).
     let total: usize = r
         .cuts
         .iter()
-        .filter(|c| !c.release)
+        .filter(|c| !c.borrows)
         .map(|c| c.total)
         .sum::<usize>()
         + r.cross_cutting.len();
     // The effort a reader gets by adding the rows up, said once at the top so
     // the column can be reconciled against `summary` without arithmetic
-    // (`A1-147`). Releases are skipped here as they are in the task count, for
-    // the same reason: they borrow their cuts' work.
+    // (`A1-147`). Borrowing rows are skipped here as they are in the task
+    // count, for the same reason: their members come from beneath them.
     // Cuts and releases counted apart, for the reason the task total already
     // separates them: a release is a checkpoint over cuts, and folding the two
     // into one number told `p00016` it had fourteen cuts when it had eleven
@@ -2053,46 +2187,69 @@ fn roadmap_human(r: &Roadmap) -> String {
             c.version.as_str()
         };
         let kind = if c.release { " (release)" } else { "" };
-        // A cut's summary is one sentence of counts, so it folds at a hanging
-        // indent of two rather than under its own version (`A1-206`).
+        // **The heading is what a reader scrolls for; the rollup is not**
+        // (`A1-296`, `A1-341`). They were one line of up to 126 characters here,
+        // and at eighty columns it folded at a hanging indent of two -- which is
+        // the *member-row* indent, so the tail of a cut's rollup read as a task
+        // inside it. The break point was arbitrary too: it separated `5.0d` from
+        // the `effort` it labels.
+        //
+        // Two lines, and **neither of them is indented at all**, which is the
+        // invariant rather than a chosen depth: a row of work is always indented
+        // and a header line never is, so no header line can be mistaken for one.
+        // Four was tried first and is wrong -- a plan that sets
+        // `roadmap.group_by` puts its group labels at two and its member rows at
+        // *four*, so the rollup landed back on the member column for exactly the
+        // readers who had asked for more structure (`A1-341`, audit).
         let _ = writeln!(
             s,
             "\n{}",
             fold::fold(
                 &format!(
-                    // **The heading is the version and the title together, and
-                    // the rollup behind it is metadata** (`A1-296`). Before this
-                    // the bold reached four characters of a hundred-character
-                    // line -- the version alone -- so the thing a reader scrolls
-                    // for was the least visible part of the line it names.
-                    // Contrast from both directions: the heading takes the
-                    // weight, the counts give it up.
-                    "{hd}{ver}{kind}  {}{hd:#}  [{st}{}{st:#}]  {dim}{}/{} done, {} ready, \
-                     {} blocked, crit {:.1}d, {:.1}d effort{}{dim:#}",
+                    "{hd}{ver}{kind}  {}{hd:#}  [{st}{}{st:#}]",
                     c.title,
                     c.status,
-                    c.done,
-                    c.total,
-                    c.ready,
-                    c.blocked,
-                    c.critical_path.total_effort_days,
-                    c.effort_days,
-                    // `w` only where a throughput was declared, and never a
-                    // second copy of a number: it is this row's own effort,
-                    // divided (`A1-147`).
-                    match r.weeks_of(c) {
-                        (Some(weeks), Some(left)) =>
-                            format!(", {}w ({}w left)", weeks_cell(weeks), weeks_cell(left)),
-                        _ => String::new(),
-                    },
                     hd = crate::style::HEADING,
                     st = crate::style::status(&c.status.to_string()),
-                    dim = crate::style::DIM,
                 ),
                 fold::out_width(),
-                2
+                0
             )
         );
+        // Not hung either: a continuation at two or four would reach a member
+        // column in one of the two layouts, and a continuation of a dim,
+        // flush-left line is already unmistakable for a row.
+        let rollup = fold::fold(
+            &format!(
+                "{dim}{}/{} done, {} ready, {} blocked, crit {:.1}d{}, {:.1}d \
+                     effort{}{dim:#}",
+                c.done,
+                c.total,
+                c.ready,
+                c.blocked,
+                c.critical_path.total_effort_days,
+                // **Two scopes, so two labels** (`A1-345`). A cut's chain is the
+                // longest one *inside* it, which is what "how much work is in
+                // this bucket" asks. A row that borrows holds no work, so its
+                // chain is the one that *ends at it* -- and that runs through
+                // the cuts it waits on or holds, which are not its members. Same
+                // word for both would be the defect this fixed, one rung along.
+                if c.borrows { " to here" } else { "" },
+                c.effort_days,
+                // `w` only where a throughput was declared, and never a
+                // second copy of a number: it is this row's own effort,
+                // divided (`A1-147`).
+                match r.weeks_of(c) {
+                    (Some(weeks), Some(left)) =>
+                        format!(", {}w ({}w left)", weeks_cell(weeks), weeks_cell(left)),
+                    _ => String::new(),
+                },
+                dim = crate::style::DIM,
+            ),
+            fold::out_width(),
+            0,
+        );
+        let _ = writeln!(s, "{rollup}");
         // A release closes cuts; it does not hold work. Its rollup is its cuts'
         // work borrowed (`A1-146`), and re-listing those rows put every task in
         // the document twice -- 152 of them on `p00016` -- while saying nothing
@@ -2181,6 +2338,13 @@ fn roadmap_json(r: &Roadmap) -> String {
             "weeks_remaining": r.weeks_of(c).1,
             "critical_path_days": c.critical_path.total_effort_days,
             "critical_path": c.critical_path.tasks.iter().map(|t| t.id.clone()).collect::<Vec<_>>(),
+            // What the chain is bounded by: a borrowing row's ends *at that
+            // row* and runs through the cuts it waits on or holds, a cut's is
+            // the longest chain among its own members (`A1-345`). `null` for a
+            // cut. Same reason as `release` above -- the model knows which
+            // question it answered, and hiding it would make the machine surface
+            // the only one that cannot tell (`A1-104`).
+            "critical_path_to": c.borrows.then(|| c.milestone_id.clone()),
             "closes": c.closes.clone(),
             "members": c.members.iter().map(roadmap_task_json).collect::<Vec<_>>(),
             // Empty unless the repository named a grouping family, so this is
@@ -2243,7 +2407,26 @@ fn closes_of(roadmap: &Roadmap, release: &Cut) -> Vec<String> {
         .collect()
 }
 
-pub fn render_roadmap_markdown(roadmap: &Roadmap, regenerate: Option<&str>) -> String {
+/// The build that wrote a generated artifact, for its banner (`A1-325`).
+///
+/// Passed in rather than computed here: this crate renders, and the identity
+/// lives behind `aplan-attest`, which it deliberately does not depend on.
+#[derive(Debug)]
+pub struct WrittenBy<'a> {
+    pub version: &'a str,
+    /// The digest of this build's `facts` document, which moves when the rule,
+    /// command, config-key or format surface does -- which is when generated
+    /// shape moves. Truncated by the caller; a banner is for recognising a
+    /// difference, not for verifying one.
+    pub surface: &'a str,
+}
+
+/// The three banner lines every generated roadmap opens with (`A1-325`).
+///
+/// Extracted so the renderer below stays inside the line limit, and because the
+/// banner is a contract of its own: `A1-059` fixed what it must say, and the
+/// build identity joined it here.
+fn roadmap_banner(regenerate: Option<&str>, written_by: Option<&WrittenBy<'_>>) -> String {
     let mut s = String::new();
     let _ = writeln!(
         s,
@@ -2266,6 +2449,27 @@ pub fn render_roadmap_markdown(roadmap: &Roadmap, regenerate: Option<&str>) -> S
         "<!-- regenerate: `{}` -->",
         regenerate.unwrap_or("aplan roadmap --format markdown")
     );
+    // Which build wrote it. Without this a regeneration by a *different* build
+    // is a diff of every line that changed shape, with nothing saying why, and
+    // the check that compares them is green by construction wherever both sides
+    // are the same build -- which is always, locally (`A1-325`,
+    // pre-public adoption evidence item 13).
+    if let Some(w) = written_by {
+        let _ = writeln!(
+            s,
+            "<!-- written by aplan {}, surface {} -->",
+            w.version, w.surface
+        );
+    }
+    s
+}
+
+pub fn render_roadmap_markdown(
+    roadmap: &Roadmap,
+    regenerate: Option<&str>,
+    written_by: Option<&WrittenBy<'_>>,
+) -> String {
+    let mut s = roadmap_banner(regenerate, written_by);
     let _ = writeln!(s, "\n# Roadmap\n\n## Cuts\n");
     // `effort` is always known; `weeks` exists only where the repository
     // declared a throughput, so a plan that declares none renders the table it
@@ -2306,9 +2510,17 @@ pub fn render_roadmap_markdown(roadmap: &Roadmap, regenerate: Option<&str>) -> S
         let weeks = weeks_cells(roadmap.weeks_of(c))
             .map_or_else(String::new, |(w, left)| format!(" {w} ({left} left) |"));
         let weeks = if weeks_column { weeks } else { String::new() };
+        // A borrowing row's chain ends *at it* and runs through the cuts it
+        // waits on or holds; a cut's is the longest chain among its own members.
+        // The column header cannot say both, so the cell says which (`A1-345`).
+        let crit = format!(
+            "{:.1}d{}",
+            c.critical_path.total_effort_days,
+            if c.borrows { " to here" } else { "" }
+        );
         let _ = writeln!(
             s,
-            "| {} | {} | {}/{} | {} | {} | {:.1}d |{} {:.1}d |",
+            "| {} | {} | {}/{} | {} | {} | {:.1}d |{} {crit} |",
             md_cell(&ver),
             c.status,
             c.done,
@@ -2317,7 +2529,6 @@ pub fn render_roadmap_markdown(roadmap: &Roadmap, regenerate: Option<&str>) -> S
             c.blocked,
             c.effort_days,
             weeks,
-            c.critical_path.total_effort_days
         );
     }
     for c in &roadmap.cuts {
@@ -2525,6 +2736,8 @@ mod tests {
             effort_days: Some(1.0),
             blocked_by: blocked.iter().map(|s| (*s).to_string()).collect(),
             prefer_after: Vec::new(),
+            ratified_by: Vec::new(),
+            contains: Vec::new(),
             evidence: Vec::new(),
             paths: Vec::new(),
             traces: Vec::new(),
@@ -2533,6 +2746,7 @@ mod tests {
             revisit_at: None,
             version_impact: None,
             version_impact_reason: None,
+            version: None,
         }
     }
 
@@ -2633,11 +2847,14 @@ mod tests {
         let out = tree(&g, "T-00000", None, false).expect("the head of the chain");
         let elapsed = start.elapsed();
 
+        let rendered = plain(&out);
         assert_eq!(
-            out.lines().count(),
-            n + 3,
-            "every task below it, plus the root and the two headings"
+            rendered.matches("  todo  ").count(),
+            n,
+            "every task appears once, independent of presentational wrapping"
         );
+        assert_eq!(rendered.matches("waits on:").count(), 1, "{rendered}");
+        assert_eq!(rendered.matches("releases:").count(), 1, "{rendered}");
         assert!(
             elapsed < std::time::Duration::from_secs(10),
             "walking {n} tasks took {elapsed:?}, which is the quadratic shape back"
@@ -2746,6 +2963,8 @@ mod tests {
             effort_days: None,
             blocked_by: Vec::new(),
             prefer_after: Vec::new(),
+            ratified_by: Vec::new(),
+            contains: Vec::new(),
             evidence: Vec::new(),
             paths: Vec::new(),
             traces: Vec::new(),
@@ -2754,6 +2973,7 @@ mod tests {
             revisit_at: None,
             version_impact: None,
             version_impact_reason: None,
+            version: None,
         };
         let g = Graph::new([&t]);
         for line in mermaid(&g).lines().skip(1).filter(|l| !l.trim().is_empty()) {
@@ -2842,7 +3062,7 @@ mod tests {
         let human = roadmap_human(&r);
         assert!(human.contains("(release)"), "{human}");
 
-        let markdown = render_roadmap_markdown(&r, None);
+        let markdown = render_roadmap_markdown(&r, None, None);
         assert!(markdown.contains("(release)"), "{markdown}");
 
         let json: serde_json::Value =
@@ -2881,7 +3101,7 @@ mod tests {
             "the human row carries the effort and its division: {human}"
         );
 
-        let md = render_roadmap_markdown(&r, None);
+        let md = render_roadmap_markdown(&r, None, None);
         assert!(md.contains("| effort | weeks |"), "the column exists: {md}");
         assert!(
             md.contains("| 20.0d | 2.0 (1.5 left) |"),
@@ -2917,7 +3137,7 @@ mod tests {
             "{human}"
         );
 
-        let md = render_roadmap_markdown(&r, None);
+        let md = render_roadmap_markdown(&r, None, None);
         assert!(
             md.contains("5.0d effort, 0.5 weeks (0.5 left), held by tasks in no cut"),
             "{md}"
@@ -2945,7 +3165,7 @@ mod tests {
             "the effort is still said: {human}"
         );
 
-        let md = render_roadmap_markdown(&r, None);
+        let md = render_roadmap_markdown(&r, None, None);
         assert!(!md.contains("weeks"), "no column invented: {md}");
         assert!(md.contains("| 20.0d |"), "{md}");
 
@@ -2958,11 +3178,66 @@ mod tests {
         assert!(json["cuts"][0]["weeks_remaining"].is_null());
     }
 
+    /// **A release's chain and a cut's chain are two scopes, so two labels**
+    /// (`A1-345`). A release holds no work: its number is the chain that *ends
+    /// at* it, running through the cuts it waits on. A cut's is the longest
+    /// chain among its own members. One word for both is the defect this row
+    /// already fixed one rung down, and every surface has to say which.
+    #[test]
+    fn a_release_row_says_its_chain_ends_there_and_a_cut_row_does_not() {
+        let mut r = one_cut("v0.1", "The release", vec![rt("T-01", "work")]);
+        r.cuts[0].critical_path.total_effort_days = 3.0;
+        let cut = r.cuts[0].clone();
+        // A release borrows, which is what the label keys on: a container
+        // declaring `contains` is the same relationship under a different word.
+        r.cuts[0].release = true;
+        r.cuts[0].borrows = true;
+        r.cuts[0].milestone_id = "R-v0.1".into();
+        r.cuts.push(cut);
+
+        let human = roadmap_human(&r);
+        assert!(human.contains("crit 3.0d to here"), "{human}");
+        assert!(
+            human.matches("crit 3.0d to here").count() == 1,
+            "the cut row took the release's label: {human}"
+        );
+
+        let md = render_roadmap_markdown(&r, None, None);
+        assert!(md.contains("| 3.0d to here |"), "{md}");
+        assert!(md.contains("| 3.0d |"), "the cut row is unlabelled: {md}");
+
+        let json: serde_json::Value =
+            serde_json::from_str(&roadmap_json(&r)).expect("the json parses");
+        // The machine surface must not be the only one that cannot tell which
+        // question the number answers.
+        assert_eq!(json["cuts"][0]["critical_path_to"], "R-v0.1", "{json}");
+        assert!(json["cuts"][1]["critical_path_to"].is_null(), "{json}");
+
+        // A container is not a release and borrows all the same (ADR-0042), so
+        // it is labelled: keying on the narrower word would leave the defect in
+        // place for every plan that migrated to `contains`.
+        r.cuts[1].borrows = true;
+        r.cuts[1].milestone_id = "C-top".into();
+        let labelled: serde_json::Value =
+            serde_json::from_str(&roadmap_json(&r)).expect("the json parses");
+        assert_eq!(
+            labelled["cuts"][1]["critical_path_to"], "C-top",
+            "{labelled}"
+        );
+        assert!(!labelled["cuts"][1]["release"].as_bool().unwrap_or(true));
+        assert_eq!(
+            roadmap_human(&r).matches("crit 3.0d to here").count(),
+            2,
+            "a container row went unlabelled"
+        );
+    }
+
     fn one_cut(version: &str, title: &str, members: Vec<RoadmapTask>) -> Roadmap {
         Roadmap {
             cuts: vec![Cut {
                 closes: Vec::new(),
                 release: false,
+                borrows: false,
                 groups: Vec::new(),
                 version: version.into(),
                 title: title.into(),
@@ -3016,7 +3291,7 @@ mod tests {
         // declares no family, so neither grouped branch is reachable from a
         // committed plan (`A1-078`).
         let r = grouped_cut();
-        let md = render_roadmap_markdown(&r, None);
+        let md = render_roadmap_markdown(&r, None, None);
         assert!(md.contains("### epic-a"), "{md}");
         assert!(md.contains("### epic-b"), "{md}");
         // Shown, not dropped: a task carrying no member of the family still
@@ -3054,7 +3329,7 @@ mod tests {
     #[test]
     fn an_ungrouped_cut_renders_the_flat_list_it_always_did() {
         let r = one_cut("v0.1", "Core", vec![rt("T-01", "first")]);
-        let md = render_roadmap_markdown(&r, None);
+        let md = render_roadmap_markdown(&r, None, None);
         assert!(!md.contains("###"), "no group headings: {md}");
         assert!(md.contains("T-01"), "{md}");
     }
@@ -3096,7 +3371,7 @@ mod tests {
             human.contains("<0.1w (<0.1w left)"),
             "the human row must not read as finished: {human}"
         );
-        let md = render_roadmap_markdown(&r, None);
+        let md = render_roadmap_markdown(&r, None, None);
         assert!(md.contains("| <0.1 (<0.1 left) |"), "{md}");
         // The machine surface is unrounded, so a consumer computing its own
         // rendering is never handed the lie in the first place.
@@ -3163,10 +3438,13 @@ mod tests {
                     paths: Vec::new(),
                     traces: Vec::new(),
                     prefer_after: Vec::new(),
+                    ratified_by: Vec::new(),
+                    contains: Vec::new(),
                     trace_fingerprints: std::collections::BTreeMap::new(),
                     revisit_at: None,
                     version_impact: None,
                     version_impact_reason: None,
+                    version: None,
                 },
                 TaskRow {
                     id: "B1".into(),
@@ -3186,10 +3464,13 @@ mod tests {
                     paths: Vec::new(),
                     traces: Vec::new(),
                     prefer_after: Vec::new(),
+                    ratified_by: Vec::new(),
+                    contains: Vec::new(),
                     trace_fingerprints: std::collections::BTreeMap::new(),
                     revisit_at: None,
                     version_impact: None,
                     version_impact_reason: None,
+                    version: None,
                 },
                 TaskRow {
                     id: "M-s0".into(),
@@ -3209,10 +3490,13 @@ mod tests {
                     paths: Vec::new(),
                     traces: Vec::new(),
                     prefer_after: Vec::new(),
+                    ratified_by: Vec::new(),
+                    contains: Vec::new(),
                     trace_fingerprints: std::collections::BTreeMap::new(),
                     revisit_at: None,
                     version_impact: None,
                     version_impact_reason: None,
+                    version: None,
                 },
             ],
         };
@@ -3243,7 +3527,7 @@ mod tests {
             blocked_by: vec![],
             evidence: vec!["file:a|b.md".into()],
         };
-        let md = render_roadmap_markdown(&one_cut("v0.1", "Core", vec![m]), None);
+        let md = render_roadmap_markdown(&one_cut("v0.1", "Core", vec![m]), None, None);
         assert!(
             md.contains(r"| A\|B | line1 line2 | done | - | file:a\|b.md |"),
             "cells must escape `|` and collapse newlines:\n{md}"
@@ -3266,6 +3550,7 @@ mod tests {
                 vec![rt("A", "Short"), rt("A-really-quite-long-id", "Long")],
             ),
             None,
+            None,
         );
         assert!(md.contains("| task | title | status | blocked_by | evidence |"));
         assert!(
@@ -3276,7 +3561,7 @@ mod tests {
 
     #[test]
     fn roadmap_markdown_marks_a_versionless_cut() {
-        let md = render_roadmap_markdown(&one_cut("", "Loose", vec![rt("A", "T")]), None);
+        let md = render_roadmap_markdown(&one_cut("", "Loose", vec![rt("A", "T")]), None, None);
         assert!(
             md.contains("| ? |"),
             "versionless cut shows `?` in the overview"
@@ -3372,7 +3657,10 @@ mod tests {
             runways: Vec::new(),
             unannounced: Vec::new(),
         };
-        let text = deprecations_human(&none);
+        // Human output follows stdout's width. This assertion is about the
+        // sentence rather than the presentation boundary, so read it the way a
+        // person does when a terminal wraps between two words (`A1-340`).
+        let text = one_line(&deprecations_human(&none));
         assert!(text.contains("declares no deprecation runway"), "{text}");
         assert!(text.contains("`blocked_by`"), "{text}");
         assert!(
@@ -3953,9 +4241,22 @@ fn first_sentence(text: &str) -> &str {
 /// architecture, the CI matrix -- which is why it is fenced rather than being
 /// the whole file (pre-public adoption evidence section 5).
 #[must_use]
-pub fn render_agents_md(c: &AgentContract) -> String {
+pub fn render_agents_md(c: &AgentContract, written_by: Option<&WrittenBy<'_>>) -> String {
     let mut s = String::new();
     let _ = writeln!(s, "{AGENTS_BEGIN}");
+    // Inside the block, never in the marker. `A1-294` made that marker a literal
+    // an adopter copies by hand, and a behaviour pins that it is matched by
+    // prefix, so putting the build in it would change what every adopter has to
+    // write (`A1-325`).
+    if let Some(w) = written_by {
+        let _ = writeln!(
+            s,
+            "{}{}, surface {} -->",
+            aplan_core::contract::WRITTEN_BY_PREFIX,
+            w.version,
+            w.surface
+        );
+    }
     let _ = writeln!(s, "\n## The plan is the source of truth\n");
     let _ = writeln!(
         s,
@@ -4300,7 +4601,7 @@ mod agents_tests {
     /// The block is the repository's *policy*, in its own terms (`A1-038`).
     #[test]
     fn the_block_states_this_repositorys_policy_not_the_tools_defaults() {
-        let out = render_agents_md(&contract());
+        let out = render_agents_md(&contract(), None);
         assert!(out.starts_with(AGENTS_BEGIN), "fenced: {out}");
         assert!(out.trim_end().ends_with(AGENTS_END), "fenced: {out}");
         assert!(
@@ -4330,7 +4631,7 @@ mod agents_tests {
     fn the_advisory_tier_names_what_switches_it_off() {
         let mut c = contract();
         c.switches.remove(&Switch::DenyWarnings);
-        let out = render_agents_md(&c);
+        let out = render_agents_md(&c, None);
         // `bullet` wraps, so a phrase longer than a few words straddles a line
         // break in the rendered block. Asserted against the unwrapped text: a
         // test that only passes while the wrap falls in a particular column is
@@ -4377,7 +4678,7 @@ mod agents_tests {
                 c.switches.remove(&Switch::DenyWarnings);
             }
             c.advisory = advisory.iter().map(|s| (*s).to_string()).collect();
-            let out = render_agents_md(&c);
+            let out = render_agents_md(&c, None);
             out.split_whitespace().collect::<Vec<_>>().join(" ")
         };
 
@@ -4424,10 +4725,13 @@ mod agents_tests {
     /// One downgraded rule is *is* and *it*, not *are* and *they*.
     #[test]
     fn a_single_downgraded_rule_reads_as_one() {
-        let out = render_agents_md(&AgentContract {
-            advisory: vec!["APLAN022".into()],
-            ..contract()
-        });
+        let out = render_agents_md(
+            &AgentContract {
+                advisory: vec!["APLAN022".into()],
+                ..contract()
+            },
+            None,
+        );
         let flat = out.split_whitespace().collect::<Vec<_>>().join(" ");
         assert!(
             flat.contains(
@@ -4446,10 +4750,13 @@ mod agents_tests {
             runner_count: 1,
             ..contract()
         };
-        let out = render_agents_md(&AgentContract {
-            runners: Vec::new(),
-            ..one
-        });
+        let out = render_agents_md(
+            &AgentContract {
+                runners: Vec::new(),
+                ..one
+            },
+            None,
+        );
         assert!(
             out.contains("resolves against the configured runner:"),
             "the sentence survives having no name to print: {out}"
@@ -4464,7 +4771,7 @@ mod agents_tests {
             switches: [Switch::RequireEffort].into_iter().collect(),
             ..AgentContract::default()
         };
-        let out = render_agents_md(&bare);
+        let out = render_agents_md(&bare, None);
         assert!(
             !out.contains("`APLAN022`"),
             "no cut rule was declared: {out}"
@@ -4519,7 +4826,7 @@ mod agents_tests {
 
         // `contract()` already turns on every switch whose bullet cites one of
         // these rules, which is what the count below insists on.
-        let block = render_agents_md(&contract());
+        let block = render_agents_md(&contract(), None);
         let mut cited = 0usize;
         for code in &exempting {
             if !block.contains(code) {
@@ -4559,7 +4866,7 @@ mod agents_tests {
     /// Every line fits, because the block is committed and diffed (`A1-038`).
     #[test]
     fn no_line_is_wider_than_the_documents_beside_it() {
-        let out = render_agents_md(&contract());
+        let out = render_agents_md(&contract(), None);
         for line in out.lines() {
             // The markers are one long line each by nature, and a fenced command
             // is copied rather than read.
@@ -4598,6 +4905,16 @@ pub struct StaleTask {
     /// task that *can* start and has not is drift a tracker cannot see, because
     /// the tracker never knew when the last blocker cleared.
     pub ready: bool,
+    /// Who holds this task, when somebody does (`A1-359`).
+    ///
+    /// **This is what makes a claim without an expiry safe.** A claim lasts
+    /// until it is released or taken over, which only works if an abandoned one
+    /// is visible as what it is -- and this report already measures the right
+    /// thing, because it dates a task by its `paths` rather than by its own
+    /// file, so claiming cannot reset the clock. Claimed *and* idle is an
+    /// abandoned claim, and naming the holder is what lets a reader see that
+    /// rather than infer it.
+    pub held_by: Option<String>,
 }
 
 /// One parked task whose revisit instant has arrived.
@@ -4811,6 +5128,12 @@ pub fn stale_human(report: &StaleReport) -> String {
         // wants the ready ones to stand out, and a second column of mostly
         // blanks does not do that.
         let ready = if t.ready { " (ready)" } else { "" };
+        // Beside the marker rather than in a column, for the reason above it: a
+        // reader scanning for an abandoned claim wants the held ones to stand
+        // out, and most rows have no holder to show.
+        let held = t.held_by.as_deref().map_or_else(String::new, |who| {
+            format!(" [{}]", crate::sanitize::visible(who))
+        });
         let _ = writeln!(
             s,
             "{}",
@@ -4824,7 +5147,7 @@ pub fn stale_human(report: &StaleReport) -> String {
                     dim = crate::style::DIM,
                     st = crate::style::status(&t.status)
                 ),
-                &format!("{}{ready}", one_line(&t.title)),
+                &format!("{}{ready}{held}", one_line(&t.title)),
             )
         );
     }
@@ -4924,6 +5247,10 @@ fn render_stale_json(report: &StaleReport) -> std::io::Result<()> {
             "status": t.status,
             "idle_days": t.idle_days,
             "ready": t.ready,
+            // Always present, `null` when nobody holds it: a consumer
+            // filtering for abandoned claims should not have to tell a missing
+            // key from an unheld task (`A1-359`).
+            "held_by": t.held_by,
         })).collect::<Vec<_>>(),
     });
     let mut out = std::io::stdout().lock();
@@ -4940,6 +5267,7 @@ mod stale_tests {
             id: id.to_string(),
             title: format!("{id} title"),
             status: "todo".to_string(),
+            held_by: None,
             idle_days,
             ready,
         }
@@ -5230,6 +5558,7 @@ fn needs(binds: &[Binding]) -> String {
         .iter()
         .map(|b| match b {
             Binding::Done => "`done`",
+            Binding::InProgress => "`in_progress`",
             Binding::NotMilestone => "not a milestone",
             Binding::Paths => "`paths`",
             Binding::Traces => "`traces`",
@@ -5256,6 +5585,7 @@ fn render_vacuity_json(report: &[RuleReach]) -> std::io::Result<()> {
             "not_run": r.off,
             "needs": r.binds.iter().map(|b| match b {
                 Binding::Done => "done",
+                Binding::InProgress => "in_progress",
                 Binding::NotMilestone => "not_milestone",
                 Binding::Paths => "paths",
                 Binding::Traces => "traces",

@@ -36,6 +36,12 @@ impl fmt::Display for Severity {
 pub enum Binding {
     /// The task claims to be finished. Most evidence rules judge nothing else.
     Done,
+    /// The task claims work on it has started (`A1-359`). The subject of
+    /// `APLAN053`, and the reason that rule has a vacuity question at all: a
+    /// plan with no task under way is a plan the rule could not have fired on,
+    /// which `vacuity` should say rather than leave a reader to assume the gate
+    /// ran.
+    InProgress,
     /// The task is work rather than a checkpoint over it. A milestone carries no
     /// `paths` and no estimate by design, so a rule that exempts one has to say
     /// which, or generated guidance repeats it as a universal claim and a
@@ -59,6 +65,7 @@ impl Binding {
     pub fn holds(self, task: &crate::task::Task) -> bool {
         match self {
             Self::Done => task.status == crate::task::Status::Done,
+            Self::InProgress => task.status == crate::task::Status::InProgress,
             Self::NotMilestone => !task.is_milestone(),
             Self::Paths => !task.paths.is_empty(),
             Self::Traces => !task.traces.is_empty(),
@@ -231,8 +238,17 @@ define_rules! {
     DoneBeforeBlocker => DONE_BEFORE_BLOCKER = "APLAN007", Error,
         "a done task does not depend on an unfinished one",
         points_at: Some("blocked_by");
-    /// A `traces` anchor does not resolve to a real file (and heading).
-    DanglingTrace => DANGLING_TRACE = "APLAN008", Error, "traces anchors resolve to real headings",
+    /// A `traces` anchor does not resolve to a real file, and to a real heading
+    /// in it, or -- since ADR-0035 -- a real node of it.
+    ///
+    /// Which resolver runs is the document's extension: a `.md` file has
+    /// headings and table rows, a `.yaml`, `.yml` or `.json` file has nodes
+    /// addressed by JSON Pointer or `JSONPath`. So the three failures an author
+    /// meets have three sentences, because their remedies differ: the document
+    /// is not addressable, the anchor is not an address, or it addresses nothing
+    /// (`A1-191`).
+    DanglingTrace => DANGLING_TRACE = "APLAN008", Error,
+        "traces anchors resolve to a real heading or node",
         points_at: Some("traces");
     /// An active task carries no effort estimate.
     MissingEffort => MISSING_EFFORT = "APLAN009", Warning,
@@ -505,8 +521,8 @@ define_rules! {
     CancelledCutLiveWork => CANCELLED_CUT_LIVE_WORK = "APLAN027", Warning,
         "a cancelled cut's members are cancelled too",
         points_at: Some("status");
-    /// A `done` task stamps some of its `traces` and not others, so `APLAN018` is
-    /// silently off for the ones it cannot compare.
+    /// A `done` task does not stamp a trace it could stamp, so `APLAN018` is
+    /// silently off for the section it cannot compare.
     ///
     /// `trace_fingerprints` is keyed by the trace string, so *editing* a `traces`
     /// entry on a closed task orphans the old key and leaves the new trace
@@ -519,13 +535,43 @@ define_rules! {
     ///
     /// An *error*, not a warning, because it is a gate that has been switched off
     /// rather than a judgement call, and because `close --restamp` repairs it
-    /// exactly. Deliberately **not** "every trace is stamped": a task closed
-    /// before `detect_drift` was enabled carries traces and no fingerprints, which
-    /// `APLAN018` treats as unverifiable rather than in violation, and that
-    /// zero-false-positive stance is why adopters leave drift on. Stamping *some*
-    /// has no such reading (`A1-098`).
-    PartialTraceStamp => PARTIAL_TRACE_STAMP = "APLAN028", Error,
-        "a done task stamps every trace it stamps any of",
+    /// exactly.
+    ///
+    /// **It used to exempt a task that stamped nothing**, on the reasoning that
+    /// one closed before `detect_drift` was enabled carries traces and no
+    /// fingerprints, and that treating it as unverifiable rather than in
+    /// violation is why adopters leave drift on (`A1-098`). That was measured and
+    /// removed (`A1-297`): across 2,410 task files in thirteen plans, every one
+    /// of them running `detect_drift`, the partial case this rule was written for
+    /// occurs **zero** times and the exempted case occurs nine. It fired on the
+    /// shape nobody has and was silent on the only shape that happens -- which is
+    /// this rule's own sentence about every trace rather than about one. An
+    /// adopter who wants the softer landing has `advisory`, which reports the
+    /// rule without failing the build and says in the output that it did; an
+    /// early return said nothing to anybody.
+    ///
+    /// **Only traces something could stamp**, which is asked of the function that
+    /// does the stamping rather than described here: a trace with no anchor, one
+    /// whose document cannot be read, and one whose anchor matches nothing are
+    /// all unstampable, and reporting them would be an error whose own fix
+    /// provably cannot clear it. The last two are `APLAN008`'s and it reports
+    /// them.
+    ///
+    /// **A trace with no anchor is therefore watched by nothing, and that is
+    /// decided rather than overlooked.** ADR-0035 records it with the
+    /// measurement behind it: zero of 414 closed-task traces across thirteen
+    /// plans carry no anchor, so a rule here would have no subjects at all. A
+    /// durable address for the reasoning, rather than a task that has since
+    /// closed (`A1-191`).
+    ///
+    /// **And not a trace `APLAN034` is already refusing.** A target outside the
+    /// repository that nothing declares is one the author is being told to
+    /// declare or drop, so asking them to stamp it in the same breath is two
+    /// errors for one cause whose fixes disagree. That precedence is the one the
+    /// per-trace loop states for the same reason (`A1-143`); this rule runs
+    /// before the loop and had to be told (`A1-297`, audit).
+    UnstampedTrace => UNSTAMPED_TRACE = "APLAN028", Error,
+        "a done task stamps every trace that can be stamped",
         points_at: Some("traces");
 
     /// A declared tag family that nothing in the plan uses.
@@ -997,6 +1043,276 @@ define_rules! {
     VersionImpactUnexplained => VERSION_IMPACT_UNEXPLAINED = "APLAN044", Warning,
         "a closed task claims less of the released version than its level implies, without saying why",
         points_at: Some("version_impact");
+    /// A *live* task's traced section has changed since anybody last touched the
+    /// task, so its premise moved while it waited (`A1-301`, `p0000000000005`
+    /// item 22).
+    ///
+    /// `APLAN018` watches a closed task's traced section against the stamp taken
+    /// at closure. A live task has no stamp -- one is taken at `close` -- so
+    /// nothing watched it at all, and a task can sit for months describing a
+    /// document that has since said something else. The fleet audit found three
+    /// live tasks tracking work that had already shipped, all passing `check`
+    /// and `verify`, and needed a human reading code to see it.
+    ///
+    /// **Measured before it was built.** Across 2,271 task files in thirteen
+    /// plans, every cheap structural signal for "this task is already done" has
+    /// *no subjects at all*: no live task cites evidence, none carries a trace
+    /// stamp, none has all its acceptance criteria ticked. This is the one signal
+    /// with a real population, and it is narrow: of the live traced anchors that
+    /// resolve at both ends, about a quarter have moved. Comparing whole
+    /// documents instead would fire on 91% of them, which is a rule nobody reads.
+    ///
+    /// **Against the task's last commit, not its first.** Editing a task is
+    /// evidence somebody re-read it, so touching the task clears this the way
+    /// `--restamp` clears `APLAN018`. A task file that was never committed has no
+    /// baseline and is left alone rather than guessed at.
+    ///
+    /// **Two things it cannot see, and says so rather than going quiet.** The
+    /// traced document is read through `traces_root`, because a rule that looked
+    /// at the repository root while the plan meant `docs/` would find nothing and
+    /// report nothing -- a gate switched off without saying so. And a shallow
+    /// clone cannot answer when a task was last touched at all: every path is
+    /// added by the graft commit, so the baseline is `HEAD` and nothing can
+    /// differ from it. Measured: a depth-1 clone of a repository where this
+    /// fires reported nothing. It now reports the checkout instead, once, the
+    /// way the commit resolver does (`A1-253`).
+    ///
+    /// **Its own code rather than widening `APLAN018`.** The subject differs (live
+    /// against closed), the baseline differs (a commit against a stored
+    /// fingerprint), and the remedy differs: `APLAN018` says re-review and
+    /// re-stamp a claim, this says the ground your unstarted work rests on has
+    /// moved and may already have been built. A warning, and `verify`-tier
+    /// because it needs the repository (`A1-290` asks that a new code be argued
+    /// for; this is the argument).
+    StalePremise => STALE_PREMISE = "APLAN045", Warning,
+        "a live task's traced section is unchanged since the task was last touched",
+        points_at: Some("traces");
+    /// A `done` task whose ratifier has not finished (`A1-306`, ADR-0036).
+    ///
+    /// `ratified_by` is the half of `blocked_by` that constrains *counting
+    /// done* rather than *starting*: somebody must bless the result, and the
+    /// work itself can be built, tested and gated before they do. `ready`
+    /// therefore ignores it, which is the whole point -- the sixth pilot had
+    /// eleven such edges drawn as `blocked_by`, five of the artefacts already
+    /// existed and were gated in CI, and the plan called them blocked
+    /// (pre-public adoption evidence).
+    ///
+    /// **This is where the gate went.** Re-pointing those edges to free `ready`
+    /// risked losing the release gate they were also serving, and it survived
+    /// only by accident, because the release happened to block on the cut
+    /// holding the chain. An edge doing two jobs is exactly what this tool
+    /// should make visible rather than hide, so the gate is stated here instead
+    /// of inferred: the work may proceed, and it may not be called finished
+    /// until the ratifier is.
+    ///
+    /// An *error*, and the same severity and shape as `APLAN007` for a producer
+    /// edge, because a `done` task whose blessing has not happened is a status
+    /// making a claim the plan contradicts.
+    Unratified => UNRATIFIED = "APLAN046", Error,
+        "a done task's ratifiers are done",
+        points_at: Some("ratified_by");
+    /// `APLAN047`: a `contains` edge is usable -- it names a milestone that
+    /// exists, and the containment does not close a loop (`A1-333`, ADR-0042).
+    ///
+    /// Containment is the third thing `blocked_by` was asked to mean, and the
+    /// first two already have their refusals: `APLAN003` for an id that names
+    /// nothing, `APLAN006` for a dependency cycle. This one is theirs for the
+    /// new edge, and it is separate rather than folded in because the remedy
+    /// differs: a `contains` loop is a *modelling* mistake -- two checkpoints
+    /// each claiming the other's work -- and the fix is to decide which
+    /// contains which, not to break a dependency.
+    ///
+    /// **Its absence was measured, not theorised.** ADR-0042 claimed "the
+    /// recursion terminates because `contains` is acyclic and refused
+    /// otherwise", and on the day it was written nothing refused it: a
+    /// two-milestone loop passed `check` cleanly. The rollup did not hang --
+    /// a visited set stops that -- so the plan reported numbers nobody could
+    /// reconcile instead of reporting the defect.
+    ///
+    /// An *error*, and not a warning, because a rollup over a loop has no
+    /// defensible answer: whichever checkpoint is walked first swallows the
+    /// other, and the number changes with iteration order.
+    ContainsUnusable => CONTAINS_UNUSABLE = "APLAN047", Error,
+        "a `contains` names a milestone that exists, and closes no loop",
+        points_at: Some("contains");
+    /// `APLAN048`: the artifact's version has moved as far as the tasks closed
+    /// since the last release require (`A1-313`, ADR-0034, ADR-0038).
+    ///
+    /// This is the failure the whole version feature exists to prevent, at the
+    /// only moment it can still be prevented. A breaking change that shipped in
+    /// a patch release is not discovered by reading the tag; it is discovered by
+    /// a consumer, after the fact, and no amount of process catches it then.
+    ///
+    /// **Both halves are read rather than believed**, which is why it is
+    /// `verify` and not `check`: what closed since the last release comes from
+    /// walking history to the nearest release tag (ADR-0038), and the version
+    /// shipping today comes from a command the repository declares (ADR-0040).
+    /// With no `version.current` there is nothing to compare and the rule is
+    /// silent -- the same opt-in `url.check` and `test.list` have, and for the
+    /// same reason: a key nobody set is not a gate nobody may switch off.
+    ///
+    /// **It fires on a version that moved, not on one that has not.** Between
+    /// releases a tree ordinarily carries the number it last shipped, and
+    /// reporting that as a defect would make this rule fire on every commit
+    /// after the first closed task -- a gate nobody could leave on. What it
+    /// catches is the bump that is too small: `0.3.0` to `0.3.1` with a
+    /// `breaking` task in the window. A release that was never prepared at all
+    /// is `ci/scripts/release.sh`'s refusal at tag time, where the tag is the
+    /// thing making the claim.
+    ///
+    /// An *error*, because a version number is a compatibility promise to
+    /// somebody who is not in the room.
+    VersionBehind => VERSION_BEHIND = "APLAN048", Error,
+        "the released version has moved as far as the closed tasks require",
+        points_at: Some("version_impact");
+    /// `APLAN049`: the artifact agrees with what the plan claims about
+    /// compatibility (`A1-314`, ADR-0034).
+    ///
+    /// Every rung above this one takes the author's word. `APLAN044` checks the
+    /// claim is well formed and `APLAN048` checks the number moved far enough
+    /// for the claims made -- but a task that removed a public function and
+    /// wrote `fix` passes both. That is the gap between "a field is filled in"
+    /// and "the field is true", which is what this whole tool is about.
+    ///
+    /// **It runs the checker the repository declares and reports what it said.**
+    /// `cargo semver-checks check-release` already exits non-zero on a breaking
+    /// change and other ecosystems have equivalents; nothing here reimplements
+    /// API diffing, exactly as nothing here reimplements a test runner. The
+    /// question asked is the one such a tool answers natively -- *is this
+    /// compatible with the last release* -- because a command that had to print
+    /// `none|fix|feature|breaking` would be this project teaching an ecosystem
+    /// its vocabulary (`A1-037`).
+    ///
+    /// **It fires in one direction only.** A checker that finds a break where
+    /// the plan claims less is a finding; a checker that finds none where the
+    /// plan claims `breaking` is silent, because ADR-0034 allows claiming more
+    /// than a floor and because an API differ cannot see a behavioural break at
+    /// all. Reporting an over-claim would punish the one habit that is always
+    /// safe.
+    ///
+    /// A checker that could not be *launched* is a fault of the configuration,
+    /// reported as itself, and no claim is called false on the strength of it --
+    /// the distinction `A1-066` and `A1-300` both turn on.
+    ///
+    /// An *error*, and off unless `version.check` is declared: the same opt-in
+    /// `url.check` and `test.list` have.
+    ImpactContradicted => IMPACT_CONTRADICTED = "APLAN049", Error,
+        "the artifact agrees with what the plan claims about compatibility",
+        points_at: Some("version_impact");
+    /// `APLAN050`: a recorded `version` is on a release, and is a version
+    /// (`A1-339`, ADR-0038).
+    ///
+    /// A release node carries the version it produced, written when it closed,
+    /// so a later run can ask what a release contained without re-deriving from
+    /// a plan that has since moved (ADR-0038 decision 1).
+    ///
+    /// **A cut is not a delivery.** This repository has eight done cuts against
+    /// three tags, which is what a cut being a planning bucket looks like, and a
+    /// `version` on one would read as a claim that it shipped. The field says
+    /// what a *release* produced or it says nothing.
+    ///
+    /// **And it has to be a version.** A value the scheme cannot read is a
+    /// record nobody can compare against: the whole point of writing it down is
+    /// that a later run reads it back, and `0.4` or `next` or an empty string
+    /// would be a record that reads as an absence at the moment it is needed.
+    ///
+    /// An *error*, and hermetic: both halves are answerable from the plan alone.
+    VersionRecordUnusable => VERSION_RECORD_UNUSABLE = "APLAN050", Error,
+        "a recorded `version` is on a release, and is a version this tool can read",
+        points_at: Some("version");
+    /// `APLAN051`: a tag one edit from a word that changes what this tool does
+    /// (`A1-212`, ADR-0014).
+    ///
+    /// Five bare words are load-bearing: `milestone` makes a task a cut,
+    /// `release` makes it a checkpoint over cuts (ADR-0022), `deprecation` and
+    /// `removal` drive the runway rules, and `cross-cutting` waives `APLAN022`.
+    /// They live in the same namespace as an adopter's own tags and nothing
+    /// declared them, so a typo did not misname anything -- it silently changed
+    /// what the plan *is*.
+    ///
+    /// **Measured on two-task plans, not theorised** (`A1-212`). `deprecatoin`
+    /// for `deprecation`: `aplan deprecations` answers "this plan declares no
+    /// deprecation runway" and exits `0`. `milestne` for `milestone`: the cut
+    /// dissolves, `roadmap` reports `0 cut(s)`, and `check` then advises adding
+    /// an `effort_days` estimate to what it no longer knows is a checkpoint --
+    /// the opposite of the rule `APLAN021` exists to state.
+    ///
+    /// Also the other direction: a `tag_families` entry that lists one of the
+    /// five is declaring a vocabulary over a word the tool already acts on, and
+    /// the tool's meaning is the one that applies. Reported once, against the
+    /// configuration, rather than left as two rules disagreeing about the same
+    /// word.
+    ///
+    /// A *warning*, for `APLAN026`'s reason: a tag one edit from a reserved word
+    /// is as likely to be a word the repository means -- `releases` beside
+    /// `release` -- as a mistake, and the repository sets `deny_warnings` if it
+    /// wants the answer to block.
+    ReservedTagNearMiss => RESERVED_TAG_NEAR_MISS = "APLAN051", Warning,
+        "a tag is not one edit from a word that changes what this tool does",
+        points_at: Some("tags");
+    /// `APLAN052`: `cross-cutting` means "in no cut", so it is not on a task in
+    /// one (`A1-212`).
+    ///
+    /// `APLAN022` reads "a member of exactly one cut, *or* tagged
+    /// `cross-cutting`". The tag means "belongs to no cut", so on a task that
+    /// *is* in one it claims something the task's own membership contradicts.
+    ///
+    /// **It used to mask, and that is fixed rather than only reported**
+    /// (`A1-212`, audit). `APLAN022` took the tag as the answer whatever the
+    /// count, so a task in *two* cuts -- an error, and a real defect -- passed
+    /// as clean. The waiver now applies to the case the tag describes and no
+    /// other, so that task is reported by `APLAN022` as the error it is, and by
+    /// this rule for the claim that is wrong either way.
+    ///
+    /// **This is the half a rule can say with confidence.** On a task in no cut
+    /// the same tag is genuinely ambiguous -- "belongs to no cut" and "concerns
+    /// several components" are indistinguishable by looking -- and a rule that
+    /// asks a question about forty-odd tasks is a rule people switch off. So
+    /// that case is silent and this one is not, which is the asymmetry `A1-212`
+    /// was filed to find.
+    ///
+    /// A *warning*: the remedy is a judgement between renaming the tag and
+    /// removing it, and an adopter meets this on tasks they already wrote.
+    CrossCuttingInACut => CROSS_CUTTING_IN_A_CUT = "APLAN052", Warning,
+        "`cross-cutting` is not on a task that is a member of a cut",
+        points_at: Some("tags");
+    /// `APLAN053`: a task says work on it has started and the repository holds
+    /// nothing it claims (`A1-359`).
+    ///
+    /// **This is the status the product's own argument could not otherwise
+    /// defend.** `done` is believed because `verify` resolves what it cites;
+    /// that is the whole premise. `in_progress` arrives as a claim with nothing
+    /// to resolve against, and a stale claim is precisely the failure this tool
+    /// exists to expose in other people's plans. `A1-224` refused
+    /// `close --criteria-met` on the neighbouring ground that a claim is not
+    /// proof, and storing `in_progress` unchecked is the same trade made the
+    /// other way.
+    ///
+    /// So the status is kept and checked rather than removed: the premise is not
+    /// "do not store claims", it is "do not take claims on trust". Nothing
+    /// leaves the schema and nothing an adopter wrote stops loading.
+    ///
+    /// **Narrow by construction**, which is `APLAN052`'s argument applied here.
+    /// The derived answer is "does the repository hold anything this task claims
+    /// responsibility for", read from the index so a file that has been written
+    /// and staged counts as work -- a task started five minutes ago that has
+    /// created its files is silent. What it reports is the unambiguous case: a
+    /// task declared under way whose declared `paths` match nothing that exists.
+    /// It deliberately does *not* ask whether the right work happened, because
+    /// a broad glob makes that question unanswerable and `aplan vacuity` is
+    /// where the breadth of a `paths` declaration is reported.
+    ///
+    /// Silent where the task declares no `paths`: there is then nothing to judge
+    /// the claim by, and a rule that fires on every task without `paths` would
+    /// be reporting `APLAN023` a second time.
+    ///
+    /// A *warning*, for `A1-134`'s reason: a task may legitimately be under way
+    /// before anything of it exists, so whether that blocks is the repository's
+    /// call through `deny_warnings` rather than this rule's.
+    UnstartedInProgress => UNSTARTED_IN_PROGRESS = "APLAN053", Warning,
+        "a task that is `in_progress` has something in the repository to show for it",
+        applies: &[Binding::InProgress], binds: &[Binding::Paths],
+        points_at: Some("status");
 }
 
 /// A repository's verdict policy: what makes a report fail its build.
@@ -1069,6 +1385,28 @@ pub struct Diagnostic {
     ///
     /// [`file`]: Diagnostic::file
     pub location: Option<Location>,
+    /// Captured evidence this finding carries, one line per element
+    /// (`A1-365`).
+    ///
+    /// **Separate from [`message`] because the two are different kinds of
+    /// text.** A message is prose, and every surface is free to fold it to its
+    /// own width; this is output a command printed, where the line breaks carry
+    /// meaning and folding would reflow an assertion into nonsense. Keeping
+    /// them apart is also what lets each surface present it in the shape its
+    /// consumer expects -- indented lines in a terminal, an array in JSON, a
+    /// property in SARIF -- rather than every consumer parsing it back out of a
+    /// sentence.
+    ///
+    /// Empty for every rule but `APLAN014`, which is why it is a `Vec` rather
+    /// than an `Option`: the common case is "nothing to add", and `is_empty()`
+    /// says that without a nested match.
+    ///
+    /// Whatever is in here has already been sanitized and bounded by whoever
+    /// produced it. A renderer may still escape it for its own format, but it
+    /// must not assume it is short.
+    ///
+    /// [`message`]: Diagnostic::message
+    pub detail: Vec<String>,
 }
 
 impl Diagnostic {
@@ -1081,6 +1419,7 @@ impl Diagnostic {
             message: message.into(),
             agent_instruction: None,
             location: None,
+            detail: Vec::new(),
         }
     }
 
@@ -1093,6 +1432,7 @@ impl Diagnostic {
             message: message.into(),
             agent_instruction: None,
             location: None,
+            detail: Vec::new(),
         }
     }
 
@@ -1118,6 +1458,15 @@ impl Diagnostic {
     #[must_use]
     pub fn with_agent_instruction(mut self, s: impl Into<String>) -> Self {
         self.agent_instruction = Some(s.into());
+        self
+    }
+
+    /// Attach captured evidence, one element per line (`A1-365`).
+    ///
+    /// The caller has already bounded and sanitized it; this only carries it.
+    #[must_use]
+    pub fn with_detail(mut self, lines: Vec<String>) -> Self {
+        self.detail = lines;
         self
     }
 }
@@ -1298,7 +1647,7 @@ mod tests {
         // Every rule's `code()` is one of the module constants and vice versa is
         // structurally guaranteed by the macro; this pins the count so dropping
         // a row is a visible change.
-        assert_eq!(Rule::ALL.len(), 44);
+        assert_eq!(Rule::ALL.len(), 53);
     }
 
     /// Severity is declared per rule in the macro. Pin the warnings so a
@@ -1316,7 +1665,8 @@ mod tests {
             vec![
                 "APLAN009", "APLAN016", "APLAN018", "APLAN019", "APLAN021", "APLAN023", "APLAN024",
                 "APLAN025", "APLAN026", "APLAN027", "APLAN029", "APLAN035", "APLAN036", "APLAN037",
-                "APLAN038", "APLAN039", "APLAN040", "APLAN041", "APLAN042", "APLAN043", "APLAN044"
+                "APLAN038", "APLAN039", "APLAN040", "APLAN041", "APLAN042", "APLAN043", "APLAN044",
+                "APLAN045", "APLAN051", "APLAN052", "APLAN053"
             ]
         );
     }

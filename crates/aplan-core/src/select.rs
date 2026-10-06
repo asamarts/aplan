@@ -39,6 +39,14 @@ pub struct Selector {
     pub owners: Vec<String>,
     /// Statuses. A task matches if it is in any of them.
     pub statuses: Vec<Status>,
+    /// Only tasks nobody holds (`A1-359`).
+    ///
+    /// The complement of `owners`, and a separate field rather than a magic
+    /// owner value, because "unassigned" is the *absence* of a name and a
+    /// sentinel string would be a name somebody could claim. Combining it with
+    /// `owners` selects nothing, which is the honest answer to a contradictory
+    /// question and is said rather than silently widened.
+    pub unclaimed: bool,
 }
 
 impl Selector {
@@ -49,6 +57,7 @@ impl Selector {
             && self.tags.is_empty()
             && self.owners.is_empty()
             && self.statuses.is_empty()
+            && !self.unclaimed
     }
 
     /// Whether `task` is in the subset, given the cut it belongs to.
@@ -69,7 +78,12 @@ impl Selector {
         let owned =
             self.owners.is_empty() || task.owner.as_ref().is_some_and(|o| self.owners.contains(o));
         let is_status = self.statuses.is_empty() || self.statuses.contains(&task.status);
-        in_cut && has_tag && owned && is_status
+        // `--unclaimed` alongside `--owner x` asks for a task that is both held
+        // by `x` and held by nobody, and selects nothing. Narrowing across
+        // dimensions is the documented reading, and quietly turning a
+        // contradiction into a union would answer a question nobody asked.
+        let held_by_nobody = !self.unclaimed || task.owner.is_none();
+        in_cut && has_tag && owned && is_status && held_by_nobody
     }
 
     /// How a view says what it was narrowed to.
@@ -78,18 +92,25 @@ impl Selector {
     #[must_use]
     pub fn describe(&self) -> Vec<String> {
         let mut out = Vec::new();
-        let mut say = |what: &str, values: Vec<String>| {
-            if !values.is_empty() {
-                out.push(format!("{what} `{}`", values.join("`, `")));
-            }
-        };
-        say("cut", self.cuts.clone());
-        say("tag", self.tags.clone());
-        say("owner", self.owners.clone());
-        say(
-            "status",
-            self.statuses.iter().map(ToString::to_string).collect(),
-        );
+        {
+            let mut say = |what: &str, values: Vec<String>| {
+                if !values.is_empty() {
+                    out.push(format!("{what} `{}`", values.join("`, `")));
+                }
+            };
+            say("cut", self.cuts.clone());
+            say("tag", self.tags.clone());
+            say("owner", self.owners.clone());
+            say(
+                "status",
+                self.statuses.iter().map(ToString::to_string).collect(),
+            );
+        }
+        // Not a value in a dimension, so it is said rather than listed: there
+        // is no name to print, and "owner `nobody`" would read as a name.
+        if self.unclaimed {
+            out.push("held by nobody".to_string());
+        }
         out
     }
 }
@@ -108,6 +129,8 @@ mod tests {
             effort_days: Some(1.0),
             blocked_by: Vec::new(),
             prefer_after: Vec::new(),
+            ratified_by: Vec::new(),
+            contains: Vec::new(),
             evidence: Vec::new(),
             paths: Vec::new(),
             traces: Vec::new(),
@@ -116,6 +139,7 @@ mod tests {
             revisit_at: None,
             version_impact: None,
             version_impact_reason: None,
+            version: None,
         }
     }
 
@@ -186,10 +210,34 @@ mod tests {
             tags: vec!["cli".into(), "output".into()],
             owners: Vec::new(),
             statuses: vec![Status::Todo],
+            unclaimed: false,
         };
         assert_eq!(
             s.describe(),
             ["cut `v0.9`", "tag `cli`, `output`", "status `todo`"]
+        );
+        // Said rather than listed, and last, because it names no value
+        // (`A1-359`).
+        assert_eq!(
+            Selector {
+                unclaimed: true,
+                ..s.clone()
+            }
+            .describe(),
+            [
+                "cut `v0.9`",
+                "tag `cli`, `output`",
+                "status `todo`",
+                "held by nobody"
+            ]
+        );
+        assert!(
+            !Selector {
+                unclaimed: true,
+                ..Selector::default()
+            }
+            .is_empty(),
+            "`--unclaimed` alone is a narrowing, so it is not the whole plan"
         );
         assert!(Selector::default().describe().is_empty());
     }

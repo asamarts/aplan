@@ -211,6 +211,8 @@ fn no_generated_roadmap_cites_this_projects_adrs() {
         effort_days: Some(1.0),
         blocked_by: Vec::new(),
         prefer_after: Vec::new(),
+        ratified_by: Vec::new(),
+        contains: Vec::new(),
         evidence: Vec::new(),
         paths: Vec::new(),
         traces: Vec::new(),
@@ -219,9 +221,10 @@ fn no_generated_roadmap_cites_this_projects_adrs() {
         revisit_at: None,
         version_impact: None,
         version_impact_reason: None,
+        version: None,
     };
     let graph = aplan_core::Graph::new(std::iter::once(&task));
-    let markdown = aplan_output::render_roadmap_markdown(&graph.roadmap(), None);
+    let markdown = aplan_output::render_roadmap_markdown(&graph.roadmap(), None, None);
     assert_eq!(leaks(&markdown), None, "{markdown}");
     assert!(
         markdown.contains("gated by `aplan verify` in CI"),
@@ -436,12 +439,12 @@ fn string_literals(span: &str) -> Vec<String> {
             continue;
         }
         let rest = &span[i..];
-        if rest.starts_with('"') || rest.starts_with("r\"") || rest.starts_with("r#") {
-            if let Some((len, content)) = raw_or_plain_string_len(rest) {
-                out.push(content);
-                i += len;
-                continue;
-            }
+        if (rest.starts_with('"') || rest.starts_with("r\"") || rest.starts_with("r#"))
+            && let Some((len, content)) = raw_or_plain_string_len(rest)
+        {
+            out.push(content);
+            i += len;
+            continue;
         }
         i += 1;
     }
@@ -709,12 +712,12 @@ fn harvest(root: &std::path::Path) -> Scan {
                     continue; // a test's own strings are addressed to nobody
                 }
                 stack.push(p);
-            } else if p.extension().is_some_and(|x| x == "rs") {
-                if let Ok(text) = std::fs::read_to_string(&p) {
-                    let s = scan(&p.display().to_string(), &text);
-                    out.strings.extend(s.strings);
-                    out.unreadable.extend(s.unreadable);
-                }
+            } else if p.extension().is_some_and(|x| x == "rs")
+                && let Ok(text) = std::fs::read_to_string(&p)
+            {
+                let s = scan(&p.display().to_string(), &text);
+                out.strings.extend(s.strings);
+                out.unreadable.extend(s.unreadable);
             }
         }
     }
@@ -973,7 +976,19 @@ fn backticked(text: &str) -> Vec<String> {
         let after = &rest[open + 1..];
         match after.find('`') {
             Some(close) => {
-                out.push(after[..close].to_string());
+                // Rendered help wraps prose for the terminal. A backticked
+                // invocation split at that presentational boundary is still
+                // one command, not an argv containing a newline. Normalising
+                // whitespace here keeps the audit about the command clap
+                // described rather than the width of the stream that happened
+                // to render it (`A1-340`).
+                out.push(
+                    after[..close]
+                        .lines()
+                        .map(str::trim)
+                        .collect::<Vec<_>>()
+                        .join(" "),
+                );
                 rest = &after[close + 1..];
             }
             None => break,
@@ -1240,4 +1255,10 @@ fn backticks_are_read_in_pairs_and_an_unclosed_one_ends_the_scan() {
     assert_eq!(backticked("no ticks here"), Vec::<String>::new());
     assert_eq!(backticked("an `unclosed span"), Vec::<String>::new());
     assert_eq!(backticked("``"), vec![""]);
+    assert_eq!(backticked("`a  b`"), vec!["a  b"]);
+    assert_eq!(
+        backticked("run `aplan check\r\n    --format json` now"),
+        vec!["aplan check --format json"],
+        "terminal wrapping is presentation, not part of the invocation"
+    );
 }

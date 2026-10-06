@@ -1,0 +1,65 @@
+`aplan tag` maintains the vocabulary a plan declares. Tags were written at
+creation and never again, so keeping a declared family right meant editing
+frontmatter by hand and running `check` afterwards to find out what it broke.
+
+Every case here changes nothing, so this fixture stays as committed: the
+writing paths are covered by `tag_cmd.rs`, which can afford a scratch plan.
+
+Adding a tag the task already carries is not an edit, and says so:
+
+```
+$ aplan tag add W-1 legacy
+`W-1` already carries `legacy`
+
+```
+
+Nor is removing one it does not:
+
+```
+$ aplan tag rm W-1 never-had-it
+`W-1` does not carry `never-had-it`
+
+```
+
+A rename names the word, not a task, so a word nobody carries is an answer
+rather than an error:
+
+```
+$ aplan tag rename nobody-has-this something-else
+no task carries `nobody-has-this`
+
+```
+
+Renaming a word to itself is refused, because it reads as a request that did
+not happen rather than one that changed nothing:
+
+```
+$ aplan tag rename legacy legacy
+? 2
+aplan: `legacy` is already what it would be renamed to
+
+```
+
+A tag is a word, so a blank one is refused before anything is read:
+
+```
+$ aplan tag add W-1 "   "
+? 2
+aplan: a tag is a word, and `   ` is blank
+
+```
+
+**The edit is judged before it writes**, which is the whole value over editing
+the file. `priority` is declared `exactly-one`, so taking the member off would
+leave `W-1` carrying none -- and that is reported instead of written. `W-2` keeps
+a member, so the finding is about the task rather than about a family nothing
+uses at all, which is a warning and would be noted rather than refused:
+
+```
+$ aplan tag rm W-1 priority-p0
+? 2
+aplan: refusing to take `priority-p0` off `W-1`: it would add 1 finding(s) `check` reports:
+  APLAN030 W-1: `priority` is declared exactly-one and this task carries none
+      fix: Carry exactly one of `tag_families.priority` on this task, or change what `.aplan.yml` requires of it.
+
+```

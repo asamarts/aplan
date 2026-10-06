@@ -16,6 +16,98 @@
 use std::path::Path;
 
 mod common;
+/// **A citation is named by `kind:ref`, and that is what removal matches**
+/// (`A1-361`).
+///
+/// Two defects met here. The shared `kind:ref` parser refused `note` for every
+/// mode, though only the modes that *write* a citation have anything to say
+/// about a kind `close` will not record; and the match compared the whole
+/// `Evidence`, including a `captured` date a caller naming a citation cannot
+/// supply. Together they made a dated `note` unmaintainable: `close` says to add
+/// one by hand, and `amend` would not take it away.
+///
+/// Every citation in this repository carries no date, so the two comparisons
+/// agreed here and would have parted on an imported plan -- `import
+/// --implemented-as done` records note-level provenance *with* a date.
+#[test]
+fn a_dated_note_citation_can_be_removed_and_replaced() {
+    let dir = tempfile::Builder::new()
+        .tempdir_in(aplan_core::fixture::fixture_root())
+        .expect("tempdir");
+    std::fs::create_dir_all(dir.path().join("aplan/tasks")).expect("mkdir");
+    std::fs::write(dir.path().join(".aplan.yml"), "root: aplan\n").expect("config");
+    std::fs::write(
+        dir.path().join("aplan/tasks/W-1.md"),
+        "---\nid: W-1\ntitle: closed on notes\nphase: 1\nstatus: done\n\
+         effort_days: 1\nevidence:\n  - kind: note\n    ref: reviewed\n\
+         \x20   captured: 2026-08-14\n  - kind: note\n    ref: second\n\
+         \x20   captured: 2026-08-15\n---\n\n## Why\n\nBecause.\n",
+    )
+    .expect("task");
+
+    // Removal names what is already there, so the kind `close` refuses to write
+    // is still a kind this can take away.
+    let out = common::run(
+        dir.path(),
+        &["amend", "W-1", "--remove-evidence", "note:reviewed"],
+    );
+    assert_eq!(
+        out.code,
+        0,
+        "a dated note could not be removed: {}",
+        out.text()
+    );
+
+    // The `from` side of a replacement is the same: nothing is recorded by it.
+    let out = common::run(
+        dir.path(),
+        &[
+            "amend",
+            "W-1",
+            "--replace-evidence",
+            "note:second",
+            "file:.aplan.yml",
+        ],
+    );
+    assert_eq!(
+        out.code,
+        0,
+        "a dated note could not be replaced: {}",
+        out.text()
+    );
+
+    let body = std::fs::read_to_string(dir.path().join("aplan/tasks/W-1.md")).expect("task");
+    assert!(
+        !body.contains("ref: reviewed"),
+        "the removal did not land:\n{body}"
+    );
+    assert!(
+        !body.contains("ref: second"),
+        "the replacement did not land:\n{body}"
+    );
+    assert!(
+        body.contains("ref: .aplan.yml"),
+        "the new citation is missing:\n{body}"
+    );
+
+    // And the mode that *writes* still refuses it, which is the half the rule
+    // was right about.
+    let out = common::run(
+        dir.path(),
+        &["amend", "W-1", "--add-evidence", "note:third"],
+    );
+    assert_ne!(
+        out.code,
+        0,
+        "adding a note should still be refused: {}",
+        out.text()
+    );
+    assert!(
+        out.text().contains("needs a `captured` date"),
+        "refused for some other reason: {}",
+        out.text()
+    );
+}
 
 /// The third shape: proof that was never proof (`A1-137`).
 ///

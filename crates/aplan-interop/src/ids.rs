@@ -255,6 +255,82 @@ fn ulid_id(plan: &Plan, phase: u32) -> Result<String, IdError> {
     Ok(format!("{stem}{}", ulid()?))
 }
 
+/// How long to wait before trying a minted id again, when another writer took it.
+///
+/// **Exponential with full jitter** (`A1-230`). Sequential ids serialise
+/// creation: every writer derives the same next id from the same plan, so one
+/// wins and the rest find the file already there. Measured at 24 concurrent
+/// `add`, two succeeded. Retrying without a wait reproduces the thundering herd
+/// -- the losers re-read together, mint the same id together and lose together
+/// -- so the wait is randomised across the whole window rather than scaled by
+/// attempt alone, which is what spreads a herd out.
+///
+/// Capped, because the window only has to exceed the time a competing write
+/// takes: over five runs of 24 writers, all of them succeed every time, with
+/// the slowest taking about 160ms and **ten** attempts at the worst. Ten rather
+/// than the five a first reading suggests, because a loser that re-reads is
+/// racing the writers who have since joined as well as the ones it lost to. The
+/// cap is generous against that and the deadline above it is the real bound.
+#[must_use]
+pub fn race_backoff(attempt: u32) -> std::time::Duration {
+    let mut bytes = [0u8; 8];
+    let roll = getrandom::fill(&mut bytes)
+        .is_ok()
+        .then(|| u64::from_le_bytes(bytes));
+    jittered(race_window(attempt), roll)
+}
+
+/// The window attempt `attempt` draws its wait from, in milliseconds.
+///
+/// 2, 4, 8 .. 32, then flat. `saturating_pow` rather than a shift so a large
+/// attempt count cannot wrap into a tiny wait, and a floor of 2 so the caller
+/// that counts from zero still waits: a one-millisecond window can only draw
+/// zero, which is a spin rather than a backoff.
+///
+/// **The cap is a trade, and both of the clever answers were measured and lost**
+/// (`A1-230`, audit). Raising it to 256ms turns 128 concurrent writers from 113
+/// landing in 5.5s into all 128 in 2.8s, and costs the ordinary case: 48 writers
+/// go from about 440ms to about 1,150ms. Scaling the window by how long the lost
+/// attempt itself took is the principled version -- an attempt costs more
+/// exactly when there is more contention, because it re-reads a plan more
+/// writers have grown -- and it also lands all 128, but it waits a multiple of
+/// that cost on the *first* retry, where the ordinary race resolves. Measured, 8
+/// writers went from about 45ms to 180-395ms, and 24 from about 165ms to about
+/// 565ms.
+///
+/// So this stays flat and small, because the case it is tuned for is the one
+/// that happens: a handful of agents, resolving in one or two attempts. What a
+/// fleet past about a hundred simultaneous writers gets instead is graceful
+/// degradation -- measured at 113 of 128, each refusal naming the id it lost and
+/// leaving a plan that loads -- and that is the documented limit rather than a
+/// surprise.
+const fn race_window(attempt: u32) -> u64 {
+    // `if` rather than `min`/`clamp`, which are not const-stable at this
+    // crate's MSRV.
+    let doublings = if attempt < 5 { attempt } else { 5 };
+    let window = 2u64.saturating_pow(doublings);
+    if window < 2 { 2 } else { window }
+}
+
+/// `roll` spread across `window`, or the whole window when there was no roll.
+///
+/// Split out to be tested, because the failure it guards cannot be provoked:
+/// **the fallback used to sleep zero.** It was written as `roll = window` and
+/// then taken modulo the window, so a `getrandom` failure produced `window %
+/// window`, which is a spin loop at every attempt rather than the "correct wait,
+/// merely less well spread" its own comment claimed. Nothing caught it because
+/// the arithmetic is only reachable when the operating system cannot produce
+/// eight bytes of randomness (`A1-230`, audit).
+const fn jittered(window: u64, roll: Option<u64>) -> std::time::Duration {
+    let ms = match roll {
+        // Full jitter: anywhere in the window, zero included. A herd is spread
+        // by the *spread*, and a floor on each wait would only shift it.
+        Some(roll) => roll % window,
+        None => window,
+    };
+    std::time::Duration::from_millis(ms)
+}
+
 /// Crockford base32, the alphabet a ULID is written in: no `I`, `L`, `O` or `U`,
 /// so a transcribed id cannot be misread as a digit or as profanity.
 const CROCKFORD: &[u8; 32] = b"0123456789ABCDEFGHJKMNPQRSTVWXYZ";
@@ -468,6 +544,8 @@ mod tests {
                 effort_days: Some(1.0),
                 blocked_by: Vec::new(),
                 prefer_after: Vec::new(),
+                ratified_by: Vec::new(),
+                contains: Vec::new(),
                 evidence: Vec::new(),
                 paths: Vec::new(),
                 traces: Vec::new(),
@@ -480,6 +558,7 @@ mod tests {
                 revisit_at: None,
                 version_impact: None,
                 version_impact_reason: None,
+                version: None,
             },
             path: std::path::PathBuf::from("plan/tasks/x.md"),
             fields: aplan_core::load::FieldLines::new(),
@@ -806,5 +885,84 @@ mod tests {
     fn a_non_ascii_id_is_not_a_panic() {
         assert!(!contains_a_ulid("A1-046-cafe\u{e9}"));
         assert!(!contains_a_ulid(&"\u{e9}".repeat(30)));
+    }
+}
+
+#[cfg(test)]
+mod backoff {
+    use super::*;
+
+    /// **A backoff that cannot draw randomness still waits** (`A1-230`, audit).
+    ///
+    /// The defect this pins: the fallback was the window taken modulo the
+    /// window, so it slept zero at every attempt, and the losers of a race
+    /// would spin against each other for the whole five-second deadline
+    /// instead of spreading out. It is unreachable in normal operation, which
+    /// is exactly why it needs a test rather than a reading.
+    ///
+    /// Proof of `ids.sequential_survives_concurrent_writers`: the wait that
+    /// makes re-minting spread a herd out instead of re-colliding with it.
+    #[test]
+    fn a_failed_draw_waits_the_whole_window() {
+        for attempt in 0..8 {
+            let window = race_window(attempt);
+            assert_eq!(
+                jittered(window, None),
+                std::time::Duration::from_millis(window),
+                "attempt {attempt} falls back to a {window}ms window"
+            );
+            assert!(
+                !jittered(window, None).is_zero(),
+                "attempt {attempt} falls back to a spin rather than a wait"
+            );
+        }
+    }
+
+    /// **Every attempt can wait, including the first** (`A1-230`, audit).
+    ///
+    /// A one-millisecond window can only draw zero, so an attempt counted from
+    /// zero would spin however good the randomness was. The window floor is 2.
+    #[test]
+    fn no_attempt_has_a_window_it_cannot_jitter_in() {
+        for attempt in 0..8 {
+            assert!(
+                race_window(attempt) >= 2,
+                "attempt {attempt} draws from a window of {}, which can only be zero",
+                race_window(attempt)
+            );
+        }
+    }
+
+    /// **The wait stays inside its window, and the window stays capped**
+    /// (`A1-230`).
+    ///
+    /// The cap is what bounds the worst case a writer pays once a herd has
+    /// spread out; the deadline above it is the real bound, and a window that
+    /// grew without limit would overshoot it in one sleep.
+    #[test]
+    fn a_drawn_wait_is_inside_its_window_and_the_window_is_capped() {
+        for attempt in 0..40 {
+            let window = race_window(attempt);
+            assert!(window <= 32, "attempt {attempt} uncapped at {window}ms");
+            for roll in [0, 1, 7, u64::MAX / 2, u64::MAX] {
+                let waited = jittered(window, Some(roll)).as_millis();
+                assert!(
+                    waited < u128::from(window),
+                    "attempt {attempt} with roll {roll} waited {waited}ms, outside its \
+                     {window}ms window"
+                );
+            }
+        }
+    }
+
+    /// **The window really grows** (`A1-230`).
+    ///
+    /// Exponential is the half that spreads a herd that keeps colliding: if
+    /// every attempt drew from the same window, twenty-four writers would
+    /// re-collide at the same rate however many times they tried.
+    #[test]
+    fn the_window_doubles_until_it_caps() {
+        let windows: Vec<u64> = (0..8).map(race_window).collect();
+        assert_eq!(windows, vec![2, 2, 4, 8, 16, 32, 32, 32], "{windows:?}");
     }
 }

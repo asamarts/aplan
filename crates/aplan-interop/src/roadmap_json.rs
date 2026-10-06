@@ -639,6 +639,8 @@ impl ProposalSource for RoadmapJson {
                     })
                     .collect(),
                 prefer_after: Vec::new(),
+                ratified_by: Vec::new(),
+                contains: Vec::new(),
                 evidence,
                 paths: Vec::new(),
                 traces: Vec::new(),
@@ -647,6 +649,7 @@ impl ProposalSource for RoadmapJson {
                 revisit_at: None,
                 version_impact: None,
                 version_impact_reason: None,
+                version: None,
             });
             bodies.push(body);
         }
@@ -727,6 +730,8 @@ fn read_workstream(
                     // neither of which anything checked before.
                     blocked_by: m.depends_on.clone(),
                     prefer_after: Vec::new(),
+                    ratified_by: Vec::new(),
+                    contains: Vec::new(),
                     evidence,
                     paths: Vec::new(),
                     traces: m.evidence.clone(),
@@ -735,6 +740,7 @@ fn read_workstream(
                     revisit_at: None,
                     version_impact: None,
                     version_impact_reason: None,
+                    version: None,
                 });
                 bodies.push(body);
             }
@@ -772,6 +778,8 @@ fn read_workstream(
                     effort_days: None,
                     blocked_by: ws.milestones.iter().map(|m| m.id.clone()).collect(),
                     prefer_after: Vec::new(),
+                    ratified_by: Vec::new(),
+                    contains: Vec::new(),
                     evidence: Vec::new(),
                     paths: Vec::new(),
                     traces,
@@ -780,6 +788,7 @@ fn read_workstream(
                     revisit_at: None,
                     version_impact: None,
                     version_impact_reason: None,
+                    version: None,
                 });
                 bodies.push(body);
             }

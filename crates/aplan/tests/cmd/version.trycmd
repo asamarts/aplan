@@ -1,0 +1,80 @@
+`aplan version` answers what a node owes the released version: a task
+declares what it did, a level supplies a floor for the tasks that declare
+nothing, and the answer is the strongest of those (ADR-0034).
+
+**The rung follows the argument.** A named node is answered from the plan alone.
+The bare form asks what the *next release* must be, which reads the repository:
+the window over history, and the version shipping today. That version is read by
+a command the repository declares, never parsed -- so a plan that declares none
+is told which key to add rather than handed a number invented from a manifest
+this tool does not understand (ADR-0040).
+
+Only the named forms are pinned here: the bare one reads whatever repository it
+is standing in, and this corpus runs in a directory whose ancestors differ
+between checkouts. `crates/aplan/tests/version_next.rs` drives it against a
+repository it builds itself.
+
+A task that declares nothing owes its level's floor, which for a unit of work is
+a `fix`:
+
+```
+$ aplan version W-001
+fix
+
+```
+
+A declaration answers instead of the floor:
+
+```
+$ aplan version W-002
+breaking
+
+```
+
+**A cut owes the strongest of its members**, which is what makes a floor compose
+where an assertion would not: one breaking task raises the cut that holds it.
+
+```
+$ aplan version M-v0.1
+breaking
+
+```
+
+The JSON names *which* member raised it, because "this cut owes breaking" is not
+actionable and "because `W-002` is" is.
+
+```
+$ aplan version M-v0.1 --format json
+{
+  "id": "M-v0.1",
+  "owes": "breaking",
+  "raised_by": "W-002",
+  "recorded": null,
+  "schema": "aplan/version/v1",
+  "unclaimed_by_any_cut": null
+}
+
+```
+
+**A release answers about its members, and says what they do not reach.** Its
+members are cuts, so a task no cut claims is in none of them -- and this form is
+answered from the plan alone, which cannot know which of those tasks ship now.
+The bare form adds them, because it has a window to measure over.
+
+```
+$ aplan version M-r
+breaking
+note: this is what `M-r`'s members owe. 1 task(s) in this plan are claimed by no cut, so no release's members reach them; `aplan version` with no id adds the ones that ship with this release
+
+```
+
+**A release that recorded what it produced answers with the record.** Re-deriving
+an impact for work that has already shipped reads a plan that has since moved,
+which is the whole reason the number is written down when the release closes.
+
+```
+$ aplan version M-shipped
+0.9.0
+note: this is the version `M-shipped` recorded when it closed, not a fresh derivation. What it owes today reads a plan that has moved since: `--format json` carries both
+
+```

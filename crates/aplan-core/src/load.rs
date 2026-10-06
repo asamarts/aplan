@@ -395,6 +395,33 @@ pub fn split_frontmatter(source: &str) -> Option<(&str, &str)> {
     None
 }
 
+/// The id and status a task file declared, read from its frontmatter alone.
+///
+/// For asking what a task *was* at some earlier commit (`A1-313`, ADR-0038):
+/// the window a release closes is the tasks that are `done` now and were not
+/// `done` at the last release tag, and answering that means reading a blob
+/// rather than a working tree.
+///
+/// Deliberately not [`load_plan`] against an old checkout. Two fields are
+/// wanted, the file may be from a build whose schema this one does not share,
+/// and a whole load would report *the old plan's* diagnostics as though they
+/// were this run's. `None` for anything that is not a fenced task file with
+/// both fields.
+#[must_use]
+pub fn id_and_status(source: &str) -> Option<(String, crate::task::Status)> {
+    #[derive(serde::Deserialize)]
+    struct Front {
+        id: String,
+        status: crate::task::Status,
+    }
+    let (frontmatter, _) = split_frontmatter(source)?;
+    // Unknown keys are ignored on purpose, which is the opposite of the loader's
+    // contract and right here: this reads a file written by an older build, and
+    // a field that build had is not this one's business to refuse.
+    let front: Front = serde_yaml_ng::from_str(frontmatter).ok()?;
+    Some((front.id, front.status))
+}
+
 /// The JSON Schema derived from the Rust types. This is the same value the
 /// `gen-schema` xtask writes to `schemas/v1/task.json`.
 pub fn derived_schema() -> serde_json::Value {
@@ -785,6 +812,35 @@ fn check_finite_effort(task: &Task, path: &Path) -> Result<(), Vec<Diagnostic>> 
 /// `.git` or `target`; the default root is the plan directory, which contains
 /// none of these, so that skip is belt-and-suspenders.
 ///
+/// Whether `frontmatter` is something this loader would accept, judged by the
+/// schema it actually uses.
+///
+/// **For a writer checking its own output** (`A1-363`). Deserialising a rewrite
+/// into a typed struct is weaker than loading it: `blocked_by` is
+/// `#[serde(default)] Vec<String>`, and a key present but empty is YAML `null`,
+/// which serde takes and the schema refuses. `aplan mv` wrote exactly that and
+/// its read-back guard passed, so the tool produced a plan it could not read.
+///
+/// The order is the loader's own -- YAML to JSON, schema, then types -- because
+/// a guard that checks something else is the defect it is there to prevent.
+///
+/// # Errors
+/// The first schema violation, or the YAML error, as the loader would word it.
+pub fn frontmatter_is_loadable(frontmatter: &str) -> Result<(), String> {
+    let schema = derived_schema();
+    let validator = jsonschema::validator_for(&schema)
+        .map_err(|e| format!("internal: derived schema is not a valid JSON Schema: {e}"))?;
+    let value: serde_json::Value =
+        serde_yaml_ng::from_str(frontmatter).map_err(|e| e.to_string())?;
+    match validator.iter_errors(&value).next() {
+        // With the instance path, because the caller is a writer refusing its
+        // own output and "null is not of type array" alone does not say which
+        // field it rewrote wrongly. Worded as the loader words it.
+        Some(error) => Err(format!("{error} (at `{}`)", error.instance_path())),
+        None => Ok(()),
+    }
+}
+
 /// Files whose first line is not a bare `---` fence are skipped silently; a
 /// candidate that fails to load (unterminated fence, invalid YAML, schema
 /// violation) produces a diagnostic; an unreadable file is reported, never
@@ -1027,6 +1083,42 @@ mod tests {
     #[test]
     fn unterminated_fence_is_none() {
         assert!(split_frontmatter("---\nid: X\nnever closed\n").is_none());
+    }
+
+    /// **The writer's check is as strong as the loader's** (`A1-363`).
+    ///
+    /// `blocked_by` is `#[serde(default)] Vec<String>`, so a key present with no
+    /// value -- YAML `null` -- deserialises happily and fails the schema. A
+    /// rewrite that emptied a list produced exactly that, and the guard meant to
+    /// catch it read the result with serde and passed. This asserts the two
+    /// really do disagree, so the reason for validating against the schema does
+    /// not quietly stop being true.
+    #[test]
+    fn a_null_list_passes_serde_and_fails_the_schema() {
+        let frontmatter =
+            "id: M-a\ntitle: a cut\nphase: 1\nstatus: todo\ntags:\n  - milestone\nblocked_by:";
+
+        let typed: Result<crate::task::Task, _> = serde_yaml_ng::from_str(frontmatter);
+        assert!(
+            typed.is_ok(),
+            "serde is supposed to be the weaker of the two here: {typed:?}"
+        );
+
+        let loadable = frontmatter_is_loadable(frontmatter);
+        assert!(
+            loadable.is_err(),
+            "the schema accepted a null where it wants an array, so the guard built on \
+             it would not have caught the rewrite that wrote one"
+        );
+        assert!(
+            loadable.unwrap_err().contains("blocked_by"),
+            "the refusal should name the field"
+        );
+
+        // And the same frontmatter without the empty key is fine, so the test is
+        // about the null and not about the rest of it.
+        let without = "id: M-a\ntitle: a cut\nphase: 1\nstatus: todo\ntags:\n  - milestone";
+        assert!(frontmatter_is_loadable(without).is_ok());
     }
 
     #[test]

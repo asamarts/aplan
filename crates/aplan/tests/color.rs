@@ -18,6 +18,36 @@ use std::path::Path;
 mod common;
 use common::{on_a_terminal_raw, run};
 
+/// The shared spawn boundary, rather than a contributor's shell profile,
+/// decides the fixture's starting point (`A1-346`).
+///
+/// `Command::get_envs` exposes both explicit values and explicit removals, so
+/// this proof does not have to mutate the test process's global environment.
+/// The terminal tests below exercise the same private baseline through the pty
+/// launcher; their per-case values are applied afterwards and retain authority.
+#[test]
+fn the_shared_launcher_has_a_known_colour_baseline() {
+    let dir = tempfile::Builder::new()
+        .tempdir_in(aplan_core::fixture::fixture_root())
+        .expect("tempdir");
+    let command = common::command(dir.path(), &["--help"]);
+    let env: std::collections::BTreeMap<String, Option<String>> = command
+        .get_envs()
+        .map(|(key, value)| {
+            (
+                key.to_string_lossy().into_owned(),
+                value.map(|value| value.to_string_lossy().into_owned()),
+            )
+        })
+        .collect();
+
+    for key in ["NO_COLOR", "CLICOLOR", "CLICOLOR_FORCE"] {
+        assert_eq!(env.get(key), Some(&None), "{key} was inherited");
+    }
+    assert_eq!(env.get("TERM"), Some(&Some("xterm-256color".to_owned())));
+    assert_eq!(env.get("COLORTERM"), Some(&Some("truecolor".to_owned())));
+}
+
 /// A plan small enough to be quick, and **not clean**.
 ///
 /// `T-002` claims `done` with nothing to show for it, which is `APLAN005`. That
@@ -597,7 +627,10 @@ fn stripping_a_forced_colour_gives_the_refused_one() {
 
     let extra = |command: &str| -> Vec<&'static str> {
         match command {
-            "show" | "why" | "tree" => vec!["T-001"],
+            // `version` joins them for the same reason: without an id the bare
+            // form refuses, and a refusal prints nothing, which is the vacuity
+            // this census exists to catch (`A1-313`).
+            "show" | "why" | "tree" | "version" => vec!["T-001"],
             "check-docs" => vec!["DOC.md"],
             _ => Vec::new(),
         }
@@ -673,7 +706,7 @@ fn the_machine_formats_carry_no_colour_when_it_is_forced() {
     // census in `format_surfaces.rs` records the same trap.
     let extra = |command: &str| -> Vec<&'static str> {
         match command {
-            "show" | "why" | "tree" => vec!["T-001"],
+            "show" | "why" | "tree" | "version" => vec!["T-001"],
             "check-docs" => vec!["DOC.md"],
             // **The clock is pinned, and it has to be.** This test runs each
             // command twice and compares the bytes, and `due`'s JSON carries
@@ -893,6 +926,13 @@ const UNSTYLED: &[(&str, &str, Option<&[&str]>)] = &[
         None,
     ),
     (
+        "version",
+        "one word from a closed vocabulary, or a version number: there is no role to \
+         carry, and colouring the answer a script is meant to substitute would be a \
+         hazard rather than a help",
+        Some(&["version", "T-001"]),
+    ),
+    (
         "schema",
         "a machine format, asserted by the machine census",
         None,
@@ -946,6 +986,32 @@ const UNSTYLED: &[(&str, &str, Option<&[&str]>)] = &[
             "IM",
         ]),
     ),
+    // `A1-359`'s four are the `dep add` shape exactly: a sentence about what was
+    // just done, naming the id the reader typed. The holder is a name rather
+    // than a role, so there is nothing for a colour to mean -- and it is read
+    // through `sanitize::visible`, which is the property the sanitize census
+    // asserts for it.
+    (
+        "claim",
+        "a sentence about the claim just made, naming the id the reader typed and the name \
+         recorded",
+        Some(&["claim", "T-001", "--as", "ada"]),
+    ),
+    (
+        "release",
+        "a sentence about the claim just dropped, naming the id the reader typed",
+        Some(&["release", "T-001"]),
+    ),
+    (
+        "start",
+        "a sentence about the status just set, naming the id the reader typed",
+        Some(&["start", "T-001"]),
+    ),
+    (
+        "stop",
+        "a sentence about the status just cleared, naming the id the reader typed",
+        Some(&["stop", "T-001"]),
+    ),
     (
         "dep",
         "a parent with no output of its own: `clap` prints its help and exits",
@@ -960,6 +1026,27 @@ const UNSTYLED: &[(&str, &str, Option<&[&str]>)] = &[
         "dep rm",
         "a sentence about the edge just removed, naming the two ids the reader typed",
         Some(&["dep", "rm", "T-002", "--after", "T-001"]),
+    ),
+    (
+        "tag",
+        "a parent with no output of its own: `clap` prints its help and exits",
+        None,
+    ),
+    (
+        "tag add",
+        "a sentence about the tag just put on, naming the id and the word the reader typed",
+        Some(&["tag", "add", "T-001", "backend"]),
+    ),
+    (
+        "tag rm",
+        "a sentence about the tag just taken off, naming the id and the word the reader typed",
+        Some(&["tag", "rm", "T-001", "backend"]),
+    ),
+    (
+        "tag rename",
+        "a count and the two words the reader typed: there is no role to carry, and the \
+         ids are not named because a rename is about the word rather than about any task",
+        Some(&["tag", "rename", "backend", "frontend"]),
     ),
     (
         "mv",

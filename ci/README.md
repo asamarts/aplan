@@ -142,21 +142,26 @@ bash ci/runner/teardown.sh --purge
 
 ## Cutting a release
 
-`main` carries a pre-release version (`0.3.0-dev`), on purpose: a staged build must never
+`main` carries a pre-release version (`0.4.0-dev`), on purpose: a staged build must never
 report the same string as a published release, or a consumer pinning by `--version` pins
 nothing (`A1-060`). So a release is an explicit bump, in this order:
 
-1. set `[workspace.package].version` to the release version, and the six internal
-   `path` dependencies in `[workspace.dependencies]` with it (a stale one fails the build
-   loudly, not silently)
-2. run a build so `Cargo.lock` records the new version: `release.sh` builds `--locked`, so
-   a lockfile still naming the old one fails the release with
+1. close `CHANGELOG.md`: leave an empty `## [Unreleased]` at the top and move its entries under
+   `## [X.Y.Z] - YYYY-MM-DD`
+2. set `[workspace.package].version` to the release version, and the internal `path`
+   dependencies in `[workspace.dependencies]` with it (a stale one fails the build loudly, not
+   silently)
+3. run a build so `Cargo.lock` records the new version: `release.sh` builds `--locked`, so a
+   lockfile still naming the old one fails the release with
    `cannot update the lock file ... because --locked was passed`
-3. commit both, then tag `vX.Y.Z` matching the version exactly
-4. set the version back to the next `-dev` after the release lands
+4. commit the release tree, then run `TAG=vX.Y.Z ci/scripts/release.sh` **before creating or
+   pushing the tag**; this is the same gate the release workflow runs
+5. create the annotated `vX.Y.Z` tag on that checked commit and push it
+6. after the release lands, set the version to the next `-dev` and update current install pins
 
-`ci/scripts/release.sh` refuses to build a tagged release while the version carries a
-pre-release suffix, and says this. Skipping step 1 fails at the tag, not after publishing.
+`ci/scripts/release.sh` refuses before building when the tag, manifest, changelog section, or
+plan-derived version disagree. The changelog check requires a real top-level section, not matching
+text inside a fenced example. Skipping a preparation step therefore fails before publishing.
 
 ## Run the gates locally
 
@@ -215,7 +220,7 @@ $ gh api repos/asamarts/aplan/actions/permissions/access
 Raising it to `user` would let `asamarts/*` use the action; it can go no further,
 because sharing beyond the owner is an organisation feature. So for a repository
 under **another account** this is not a setting anybody can change and not
-something a token fixes -- `uses: asamarts/aplan@v0.2.0` fails to resolve before
+something a token fixes -- `uses: asamarts/aplan@v0.3.0` fails to resolve before
 any of the adopter's plan is read. Two pilots hit it in a row, which is why it is
 written down here rather than left to be rediscovered.
 
@@ -236,15 +241,16 @@ and the same digest pin applies.
 ### Staging the binary
 
 Get a binary. Either the published release, which is statically linked and comes
-with its checksum -- but check first that it carries what your gate needs, because
-the newest release is `v0.2.0` and everything since is on `main` only, which is
-why the second pilot to do this builds rather than downloads:
+with its checksum -- and since `v0.3.0` that is usually enough. The two pilots that
+built from a checkout did so when the newest release was `v0.2.0` and six weeks of
+work sat on `main` only; `v0.3.0` closed that gap, so check what your gate needs
+against `aplan facts --require` and download unless it names something newer:
 
 ```sh
-gh release download v0.2.0 --repo asamarts/aplan \
-  --pattern 'aplan-v0.2.0-x86_64-unknown-linux-musl.tar.gz*' --dir /tmp/aplan-dl --clobber
-( cd /tmp/aplan-dl && sha256sum -c aplan-v0.2.0-x86_64-unknown-linux-musl.tar.gz.sha256 )
-tar -xzf /tmp/aplan-dl/aplan-v0.2.0-x86_64-unknown-linux-musl.tar.gz -C /tmp/aplan-dl
+gh release download v0.3.0 --repo asamarts/aplan \
+  --pattern 'aplan-v0.3.0-x86_64-unknown-linux-musl.tar.gz*' --dir /tmp/aplan-dl --clobber
+( cd /tmp/aplan-dl && sha256sum -c aplan-v0.3.0-x86_64-unknown-linux-musl.tar.gz.sha256 )
+tar -xzf /tmp/aplan-dl/aplan-v0.3.0-x86_64-unknown-linux-musl.tar.gz -C /tmp/aplan-dl
 ```
 
 or a build from a checkout, when the gate needs something no release carries yet.
@@ -278,7 +284,7 @@ RUN echo "${APLAN_SHA256}  /usr/local/bin/aplan" | sha256sum -c - \
  && aplan --version
 ```
 
-Where the staged binary is a build rather than `v0.2.0`, assert the *capability*
+Where the staged binary is a build rather than `v0.3.0`, assert the *capability*
 the gate depends on rather than the version string, so an image built from the
 wrong binary fails at build time instead of during a run:
 
@@ -286,10 +292,10 @@ wrong binary fails at build time instead of during a run:
 aplan facts --require test.covers --require APLAN024
 ```
 
-`--require` is itself newer than `v0.2.0`, so on the published release the smoke
-test is `aplan --version` and nothing finer. That is one more reason to build:
-a staged binary that can state what it supports is checkable, and one that can
-only state a version is not.
+`--require` shipped in `v0.3.0`, so this now works against the published release
+as well as against a build. On `v0.2.0` it does not exist and the smoke test is
+`aplan --version` and nothing finer, which was the strongest reason to build
+rather than download while that was the newest tag.
 
 Bump the pinned version and the digest together; they are one fact written twice
 and this is the arrangement's only place to get that wrong.
@@ -305,10 +311,10 @@ is the same three commands as above with a secret in front of them:
   env:
     GH_TOKEN: ${{ secrets.APLAN_RELEASE_TOKEN }}
   run: |
-    gh release download v0.2.0 --repo asamarts/aplan \
-      --pattern 'aplan-v0.2.0-x86_64-unknown-linux-musl.tar.gz*' --clobber
-    sha256sum -c aplan-v0.2.0-x86_64-unknown-linux-musl.tar.gz.sha256
-    tar -xzf aplan-v0.2.0-x86_64-unknown-linux-musl.tar.gz
+    gh release download v0.3.0 --repo asamarts/aplan \
+      --pattern 'aplan-v0.3.0-x86_64-unknown-linux-musl.tar.gz*' --clobber
+    sha256sum -c aplan-v0.3.0-x86_64-unknown-linux-musl.tar.gz.sha256
+    tar -xzf aplan-v0.3.0-x86_64-unknown-linux-musl.tar.gz
     sudo install -m 0755 aplan /usr/local/bin/aplan
 - run: aplan check --format github
 ```
@@ -320,7 +326,7 @@ until `deny_warnings: true` is in the consumer's `.aplan.yml`. `README.md`'s
 automating the gate are two decisions nobody makes in the same sitting.
 
 Whichever row you took, `aplan check` fails the job on an error and not on a
-warning, and 21 of aplan's 44 rules are warnings -- so a good deal of what it
+warning, and 25 of aplan's 53 rules are warnings -- so a good deal of what it
 checks annotates the pull request without gating it until `deny_warnings: true`
 is in the consumer's `.aplan.yml`. `README.md`'s *In CI* section has the reasoning; the trap is that
 turning the rule on and automating the gate are two decisions nobody makes in the

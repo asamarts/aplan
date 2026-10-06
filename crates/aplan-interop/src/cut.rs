@@ -169,7 +169,7 @@ pub struct Placed {
 /// guards would run too late: a refusal would leave newly written tasks stranded
 /// outside any cut, and an error message implying nothing had happened.
 pub fn check_target(plan: &Plan, cut: &str) -> Result<(), CutError> {
-    resolve(plan, cut).map(|_| ())
+    resolve_extendable(plan, cut).map(|_| ())
 }
 
 /// The milestone id a `--cut` argument names (`A1-139`, ADR-0013's vocabulary).
@@ -263,7 +263,10 @@ fn known_cuts(plan: &Plan) -> String {
     }
 }
 
-/// Check that `cut` names a cut this import is allowed to extend.
+/// Find the cut `cut` names, whatever is going to be done to it.
+///
+/// The two guards here are about the *name*: it has to resolve to one task, and
+/// that task has to be a cut. Neither depends on the edit.
 fn resolve<'p>(plan: &'p Plan, cut: &str) -> Result<&'p aplan_core::load::LoadedTask, CutError> {
     let id = resolve_id(plan, cut)?;
     let id = id.as_str();
@@ -279,10 +282,30 @@ fn resolve<'p>(plan: &'p Plan, cut: &str) -> Result<&'p aplan_core::load::Loaded
     if !found.task.is_milestone() {
         return Err(CutError::NotAMilestone { id: id.to_string() });
     }
-    // Guard 3: never extend a settled cut (see the module docs).
+    Ok(found)
+}
+
+/// The cut `cut` names, refusing one that is settled.
+///
+/// **Guard 3, and only for the callers that extend a cut** (`A1-362`). It was
+/// inside `resolve`, which three callers share, and one of them -- `plan_removal`
+/// -- takes a member *out*. So moving finished work out of a finished cut was
+/// refused by the guard against putting unfinished work in, and told the caller
+/// that "adding an unfinished task to a settled cut would break it" about a cut
+/// it was leaving. A removal cannot break a settled cut that way.
+///
+/// It also reinstated a refusal `A1-134` had deliberately removed: emptying a
+/// cut is a *warning* there, so the repository's `deny_warnings` decides, and
+/// `APLAN021` is the rule with an opinion about a cut holding no work. A guard
+/// here answered first and in the wrong words.
+fn resolve_extendable<'p>(
+    plan: &'p Plan,
+    cut: &str,
+) -> Result<&'p aplan_core::load::LoadedTask, CutError> {
+    let found = resolve(plan, cut)?;
     if matches!(found.task.status, Status::Done | Status::Dropped) {
         return Err(CutError::Settled {
-            id: id.to_string(),
+            id: found.task.id.clone(),
             status: status_word(found.task.status).to_string(),
         });
     }
@@ -463,7 +486,14 @@ fn rewrite_region_removing(frontmatter: &str, ids: &[String]) -> Option<String> 
             ));
             done = true;
         } else if value.trim().is_empty() {
-            lines.push(line.to_string());
+            // **The key goes with the last member** (`A1-363`). Kept, it is a
+            // `blocked_by:` with nothing under it, which YAML reads as `null`
+            // and the schema wants an array: the file stops loading, and this
+            // rewrite is what emptying a cut goes through. `close::set_id_list`
+            // has always removed the key for the same situation; the flow branch
+            // above writes `blocked_by: []`, which is a valid empty array, so
+            // only the block form could produce it.
+            let mut kept: Vec<String> = Vec::new();
             while let Some(next) = iter.peek() {
                 let trimmed = next.trim_start();
                 if !trimmed.starts_with("- ") {
@@ -475,8 +505,12 @@ fn rewrite_region_removing(frontmatter: &str, ids: &[String]) -> Option<String> 
                 let keep = !drop_it(item);
                 let taken = iter.next()?;
                 if keep {
-                    lines.push(taken.to_string());
+                    kept.push(taken.to_string());
                 }
+            }
+            if !kept.is_empty() {
+                lines.push(line.to_string());
+                lines.extend(kept);
             }
             done = true;
         } else {
@@ -603,6 +637,8 @@ pub fn plan_removal(
     milestone_id: &str,
     ids: &[String],
 ) -> Result<PendingRemoval, CutError> {
+    // A removal takes a member out, so a settled cut is not refused here
+    // (`A1-362`): what it leaves behind is the post-state check's to judge.
     let target = resolve(plan, milestone_id)?;
     let path = target.path.clone();
 
@@ -636,13 +672,30 @@ pub fn plan_removal(
 
     // Read back before writing, as `place` does: a rewrite that cannot be parsed
     // again is a corrupted file, and refusing beats saving it.
-    let parsed: crate::cut::TaskProbe = serde_yaml_ng::from_str(
-        split_frontmatter(&updated)
-            .ok_or_else(|| CutError::Unsupported { path: path.clone() })?
-            .0,
-    )
-    .map_err(|_| CutError::Unsupported { path: path.clone() })?;
-    if removed.iter().any(|id| parsed.blocked_by.contains(id)) {
+    let rewritten_fm = split_frontmatter(&updated)
+        .ok_or_else(|| CutError::Unsupported { path: path.clone() })?
+        .0;
+    // **Judged the way the loader judges it** (`A1-363`). Deserialising into the
+    // probe below is weaker: `blocked_by` is a defaulted `Vec<String>`, so a key
+    // with no value is `null` to YAML, empty to serde, and a type error to the
+    // schema. A guard weaker than the thing it guards passes exactly when it is
+    // needed, and this one did.
+    aplan_core::load::frontmatter_is_loadable(rewritten_fm)
+        .map_err(|_| CutError::Unsupported { path: path.clone() })?;
+    let parsed: crate::cut::TaskProbe = serde_yaml_ng::from_str(rewritten_fm)
+        .map_err(|_| CutError::Unsupported { path: path.clone() })?;
+    // **Exactly what was intended, not merely "the removed ones are gone"**
+    // (`A1-363`). An empty list satisfied the weaker assertion, which is the one
+    // case that used to corrupt the file: a bare `blocked_by:` reads back as no
+    // members and the removed ids are absent from it, so the guard passed.
+    let intended: Vec<String> = target
+        .task
+        .blocked_by
+        .iter()
+        .filter(|b| !removed.iter().any(|r| r == *b))
+        .cloned()
+        .collect();
+    if parsed.blocked_by != intended {
         return Err(CutError::Unsupported { path });
     }
 
@@ -715,7 +768,7 @@ pub fn plan_placement(
     milestone_id: &str,
     ids: &[String],
 ) -> Result<PendingPlacement, CutError> {
-    let target = resolve(plan, milestone_id)?;
+    let target = resolve_extendable(plan, milestone_id)?;
     let path = target.path.clone();
 
     let added = missing_from(&target.task, ids);
@@ -762,6 +815,11 @@ fn self_check(updated: &str, added: &[String], path: &Path) -> Result<(), CutErr
 
     let (frontmatter, _) =
         split_frontmatter(updated).ok_or_else(|| fail("the result has no frontmatter".into()))?;
+    // The loader's own judgement first, then the typed read (`A1-363`). A
+    // placement cannot empty a list, so it cannot produce the `null` that broke
+    // the removal -- but "the rewrite is still something aplan can read" is the
+    // claim this function makes, and only the schema settles it.
+    aplan_core::load::frontmatter_is_loadable(frontmatter).map_err(fail)?;
     let parsed: Task = serde_yaml_ng::from_str(frontmatter).map_err(|e| fail(e.to_string()))?;
 
     if let Some(missing) = added.iter().find(|id| !parsed.blocked_by.contains(id)) {

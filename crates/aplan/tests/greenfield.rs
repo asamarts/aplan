@@ -179,12 +179,44 @@ fn a_cut_can_be_created_around_work_the_plan_already_has() {
     greenfield(dir.path());
     // A `cross-cutting` task satisfies `APLAN022` while belonging to no cut,
     // which is the only way a plan under this policy holds unplaced work.
+    let unplaced = |tags: &str| {
+        format!(
+            "---\nid: T-003\ntitle: Unplaced work\nphase: 1\nstatus: todo\n\
+             effort_days: 1.0\n{tags}---\n\n## Why\n\nBecause.\n"
+        )
+    };
     std::fs::write(
         dir.path().join("aplan/T-003.md"),
-        "---\nid: T-003\ntitle: Unplaced work\nphase: 1\nstatus: todo\neffort_days: 1.0\n\
-         tags:\n- cross-cutting\n---\n\n## Why\n\nBecause.\n",
+        unplaced("tags:\n- cross-cutting\n"),
     )
     .expect("task");
+
+    // **And placing it while it still carries the tag is refused** (`A1-212`).
+    // `APLAN052` says the tag cannot mean "belongs to no cut" on a task that is
+    // in one, and `add` runs the rules against the plan it would produce -- so
+    // the contradiction is caught at the moment it would be created rather than
+    // sitting in the plan afterwards.
+    let (out, code) = aplan(
+        dir.path(),
+        &[
+            "add",
+            "Second cut",
+            "--id",
+            "M-v0.2",
+            "--tag",
+            "milestone",
+            "--blocked-by",
+            "T-003",
+        ],
+    );
+    assert_ne!(
+        code, 0,
+        "placing a `cross-cutting` task in a cut was allowed: {out}"
+    );
+    assert!(out.contains("APLAN052"), "{out}");
+
+    // The tag goes when the work is placed, which is what it means.
+    std::fs::write(dir.path().join("aplan/T-003.md"), unplaced("")).expect("task");
 
     let (out, code) = aplan(
         dir.path(),

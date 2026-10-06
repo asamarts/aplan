@@ -51,6 +51,19 @@ pub struct Cut {
     /// borrowed for the rollup, so a consumer summing every cut's `total` must
     /// skip these or count that work twice.
     pub release: bool,
+    /// Whether this row's members are **borrowed** from beneath it rather than
+    /// its own, so a consumer summing rows must skip it or count that work
+    /// twice (`A1-333`, ADR-0042).
+    ///
+    /// `release` used to answer this, and stopped being able to: a release
+    /// borrows, and so does any milestone that declares `contains`, and the two
+    /// are no longer the same set. Measured the moment containment worked -- a
+    /// four-level plan with two real tasks reported `4 task(s), 10.0d` in the
+    /// header, because the cut and the sub-cut both legitimately carried them.
+    ///
+    /// `release` keeps its other jobs: the label, `closes`, and which kind the
+    /// row is. This one answers only the arithmetic question.
+    pub borrows: bool,
     pub total: usize,
     pub done: usize,
     pub ready: usize,
@@ -181,29 +194,58 @@ pub fn parse_cut_version(tag: &str) -> Option<(u32, u32)> {
 /// (`A1-216`). A release lists cuts, so its members are its cuts'
 /// members.
 fn members_of<'a>(graph: &'a Graph, m: &'a Task) -> BTreeSet<&'a str> {
-    if m.is_release() {
-        m.blocked_by
-            .iter()
-            .filter_map(|b| graph.get(b))
-            .filter(|c| c.is_milestone())
-            .flat_map(|c| {
-                c.blocked_by.iter().map(String::as_str).filter(move |b| {
-                    graph
-                        .get(b)
-                        .is_some_and(|t| crate::edge_kind(t, c) == crate::EdgeKind::Membership)
-                })
-            })
-            .collect()
-    } else {
-        m.blocked_by
-            .iter()
-            .map(String::as_str)
-            .filter(|b| {
-                graph
-                    .get(b)
-                    .is_some_and(|t| crate::edge_kind(t, m) == crate::EdgeKind::Membership)
-            })
-            .collect()
+    let mut out = BTreeSet::new();
+    let mut seen = BTreeSet::new();
+    collect_members(graph, m, &mut out, &mut seen);
+    out
+}
+
+/// The work beneath a milestone, at any depth, each task once (ADR-0042).
+///
+/// Two edges reach a child milestone and they mean different things. `contains`
+/// is containment, and its work rolls up here. A milestone in `blocked_by`
+/// *sequences* the two cuts (ADR-0013) and its work is its own -- which is why
+/// this walk descends the first and not the second, and why a plan written
+/// before `contains` existed rolls up exactly as it did.
+///
+/// **A release descends its `blocked_by` milestones too**, which is ADR-0022's
+/// "read one level through" kept for compatibility: a release written before
+/// this ADR names its cuts there and must keep working. Declaring `contains` is
+/// the way to say it now, and the two are unioned rather than chosen between,
+/// so a release part-way through the migration is not half-counted.
+///
+/// `seen` is what makes ADR-0022's double-counting worry unnecessary: a
+/// descendant reachable by two routes is visited once, so the recursion that
+/// supersedes "one level through" cannot count it twice.
+fn collect_members<'a>(
+    graph: &'a Graph,
+    m: &'a Task,
+    out: &mut BTreeSet<&'a str>,
+    seen: &mut BTreeSet<&'a str>,
+) {
+    if !seen.insert(m.id.as_str()) {
+        return;
+    }
+    for b in &m.blocked_by {
+        if graph
+            .get(b)
+            .is_some_and(|t| crate::edge_kind(t, m) == crate::EdgeKind::Membership)
+        {
+            out.insert(b.as_str());
+        }
+    }
+    let descend = m.contains.iter().chain(
+        m.is_release()
+            .then(|| m.blocked_by.iter())
+            .into_iter()
+            .flatten(),
+    );
+    for child in descend {
+        if let Some(c) = graph.get(child)
+            && c.is_milestone()
+        {
+            collect_members(graph, c, out, seen);
+        }
     }
 }
 
@@ -249,13 +291,14 @@ impl Roadmap {
     }
 
     /// The plan's own effort: every cut plus the tasks in none, with releases
-    /// skipped because they borrow the work of the cuts they close (ADR-0022).
+    /// skipped because they borrow the work of the cuts they close (ADR-0022),
+    /// as is any row that borrows from beneath it (`A1-333`, ADR-0042).
     /// This is what the effort column adds up to, and it agrees with `summary`.
     #[must_use]
     pub fn total_effort_days(&self) -> f64 {
         self.cuts
             .iter()
-            .filter(|c| !c.release)
+            .filter(|c| !c.borrows)
             .map(|c| c.effort_days)
             .sum::<f64>()
             + self.cross_cutting_effort_days
@@ -393,6 +436,19 @@ impl Graph<'_> {
         let mut claimed: BTreeSet<&str> = BTreeSet::new();
         let mut cuts: Vec<Cut> = Vec::new();
 
+        // **One walk for every bounded row** (`A1-345`, audit). The chain that
+        // ends at a borrowing row is a trace back through a whole-plan DP, and
+        // the DP is the same for all of them: asking per row cost this report
+        // 472ms against 214ms on a 4,870-task plan with ten releases. Empty
+        // where the walk is cyclic, which is a plan `check` rejects.
+        let borrowing: BTreeSet<&str> = self
+            .by_id
+            .iter()
+            .filter(|(_, m)| m.is_milestone() && (m.is_release() || !m.contains.is_empty()))
+            .map(|(id, _)| *id)
+            .collect();
+        let bounded = self.chains_to(&borrowing).unwrap_or_default();
+
         for (&id, &m) in &self.by_id {
             if !m.is_milestone() {
                 continue;
@@ -444,7 +500,30 @@ impl Graph<'_> {
             }
             let (effort_days, done_effort_days) = live_effort(&member_tasks);
 
-            let critical_path = self.critical_path_within(&active).unwrap_or(CriticalPath {
+            // **A borrowing row's `crit` is the chain that ends at it**
+            // (`A1-345`). Over its members it was the longest chain among the
+            // work it borrows, which excludes the zero-effort milestone nodes
+            // carrying cut order -- so on the sixth pilot's plan the release row
+            // said `82.0d` while the chain that actually controls the release ran
+            // through cuts it does not hold. Two quantities under one word, and
+            // the smaller one was the one on the page.
+            //
+            // Keyed on `borrows`, not on `release`: a container declaring
+            // `contains` holds the same relationship to the work under it
+            // (ADR-0042), and keying on the narrower word would leave the
+            // defect in place for every plan that migrated to the new field.
+            //
+            // A *cut*'s number stays the member-induced one, because that is the
+            // question a cut's row asks: how much work is in this bucket. A row
+            // that borrows holds no work of its own, so the only chain it has is
+            // the one leading to it.
+            let borrows = m.is_release() || !m.contains.is_empty();
+            let critical_path = if borrows {
+                bounded.get(id).cloned()
+            } else {
+                self.critical_path_within(&active)
+            }
+            .unwrap_or(CriticalPath {
                 total_effort_days: 0.0,
                 tasks: Vec::new(),
             });
@@ -457,6 +536,7 @@ impl Graph<'_> {
                 milestone_id: id.to_string(),
                 status: m.status,
                 release: m.is_release(),
+                borrows,
                 closes,
                 total,
                 done,
@@ -527,6 +607,8 @@ mod tests {
             effort_days: effort,
             blocked_by: blocked_by.iter().map(|s| (*s).to_string()).collect(),
             prefer_after: Vec::new(),
+            ratified_by: Vec::new(),
+            contains: Vec::new(),
             evidence: Vec::new(),
             paths: Vec::new(),
             traces: Vec::new(),
@@ -535,6 +617,7 @@ mod tests {
             revisit_at: None,
             version_impact: None,
             version_impact_reason: None,
+            version: None,
         }
     }
 
@@ -1035,6 +1118,8 @@ mod release_tests {
             effort_days: effort,
             blocked_by: blocked_by.iter().map(|s| (*s).to_string()).collect(),
             prefer_after: Vec::new(),
+            ratified_by: Vec::new(),
+            contains: Vec::new(),
             evidence: Vec::new(),
             paths: Vec::new(),
             traces: Vec::new(),
@@ -1043,6 +1128,7 @@ mod release_tests {
             revisit_at: None,
             version_impact: None,
             version_impact_reason: None,
+            version: None,
         }
     }
 
@@ -1093,6 +1179,162 @@ mod release_tests {
                 cut.closes
             );
         }
+    }
+
+    /// A release's `crit` is the chain that ends at the release, not the longest
+    /// chain among the work it borrows (`A1-345`).
+    ///
+    /// The two differ exactly where cuts are sequenced. `critical_path_within`
+    /// sees only the release's members, so the milestone nodes that carry cut
+    /// order are not in the induced set and their edges vanish: B-1's dependency
+    /// on the whole of cut s0 disappears, and two tasks that run one after the
+    /// other read as running side by side. The sixth pilot's release row said
+    /// `82.0d` for this reason while the chain that controls the release was
+    /// longer. Same word, two quantities, and the smaller was on the page.
+    #[test]
+    fn a_release_reports_the_chain_that_ends_at_it() {
+        let a = task("A-1", &[], &[], Some(1.0));
+        // Sequenced after the first cut (ADR-0013): this is the edge the
+        // member-induced answer cannot see.
+        let b = task("B-1", &["M-s0"], &[], Some(2.0));
+        let s0 = task("M-s0", &["A-1"], &["milestone", "s0"], None);
+        let s1 = task("M-s1", &["B-1", "M-s0"], &["milestone", "s1"], None);
+        let release = task(
+            "R-v0.1",
+            &["M-s0", "M-s1"],
+            &["milestone", "release", "v0.1"],
+            None,
+        );
+        let plan = [a, b, s0, s1, release];
+        let r = Graph::new(plan.iter()).roadmap();
+
+        let rel = r
+            .cuts
+            .iter()
+            .find(|c| c.milestone_id == "R-v0.1")
+            .expect("the release");
+        assert_eq!(
+            rel.critical_path
+                .tasks
+                .iter()
+                .map(|t| t.id.as_str())
+                .collect::<Vec<_>>(),
+            vec!["A-1", "B-1"],
+            "the release's chain runs through the cut it waits on"
+        );
+        assert!(
+            (rel.critical_path.total_effort_days - 3.0).abs() < 1e-9,
+            "got {}, and 2.0 is the member-induced answer this replaced",
+            rel.critical_path.total_effort_days
+        );
+
+        // A *cut* keeps the member-induced number, because its row asks how much
+        // work is in this bucket rather than what leads to it: s1 holds B-1 only.
+        let s1 = r
+            .cuts
+            .iter()
+            .find(|c| c.milestone_id == "M-s1")
+            .expect("the cut");
+        assert!(
+            (s1.critical_path.total_effort_days - 2.0).abs() < 1e-9,
+            "got {}",
+            s1.critical_path.total_effort_days
+        );
+    }
+
+    /// A container's row is derived the same way a release's is (`A1-345`,
+    /// ADR-0042), because it holds the same relationship to the work beneath it.
+    ///
+    /// Keying on `release` instead would have left the defect in place for
+    /// exactly the plans that took up the newer field: containment is not an
+    /// edge, so the member-induced chain over a container's rolled-up work loses
+    /// the same sequencing it loses for a release.
+    #[test]
+    fn a_container_reports_the_chain_that_ends_at_it_too() {
+        let a = task("A-1", &[], &[], Some(1.0));
+        let b = task("B-1", &["M-s0"], &[], Some(2.0));
+        let s0 = task("M-s0", &["A-1"], &["milestone", "s0"], None);
+        let s1 = task("M-s1", &["B-1"], &["milestone", "s1"], None);
+        // Holds both cuts *and* waits on them, which is the only shape
+        // `APLAN047` accepts (`A1-345`, audit: the first draft of this test
+        // wrote `contains` alone, which `check` refuses).
+        let mut container = task("C-top", &["M-s0", "M-s1"], &["milestone", "top"], None);
+        container.contains = vec!["M-s0".into(), "M-s1".into()];
+        let plan = [a, b, s0, s1, container];
+        let r = Graph::new(plan.iter()).roadmap();
+
+        let top = r
+            .cuts
+            .iter()
+            .find(|c| c.milestone_id == "C-top")
+            .expect("the container");
+        assert!(top.borrows, "a container borrows what it holds");
+        assert!(!top.release, "and it is not a release");
+        assert_eq!(
+            top.critical_path
+                .tasks
+                .iter()
+                .map(|t| t.id.as_str())
+                .collect::<Vec<_>>(),
+            vec!["A-1", "B-1"],
+            "the chain descends `contains` and keeps the sequencing edge"
+        );
+        assert!(
+            (top.critical_path.total_effort_days - 3.0).abs() < 1e-9,
+            "got {}, and 2.0 is the member-induced answer this replaced",
+            top.critical_path.total_effort_days
+        );
+    }
+
+    /// A plan whose containment closes a loop still renders a roadmap.
+    ///
+    /// `APLAN047` rejects it and `critical-path` refuses to name a number, but
+    /// this is a report and a report that panics on a bad plan is worse than one
+    /// that says `0.0d` beside a rollup the reader can see is larger. The walk
+    /// has no defensible answer, so the row carries the absence rather than an
+    /// invented figure (`A1-345`, audit).
+    #[test]
+    fn a_containment_loop_renders_rather_than_panicking() {
+        let a = task("A-1", &[], &[], Some(1.0));
+        let mut one = task("M-s0", &["A-1", "M-s1"], &["milestone", "s0"], None);
+        one.contains = vec!["M-s1".into()];
+        let mut two = task("M-s1", &["M-s0"], &["milestone", "s1"], None);
+        two.contains = vec!["M-s0".into()];
+        let plan = [a, one, two];
+        let r = Graph::new(plan.iter()).roadmap();
+        for cut in &r.cuts {
+            assert!(cut.borrows, "both rows hold the other");
+            assert!(
+                (cut.critical_path.total_effort_days - 0.0).abs() < 1e-9,
+                "`{}` invented a number over a loop: {}",
+                cut.milestone_id,
+                cut.critical_path.total_effort_days
+            );
+        }
+    }
+
+    /// A release's chain never counts its checkpoint nodes as work, so the
+    /// number stays an effort total rather than a hop count.
+    #[test]
+    fn a_release_chain_holds_no_milestones() {
+        let a = task("A-1", &[], &[], Some(1.0));
+        let s0 = task("M-s0", &["A-1"], &["milestone", "s0"], None);
+        let release = task("R-v0.1", &["M-s0"], &["milestone", "release", "v0.1"], None);
+        let plan = [a, s0, release];
+        let r = Graph::new(plan.iter()).roadmap();
+        let rel = r
+            .cuts
+            .iter()
+            .find(|c| c.milestone_id == "R-v0.1")
+            .expect("the release");
+        assert_eq!(
+            rel.critical_path
+                .tasks
+                .iter()
+                .map(|t| t.id.as_str())
+                .collect::<Vec<_>>(),
+            vec!["A-1"]
+        );
     }
 
     /// A release rolls up the work of the cuts it closes (`A1-146`, ADR-0022).
@@ -1157,6 +1399,8 @@ mod label_tests {
             effort_days: None,
             blocked_by: Vec::new(),
             prefer_after: Vec::new(),
+            ratified_by: Vec::new(),
+            contains: Vec::new(),
             evidence: Vec::new(),
             paths: Vec::new(),
             traces: Vec::new(),
@@ -1165,6 +1409,7 @@ mod label_tests {
             revisit_at: None,
             version_impact: None,
             version_impact_reason: None,
+            version: None,
         }
     }
 

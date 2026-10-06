@@ -106,6 +106,15 @@ pub struct TaskRow {
     /// The discretionary order somebody recorded, which is not a dependency
     /// (ADR-0025): `ready` uses it to break ties and the graph does not draw it.
     pub prefer_after: Vec<String>,
+    /// Who must bless this task before it counts as finished, which is not a
+    /// dependency either (ADR-0036): `ready` does not read it, and `APLAN046`
+    /// refuses `done` while a ratifier is unfinished.
+    pub ratified_by: Vec<String>,
+    /// The checkpoints this one contains, whose work rolls up into it at any
+    /// depth (ADR-0042). Not a dependency either: a milestone in `blocked_by`
+    /// *sequences* two cuts (ADR-0013), and the two meanings are what this
+    /// separates.
+    pub contains: Vec<String>,
     /// The anchor fingerprints a closed task stamped, which is what `APLAN018`
     /// compares against to find a traced section that moved.
     pub trace_fingerprints: std::collections::BTreeMap<String, String>,
@@ -132,6 +141,14 @@ pub struct TaskRow {
     /// none. This is the half a reviewer reads, and `APLAN044` is the rule that
     /// asks for it.
     pub version_impact_reason: Option<String>,
+    /// The version a **release** produced, written when it closed, `null`
+    /// everywhere else (`A1-339`, ADR-0038).
+    ///
+    /// Carried because it is a *record* rather than a derivation: a consumer
+    /// asking what a release contained reads this instead of re-deriving from a
+    /// plan that has since moved, which is the whole argument for the field
+    /// existing. `APLAN050` is the rule that keeps it on a release and readable.
+    pub version: Option<String>,
 }
 
 /// One citation, as the data surface carries it.
@@ -201,10 +218,13 @@ impl Graph<'_> {
                     paths: t.paths.clone(),
                     traces: t.traces.clone(),
                     prefer_after: t.prefer_after.clone(),
+                    ratified_by: t.ratified_by.clone(),
+                    contains: t.contains.clone(),
                     trace_fingerprints: t.trace_fingerprints.clone(),
                     revisit_at: t.revisit_at.clone(),
                     version_impact: t.version_impact,
                     version_impact_reason: t.version_impact_reason.clone(),
+                    version: t.version.clone(),
                 }
             })
             .collect();
@@ -224,8 +244,15 @@ impl Graph<'_> {
 /// whichever of the two came first, and on `p00016` that was the release for
 /// every task in the plan (`A1-240`). The model was right and the derivation
 /// read the borrowed list as ownership.
+///
+/// **Nor is a container** (`A1-333`, ADR-0042), which is the same defect in a
+/// second shape: a milestone declaring `contains` carries the work beneath it
+/// for its rollup, and reading that as ownership gave a nested task the outer
+/// cut rather than the one that lists it. ADR-0042's own stated test is that a
+/// task belongs to exactly one cut at any depth, and it failed on the first
+/// four-level plan built against it. `borrows` is what says which rows lend.
 fn cut_of(roadmap: &Roadmap, id: &str) -> (Option<String>, Option<String>) {
-    for cut in roadmap.cuts.iter().filter(|c| !c.release) {
+    for cut in roadmap.cuts.iter().filter(|c| !c.borrows) {
         if cut.milestone_id == id {
             return (Some(cut.version.clone()), Some(cut.milestone_id.clone()));
         }
@@ -269,6 +296,8 @@ mod tests {
             effort_days: effort,
             blocked_by: Vec::new(),
             prefer_after: Vec::new(),
+            ratified_by: Vec::new(),
+            contains: Vec::new(),
             evidence: Vec::new(),
             paths: Vec::new(),
             traces: Vec::new(),
@@ -277,6 +306,7 @@ mod tests {
             revisit_at: None,
             version_impact: None,
             version_impact_reason: None,
+            version: None,
         }
     }
 

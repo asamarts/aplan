@@ -43,7 +43,7 @@ table, and a gate checks each marker against the code that declares it:
 | `APLAN005` | **`done` carries at least one piece of evidence** |
 | `APLAN006` | No task blocks itself |
 | `APLAN007` | A `done` task does not depend on an unfinished one |
-| `APLAN008` | `traces` anchors resolve to real headings, or table rows, in real documents |
+| `APLAN008` | `traces` anchors resolve to a real heading, table row, or YAML/JSON node, in a real document |
 | `APLAN009` | Active tasks carry an effort estimate *(warning)* |
 | `APLAN010` | A `note` used as evidence carries a date |
 | `APLAN020` | A live task is not waiting on a `dropped` one |
@@ -69,6 +69,15 @@ table, and a gate checks each marker against the code that declares it:
 | `APLAN041` | The generated `AGENTS.md` block still says what this repository's policy says. It is what an agent reads before touching the plan, and it is a second copy of the policy, so it goes stale silently. Scoped by the markers: a file that carries none is one nobody asked to keep current *(warning, `check`)* |
 | `APLAN043` | A live task does not carry the scaffold's own prompt beside the criteria its author wrote. There is no command that edits a body, so the real criteria go in by hand, and appending your own `## Acceptance criteria` to a scaffolded file leaves two of them with the prompt under the first *(warning, `check`)* |
 | `APLAN044` | A closed task claims less of the released version than its level implies, and says nowhere why. A task's level is already a floor -- a unit of work a `fix`, a cut a `feature` -- so ordinary tasks declare nothing; claiming below the floor is overriding the plan's reading, which a reviewer should be told about. Off unless `version.require_impact` asks for it *(warning, `check`)* |
+| `APLAN045` | A *live* task's traced section has changed since anybody last touched the task, so its premise moved while it waited. `APLAN018` watches a closed task against the stamp taken at closure; a live task has no stamp, so nothing watched it at all and work can ship under it unnoticed *(warning, `verify`)* |
+| `APLAN046` | A `done` task whose ratifier has not finished. `ratified_by` is the half of a dependency that constrains *counting done* rather than *starting*: `ready` ignores it, so a task awaiting a blessing is still offered, and only its `done` claim is refused *(error, `check`)* |
+| `APLAN047` | A `contains` that cannot be walked: it names nothing, names a task rather than a milestone, or closes a loop. Containment is how a checkpoint says the work beneath it rolls up into it; a milestone in `blocked_by` *sequences* two cuts instead, and the two meanings are what this separates *(error, `check`)* |
+| `APLAN048` | The version this tree declares is smaller than the tasks closed since the last release tag require -- a breaking change shipping in a patch release, found while it is still preventable rather than by a consumer. It fires on a version that moved and did not move far enough, never on one that has not moved yet. Off unless `version.current` declares how to read the version *(error, `verify`)* |
+| `APLAN049` | The compatibility checker this repository declares found a break the plan does not claim. Every rung above this takes the author's word: a task that removed a public function and wrote `fix` passes them all. It runs the checker you declare -- `cargo semver-checks check-release` exits non-zero on a break -- and reports what it said; it never diffs an API itself. Silent on an over-claim, and on a checker that could not be asked, which is reported as the configuration fault it is *(error, `verify`)* |
+| `APLAN050` | A recorded `version` that is not on a release, or is not a version this tool can read back. A release carries the version it produced, written when it closed, so a later run can ask what a release contained without re-deriving from a plan that has since moved. A cut is a planning bucket rather than a delivery, and a `version` on one reads as a claim that it shipped *(error, `check`)* |
+| `APLAN051` | A tag one edit away from one of the five words that change what this tool does: `milestone` makes a task a cut, `release` makes it a checkpoint over cuts, `deprecation` and `removal` drive the runway rules, and `cross-cutting` waives `APLAN022`. A typo does not misname anything -- `milestne` dissolves the cut, and `deprecatoin` makes `aplan deprecations` answer that the plan declares no runway, at exit 0. Also reported the other way: a `tag_families` entry that lists one of the five is declaring a vocabulary over a word the tool already acts on *(warning, `check`)* |
+| `APLAN052` | `cross-cutting` on a task that *is* a member of a cut. The tag is `APLAN022`'s escape hatch and means "belongs to no cut", so on a task in one it cannot mean what the rule reads it as -- and it switches that check off, so the task could fall out of its cut or into two and the plan would still be clean. On a task in no cut the same tag is what the rule reads it as, and is silent: that asymmetry is deliberate *(warning, `check`)* |
+| `APLAN053` | A task that is `in_progress` and whose declared `paths` match nothing the repository tracks: it says work has started and there is nothing to show for it. The one status the product's own argument could not otherwise defend -- `done` is believed because `verify` resolves what it cites, and a stored `in_progress` has nothing to resolve against, so it is checked rather than trusted. Read from the index, so a file written and staged counts; silent where the task declares no `paths`, since there is then nothing to judge the claim by *(warning, `verify`)* |
 
 `APLAN023` is the one the first outside pilot produced. `paths` is optional, and `APLAN012`
 binds a cited `commit` to a task by checking its diff against those globs, so a task with no
@@ -212,6 +221,29 @@ kept as one table under one heading would otherwise re-flag every task tracing i
 whenever any row changed, so `constitution.md#invariant-7` fingerprints that row
 alone and an edit to invariant 11 is not invariant 7's drift. Headings resolve
 first, so nothing an existing plan traces changes meaning.
+
+**An anchor may address a YAML or JSON node** (ADR-0035). A repository whose source
+of truth is a spec file rather than prose can put it under drift detection directly,
+instead of tracing the paragraph that narrates it -- which is a second copy of the
+fact, in a tool whose argument is that second copies drift. The document's extension
+picks the resolver, so nothing about `#` becomes ambiguous:
+
+```yaml
+traces:
+  - spec/resource-states.yaml#/states/provisioning     # JSON Pointer, RFC 6901
+  - spec/openapi.json#$.paths['/users'].get            # JSONPath, RFC 9535
+```
+
+`spec.yaml#$` and `spec.yaml#/` address the document itself, which is the one
+whole-file trace drift can watch: a markdown trace with no anchor cannot be
+fingerprinted, and a structured one that names the root can.
+
+The fingerprint is of the node's *value*, canonically: reindenting the file,
+reordering two keys or reflowing a comment is not drift, while changing, adding or
+removing a value is. Only JSONPath expressions that address a single node are
+accepted -- names and whole-number indices. A wildcard, descendant, slice, union or
+filter is refused by name, because a fingerprint is taken of one node, and because
+this tool resolves an address rather than running a query.
 
 **A list item is not an anchor**, and that is a decision rather than an omission.
 A table row has a first cell: a short name the author wrote, which survives the
@@ -470,6 +502,7 @@ aplan verify --execute         # also run cited tests (L3; off by default)
 aplan ready                    # workable tasks whose blockers are all done, best first
 aplan ready --explain          # and why each one is where it is
 aplan why P1-003               # what blocks a task: its own blockers, and any unfinished cut
+aplan version M-v0.9      # what that cut owes the released version: fix, feature, breaking
 aplan why P1-003 --all         # ... walking through those cuts into their membership too
 aplan paths                    # how much of recent history each task's `paths` would match
 aplan stale --older-than 30    # live tasks that have sat -- including parked ones, and how long the park has held
@@ -485,6 +518,8 @@ aplan summary                  # tasks, effort, and ready count rolled up by pha
 aplan summary --format json    # the same, machine-readable
 aplan tasks --format json      # the plan as data, so any other rollup is a `jq` line
 aplan critical-path            # the longest effort-weighted chain of dependent tasks
+aplan critical-path M-v0.9     # ... and what must finish before one checkpoint can,
+                               #     with how much of that chain is not yet done
 aplan roadmap                  # the plan grouped by cut: rollups + per-cut critical path
 aplan roadmap --format markdown # the committed ROADMAP.status.md companion (ADR-0009)
 aplan roadmap --format markdown --regenerate-with 'make roadmap'  # when a wrapper generates it
@@ -498,16 +533,25 @@ aplan close P1-003 --evidence commit:d213c9a --evidence test:mod::name
 aplan amend P1-003 --replace-evidence test:old_name test:new_name   # repair a closed task's citation
 aplan supersede P1-003 "Re-fix the rail"  # the successor to a closed task whose outcome stopped holding
 aplan dep add P1-004 --after P1-003     # P1-004 comes after P1-003; `dep rm` takes it back, and a cut's membership stays `mv`'s
+aplan tag add P1-004 cli                # put a tag on an existing task; `tag rm` takes it off
+aplan tag rename epic-a epic-b          # ... and rename one across every task that carries it, as one change
 aplan drop P1-003              # cancel a task, recording the decision rather than deleting it
 aplan drop --cut M-v0.6        # cancel a whole cut: its members, then the milestone
 aplan mv P1-003 P1-004 --cut M-v0.7   # move tasks between cuts, editing both milestones or neither
+aplan claim P1-003             # record that you are on it: a compare-and-swap, so two actors cannot both win
+aplan claim P1-003 --from ada  # take a task somebody holds, naming them; the name is checked
+aplan release P1-003           # drop the claim, naming whose it was; anybody may run it
+aplan start P1-003             # record that work has begun; APLAN053 reports one the repo contradicts
+aplan stop P1-003              # record that it has stopped, back to todo (not a closure)
+aplan ready --unclaimed        # ... and only the work nobody holds
 aplan import kep.yaml          # read a Kubernetes KEP into a task (lossy, and says so)
 aplan import ROADMAP.md --format checklist     # a markdown `- [ ]` roadmap, the commonest shape
 aplan import roadmap.json --format roadmap-json # a status contract, depends_on -> blocked_by
 aplan import kep.yaml --dry-run --cut M-v0.6   # preview, and place it in a release cut
 aplan export --format checklist --out ROADMAP.md  # write the plan back out as the checklist it came from
 aplan export --format checklist --check ROADMAP.md  # ... and the gate that keeps it true
-aplan mcp                      # MCP server over stdio: identity, ready, why, check, verify, add, show, dep, close
+aplan mcp                      # MCP server over stdio: identity, ready, why, check, verify,
+                               #   add, show, dep, close, claim, release, start, stop
 aplan init                     # scaffold a starter .aplan.yml (never overwrites)
 aplan graph                    # generated Mermaid dependency graph; `--cut v0.8`/`--tag output` scope it
 aplan tree A1-126              # one task's neighbourhood: what precedes it, what it releases (`--depth N`)
@@ -516,13 +560,16 @@ aplan schema                   # the JSON Schema, derived from the Rust types
 aplan facts                    # the tool's rules/formats/commands as JSON (see facts.json)
 ```
 
-`add`, `close`, `drop`, `mv`, `init`, and `import` are the only commands that write, and all
-land in your working tree to stage yourself, never an auto-commit. `close` changes one task file in place,
-the `status:` line and a new `evidence:` block, and leaves the rest byte-for-byte
-untouched; it refuses to author a false record: an unknown or still-blocked task, one
-already `done` or already carrying evidence, or a `note` (which needs a `captured` date
-it cannot invent). `init` refuses to overwrite an existing `.aplan.yml`, so it never
-clobbers a policy you have already committed to.
+Commands that mutate a plan write into the working tree for you to review and stage; they never
+create a commit. Commands with a different write target say so in their own help: exports can
+write the output path you name, and `attest --attach-note` writes an explicit Git note. This is a
+shared safety guarantee, not an exhaustive hand-maintained list of writers.
+
+`close` changes one task file in place, the `status:` line and a new `evidence:` block, and leaves
+the rest byte-for-byte untouched; it refuses to author a false record: an unknown or still-blocked
+task, one already `done` or already carrying evidence, or a `note` (which needs a `captured` date it
+cannot invent). `init` refuses to overwrite an existing `.aplan.yml`, so it never clobbers a policy
+you have already committed to.
 
 `import` reads someone else's plan, and is **lossy by design, and says so** (ADR-0012):
 every field the task model cannot hold is reported, never dropped in silence, so you
@@ -732,9 +779,50 @@ The file is optional: with no `.aplan.yml`, the built-in defaults apply. Default
 fail *closed*, every invariant runs unless you switch it off by name, and a `--root`
 that is not a directory is a usage error (exit 2), not an empty plan that passes.
 
+### Per-user settings, and the one thing they hold
+
+`.aplan.yml` is the **repository's** policy: committed, shared, and binding on everybody who works
+the checkout. There is a second, optional file for the other kind of setting, the kind that is about
+*you* rather than about the plan:
+
+```yaml
+# ~/.config/aplan/config.yml  (or $XDG_CONFIG_HOME/aplan/config.yml)
+me: ada          # who `aplan claim` records, for every repository on this machine
+```
+
+That is the whole file today. **It deliberately cannot hold anything `.aplan.yml` holds**, and the
+reason is worth stating because it is the design rather than an omission. `.aplan.yml` has keys like
+`deny_warnings`, `advisory` and `evidence.require_min_strength`; a per-user file that accepted them
+would let anybody turn a repository's gate down on their own machine and still pass it, silently,
+exactly where nobody reviews. So the two files are two types with no key in common, and a test keeps
+them that way. Precedence is not a rule anybody has to remember: there is nothing in this file for a
+repository to lose an argument with.
+
+Why identity is not in `.aplan.yml`: several people and agents work one checkout, so a name recorded
+there would be the right one for at most one of them. And the file has to be *outside* the
+repository for the same reason: both `XDG_CONFIG_HOME` and `HOME` are required to be absolute, so a
+checkout cannot supply one by leaving `HOME` empty. Pin the behaviour with
+`aplan facts --require identity.reads_a_per_user_file`.
+
+`--no-config` does not suppress this file, and that is deliberate: the flag exists so a tree under review cannot say what a run may do, and this file is yours rather than the tree's. It holds nothing a repository can require, so there is nothing in it for that flag to protect you from.
+
+Where a name comes from, in order: `--as <name>`, then `APLAN_OWNER`, then this file, then
+`git config user.name`, then the operating system's user. A refusal names all five. The environment
+variable comes first because it is something you set for this run; this file comes before git's name
+because replacing that guess is what it is for.
+
+**There is no `.env` support, and that is a decision rather than a gap.** `APLAN_OWNER` already
+covers "set it for this shell", so a dotenv would be a second way to say one thing -- and it would be
+in the wrong place twice. Committed, it is shared between actors, which is what a repository key was
+rejected for. Ignored, it is per-machine configuration living in a directory that is not per-machine.
+
+
 ## Install
 
-Build from source:
+Build from source. **Rust 1.88 or newer**, which is `rust-version` in
+`Cargo.toml` and is checked against the locked dependency graph on every CI run
+(`cargo xtask msrv`), so the number here is the one the reviewed revision
+actually builds with rather than an aspiration:
 
 ```sh
 cargo build --release        # binary at target/release/aplan
@@ -744,7 +832,7 @@ Or take the released binary, a statically linked Linux x86_64 build published wi
 its `sha256` (`v0.1.0` onward), so it runs whatever glibc the host ships. `cargo
 install aplan` will work once the crate is released.
 
-A build from `main` reports a pre-release version (`0.3.0-dev`), never the version
+A build from `main` reports a pre-release version (`0.4.0-dev`), never the version
 of a published release, so a staged build can never be mistaken for one. Pin a
 *capability* rather than a name where you can:
 
@@ -765,7 +853,7 @@ a plan you have not touched.
 
 ```yaml
 - uses: actions/checkout@v7
-- uses: asamarts/aplan@v0.2.0    # pinning the action pins the binary
+- uses: asamarts/aplan@v0.3.0    # pinning the action pins the binary
 ```
 
 That installs the release matching the tag you pinned, verifies it against the
@@ -775,7 +863,7 @@ becomes an inline annotation on the pull request. Policy comes from your
 resolves evidence against git instead (check out with `fetch-depth: 0` for that).
 
 **Automating the gate turns the warning tier off.** Both commands exit `0` with warnings
-outstanding, by design -- and **21 of this tool's 44 rules are warnings**, among them
+outstanding, by design -- and **25 of this tool's 53 rules are warnings**, among them
 most of what it says about evidence: a task `done` over its own unticked acceptance
 criteria (`APLAN038`), a traced section that moved after closure (`APLAN018`), and,
 under `verify`, a commit so broad it would have overlapped almost any task's `paths`

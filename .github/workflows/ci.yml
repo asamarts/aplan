@@ -28,9 +28,122 @@ permissions:
   contents: read
 
 jobs:
+  # **Where every job below runs is decided here, and nowhere else** (`A1-117`,
+  # the pre-public repository-boundary decision). Proved against a real fork pull request on a throwaway public
+  # repository before this landed, because a security gate that was only read is
+  # the defect this project names most often.
+  #
+  # Its own placement is conditional, and that is what let this land before the
+  # repository is public rather than at the moment of the flip. `A1-117` assumed
+  # the router must always be hosted and therefore always bill, which is why it
+  # decided to stay unbuilt; a router that sits on the box while the repository
+  # is private bills nothing and is already in place when visibility changes.
+  #
+  # `format` turns a null or missing `private` into an empty string rather than
+  # the literal `null`, so a malformed payload is falsy and the router goes
+  # hosted. Hosted is the fail-closed direction for the router itself.
+  route:
+    name: Route
+    runs-on: ${{ (github.event.repository.private && fromJSON('["self-hosted","linux","aplan"]')) || fromJSON('["ubuntu-latest"]') }}
+    timeout-minutes: 5
+    outputs:
+      runner: ${{ steps.route.outputs.runner }}
+      hosted: ${{ steps.route.outputs.hosted }}
+    steps:
+      # No checkout in this job at all. The decision reads the event payload,
+      # which a pull request cannot alter, and there is nothing here for one to
+      # influence.
+      - id: route
+        env:
+          EVENT_NAME: ${{ github.event_name }}
+          IS_PRIVATE: ${{ format('{0}', github.event.repository.private) }}
+        run: |
+          set -euo pipefail
+          box='["self-hosted","linux","aplan"]'
+          hosted='["ubuntu-latest"]'
+          # **An allow-list, not an exclusion** (`A1-117`, audit). This read
+          # `!= pull_request`, which sends every *other* event to the box --
+          # including `pull_request_target`, whose whole hazard is that it
+          # carries base authority while being raised by a fork, and including
+          # any event type added to this workflow later. Naming the events that
+          # are base-controlled means a new trigger is hosted until somebody
+          # decides otherwise, which is the fail-closed direction.
+          case "$EVENT_NAME" in
+            push|workflow_dispatch|schedule) trusted=yes ;;
+            *) trusted=no ;;
+          esac
+          if [ "$trusted" = "yes" ]; then
+            # A push (branch or tag), a schedule or a dispatch is
+            # base-controlled: the workflow and the code are both what the
+            # repository already holds.
+            echo "runner=$box" >> "$GITHUB_OUTPUT"
+            echo "hosted=false" >> "$GITHUB_OUTPUT"
+          elif [ "$IS_PRIVATE" = "true" ]; then
+            # Private: a fork pull request cannot exist, because forking needs
+            # access. This clause is what keeps a private repository at zero
+            # hosted minutes, and it is the clause to delete if that premise
+            # stops holding.
+            echo "runner=$box" >> "$GITHUB_OUTPUT"
+            echo "hosted=false" >> "$GITHUB_OUTPUT"
+          else
+            # Public, and not a base-controlled event: hosted, fork or not.
+            #
+            # An author allow-list was considered and rejected. `alint` carries
+            # one and holds its capacity switch off, so every pull request there
+            # goes hosted anyway. Its own rejected-shortcuts note records that a
+            # name-based trust test passed a same-repository *bot* pull request;
+            # a rule with no list cannot be wrong about who is on it.
+            echo "runner=$hosted" >> "$GITHUB_OUTPUT"
+            echo "hosted=true" >> "$GITHUB_OUTPUT"
+          fi
+
+      # The decision, in the log. A gate whose answer has to be inferred from
+      # which labels the jobs ended up with is one nobody can audit after the
+      # fact, and this one will be read again at the flip.
+      - name: Say what was decided, and from what
+        run: |
+          echo "event      = ${{ github.event_name }}"
+          echo "private    = ${{ format('{0}', github.event.repository.private) }}"
+          echo "base repo  = ${{ format('{0}', github.event.repository.id) }}"
+          echo "head repo  = ${{ format('{0}', github.event.pull_request.head.repo.id) }}"
+          echo "routed to  = ${{ steps.route.outputs.runner }}"
+          echo "hosted     = ${{ steps.route.outputs.hosted }}"
+
+  # **Why a hosted pull request is red, said once instead of six times**
+  # (`A1-117`, audit). The six jobs below run `ci/scripts/*.sh` against the
+  # runner image's baked-in toolchain and its cargo volumes; on `ubuntu-latest`
+  # they fail for want of a toolchain, which looks like a code defect and is not.
+  #
+  # They are deliberately *not* skipped when hosted. A skipped job reports as
+  # neutral, so a pull request with six skips and no failure can read as green,
+  # and an unvalidated change that looks validated is worse than a noisy one.
+  # So they still fail, and this job says why in one place.
+  #
+  # It is also the only consumer of the router's `hosted` output. Declaring an
+  # output nothing reads is the shape this repository objects to elsewhere, and
+  # the audit found it declared and unread.
+  hosted-path:
+    name: hosted runners cannot run these checks yet
+    needs: route
+    if: needs.route.outputs.hosted == 'true'
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - run: |
+          echo "This run was routed to a hosted runner, which is correct: a pull" >&2
+          echo "request must not run on the self-hosted box (A1-117, ADR-0016)." >&2
+          echo "" >&2
+          echo "The checks below it then fail for a different reason: they expect" >&2
+          echo "the runner image's Rust toolchain and cargo volumes, which a hosted" >&2
+          echo "runner does not have. Making them portable is owed before this" >&2
+          echo "repository goes public; until then a hosted run cannot validate a" >&2
+          echo "change, and this job fails so that it cannot look as though it did." >&2
+          exit 1
+
   test:
     name: build + test
-    runs-on: [self-hosted, linux, aplan]
+    needs: route
+    runs-on: ${{ fromJSON(needs.route.outputs.runner) }}
     timeout-minutes: 30  # bound a hang: one runner, so a stuck job blocks all CI
     steps:
       - uses: actions/checkout@v7
@@ -45,9 +158,24 @@ jobs:
       - name: test
         run: ci/scripts/test.sh
 
+  # Its own job for the reason `coverage` has one: a different compiler shares
+  # no artifacts with the stable build, so folding this into `test` would make
+  # every push pay a second full check. Measured on this workspace: 27s cold,
+  # under a second warm (`A1-330`).
+  msrv:
+    name: builds at the declared MSRV
+    needs: route
+    runs-on: ${{ fromJSON(needs.route.outputs.runner) }}
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v7
+      - name: msrv build
+        run: ci/scripts/msrv-build.sh
+
   coverage:
     name: coverage floors
-    runs-on: [self-hosted, linux, aplan]
+    needs: route
+    runs-on: ${{ fromJSON(needs.route.outputs.runner) }}
     # Longer than the others: the run rebuilds the workspace instrumented, which
     # shares no artifacts with the ordinary test build.
     timeout-minutes: 45
@@ -62,7 +190,8 @@ jobs:
 
   spec:
     name: spec drift
-    runs-on: [self-hosted, linux, aplan]
+    needs: route
+    runs-on: ${{ fromJSON(needs.route.outputs.runner) }}
     timeout-minutes: 30  # bound a hang: one runner, so a stuck job blocks all CI
     steps:
       - uses: actions/checkout@v7
@@ -74,7 +203,8 @@ jobs:
 
   style:
     name: house style
-    runs-on: [self-hosted, linux, aplan]
+    needs: route
+    runs-on: ${{ fromJSON(needs.route.outputs.runner) }}
     timeout-minutes: 30  # bound a hang: one runner, so a stuck job blocks all CI
     steps:
       - uses: actions/checkout@v7
@@ -85,7 +215,8 @@ jobs:
 
   dogfood:
     name: aplan lints its own plan
-    runs-on: [self-hosted, linux, aplan]
+    needs: route
+    runs-on: ${{ fromJSON(needs.route.outputs.runner) }}
     timeout-minutes: 30  # bound a hang: one runner, so a stuck job blocks all CI
     steps:
       # `fetch-depth: 0` gives `aplan verify` the full history it needs to

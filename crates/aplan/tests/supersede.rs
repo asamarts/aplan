@@ -212,6 +212,450 @@ fn a_successor_that_check_would_reject_is_refused_first() {
     }
 }
 
+/// **Every bad input refuses before any file changes** (`A1-251`).
+///
+/// `supersede` writes three files: the successor, the re-stamped predecessor and
+/// the cut that gains it. A refusal that had already written one of them would
+/// leave a plan nobody asked for, and the retry mints a second successor id. The
+/// batch writer makes that all-or-nothing at the point of writing (`A1-246`);
+/// this asserts the other half, that a refusal reaches the point of writing with
+/// nothing done.
+#[test]
+fn a_bad_tag_or_cut_refuses_before_any_file_changes() {
+    let dir = repo();
+    let root = dir.path();
+    std::fs::write(
+        root.join(".aplan.yml"),
+        "detect_drift: true\nrequire_cut_membership: true\ntag_families:\n  kind:\n\
+         \x20   members: [kind-fix, kind-feature]\n    require: exactly-one\n\
+         \x20   milestones: exclude\n",
+    )
+    .expect("config");
+    let t1 = root.join("aplan/tasks/T-1.md");
+    let body = std::fs::read_to_string(&t1).expect("T-1");
+    std::fs::write(
+        &t1,
+        body.replace("status: done\n", "status: done\ntags:\n  - kind-fix\n"),
+    )
+    .expect("tagged");
+    std::fs::write(
+        root.join("aplan/tasks/M-a.md"),
+        "---\nid: M-a\ntitle: a cut\nphase: 1\nstatus: todo\ntags:\n  - milestone\n\
+         blocked_by:\n  - T-1\n---\n\nbody\n",
+    )
+    .expect("cut");
+
+    let before = plan_bytes(root);
+    for (what, args) in [
+        (
+            "a cut that is not there",
+            vec![
+                "supersede",
+                "T-1",
+                "S",
+                "--root",
+                "aplan",
+                "--cut",
+                "M-nope",
+            ],
+        ),
+        (
+            "two members of an exactly-one family",
+            vec![
+                "supersede",
+                "T-1",
+                "S",
+                "--root",
+                "aplan",
+                "--cut",
+                "M-a",
+                "--tag",
+                "kind-fix",
+                "--tag",
+                "kind-feature",
+            ],
+        ),
+        (
+            "no tag at all where one is required",
+            vec![
+                "supersede",
+                "T-1",
+                "S",
+                "--root",
+                "aplan",
+                "--cut",
+                "M-a",
+                "--tag",
+                "docs",
+            ],
+        ),
+        (
+            "a bad cut and a bad tag together",
+            vec![
+                "supersede",
+                "T-1",
+                "S",
+                "--root",
+                "aplan",
+                "--cut",
+                "M-nope",
+                "--tag",
+                "docs",
+            ],
+        ),
+    ] {
+        let (out, code) = aplan(root, &args);
+        assert_ne!(code, 0, "{what} was accepted: {out}");
+        assert_eq!(
+            before,
+            plan_bytes(root),
+            "{what} changed a file before refusing: {out}"
+        );
+    }
+}
+
+/// **A waiver is not inherited** (`A1-251`, and the test that changed the
+/// decision).
+///
+/// `cross-cutting` reads like a membership answer the successor should carry,
+/// and it is really a deliberate waiver of `APLAN022`. Inheriting it lets the
+/// successor escape a check nobody waived for it -- and on a plan with no cuts
+/// at all it files a second uncut task silently, where `A1-252` decided such a
+/// command should say there is no cut yet. That is asserted by
+/// `supersede_on_a_plan_with_no_cut_is_told_the_same_thing`; this is the same
+/// decision on a plan that *has* a cut, so the two cannot drift apart.
+///
+/// Proves the named behaviour `supersede.successor_is_placed_and_classified`
+/// (`A1-251`).
+#[test]
+fn cross_cutting_is_not_inherited_because_it_is_a_waiver() {
+    let dir = repo();
+    let root = dir.path();
+    let t1 = root.join("aplan/tasks/T-1.md");
+    let body = std::fs::read_to_string(&t1).expect("T-1");
+    std::fs::write(
+        &t1,
+        body.replace(
+            "status: done\n",
+            "status: done\ntags:\n  - cross-cutting\n  - docs\n",
+        ),
+    )
+    .expect("tagged");
+
+    let (out, code) = aplan(
+        root,
+        &[
+            "supersede",
+            "T-1",
+            "A waiver is not inherited",
+            "--root",
+            "aplan",
+        ],
+    );
+    assert_eq!(code, 0, "{out}");
+    let successor = std::fs::read_dir(root.join("aplan/tasks"))
+        .expect("tasks")
+        .flatten()
+        .map(|e| std::fs::read_to_string(e.path()).unwrap_or_default())
+        .find(|b| b.contains("title: A waiver is not inherited"))
+        .expect("the successor was written");
+    assert_eq!(
+        tags_in(&successor),
+        vec!["docs".to_string()],
+        "a waiver was inherited:\n{successor}"
+    );
+
+    // And it can be said again deliberately, which is the whole remedy.
+    let (out, code) = aplan(
+        root,
+        &[
+            "supersede",
+            "T-1",
+            "Said again on purpose",
+            "--root",
+            "aplan",
+            "--tag",
+            "cross-cutting",
+        ],
+    );
+    assert_eq!(code, 0, "{out}");
+    let successor = std::fs::read_dir(root.join("aplan/tasks"))
+        .expect("tasks")
+        .flatten()
+        .map(|e| std::fs::read_to_string(e.path()).unwrap_or_default())
+        .find(|b| b.contains("title: Said again on purpose"))
+        .expect("the second successor was written");
+    assert_eq!(tags_in(&successor), vec!["cross-cutting".to_string()]);
+}
+
+/// **An inherited tag is not written twice** (`A1-251`, audit).
+///
+/// A predecessor carrying one tag twice is a file `check` accepts, and
+/// inheriting it faithfully would put the mistake in a file this command wrote
+/// itself. `add` dedupes what it is given and `tag rename` says why: `[cli,
+/// cli]` is "this tool writing a document its own loader reads as one tag and a
+/// reviewer reads as a mistake". Inheritance is the third way in, and had no
+/// such rule until this test.
+#[test]
+fn an_inherited_tag_is_not_written_twice() {
+    let dir = repo();
+    let root = dir.path();
+    let t1 = root.join("aplan/tasks/T-1.md");
+    let body = std::fs::read_to_string(&t1).expect("T-1");
+    std::fs::write(
+        &t1,
+        body.replace(
+            "status: done\n",
+            "status: done\ntags:\n  - dup\n  - dup\n  - other\n",
+        ),
+    )
+    .expect("tagged");
+
+    let (out, code) = aplan(root, &["supersede", "T-1", "Deduped", "--root", "aplan"]);
+    assert_eq!(code, 0, "{out}");
+    let successor = std::fs::read_dir(root.join("aplan/tasks"))
+        .expect("tasks")
+        .flatten()
+        .map(|e| std::fs::read_to_string(e.path()).unwrap_or_default())
+        .find(|b| b.contains("title: Deduped"))
+        .expect("the successor was written");
+    assert_eq!(
+        tags_in(&successor),
+        vec!["dup".to_string(), "other".to_string()],
+        "a tag was inherited twice:\n{successor}"
+    );
+}
+
+/// The `tags:` block of a task file, as a list.
+///
+/// Substring checks are wrong here: a successor inherits `paths: - docs/**`, so
+/// asking whether the file contains `- docs` answers a question about paths,
+/// and answers it yes.
+fn tags_in(body: &str) -> Vec<String> {
+    let mut out = Vec::new();
+    let mut inside = false;
+    for line in body.lines() {
+        if line.starts_with("tags:") {
+            inside = true;
+            continue;
+        }
+        if inside {
+            match line.trim_start().strip_prefix("- ") {
+                Some(tag) => out.push(tag.trim().to_string()),
+                None => break,
+            }
+        }
+    }
+    out
+}
+
+/// **The repair the pilot could not perform** (`A1-251`), end to end.
+///
+/// `p003` requires exactly one `kind-*` tag on every non-milestone task and
+/// exactly one cut membership. Its real post-closure repair could not be run:
+/// the successor carried no tag, so `APLAN030` refused it, and no invocation
+/// could satisfy that because there was no way to say a tag. Underneath that,
+/// the successor was judged as belonging to no cut even with `--cut` given,
+/// because the milestone edit `--cut` performs was not part of the plan the gate
+/// looked at.
+///
+/// Both halves are asserted here rather than argued, on a plan with both dials
+/// on, because either one alone still refuses.
+///
+/// Proves the named behaviour `supersede.successor_is_placed_and_classified`
+/// (`A1-251`).
+#[test]
+fn a_successor_satisfies_a_mandatory_family_and_the_cut_it_is_given() {
+    let dir = repo();
+    let root = dir.path();
+    std::fs::write(
+        root.join(".aplan.yml"),
+        "detect_drift: true\nrequire_cut_membership: true\ntag_families:\n  kind:\n\
+         \x20   members: [kind-fix, kind-feature]\n    require: exactly-one\n\
+         \x20   milestones: exclude\n",
+    )
+    .expect("config");
+    // The predecessor carries the family member, as every task in such a plan
+    // must; the cut holds it.
+    let t1 = root.join("aplan/tasks/T-1.md");
+    let body = std::fs::read_to_string(&t1).expect("T-1");
+    std::fs::write(
+        &t1,
+        body.replace("status: done\n", "status: done\ntags:\n  - kind-fix\n"),
+    )
+    .expect("tagged");
+    std::fs::write(
+        root.join("aplan/tasks/M-a.md"),
+        "---\nid: M-a\ntitle: a cut\nphase: 1\nstatus: todo\ntags:\n  - milestone\n\
+         blocked_by:\n  - T-1\n---\n\nbody\n",
+    )
+    .expect("cut");
+    let (out, code) = aplan(root, &["check", "--root", "aplan"]);
+    assert_eq!(code, 0, "the fixture must start clean: {out}");
+
+    let (out, code) = aplan(
+        root,
+        &[
+            "supersede",
+            "T-1",
+            "Fix the rail at five points",
+            "--root",
+            "aplan",
+            "--cut",
+            "M-a",
+            "--effort",
+            "1",
+        ],
+    );
+    assert_eq!(code, 0, "the pilot's repair still refuses: {out}");
+    assert!(
+        out.contains("tags: kind-fix (inherited from T-1)"),
+        "the successor's tags were not named, so inheritance is invisible: {out}"
+    );
+
+    // The plan it left behind is one `check` accepts: the successor carries the
+    // family member and is in the cut that was asked for.
+    let (out, code) = aplan(root, &["check", "--root", "aplan"]);
+    assert_eq!(code, 0, "the repair left a plan that does not check: {out}");
+
+    // The predecessor was re-stamped rather than merely left alone: the drift
+    // this repair answers is what `APLAN018` was reporting, and a successor
+    // filed beside a still-drifted predecessor would leave the warning open.
+    let predecessor = std::fs::read_to_string(root.join("aplan/tasks/T-1.md")).expect("T-1");
+    assert!(
+        predecessor.contains("trace_fingerprints:"),
+        "the predecessor was not re-stamped:\n{predecessor}"
+    );
+    assert!(
+        predecessor.contains("status: done"),
+        "the predecessor did not keep its status:\n{predecessor}"
+    );
+
+    let milestone = std::fs::read_to_string(root.join("aplan/tasks/M-a.md")).expect("cut");
+    let successor = std::fs::read_dir(root.join("aplan/tasks"))
+        .expect("tasks")
+        .flatten()
+        .map(|e| std::fs::read_to_string(e.path()).unwrap_or_default())
+        .find(|b| b.contains("title: Fix the rail at five points"))
+        .expect("the successor was written");
+    assert_eq!(
+        tags_in(&successor),
+        vec!["kind-fix".to_string()],
+        "the family member was not inherited:\n{successor}"
+    );
+    let id = successor
+        .lines()
+        .find_map(|l| l.strip_prefix("id: "))
+        .expect("an id");
+    assert!(
+        milestone.contains(id),
+        "`--cut` did not place the successor:\n{milestone}"
+    );
+}
+
+/// `--tag` says what the successor carries, instead of inheriting (`A1-251`).
+///
+/// Replacing rather than adding, as `add --tag` sets a new task's tags: a
+/// successor that is a different *kind* of work is the case the flag exists for,
+/// and adding to an inherited `kind-fix` would break the same cardinality the
+/// flag was added to satisfy.
+///
+/// Proves the named behaviour `supersede.successor_is_placed_and_classified`
+/// (`A1-251`).
+#[test]
+fn an_explicit_tag_replaces_what_would_have_been_inherited() {
+    let dir = repo();
+    let root = dir.path();
+    let t1 = root.join("aplan/tasks/T-1.md");
+    let body = std::fs::read_to_string(&t1).expect("T-1");
+    std::fs::write(
+        &t1,
+        body.replace(
+            "status: done\n",
+            "status: done\ntags:\n  - kind-fix\n  - docs\n",
+        ),
+    )
+    .expect("tagged");
+
+    let (out, code) = aplan(
+        root,
+        &[
+            "supersede",
+            "T-1",
+            "A different kind of work",
+            "--root",
+            "aplan",
+            "--tag",
+            "kind-feature",
+        ],
+    );
+    assert_eq!(code, 0, "{out}");
+    assert!(
+        out.contains("tags: kind-feature") && !out.contains("inherited"),
+        "an explicit tag should not report as inherited: {out}"
+    );
+    let successor = std::fs::read_dir(root.join("aplan/tasks"))
+        .expect("tasks")
+        .flatten()
+        .map(|e| std::fs::read_to_string(e.path()).unwrap_or_default())
+        .find(|b| b.contains("title: A different kind of work"))
+        .expect("the successor was written");
+    assert_eq!(
+        tags_in(&successor),
+        vec!["kind-feature".to_string()],
+        "`--tag` should replace the inherited set:\n{successor}"
+    );
+}
+
+/// A role in a runway is not inherited (`A1-251`).
+///
+/// `deprecation` and `removal` say what a task *is* in a schedule, not what it
+/// is about. A successor that claimed to be a second announcement would be a
+/// finding, and the write would then be refused -- turning inheritance into the
+/// unusable command this task exists to fix. `docs` is about the subject and
+/// comes across.
+///
+/// Proves the named behaviour `supersede.successor_is_placed_and_classified`
+/// (`A1-251`).
+#[test]
+fn a_runway_role_is_not_inherited_but_the_subject_is() {
+    let dir = repo();
+    let root = dir.path();
+    let t1 = root.join("aplan/tasks/T-1.md");
+    let body = std::fs::read_to_string(&t1).expect("T-1");
+    std::fs::write(
+        &t1,
+        body.replace(
+            "status: done\n",
+            "status: done\ntags:\n  - docs\n  - deprecation\n",
+        ),
+    )
+    .expect("tagged");
+
+    let (out, code) = aplan(
+        root,
+        &[
+            "supersede",
+            "T-1",
+            "Carry the subject over",
+            "--root",
+            "aplan",
+        ],
+    );
+    assert_eq!(code, 0, "{out}");
+    let successor = std::fs::read_dir(root.join("aplan/tasks"))
+        .expect("tasks")
+        .flatten()
+        .map(|e| std::fs::read_to_string(e.path()).unwrap_or_default())
+        .find(|b| b.contains("title: Carry the subject over"))
+        .expect("the successor was written");
+    assert_eq!(
+        tags_in(&successor),
+        vec!["docs".to_string()],
+        "the subject should carry and the runway role should not:\n{successor}"
+    );
+}
+
 /// A finished cut stays finished. Reopening a member would have made the
 /// milestone's `done` false and every downstream cut's premise with it; this is
 /// the case that decided the design, so it is asserted rather than argued.

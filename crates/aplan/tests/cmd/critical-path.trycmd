@@ -4,15 +4,34 @@ tasks. Here `A -> B -> C` totals 6 days, beating the standalone `D` (5 days).
 ```
 $ aplan critical-path
 critical path: 6.0 days across 3 task(s)
-  A           1.0d  Alpha
-  B           3.0d  Beta
-  C           2.0d  Gamma
+  A           1.0d  todo          Alpha
+  B           3.0d  todo          Beta
+  C           2.0d  todo          Gamma
+
+```
+
+Name a checkpoint and the chain ends there instead: what must finish before `B`
+can, which is a different question and a smaller number. Nothing is filtered out
+-- every edge is kept and only the end is chosen -- so a prerequisite that lives
+in another cut still counts.
+
+```
+$ aplan critical-path B
+critical path to `B`: 4.0 days across 2 task(s)
+  A           1.0d  todo          Alpha
+  B           3.0d  todo          Beta
 
 ```
 
 ```
 $ aplan critical-path --format json
 {
+  "remaining": [
+    "A",
+    "B",
+    "C"
+  ],
+  "remaining_effort_days": 6.0,
   "schema": "aplan/critical-path/v1",
   "tasks": [
     {
@@ -34,8 +53,58 @@ $ aplan critical-path --format json
       "title": "Gamma"
     }
   ],
+  "to": null,
   "total_effort_days": 6.0
 }
+
+```
+
+A chain that is partly finished says how much of it is left, and the number is
+**re-walked rather than subtracted**: the longest chain and the longest chain of
+what remains ordinarily end at different tasks. `E` is done, so it weighs nothing
+and is not on the list of work left -- but its edge stays, exactly as a
+milestone's does.
+
+```
+$ aplan critical-path F
+critical path to `F`: 3.0 days across 2 task(s), 2.0d of it not yet done across 1 task(s)
+  E           1.0d  done          Epsilon
+  F           2.0d  todo          Zeta
+
+```
+
+`to` is the checkpoint the chain ends at, so a consumer can tell the two
+questions apart. It is `null` above and named here:
+
+```
+$ aplan critical-path D --format json
+{
+  "remaining": [
+    "D"
+  ],
+  "remaining_effort_days": 5.0,
+  "schema": "aplan/critical-path/v1",
+  "tasks": [
+    {
+      "effort_days": 5.0,
+      "id": "D",
+      "status": "todo",
+      "title": "Delta"
+    }
+  ],
+  "to": "D",
+  "total_effort_days": 5.0
+}
+
+```
+
+An id the plan does not hold is a refusal, not an empty chain that would read as
+"nothing blocks this":
+
+```
+$ aplan critical-path Z
+? 2
+aplan: no task `Z` in this plan
 
 ```
 

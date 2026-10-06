@@ -40,6 +40,62 @@
         }
       ]
     },
+    "DeclaredCommand": {
+      "additionalProperties": false,
+      "description": "A command `.aplan.yml` declares under `version` (`A1-313`, `A1-314`).\n\n**One type for the two of them**, because they are the same idea with\ndifferent questions: `version.current` prints the version the artifact ships,\nand `version.check` exits zero when the artifact is compatible with the last\nrelease. What each *means* is documented on the key that takes it; what they\nshare -- how it is spawned and what it may spend -- is documented here.\n\nIt carries the same four limit keys `test` and `url` carry, because ADR-0033\ncovers *every* spawned command: the machine does not care which one ate it.\nA third implementation of the configured-checker idea is what `A1-185` is\nabout, and adding a fourth here rather than a second would have been that\ntask's subject arriving twice in one cut.",
+      "properties": {
+        "command": {
+          "description": "argv, e.g. `[\"ci/scripts/version.sh\"]`.\n\nSpawned with no shell (HLD section 5.5). A pipeline is declared as one:\n`[\"sh\", \"-c\", \"...\"]` is this repository's business to write and not this\ntool's to synthesise.",
+          "items": {
+            "type": "string"
+          },
+          "type": "array"
+        },
+        "max_memory": {
+          "default": null,
+          "description": "The most memory this command may hold, as a size (`256M`) (`A1-310`,\nADR-0033).",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "max_processes": {
+          "default": null,
+          "description": "The most processes it may have alive at once (`A1-310`, ADR-0033).",
+          "format": "uint32",
+          "minimum": 0,
+          "type": [
+            "integer",
+            "null"
+          ]
+        },
+        "timeout_seconds": {
+          "default": null,
+          "description": "How long it may take before the version is reported as *not read*, in\nseconds. Default: 30. `0` means no limit (`A1-121`).\n\nThe same thirty seconds `url.check` gets, and for the same reason: this\nis one question with one answer, and a command that has not printed a\nversion in half a minute is not going to.",
+          "format": "uint64",
+          "minimum": 0,
+          "type": [
+            "integer",
+            "null"
+          ]
+        },
+        "wrap": {
+          "default": null,
+          "description": "argv prepended to it (`A1-310`, ADR-0033).",
+          "items": {
+            "type": "string"
+          },
+          "type": [
+            "array",
+            "null"
+          ]
+        }
+      },
+      "required": [
+        "command"
+      ],
+      "type": "object"
+    },
     "DocsConfig": {
       "additionalProperties": false,
       "description": "What `aplan check-docs` may check beyond references resolving.",
@@ -510,7 +566,7 @@
         },
         "max_memory": {
           "default": null,
-          "description": "Whether this runner's `run` command selects exactly the name `list`\nprinted. Default: unknown, and `APLAN037` finds out by asking.\n\nThe rung `--execute` claims is that the cited test *passed*, and that is\nonly worth what the runner makes it worth: a `run` command whose filter\ndoes not match the names `list` prints selects nothing, skips everything\nand exits `0`, which reads as a pass. `APLAN037` learns what a miss looks\nlike by running a name no test can have, and compares.\n\nSet `true` where the runner is right and simply says nothing either way,\nwhich no probe can tell from a runner that ran nothing. It is a claim the\nrepository makes and nothing checks -- so it also skips the probe's extra\nrun of `test.run`, which is the honest trade: a claim in exchange for the\ncost of the question.\n\n`false` is the same as leaving it out. The key is a one-sided claim, like\n`expect_tests`: saying a runner does *not* select exactly is saying the\nprobe is right, and silencing a rule on the strength of agreeing with it\nwould be the one reading nobody wants.\nThe most memory this runner's commands may hold, as a size (`4G`, `512M`)\n(`A1-310`, ADR-0033).\n\nEnforced by a cgroup, which sets `memory.max` **and** `memory.swap.max`:\nprototyped, a process under a 64MB `memory.max` alone allocated 3GB with\n`oom_kill` still `0`, because the pages went to swap. A cap that a box\nwith swap turns into a paging target is not a cap.\n\nWhat a command spends is the harness's and varies by two orders of\nmagnitude: measured on one machine, `cargo test` warm peaks at 156MB,\n`go test ./...` at 1.2GB, and `npm test` (vitest) at 33GB. Size it from\nwhat your own run reports rather than from a number here.",
+          "description": "The most memory this runner's commands may hold, as a size (`4G`, `512M`)\n(`A1-310`, ADR-0033).\n\nEnforced by a cgroup, which sets `memory.max` **and** `memory.swap.max`:\nprototyped, a process under a 64MB `memory.max` alone allocated 3GB with\n`oom_kill` still `0`, because the pages went to swap. A cap that a box\nwith swap turns into a paging target is not a cap.\n\nWhat a command spends is the harness's and varies by two orders of\nmagnitude: measured on one machine, `cargo test` warm peaks at 156MB,\n`go test ./...` at 1.2GB, and `npm test` (vitest) at 33GB. Size it from\nwhat your own run reports rather than from a number here.",
           "type": [
             "string",
             "null"
@@ -534,6 +590,16 @@
             "null"
           ]
         },
+        "output_lines": {
+          "default": null,
+          "description": "How many lines of a failed test's output a finding may carry. Default:\neight; `0` suppresses it (`A1-365`).\n\n**Present by default, which is a decision with a recorded cost.** A pilot\nrejected two cited tests that failed only inside its nested-Podman\nrunner, and the whole actionable output was \"failed under `--execute`\"\nwith the instruction to make the test pass: both streams had been\ncaptured and thrown away, so the cause could only be found by entering\nthe runner by hand. `test.list` has retained one line of stderr for a\nlaunch failure since it was written, and this is that precedent applied\nto the other half. An opt-in would reproduce the pilot's experience\nexactly: they met the opaque failure first, and would only then have\ndiscovered a key existed.\n\nThe cost is that a CI log can contain a little output nobody explicitly\nasked for. Three things bound it: the default is small, every line goes\nthrough the sanitizer a generated document uses, and recognisable\ncredential shapes are masked. Set `0` for a repository whose tests print\nthings it would rather not publish -- redaction is a best-effort filter\nover shapes that look like credentials, not a secret scanner, and the\nupgrade guidance says so in those words.",
+          "format": "uint",
+          "minimum": 0,
+          "type": [
+            "integer",
+            "null"
+          ]
+        },
         "run": {
           "description": "argv that runs one test. Exactly one element must be [`PLACEHOLDER`]; it\nis replaced, whole, by the test name.\n\n**`--execute` believes this command's exit status**, so it is worth\nknowing whether yours earns that. The assumption is that the name `list`\nprints is the name this command selects: `cargo test -- --exact <name>`\nand `pytest <node id>` both honour it, and a filter flag over a different\nnamespace does not. `vitest list` prints `file > suite > test` while\n`vitest run -t` matches the test's title, so the listed name selects\nnothing, every test is skipped, and the exit status is `0` -- which reads\nhere as the test passing (`A1-034`, `A1-167`).\n\nThe one-command check: run your `run` command with a name no test could\nhave. If it fails, the exit status means something. If it succeeds,\n`--execute` cannot tell a pass from a miss for this runner, and the\ncitations it resolves are worth their L1 claim rather than their L3 one.",
           "items": {
@@ -543,6 +609,7 @@
         },
         "run_selects": {
           "default": null,
+          "description": "Whether this runner's `run` command selects exactly the name `list`\nprinted. Default: unknown, and `APLAN037` finds out by asking.\n\nThe rung `--execute` claims is that the cited test *passed*, and that is\nonly worth what the runner makes it worth: a `run` command whose filter\ndoes not match the names `list` prints selects nothing, skips everything\nand exits `0`, which reads as a pass. `APLAN037` learns what a miss looks\nlike by running a name no test can have, and compares.\n\nSet `true` where the runner is right and simply says nothing either way,\nwhich no probe can tell from a runner that ran nothing. It is a claim the\nrepository makes and nothing checks -- so it also skips the probe's extra\nrun of `test.run`, which is the honest trade: a claim in exchange for the\ncost of the question.\n\n`false` is the same as leaving it out. The key is a one-sided claim, like\n`expect_tests`: saying a runner does *not* select exactly is saying the\nprobe is right, and silencing a rule on the strength of agreeing with it\nwould be the one reading nobody wants.",
           "type": [
             "boolean",
             "null"
@@ -688,6 +755,28 @@
       "additionalProperties": false,
       "description": "What a task is expected to say about the released version (`A1-312`,\nADR-0034).\n\nOff unless asked for, and cheap when asked for: a task's **level** supplies a\nfloor, so with this on and nothing else configured a plan that declares no\nimpacts at all still judges clean. The only thing an author writes by hand is\nwhat a floor cannot supply -- a `breaking` change inside one task, or a `none`\nwith the reason it is none.",
       "properties": {
+        "check": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/DeclaredCommand"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "description": "How to ask the artifact whether it is compatible with the last release\n(`A1-314`, `APLAN049`).\n\n**Exit zero when it is, non-zero when it is not.** That is the question\n`cargo semver-checks check-release` already answers natively, and asking\nit this way is what keeps this tool's vocabulary out of somebody else's\nchecker: a command that had to print `none|fix|feature|breaking` would be\nthis project teaching an ecosystem its words, which is the refusal\n`A1-037` makes about `vN.N` one layer along.\n\nIt is the L3 rung of a version claim, and it behaves like the other one:\nopt-in, run only where declared, reported as a finding about the *claim*\nrather than as a crash, and bounded by the limits above -- an API differ\nis exactly the kind of command that compiles a workspace twice.\n\nNothing here reimplements API diffing. The tool runs the checker the\nrepository declares and reports what it said, exactly as it runs\n`test.run`."
+        },
+        "current": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/DeclaredCommand"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "description": "How to read the version the artifact ships today (`A1-313`, ADR-0040).\n\nA command, never a parse. This tool does not know what a `pyproject.toml`\nmeans, what a `version` key in one of four build backends refers to, or\nwhich of a monorepo's eleven manifests is the one that ships -- and a\nguess about any of those is a wrong number stated confidently, which is\nthe one thing the arithmetic must never produce.\n\nIt prints the version on stdout and exits zero. The first non-empty line\nis taken, trimmed, with a leading `v` removed -- because `git describe`\nand `cargo pkgid` disagree about that one character and neither is wrong.\n\nWithout it the plan still answers what a node *owes*, which needs nothing\noutside the plan. What it cannot do is turn that into a number, because\nthe number is relative to one this tool has no way to learn."
+        },
         "levels": {
           "anyOf": [
             {
@@ -698,6 +787,14 @@
             }
           ],
           "description": "What each level owes before any member speaks. Default: a unit of work\n`fix`, a cut `feature`, a release nothing of its own."
+        },
+        "release_tag": {
+          "default": null,
+          "description": "Which tags name a release, as a glob (`A1-317`, ADR-0038). Default: `v*`.\n\nADR-0038 decided the window with no release node is everything closed\nsince the nearest release tag reachable from `HEAD`, and that a\nrepository tagging things other than releases has to say which tags are\nreleases. `v*` is what this project and its pilots use; a project tagging\n`release-2026-09` says so here rather than being told its vocabulary is\nwrong (`A1-037`).",
+          "type": [
+            "string",
+            "null"
+          ]
         },
         "require_impact": {
           "default": null,

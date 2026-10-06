@@ -76,7 +76,7 @@ fn the_binary_digest_is_this_binarys_own() {
     let dir = scratch();
     let doc = identity(dir.path());
 
-    let bytes = std::fs::read(env!("CARGO_BIN_EXE_aplan")).expect("read the binary under test");
+    let bytes = std::fs::read(common::binary()).expect("read the binary under test");
     let expected = aplan_attest::sha256_hex(&bytes);
     assert_eq!(
         doc["binary_sha256"].as_str().unwrap_or_default(),
@@ -214,12 +214,24 @@ fn attest_and_identity_agree_about_this_build() {
     let tool = &attested["tool"];
     let doc = identity(dir.path());
 
-    for field in ["version", "source", "facts_sha256", "binary_sha256"] {
+    for field in ["version", "facts_sha256", "binary_sha256"] {
         assert_eq!(
             tool[field], doc[field],
             "`attest` and `facts --identity` disagree about `{field}`:\n  attest:   {}\n               identity: {}",
             tool[field], doc[field]
         );
+    }
+
+    // `attest` retains the v1 source string, while the newer identity document
+    // omits an unknown source. Both mean "this build could not name a commit".
+    // A build from a tarball or a git hook can exercise this supported case.
+    if tool["source"] == "" {
+        assert!(
+            doc.get("source").is_none(),
+            "an unknown source must be absent from facts --identity: {doc}"
+        );
+    } else {
+        assert_eq!(tool["source"], doc["source"]);
     }
 }
 

@@ -44,7 +44,7 @@ fn the_document_is_stamped_with_the_commit_and_records_what_resolved() {
     }
     // The one an auditor checks first: the digest of the binary that ran, as
     // `sha256sum` spells it.
-    let exe = std::fs::read(env!("CARGO_BIN_EXE_aplan")).expect("read the binary");
+    let exe = std::fs::read(common::binary()).expect("read the binary");
     assert_eq!(
         tool["binary_sha256"],
         aplan_attest::sha256_hex(&exe),

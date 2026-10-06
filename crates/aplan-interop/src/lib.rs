@@ -23,6 +23,7 @@ pub mod cut;
 pub mod docs;
 pub mod emit;
 pub mod export;
+pub mod identity;
 pub mod ids;
 pub mod kep;
 pub mod manifest;

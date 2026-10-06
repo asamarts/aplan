@@ -176,6 +176,48 @@ pub struct Task {
     /// all three, which ADR-0017 measured before deferring this field.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub prefer_after: Vec<String>,
+    /// Task IDs that must bless this one before it counts as finished: a
+    /// constraint on *counting done*, never on starting (`A1-306`, ADR-0036).
+    ///
+    /// `blocked_by` was carrying two relationships that behave nothing alike. A
+    /// **producer** edge means the work cannot begin, because it consumes what
+    /// the blocker makes. A **ratification** edge means somebody must approve
+    /// the result, and the work can be built, tested and gated today. The sixth
+    /// pilot modelled eleven of the second kind as the first, `ready` reported
+    /// none of them, and it was right to: nothing in the file said which was
+    /// meant. Five of those artefacts already existed and were gated in CI while
+    /// the plan called them blocked, which cost two days of wrong belief
+    /// (pre-public adoption evidence).
+    ///
+    /// Following `prefer_after`'s precedent exactly (ADR-0025): the answer to
+    /// "`blocked_by` is being asked to mean two things" is a second field that
+    /// means one of them, not a second kind of edge. `ready` does not read this,
+    /// so a ratification never hides startable work; `APLAN046` refuses `done`
+    /// while a ratifier is unfinished, which is where the gate the pilot was
+    /// accidentally relying on actually belongs.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub ratified_by: Vec<String>,
+    /// The milestones this one **contains**: its children, whose work rolls up
+    /// into it at any depth (`A1-333`, ADR-0042).
+    ///
+    /// The third thing `blocked_by` was being asked to mean. ADR-0013 decided
+    /// that a milestone listing another milestone there *sequences* the two
+    /// cuts, and the member filter excludes it deliberately -- so an author who
+    /// writes it intending containment gets a rollup of `0.0d` over real work
+    /// and an `APLAN021` saying their cut is empty, with nothing anywhere using
+    /// the word "sequence". Measured on a four-level plan (`A1-317`'s audit),
+    /// and misdiagnosed there as a traversal defect.
+    ///
+    /// `prefer_after`'s precedent again (ADR-0025), and `ratified_by`'s
+    /// (ADR-0036): a second meaning earns a second field, never a second kind
+    /// of edge. A release is now the special case of this rather than the
+    /// mechanism for it.
+    ///
+    /// **This is not a second grouping level** (ADR-0014): a task still belongs
+    /// to exactly one cut, the one that lists it. A container *borrows* the work
+    /// beneath it, which is the word ADR-0022 already used for a release.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub contains: Vec<String>,
     /// Proof of completion. Must be non-empty when `status: done`.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub evidence: Vec<Evidence>,
@@ -244,6 +286,27 @@ pub struct Task {
     /// same reason `APLAN021` counts members rather than reading the narrative.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub version_impact_reason: Option<String>,
+    /// The version this **release** produced, written when it closed
+    /// (`A1-339`, ADR-0038).
+    ///
+    /// **Derived while open, recorded at close.** The plan decides the number
+    /// rather than grading a human's guess (`A1-313`), and the number is written
+    /// into the node when it closes so a later run can ask what a release
+    /// contained without re-deriving from a plan that has since moved. A closed
+    /// release whose answer changes when somebody edits a task it closed is not
+    /// a record.
+    ///
+    /// **Only a release carries it**, and `APLAN050` refuses it anywhere else: a
+    /// cut is a planning bucket rather than a delivery (ADR-0038), and a
+    /// `version` on one would read as a claim that it shipped.
+    ///
+    /// **A field, which ADR-0008 resists, and the argument is measured.** The
+    /// existing tag vocabulary cannot carry it: `parse_cut_version` reads `vN.N`
+    /// and a release needs `vN.N.P`, so a node tagged `v1.0.0` falls through to
+    /// the first tag that is not `milestone` and renders as the word `release`.
+    /// A tag that does not survive being read back is not a record either.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub version: Option<String>,
 }
 
 /// What a change did to the thing that ships (`A1-312`, ADR-0034).
@@ -430,6 +493,8 @@ mod tests {
             effort_days: None,
             blocked_by: Vec::new(),
             prefer_after: Vec::new(),
+            ratified_by: Vec::new(),
+            contains: Vec::new(),
             evidence: Vec::new(),
             paths: Vec::new(),
             traces: Vec::new(),
@@ -438,6 +503,7 @@ mod tests {
             revisit_at: None,
             version_impact: None,
             version_impact_reason: None,
+            version: None,
         }
     }
 
@@ -506,6 +572,8 @@ mod tests {
             effort_days: Some(1.0),
             blocked_by: Vec::new(),
             prefer_after: Vec::new(),
+            ratified_by: Vec::new(),
+            contains: Vec::new(),
             evidence: Vec::new(),
             paths: Vec::new(),
             traces: Vec::new(),
@@ -514,6 +582,7 @@ mod tests {
             revisit_at: None,
             version_impact: None,
             version_impact_reason: None,
+            version: None,
         };
         assert!(
             !t.is_release(),
@@ -540,6 +609,8 @@ mod tests {
             effort_days: None,
             blocked_by: Vec::new(),
             prefer_after: Vec::new(),
+            ratified_by: Vec::new(),
+            contains: Vec::new(),
             evidence: Vec::new(),
             paths: Vec::new(),
             traces: Vec::new(),
@@ -548,6 +619,7 @@ mod tests {
             revisit_at: None,
             version_impact: None,
             version_impact_reason: None,
+            version: None,
         };
         assert!(
             !parked.is_ready(|_| true),
@@ -584,6 +656,8 @@ mod tests {
                 effort_days: None,
                 blocked_by: Vec::new(),
                 prefer_after: Vec::new(),
+                ratified_by: Vec::new(),
+                contains: Vec::new(),
                 evidence: Vec::new(),
                 paths: vec!["src/**".into()],
                 traces: Vec::new(),
@@ -592,6 +666,7 @@ mod tests {
                 revisit_at: None,
                 version_impact: None,
                 version_impact_reason: None,
+                version: None,
             };
             t.evidence = evidence;
             t.binds_paths()
@@ -629,6 +704,8 @@ mod tests {
             effort_days: None,
             blocked_by: Vec::new(),
             prefer_after: Vec::new(),
+            ratified_by: Vec::new(),
+            contains: Vec::new(),
             evidence: Vec::new(),
             paths: Vec::new(),
             traces: Vec::new(),
@@ -637,6 +714,7 @@ mod tests {
             revisit_at: None,
             version_impact: None,
             version_impact_reason: None,
+            version: None,
         };
         assert!(!t.is_milestone(), "no tags: not a milestone");
         t.tags = vec!["cli".into(), "milestone".into()];

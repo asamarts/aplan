@@ -18,7 +18,7 @@ the fixture, and the corpus would then be testing whatever the last run left.)
 ```
 $ aplan export-agents-md --check AGENTS.md
 ? 1
-AGENTS.md disagrees with `aplan export-agents-md`. Regenerate it with `aplan export-agents-md --write AGENTS.md`.
+AGENTS.md disagrees with `aplan export-agents-md`, checked by aplan [..]. Regenerate it with `aplan export-agents-md --write AGENTS.md`.
 
 ```
 

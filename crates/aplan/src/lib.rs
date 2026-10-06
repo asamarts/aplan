@@ -132,11 +132,22 @@ struct Cli {
     #[arg(long, global = true, value_name = "FILE", conflicts_with = "no_config")]
     config: Option<PathBuf>,
 
-    /// Read no configuration at all: defaults only, and no configured programs.
+    /// Read no configuration from this repository: defaults only, and no
+    /// configured programs.
     ///
     /// Distinct from finding none. `verify` can then resolve `commit` and `file`
     /// evidence and nothing that would run a command, which is the fail-closed
     /// shape for reviewing an untrusted tree.
+    ///
+    /// **A per-user identity file is not repository configuration and is still
+    /// read.** This flag exists because a tree under review must not be trusted
+    /// to say what a run may do; `~/.config/aplan/config.yml` is yours rather
+    /// than the tree's, and it holds nothing a repository can require. So
+    /// `aplan claim` still knows who you are here.
+    // The clause above is what this flag's contract was missing: it said "no
+    // configuration at all", which stopped being true when a per-user file
+    // started being read, and a trust boundary described imprecisely is the one
+    // kind of documentation defect that matters (`A1-364`, audit).
     #[arg(long, global = true)]
     no_config: bool,
 
@@ -191,6 +202,16 @@ enum Command {
         #[arg(long, default_value = "human")]
         format: String,
     },
+    // ADR-0034 decided the ladder and the floors; the number stays here rather
+    // than in the help, where this project's records do not resolve (`A1-044`).
+    /// What the plan says the next version must be.
+    ///
+    /// The plan decides the number and the scheme spells it: a task declares
+    /// what it did to the released artifact, a level supplies a floor for the
+    /// tasks that declare nothing, and the answer is the strongest of those. A
+    /// `breaking` claim on one task therefore raises the cut that holds it and
+    /// the release that closes the cut.
+    Version(VersionArgs),
     /// Print the dependency graph as Mermaid, whole or scoped.
     Graph(GraphArgs),
     /// Show one task whole: its fields, what it waits on and releases, and the
@@ -501,6 +522,54 @@ enum Command {
         #[command(flatten)]
         verdict: VerdictFlags,
     },
+    /// Record who is working on a task, so two actors sharing a repository can
+    /// see it. Refuses to take a task somebody else holds unless `--from` names
+    /// them, and refuses to overwrite a claim made between reading and writing.
+    Claim {
+        /// The task to claim.
+        id: String,
+        /// The name to record. Otherwise `APLAN_OWNER`, then
+        /// `git config user.name`, then the operating system's user. Never read
+        /// from `.aplan.yml`: several actors share one repository, so a name
+        /// recorded there would be the wrong one.
+        #[arg(long = "as", value_name = "NAME")]
+        as_name: Option<String>,
+        /// Who the task is being taken from. Required when somebody holds it,
+        /// so a takeover names both sides and the diff shows what it displaced.
+        #[arg(long, value_name = "HOLDER")]
+        from: Option<String>,
+        /// Whether a warning blocks this write, as `check` and `verify` take it.
+        #[command(flatten)]
+        verdict: VerdictFlags,
+    },
+    /// Drop a claim, naming whose it was. Anybody may run it, so a claim nobody
+    /// released can always be cleared; the record of who held it is in the diff.
+    Release {
+        /// The task to release.
+        id: String,
+        /// Whether a warning blocks this write, as `check` and `verify` take it.
+        #[command(flatten)]
+        verdict: VerdictFlags,
+    },
+    /// Record that work on a task has started. The claim is checked against the
+    /// repository afterwards, so this is a statement `verify` can contradict
+    /// rather than one it takes on trust.
+    Start {
+        /// The task to start.
+        id: String,
+        /// Whether a warning blocks this write, as `check` and `verify` take it.
+        #[command(flatten)]
+        verdict: VerdictFlags,
+    },
+    /// Record that work on a task has stopped, returning it to `todo`. Not a
+    /// closure: nothing is claimed about the work, which is what `close` is for.
+    Stop {
+        /// The task to stop.
+        id: String,
+        /// Whether a warning blocks this write, as `check` and `verify` take it.
+        #[command(flatten)]
+        verdict: VerdictFlags,
+    },
     /// Move tasks between cuts, editing both milestones or neither.
     Mv {
         /// The tasks to move. Several are one move: every refusal runs before
@@ -547,11 +616,26 @@ enum Command {
     },
     /// Show the critical path: the longest `effort_days`-weighted chain of
     /// dependent tasks. Advisory, never a gate.
-    CriticalPath {
-        /// Output format: human (a table) or json.
-        #[arg(long, default_value = "human")]
-        format: String,
-    },
+    ///
+    /// Name a task, a cut, a container or a release to get the longest chain
+    /// that ends *there* instead: what must finish before that checkpoint can.
+    /// That is a different question from what the whole plan's longest chain
+    /// is, and a row in `roadmap` that borrows its work answers it rather than
+    /// reporting the longest chain among the work it borrows.
+    ///
+    /// **A cut's `crit` in `roadmap` is a third number, and deliberately.** It
+    /// is the longest chain *among that cut's own members*, which answers how
+    /// much of the bucket's effort is sequential rather than what it takes to
+    /// reach it, so it is smaller than the answer here and does not include the
+    /// cuts before it. A row whose chain is bounded the way this command bounds
+    /// it says `to here`.
+    ///
+    /// **Why this is not a filter.** Selecting a subset first turns a fragment
+    /// into a false path: a chain whose blockers were removed reads as shorter
+    /// than it is, so `--cut` and friends are refused here. Naming an endpoint
+    /// removes nothing -- every edge is kept, including prerequisites that cross
+    /// a cut -- and only the chain's end is chosen.
+    CriticalPath(CriticalPathArgs),
     // The doc comment below is `--help` text, so it carries no ADR number
     // (`A1-044`): a consumer reads it beside their own `docs/adr/`. The decision
     // it implements is this project's ADR-0009, recorded here where only a
@@ -630,6 +714,21 @@ enum Command {
     /// post-state check every other mutation runs.
     #[command(subcommand)]
     Dep(DepCommand),
+    /// Add, remove or rename a tag: `tag add A cli`, `tag rm A cli`, and `tag
+    /// rename epic-a epic-b` across every task that carries it.
+    ///
+    /// Tags were written at creation and never again, so maintaining a declared
+    /// vocabulary meant editing frontmatter by hand and running `check`
+    /// afterwards to find out what it broke. A family with a required
+    /// cardinality makes that an error rather than a warning, which is what puts
+    /// a tag among the mutations this tool owns. Whether the result is legal is
+    /// decided by the same post-state check every other mutation runs, so an
+    /// edit that would break a cardinality refuses instead of writing.
+    ///
+    /// `rename` is one change over many files or none of them, because a
+    /// vocabulary migration is the case hand-editing is worst at.
+    #[command(subcommand)]
+    Tag(TagCommand),
     /// Import proposals from another tool's format into `aplan` tasks. Lossy by
     /// design, and says so: every field the task model cannot hold is reported.
     Import(ImportArgs),
@@ -639,7 +738,8 @@ enum Command {
     /// them. `--from <file>` adds every task a file names instead, as one change.
     Add(AddArgs),
     /// Run an MCP server over stdio, exposing a deliberately small tool set
-    /// (`identity`, `ready`, `why`, `check`, `verify`, `add`, `show`, `dep`, `close`) to an agent. `close` goes through the
+    /// (`identity`, `ready`, `why`, `check`, `verify`, `add`, `show`, `dep`,
+    /// `close`, `claim`, `release`, `start`, `stop`) to an agent. `close` goes through the
     /// same evidence gate as the CLI, in both directions: an agent cannot close
     /// through MCP what it could not close here, and is not refused what this
     /// command records.
@@ -1510,6 +1610,41 @@ fn post_state_for_add(
     after
 }
 
+/// The tags a successor inherits: the predecessor's, minus the five words that
+/// decide what a plan *is* (`A1-251`).
+///
+/// A tag like `kind-fix` or `docs` says what the work is *about*, and the
+/// successor is about the same thing. `RESERVED_TAGS` say what a task *is* to
+/// the plan's structure (`A1-212`), which a successor does not take on by being
+/// filed. `release`, `deprecation` and `removal` place a task in a runway, and a
+/// successor claiming to be a second announcement nothing schedules a removal
+/// for is a finding the write would then be refused for -- inheritance turning
+/// back into the unusable command this task exists to fix. `milestone` cannot
+/// reach here at all, a cut being refused a successor.
+///
+/// **`cross-cutting` is not inherited either, and that one is worth the
+/// sentence.** It reads like a membership answer the successor should keep, and
+/// it is really a deliberate waiver of `APLAN022`. Inheriting a waiver means the
+/// successor escapes a check nobody waived for it, and on a plan with no cuts at
+/// all it quietly files a second uncut task where `A1-252` exists to say there
+/// is no cut yet. Saying it again is `--tag cross-cutting`, which is one flag
+/// and leaves a record of the decision.
+fn successor_tags(inherited: &[String]) -> Vec<String> {
+    // Deduplicated, because this tool does not write a tag twice: `add` dedupes
+    // what it is given (`A1-116`) and `tag rename` says why, that `[cli, cli]`
+    // is "this tool writing a document its own loader reads as one tag and a
+    // reviewer reads as a mistake". A predecessor carrying one twice is a file
+    // `check` accepts, so inheriting it faithfully would have propagated the
+    // mistake into a file this command wrote itself (`A1-251`, audit).
+    aplan_interop::emit::deduped(
+        &inherited
+            .iter()
+            .filter(|t| !aplan_core::validate::RESERVED_TAGS.contains(&t.as_str()))
+            .cloned()
+            .collect::<Vec<_>>(),
+    )
+}
+
 /// The task a produced file would load as, named for the message on failure.
 fn task_of(content: &str, id: &str) -> Result<aplan_core::Task> {
     aplan_core::mutation::task_of(content).map_err(|e| anyhow::anyhow!("`{id}`: {e}"))
@@ -1737,11 +1872,15 @@ fn cmd_verify(root: &std::path::Path, args: &VerifyArgs) -> Result<u8> {
     // The stance was already half-taken two lines above: `verify` refuses a plan
     // that did not *load*, because it "cannot speak honestly about" one. A plan
     // that loads but does not validate is the same sentence.
-    let opts = aplan_evidence::VerifyOptions {
+    let mut opts = aplan_evidence::VerifyOptions {
+        traces_root: None,
         execute,
         test_runner: config.test.clone(),
         max_unrelated_files: config.evidence.as_ref().and_then(|e| e.max_unrelated_files),
         url_check: config.url.clone(),
+        // `APLAN048`'s half of the ladder: what the plan requires of the
+        // version, against what the repository says it ships (`A1-313`).
+        version: config.version.clone(),
         // So a finding about a runner or the url checker lands on the file that
         // configured it (`A1-066`).
         config_file: config_dir
@@ -1758,6 +1897,10 @@ fn cmd_verify(root: &std::path::Path, args: &VerifyArgs) -> Result<u8> {
     // The same refusal `check` makes: `verify` is a superset of it, so a
     // configuration it cannot honour must stop both commands the same way
     // (`A1-058`, `A1-143`).
+    // The same root `check` resolves traces from, so `APLAN045` reads the
+    // document git actually has rather than looking for it at the repository
+    // root and quietly finding nothing (`A1-301`, audit).
+    opts.traces_root.clone_from(&check_opts.traces_root);
     refuse_absent_external_roots(&check_opts)?;
     // `verify` is a superset of `check` (`A1-058`), so it reports `APLAN041` too:
     // an adopter who wires one command into CI reaches for this one.
@@ -1866,11 +2009,13 @@ fn config_at(dir: &std::path::Path) -> Result<(aplan_config::Config, Option<Path
 fn note_config_refused() {
     static NOTED: std::sync::Once = std::sync::Once::new();
     if config_refused() {
-        NOTED.call_once(|| errln!(
-            "aplan: --no-config: no configuration was read, so this repository's own policy was \
-             not applied and no `test` or `url` citation could be resolved -- those stay \
-             unchecked rather than passing."
-        ));
+        NOTED.call_once(|| {
+            errln!(
+                "aplan: --no-config: no configuration was read from this repository, so its \
+                 own policy was not applied and no `test` or `url` citation could be \
+                 resolved -- those stay unchecked rather than passing."
+            );
+        });
     }
 }
 
@@ -1922,15 +2067,12 @@ fn dispatch(command: Command, cli_root: Option<PathBuf>) -> Result<u8> {
         Command::Schema => cmd_schema(),
         Command::Check(args) => cmd_check(&resolve_root(cli_root)?, &args),
         Command::Verify(args) => cmd_verify(&resolve_root(cli_root)?, &args),
-
         Command::Ready(args) => cmd_ready(&resolve_root(cli_root)?, &args),
-
         Command::Why { id, all, format } => cmd_why(&resolve_root(cli_root)?, &id, all, &format),
+        Command::Version(args) => cmd_version(&resolve_root(cli_root)?, &args),
         Command::Due(args) => cmd_due(&resolve_root(cli_root)?, &args),
         Command::Graph(args) => cmd_graph(&resolve_root(cli_root)?, &args),
-
         Command::Show(args) => cmd_show(&resolve_root(cli_root)?, &args),
-
         Command::Tree { id, depth, live } => cmd_tree(&resolve_root(cli_root)?, &id, depth, live),
 
         Command::Summary { format, select } => {
@@ -1988,22 +2130,19 @@ fn dispatch(command: Command, cli_root: Option<PathBuf>) -> Result<u8> {
             cmd_check_docs(&resolve_root(cli_root)?, &paths, &format)
         }
 
-        Command::CriticalPath { format } => cmd_critical_path(&resolve_root(cli_root)?, &format),
-        Command::Drop { ids, cut, verdict } => {
-            cmd_drop(&resolve_root(cli_root)?, &ids, cut, verdict)
-        }
-        Command::Mv {
-            ids,
-            cut,
-            phase,
-            verdict,
-        } => cmd_mv(
-            &resolve_root(cli_root)?,
-            &ids,
-            cut.as_deref(),
-            phase,
-            verdict,
-        ),
+        Command::CriticalPath(args) => cmd_critical_path(&resolve_root(cli_root)?, &args),
+        // Routed together, and the group is a real one: none of these changes
+        // what a task *says*. They change where it sits, who holds it, and what
+        // state it is in, where `add`, `close`, `amend`, `tag` and `supersede`
+        // all edit a task's own content. Split out when `A1-359`'s four took
+        // `dispatch` past its line limit, on that boundary rather than an
+        // arbitrary one.
+        Command::Drop { .. }
+        | Command::Mv { .. }
+        | Command::Claim { .. }
+        | Command::Release { .. }
+        | Command::Start { .. }
+        | Command::Stop { .. } => dispatch_placement(command, cli_root),
         Command::Tasks { format, select } => cmd_tasks(&resolve_root(cli_root)?, &format, &select),
         Command::Roadmap(args) => cmd_roadmap(&resolve_root(cli_root)?, &args),
 
@@ -2030,6 +2169,7 @@ fn dispatch(command: Command, cli_root: Option<PathBuf>) -> Result<u8> {
         Command::Supersede(args) => cmd_supersede(&resolve_root(cli_root)?, &args),
 
         Command::Dep(args) => cmd_dep(&resolve_root(cli_root)?, &args),
+        Command::Tag(args) => cmd_tag(&resolve_root(cli_root)?, &args),
         Command::Import(args) => cmd_import(&resolve_root(cli_root)?, &args),
         Command::Mcp => cmd_mcp(cli_root),
         Command::Init { dir } => cmd_init(&dir),
@@ -2038,9 +2178,14 @@ fn dispatch(command: Command, cli_root: Option<PathBuf>) -> Result<u8> {
     }
 }
 
-/// Parse one `kind:ref` evidence argument. `note` is refused: it needs a dated
-/// `captured`, and the point of `close` is to record *strong*, derivable proof.
-fn parse_evidence(arg: &str) -> Result<aplan_core::Evidence> {
+/// Parse one `kind:ref` argument.
+///
+/// `note_ok` is whether the caller is *naming* a citation the task already
+/// carries or *recording* a new one, and it changes two things: whether `note`
+/// is accepted, and which kinds the unknown-kind message lists. Those have to
+/// move together -- listing a kind the caller cannot use would be this tool
+/// advertising a refusal, which the corpus caught when they did not (`A1-361`).
+fn citation(arg: &str, note_ok: bool) -> Result<aplan_core::Evidence> {
     let (kind, reference) = arg
         .split_once(':')
         .filter(|(k, r)| !k.is_empty() && !r.is_empty())
@@ -2050,16 +2195,51 @@ fn parse_evidence(arg: &str) -> Result<aplan_core::Evidence> {
         "test" => aplan_core::EvidenceKind::Test,
         "file" => aplan_core::EvidenceKind::File,
         "url" => aplan_core::EvidenceKind::Url,
+        "note" if note_ok => aplan_core::EvidenceKind::Note,
         "note" => anyhow::bail!(
-            "`note` evidence needs a `captured` date; add it by hand rather than via `close`"
+            "`note` evidence needs a `captured` date, which this tool will not invent; write it into the task by hand"
         ),
-        other => anyhow::bail!("unknown evidence kind `{other}` (commit, test, file, url)"),
+        other => {
+            let accepted = if note_ok {
+                "commit, test, file, url, note"
+            } else {
+                "commit, test, file, url"
+            };
+            anyhow::bail!("unknown evidence kind `{other}` ({accepted})")
+        }
     };
     Ok(aplan_core::Evidence {
         kind,
         reference: reference.to_string(),
         captured: None,
     })
+}
+
+/// Parse one `kind:ref` argument that *names* a citation a task already carries.
+///
+/// **Every kind the file can hold, including `note`** (`A1-361`). Naming a
+/// citation to remove it, or as the `from` of a replacement, records nothing:
+/// the thing being named is already in the task. One parser served all four
+/// modes, so `close`'s refusal to *write* a `note` refused `amend
+/// --remove-evidence note:...` as well -- and `close` says to add a note by
+/// hand, so a note citation could be neither written nor taken away by the
+/// tool. `amend` exists because "the answer used to be to edit the file by
+/// hand"; for one kind out of five, it still was.
+fn parse_citation(arg: &str) -> Result<aplan_core::Evidence> {
+    citation(arg, true)
+}
+
+/// Parse one `kind:ref` argument for a citation about to be *written*.
+///
+/// `note` is refused here and only here, and the refusal is a decision rather
+/// than a limit of the flag (`A1-361`). A note is the weakest rung: `verify`
+/// cannot resolve it, and `require_min_strength` exists so a repository can keep
+/// its plan off it. Recording one needs a `captured` date, and the only date
+/// this command could supply is the moment it ran, which is not when the thing
+/// happened. Inventing it would be the tool authoring the weakest record it
+/// holds, so it declines and says whose date it is.
+fn parse_evidence(arg: &str) -> Result<aplan_core::Evidence> {
+    citation(arg, false)
 }
 
 /// `aplan close`, set a task `done` and attach evidence, in place.
@@ -2186,6 +2366,7 @@ fn cmd_mcp(cli_root: Option<PathBuf>) -> Result<u8> {
             advisory: config.advisory.clone().unwrap_or_default(),
         },
         verify: aplan_evidence::VerifyOptions {
+            traces_root: None,
             // Never from this surface, whatever the config says (`A1-102`).
             execute: false,
             test_runner: config.test.clone(),
@@ -2193,6 +2374,10 @@ fn cmd_mcp(cli_root: Option<PathBuf>) -> Result<u8> {
             // The agent surface reaches the network only where the CLI does, and
             // `aplan_verify` is the CLI's `verify` (`A1-104`).
             url_check: config.url.clone(),
+            // For the same reason: this surface answers the question the CLI
+            // answers, and a rule that ran for one caller and not the other
+            // would be two tools wearing one name (`A1-313`).
+            version: config.version.clone(),
             config_file: config_dir
                 .as_deref()
                 .map(|d| d.join(aplan_config::CONFIG_FILE)),
@@ -2216,6 +2401,38 @@ fn cmd_mcp(cli_root: Option<PathBuf>) -> Result<u8> {
         ))
         .context("serving MCP over stdio")?;
     Ok(EXIT_OK)
+}
+
+#[derive(Subcommand, Debug)]
+pub enum TagCommand {
+    /// Put a tag on a task.
+    Add(TagArgs),
+    /// Take it off again.
+    Rm(TagArgs),
+    /// Rename a tag on every task that carries it, as one change.
+    Rename(TagRenameArgs),
+}
+
+#[derive(clap::Args, Debug)]
+pub struct TagArgs {
+    /// The task to edit.
+    id: String,
+    /// The tag.
+    tag: String,
+    /// Whether a warning blocks this write, as `check` and `verify` take it.
+    #[command(flatten)]
+    verdict: VerdictFlags,
+}
+
+#[derive(clap::Args, Debug)]
+pub struct TagRenameArgs {
+    /// The tag as it is written today.
+    from: String,
+    /// What it becomes.
+    to: String,
+    /// Whether a warning blocks this write, as `check` and `verify` take it.
+    #[command(flatten)]
+    verdict: VerdictFlags,
 }
 
 #[derive(Subcommand, Debug)]
@@ -2259,6 +2476,10 @@ pub struct SupersedeArgs {
     /// Owner of the successor. Defaults to the predecessor's.
     #[arg(long)]
     owner: Option<String>,
+    /// A tag for the successor. Repeatable. Given, these are its tags; omitted,
+    /// it inherits the predecessor's.
+    #[arg(long = "tag")]
+    tags: Vec<String>,
     /// Whether a warning blocks this write, as `check` and `verify` take it.
     #[command(flatten)]
     verdict: VerdictFlags,
@@ -2534,6 +2755,15 @@ pub struct ImportArgs {
     /// `AL1-001`. Default `T`. Only meaningful with `--format checklist`.
     #[arg(long)]
     id_prefix: Option<String>,
+    // The number stays here: help is read beside the consumer's own `docs/adr/`,
+    // where this project's ids do not resolve (`A1-044`, `A1-357`).
+    /// A tag for every imported task. Repeatable.
+    ///
+    /// A source document carries no vocabulary of its own, so a plan whose
+    /// `tag_families` declares one needs this to import into itself; without it
+    /// every imported task fails the family and has to be edited afterwards.
+    #[arg(long = "tag")]
+    tags: Vec<String>,
 }
 
 /// Turn the validated flags into the importer's options.
@@ -2661,6 +2891,7 @@ fn push_run_notices(
     placed_in_cut: bool,
     plan_has_a_cut: bool,
     steering: usize,
+    unmet_families: &[String],
 ) {
     use aplan_interop::report::{Notice, NoticeKind};
 
@@ -2709,6 +2940,23 @@ fn push_run_notices(
         "imported tasks carry no `effort_days`, because there is nothing to derive one from; \
          `check` warns (APLAN009) until you estimate them",
     ));
+    // **The third dial, which this said nothing about** (`A1-357`). Cut
+    // membership and effort were named and `tag_families` was not, though it is
+    // the one that makes `check` *fail* rather than warn -- and it is the newest
+    // of the three, which is how it came to be the one nobody carried the notice
+    // to. A source document has no vocabulary of its own, so there is nothing to
+    // derive a family member from and the author has to say it.
+    if !unmet_families.is_empty() {
+        report.push(Notice::new(
+            source_name,
+            NoticeKind::Placement,
+            format!(
+                "imported tasks carry no member of {}, which this plan declares; `check` \
+                 reports APLAN030 until `--tag <member>` gives them one",
+                unmet_families.join(", ")
+            ),
+        ));
+    }
 }
 
 /// How this repository mints ids, from its config (`A1-047`).
@@ -2746,38 +2994,22 @@ fn wrote_row(dry_run: bool, id: &str, title: &str, path: &std::path::Path) -> St
     )
 }
 
-fn cmd_add(root: &std::path::Path, args: &AddArgs) -> Result<u8> {
-    use aplan_interop::{cut, emit, ids};
-
-    if let Some(from) = &args.from {
-        return cmd_add_from(root, args, from);
-    }
-    // clap requires one of the two, so this is the shape of the invocation
-    // rather than a value to defend against.
-    let title = args
-        .title
-        .as_deref()
-        .expect("clap requires a title when `--from` is absent");
-    let plan = aplan_core::load_plan(root);
-    // A `--cut` may be the milestone id or the label the cut reports itself
-    // under, resolved once here so everything downstream works in ids
-    // (`A1-139`). `roadmap` prints the label, so refusing it was the tool asking
-    // a reader to translate between two names for one thing.
-    let cut = match &args.cut {
-        Some(name) => Some(cut::resolve_id(&plan, name)?),
-        None => None,
-    };
-    let cut = cut.as_deref();
-    // The cut is the better answer than the highest phase in use, and `add` has
-    // it here (`A1-108`).
-    let phase = match args.phase {
-        Some(p) => p,
-        None => ids::phase_for(&plan, cut),
-    };
-    let id = match &args.id {
-        Some(id) => id.clone(),
-        None => ids::mint(&plan, phase, id_strategy(root)?)?,
-    };
+/// Refuse an `add` the loader, the schema or the plan would reject, before any
+/// of it is written.
+///
+/// Extracted from [`cmd_add`] when the id-race retry (`A1-230`) put its body in
+/// a closure and pushed the function past the line limit. It is the natural
+/// seam: everything here reads the plan and writes nothing, so it re-runs on
+/// each attempt against the plan as it then is -- which is what makes a retry
+/// correct rather than merely a second write.
+fn refuse_bad_add_args(
+    plan: &aplan_core::Plan,
+    args: &AddArgs,
+    title: &str,
+    id: &str,
+    cut: Option<&str>,
+) -> Result<()> {
+    use aplan_interop::cut;
 
     // --- refuse before writing, not after -----------------------------------
     // Identity is the `id` field rather than the path (ADR-0010), so a collision
@@ -2797,13 +3029,15 @@ fn cmd_add(root: &std::path::Path, args: &AddArgs) -> Result<u8> {
     if title.trim().is_empty() {
         anyhow::bail!("a task needs a title: it is how anyone finds this task again");
     }
-    if let Some(days) = args.effort {
-        if !days.is_finite() || days < 0.0 {
-            anyhow::bail!(
-                "`--effort {days}` is not a number of days; give a finite, non-negative estimate \
+    refuse_blank_tags(&args.tags)?;
+    refuse_blank_owner(args.owner.as_ref())?;
+    if let Some(days) = args.effort
+        && (!days.is_finite() || days < 0.0)
+    {
+        anyhow::bail!(
+            "`--effort {days}` is not a number of days; give a finite, non-negative estimate \
                  or omit it"
-            );
-        }
+        );
     }
     let unknown: Vec<&String> = args
         .blocked_by
@@ -2822,125 +3056,127 @@ fn cmd_add(root: &std::path::Path, args: &AddArgs) -> Result<u8> {
         );
     }
     if let Some(cut_id) = cut {
-        cut::check_target(&plan, cut_id)?;
+        cut::check_target(plan, cut_id)?;
     }
+    Ok(())
+}
 
-    let task = aplan_core::Task {
-        id: id.clone(),
-        title: title.to_string(),
-        phase,
-        status: aplan_core::Status::Todo,
-        owner: args.owner.clone(),
-        effort_days: args.effort,
-        blocked_by: args.blocked_by.clone(),
-        prefer_after: Vec::new(),
-        evidence: Vec::new(),
-        // Repeats removed on both surfaces, in one place (`A1-116`).
-        paths: emit::deduped(&args.paths),
-        traces: emit::deduped(&args.traces),
-        trace_fingerprints: std::collections::BTreeMap::new(),
-        tags: emit::deduped(&args.tags),
-        revisit_at: None,
-        version_impact: None,
-        version_impact_reason: None,
+fn cmd_add(root: &std::path::Path, args: &AddArgs) -> Result<u8> {
+    use aplan_interop::{cut, emit, ids};
+
+    if let Some(from) = &args.from {
+        return cmd_add_from(root, args, from);
+    }
+    // clap requires one of the two, so this is the shape of the invocation
+    // rather than a value to defend against.
+    let title = args
+        .title
+        .as_deref()
+        .expect("clap requires a title when `--from` is absent");
+    // **One attempt at minting and writing** (`A1-230`). Everything here reads
+    // the plan, so a retry re-reads it: the id that collided is taken now, and
+    // minting again finds the next free one. The post-state gate is re-run for
+    // the same reason -- judging this mutation against a plan another writer has
+    // since changed would attribute their findings to it.
+    let attempt = || -> Result<String> {
+        let plan = aplan_core::load_plan(root);
+        // A `--cut` may be the milestone id or the label the cut reports itself
+        // under, resolved once here so everything downstream works in ids
+        // (`A1-139`). `roadmap` prints the label, so refusing it was the tool asking
+        // a reader to translate between two names for one thing.
+        let cut = match &args.cut {
+            Some(name) => Some(cut::resolve_id(&plan, name)?),
+            None => None,
+        };
+        let cut = cut.as_deref();
+        // The cut is the better answer than the highest phase in use, and `add` has
+        // it here (`A1-108`).
+        let phase = match args.phase {
+            Some(p) => p,
+            None => ids::phase_for(&plan, cut),
+        };
+        let id = match &args.id {
+            Some(id) => id.clone(),
+            None => ids::mint(&plan, phase, id_strategy(root)?)?,
+        };
+
+        refuse_bad_add_args(&plan, args, title, &id, cut)?;
+
+        let task = aplan_core::Task {
+            id: id.clone(),
+            title: title.to_string(),
+            phase,
+            status: aplan_core::Status::Todo,
+            owner: args.owner.clone(),
+            effort_days: args.effort,
+            blocked_by: args.blocked_by.clone(),
+            prefer_after: Vec::new(),
+            ratified_by: Vec::new(),
+            contains: Vec::new(),
+            evidence: Vec::new(),
+            // Repeats removed on both surfaces, in one place (`A1-116`).
+            paths: emit::deduped(&args.paths),
+            traces: emit::deduped(&args.traces),
+            trace_fingerprints: std::collections::BTreeMap::new(),
+            tags: emit::deduped(&args.tags),
+            revisit_at: None,
+            version_impact: None,
+            version_impact_reason: None,
+            version: None,
+        };
+
+        // The whole post-state, through the one shared path (`A1-113`). The
+        // milestone edit `--cut` performs is part of it, so a placement that would
+        // break the plan is refused here rather than reported on the next `check`.
+        let after = post_state_for_add(&plan, &task, cut);
+        refuse_bad_mutation(root, &format!("add `{id}`"), &plan, &after, args.verdict)?;
+
+        let out_dir = args.out.clone().unwrap_or_else(|| successor_dir(root));
+        let path = emit::task_path(&out_dir, &id);
+
+        let mut out = String::new();
+        let _ = writeln!(out, "{}", wrote_row(args.dry_run, &id, &task.title, &path));
+
+        if args.dry_run {
+            if let Some(cut_id) = cut {
+                let _ = writeln!(out, "  would add {id} to `{cut_id}`");
+            }
+        } else {
+            // Created *and* placed, or nothing (`A1-103`).
+            let placed = emit::write_task_placed(&out_dir, root, &task, emit::ADD_BODY, cut)?;
+            if let (Some(cut_id), Some(path)) = (cut, placed) {
+                let _ = writeln!(out, "  added {id} to `{cut_id}` in {}", path.display());
+            }
+        }
+
+        Ok(out)
     };
-
-    // The whole post-state, through the one shared path (`A1-113`). The
-    // milestone edit `--cut` performs is part of it, so a placement that would
-    // break the plan is refused here rather than reported on the next `check`.
-    let after = post_state_for_add(&plan, &task, cut);
-    refuse_bad_mutation(root, &format!("add `{id}`"), &plan, &after, args.verdict)?;
-
-    let out_dir = args.out.clone().unwrap_or_else(|| successor_dir(root));
-    let path = emit::task_path(&out_dir, &id);
-
-    let mut out = String::new();
-    let _ = writeln!(out, "{}", wrote_row(args.dry_run, &id, &task.title, &path));
-
-    if args.dry_run {
-        if let Some(cut_id) = cut {
-            let _ = writeln!(out, "  would add {id} to `{cut_id}`");
-        }
-    } else {
-        // Created *and* placed, or nothing (`A1-103`).
-        let placed = emit::write_task_placed(&out_dir, root, &task, emit::ADD_BODY, cut)?;
-        if let (Some(cut_id), Some(path)) = (cut, placed) {
-            let _ = writeln!(out, "  added {id} to `{cut_id}` in {}", path.display());
-        }
+    // An `--id` the caller supplied is used verbatim, so a collision is their
+    // mistake and retrying would loop to the deadline restating it. Only a
+    // minted id is worth trying again.
+    let started = std::time::Instant::now();
+    let (mut out, tries) = with_id_retry(args.id.is_none(), ID_RACE_DEADLINE, attempt)?;
+    if let Some(note) = raced_for_the_id(tries, started.elapsed()) {
+        let _ = writeln!(out, "{note}");
     }
-
     out.push_str(&add_notes(args));
     write_stdout(&out)?;
     Ok(EXIT_OK)
 }
 
-/// `aplan add --from`, a written plan turned into tasks as one change
-/// (`A1-241`).
+/// The two things a manifest run reports that nothing else would show.
 ///
-/// **Why this is `add` and not an importer.** ADR-0012's honesty rules exist for
-/// a format the task model cannot hold, and an entry here is the set of
-/// arguments this command already takes, so there is nothing to lose in
-/// translation. What it removes is the invocation count, and the thing the
-/// invocation count drove an adopter to: `p00016` turned a 1,400-line document
-/// into 153 tasks, 11 cuts and 3 releases with a generator that emitted
-/// frontmatter directly, which makes the plan's own file format a second
-/// implementation nothing gates (pre-public adoption evidence item 3). `p00002` shelled
-/// out 64 times instead and every task landed, which is the same finding without
-/// the damage (pre-public adoption evidence item 2).
-///
-/// **The whole batch, or none of it.** Every entry is resolved against the state
-/// the entries before it produce, so an entry may join a cut an earlier one
-/// creates and wait on a task an earlier one adds. The rules run once, on the
-/// plan the whole file would produce, rather than once per entry against a plan
-/// that is half written -- a hundred and fifty three separate gates would each
-/// judge a plan no author ever intends to have. The write is one batch through
-/// `save::replace_all`, so a failure anywhere writes nothing at all.
-fn cmd_add_from(root: &std::path::Path, args: &AddArgs, from: &std::path::Path) -> Result<u8> {
-    use aplan_interop::{cut, emit, manifest};
-
-    let entries = manifest::read(from)?;
-    let plan = aplan_core::load_plan(root);
-    let out_dir = args.out.clone().unwrap_or_else(|| successor_dir(root));
-    let Planned {
-        after,
-        created,
-        joined,
-        bodies,
-    } = plan_the_batch(root, &plan, &entries, &out_dir)?;
-
-    // One gate, on the plan the whole file produces (`A1-113`).
-    refuse_bad_mutation(
-        root,
-        &format!("add {} task(s) from {}", created.len(), from.display()),
-        &plan,
-        &after,
-        args.verdict,
-    )?;
-
+/// Extracted from [`cmd_add_from`] when the id-race retry (`A1-230`) put its
+/// body in a closure and pushed the function past the line limit. Both lines
+/// are derived from the batch this attempt planned, so they belong to the
+/// attempt rather than to the command: a retry re-plans, and these must
+/// describe what was actually written.
+fn manifest_notes(
+    bodies: &std::collections::BTreeMap<String, String>,
+    created: &[String],
+    after: &aplan_core::Plan,
+) -> String {
     let mut out = String::new();
-    let mut batch: Vec<aplan_core::save::Replacement> = Vec::new();
-    for id in &created {
-        let lt = after
-            .tasks
-            .iter()
-            .find(|lt| lt.task.id == *id)
-            .expect("just added");
-        // From `after`, so a cut created here carries the members later entries
-        // gave it. Its own file is the only place those can be written.
-        batch.push(aplan_core::save::Replacement {
-            path: lt.path.clone(),
-            expected: String::new(),
-            updated: emit::task_file(
-                &lt.task,
-                bodies.get(id).map_or(emit::ADD_BODY, String::as_str),
-            )?,
-        });
-        let _ = writeln!(
-            out,
-            "{}",
-            wrote_row(args.dry_run, id, &lt.task.title, &lt.path)
-        );
-    }
     // What the reader cannot otherwise see. A manifest is generated, so a
     // template that emitted `body` for some entries and not others produces a
     // run that looks identical to one that worked -- and the difference only
@@ -2984,33 +3220,121 @@ fn cmd_add_from(root: &std::path::Path, args: &AddArgs, from: &std::path::Path) 
             aplan_output::sanitize::MARKER
         );
     }
-    // A cut the plan already had is edited in place; one this file creates was
-    // written with its members above.
-    for (cut_id, ids) in &joined {
-        if !plan.tasks.iter().any(|lt| lt.task.id == *cut_id) {
-            let _ = writeln!(
-                out,
-                "  `{cut_id}` {} {} of them, in its own file",
-                if args.dry_run { "would hold" } else { "holds" },
-                ids.len()
-            );
-            continue;
-        }
-        let pending = cut::plan_placement(&plan, cut_id, ids)?;
-        if let Some(replacement) = pending.replacement() {
-            let _ = writeln!(
-                out,
-                "  {} {} task(s) to `{cut_id}` in {}",
-                if args.dry_run { "would add" } else { "added" },
-                pending.added.len(),
-                replacement.path.display()
-            );
-            batch.push(replacement);
-        }
-    }
+    out
+}
 
-    if !args.dry_run {
-        save_batch(&batch, "add --from")?;
+/// `aplan add --from`, a written plan turned into tasks as one change
+/// (`A1-241`).
+///
+/// **Why this is `add` and not an importer.** ADR-0012's honesty rules exist for
+/// a format the task model cannot hold, and an entry here is the set of
+/// arguments this command already takes, so there is nothing to lose in
+/// translation. What it removes is the invocation count, and the thing the
+/// invocation count drove an adopter to: `p00016` turned a 1,400-line document
+/// into 153 tasks, 11 cuts and 3 releases with a generator that emitted
+/// frontmatter directly, which makes the plan's own file format a second
+/// implementation nothing gates (pre-public adoption evidence item 3). `p00002` shelled
+/// out 64 times instead and every task landed, which is the same finding without
+/// the damage (pre-public adoption evidence item 2).
+///
+/// **The whole batch, or none of it.** Every entry is resolved against the state
+/// the entries before it produce, so an entry may join a cut an earlier one
+/// creates and wait on a task an earlier one adds. The rules run once, on the
+/// plan the whole file would produce, rather than once per entry against a plan
+/// that is half written -- a hundred and fifty three separate gates would each
+/// judge a plan no author ever intends to have. The write is one batch through
+/// `save::replace_all`, so a failure anywhere writes nothing at all.
+fn cmd_add_from(root: &std::path::Path, args: &AddArgs, from: &std::path::Path) -> Result<u8> {
+    use aplan_interop::{cut, emit, manifest};
+
+    let entries = manifest::read(from)?;
+    // **One attempt at minting and writing** (`A1-230`). A manifest entry
+    // without an id is minted from the plan, so another writer taking one means
+    // re-reading and planning the batch again. The whole batch, because it is
+    // all-or-nothing already: an entry may join a cut an earlier one creates,
+    // so a partial re-plan would resolve against state that was never written.
+    let attempt = || -> Result<String> {
+        let plan = aplan_core::load_plan(root);
+        let out_dir = args.out.clone().unwrap_or_else(|| successor_dir(root));
+        let Planned {
+            after,
+            created,
+            joined,
+            bodies,
+        } = plan_the_batch(root, &plan, &entries, &out_dir)?;
+
+        // One gate, on the plan the whole file produces (`A1-113`).
+        refuse_bad_mutation(
+            root,
+            &format!("add {} task(s) from {}", created.len(), from.display()),
+            &plan,
+            &after,
+            args.verdict,
+        )?;
+
+        let mut out = String::new();
+        let mut batch: Vec<aplan_core::save::Replacement> = Vec::new();
+        for id in &created {
+            let lt = after
+                .tasks
+                .iter()
+                .find(|lt| lt.task.id == *id)
+                .expect("just added");
+            // From `after`, so a cut created here carries the members later entries
+            // gave it. Its own file is the only place those can be written.
+            batch.push(aplan_core::save::Replacement {
+                path: lt.path.clone(),
+                expected: String::new(),
+                updated: emit::task_file(
+                    &lt.task,
+                    bodies.get(id).map_or(emit::ADD_BODY, String::as_str),
+                )?,
+            });
+            let _ = writeln!(
+                out,
+                "{}",
+                wrote_row(args.dry_run, id, &lt.task.title, &lt.path)
+            );
+        }
+        out.push_str(&manifest_notes(&bodies, &created, &after));
+        // A cut the plan already had is edited in place; one this file creates was
+        // written with its members above.
+        for (cut_id, ids) in &joined {
+            if !plan.tasks.iter().any(|lt| lt.task.id == *cut_id) {
+                let _ = writeln!(
+                    out,
+                    "  `{cut_id}` {} {} of them, in its own file",
+                    if args.dry_run { "would hold" } else { "holds" },
+                    ids.len()
+                );
+                continue;
+            }
+            let pending = cut::plan_placement(&plan, cut_id, ids)?;
+            if let Some(replacement) = pending.replacement() {
+                let _ = writeln!(
+                    out,
+                    "  {} {} task(s) to `{cut_id}` in {}",
+                    if args.dry_run { "would add" } else { "added" },
+                    pending.added.len(),
+                    replacement.path.display()
+                );
+                batch.push(replacement);
+            }
+        }
+
+        if !args.dry_run {
+            save_batch(&batch, "add --from")?;
+        }
+        Ok(out)
+    };
+    // Only when the manifest left an id to be minted. A file that names every
+    // id is asserting them, so a collision is the manifest to fix and retrying
+    // would restate it until the deadline.
+    let minted = entries.iter().any(|e| e.id.is_none());
+    let started = std::time::Instant::now();
+    let (mut out, tries) = with_id_retry(minted, ID_RACE_DEADLINE, attempt)?;
+    if let Some(note) = raced_for_the_id(tries, started.elapsed()) {
+        let _ = writeln!(out, "{note}");
     }
     write_stdout(&out)?;
     Ok(EXIT_OK)
@@ -3040,6 +3364,41 @@ struct Planned {
 /// the earlier ones establish. Expressed as N invocations, an author has to work
 /// all three out in advance, which is what drove a pilot to write frontmatter
 /// directly (`A1-241`).
+/// One `add --from` entry as a `Task`, in the state `add` mints: `todo`, no
+/// evidence, nothing the manifest cannot say.
+///
+/// Extracted from `plan_the_batch` when a new field pushed it one line over the
+/// length limit. Its own function rather than a wider limit: this is the part
+/// that answers "what does a manifest entry become", and the rest of that
+/// function is about whether the entry may be used at all.
+fn task_from_entry(
+    id: &str,
+    phase: u32,
+    entry: &aplan_interop::manifest::Entry,
+) -> aplan_core::Task {
+    aplan_core::Task {
+        id: id.to_string(),
+        title: entry.title.clone(),
+        phase,
+        status: aplan_core::Status::Todo,
+        owner: entry.owner.clone(),
+        effort_days: entry.effort,
+        blocked_by: entry.blocked_by.clone(),
+        prefer_after: Vec::new(),
+        ratified_by: Vec::new(),
+        contains: Vec::new(),
+        evidence: Vec::new(),
+        paths: aplan_interop::emit::deduped(&entry.paths),
+        traces: aplan_interop::emit::deduped(&entry.traces),
+        trace_fingerprints: std::collections::BTreeMap::new(),
+        tags: aplan_interop::emit::deduped(&entry.tags),
+        revisit_at: None,
+        version_impact: None,
+        version_impact_reason: None,
+        version: None,
+    }
+}
+
 fn plan_the_batch(
     root: &std::path::Path,
     plan: &aplan_core::load::Plan,
@@ -3122,24 +3481,7 @@ fn plan_the_batch(
             )));
         }
 
-        let task = aplan_core::Task {
-            id: id.clone(),
-            title: entry.title.clone(),
-            phase,
-            status: aplan_core::Status::Todo,
-            owner: entry.owner.clone(),
-            effort_days: entry.effort,
-            blocked_by: entry.blocked_by.clone(),
-            prefer_after: Vec::new(),
-            evidence: Vec::new(),
-            paths: emit::deduped(&entry.paths),
-            traces: emit::deduped(&entry.traces),
-            trace_fingerprints: std::collections::BTreeMap::new(),
-            tags: emit::deduped(&entry.tags),
-            revisit_at: None,
-            version_impact: None,
-            version_impact_reason: None,
-        };
+        let task = task_from_entry(&id, phase, entry);
         if let Some(body) = &entry.body {
             // An empty body is refused rather than written. A manifest is
             // generated, so `body: ""` is a lookup that came back empty far more
@@ -3558,14 +3900,55 @@ fn imported_lines(tasks: &[aplan_core::task::Task], out_dir: &std::path::Path) -
     lines
 }
 
+/// Every imported task carries what the invocation named (`A1-357`).
+///
+/// A source document supplies no vocabulary of its own, and the plan it is being
+/// imported into may require one, so the tags have to come from the caller.
+/// Deduped and set rather than added, as `add --tag` and `supersede --tag` do:
+/// one argument reaching four commands should reach one answer. An empty list
+/// leaves the tasks as the importer built them.
+fn apply_import_tags(tasks: &mut [aplan_core::task::Task], tags: &[String]) {
+    if tags.is_empty() {
+        return;
+    }
+    let deduped = aplan_interop::emit::deduped(tags);
+    for task in tasks {
+        task.tags.clone_from(&deduped);
+    }
+}
+
+/// The declared families that would judge these tasks and find nothing.
+///
+/// The same question `APLAN030` asks, borrowed rather than restated, so a family
+/// whose scope these tasks fall outside produces no notice either. Asked of the
+/// tasks as they will be written, so a `--tag` that satisfies one is silence
+/// rather than a warning about a problem the invocation already solved.
+fn unmet_families(root: &std::path::Path, tasks: &[aplan_core::task::Task]) -> Result<Vec<String>> {
+    let (config, config_dir) = config_at(root)?;
+    let opts = resolve_check_options(&config, config_dir.as_deref(), false, None, false);
+    Ok(opts
+        .tag_families
+        .iter()
+        .filter(|(_, family)| {
+            tasks
+                .iter()
+                .any(|t| family.judges(t) && !family.satisfied_by(t))
+        })
+        .map(|(name, family)| format!("`{name}` (declared {})", family.require.as_str()))
+        .collect())
+}
+
 fn cmd_import(root: &std::path::Path, args: &ImportArgs) -> Result<u8> {
     use aplan_interop::{cut, emit, report};
 
     let options = import_options(args)?;
+    refuse_blank_tags(&args.tags)?;
     let source_name = args.source.display().to_string();
     let contents =
         std::fs::read_to_string(&args.source).with_context(|| format!("reading {source_name}"))?;
-    let imported = read_source(&args.format, &source_name, &contents, &options)?;
+    let mut imported = read_source(&args.format, &source_name, &contents, &options)?;
+
+    apply_import_tags(&mut imported.tasks, &args.tags);
 
     check_importable(&imported.tasks)?;
 
@@ -3644,12 +4027,15 @@ fn cmd_import(root: &std::path::Path, args: &ImportArgs) -> Result<u8> {
         }
     }
 
+    let unmet = unmet_families(root, &imported.tasks)?;
+
     push_run_notices(
         &mut report,
         &source_name,
         args.cut.is_some(),
         plan.tasks.iter().any(|lt| lt.task.is_milestone()),
         steering_fields(&imported.tasks),
+        &unmet,
     );
 
     let verb = if args.dry_run {
@@ -3804,10 +4190,17 @@ fn cmd_show(root: &std::path::Path, args: &ShowArgs) -> Result<u8> {
     let mut resolved = !args.no_resolve;
     if resolved {
         let opts = aplan_evidence::VerifyOptions {
+            traces_root: None,
             execute: false,
             test_runner: config.test.clone(),
             max_unrelated_files: config.evidence.as_ref().and_then(|e| e.max_unrelated_files),
             url_check: config.url.clone(),
+            // Deliberately not `config.version`: this resolves one task's
+            // citations, and `APLAN048` is a finding about the plan against the
+            // repository. Running the version command to show a task would be a
+            // subprocess nobody asked for, reported against a plan of one
+            // (`A1-313`).
+            version: None,
             config_file: config_dir
                 .as_deref()
                 .map(|d| d.join(aplan_config::CONFIG_FILE)),
@@ -4165,6 +4558,15 @@ fn cmd_ready(root: &std::path::Path, args: &ReadyArgs) -> Result<u8> {
         let effort = t
             .effort_days
             .map_or_else(String::new, |e| format!(" ({e}d)"));
+        // **The holder rides with the title, not in a column of its own**
+        // (`A1-359`). A fleet picking work has to see what somebody already
+        // holds, and the alternative -- hiding held tasks by default -- was
+        // rejected because the default set must not change: a caller that
+        // reads this list today would silently start seeing less.
+        // `--unclaimed` is how a reader asks for the narrower answer.
+        let held = t.held_by.as_deref().map_or_else(String::new, |who| {
+            format!(" [{}]", aplan_output::sanitize::visible(who))
+        });
         // The title is the trailing column and the effort rides with it, so a
         // long title folds under itself rather than under the id (`A1-206`).
         let _ = writeln!(
@@ -4173,9 +4575,10 @@ fn cmd_ready(root: &std::path::Path, args: &ReadyArgs) -> Result<u8> {
             aplan_output::fold::row(
                 &format!("{id}{}{id:#}  ", t.id, id = aplan_output::style::ID),
                 &format!(
-                    "{}{dim}{}{dim:#}",
+                    "{}{dim}{}{}{dim:#}",
                     aplan_output::sanitize::visible(&t.title),
                     effort,
+                    held,
                     dim = aplan_output::style::DIM
                 ),
             )
@@ -4253,6 +4656,236 @@ fn locate<'p>(
         // "no task `X` in this plan", which is what `drop` and `mv` already
         // said: it names where it looked, and one question deserves one wording.
         .ok_or_else(|| anyhow::anyhow!("no task `{id}` in this plan"))
+}
+
+/// `aplan tag`, the vocabulary a plan maintains (`A1-213`).
+///
+/// `A1-077` refused a CRUD surface and took only the mutations where hand
+/// editing can break an invariant, which is where `mv` and `drop` came from. A
+/// tag broke none at the time: a family was a vocabulary and `APLAN026` a
+/// warning. `A1-133` then gave a family a cardinality, so `APLAN030` is an
+/// error -- and a tag became exactly what that principle selects for, by its own
+/// test, after the test was written.
+fn cmd_tag(root: &std::path::Path, args: &TagCommand) -> Result<u8> {
+    match args {
+        TagCommand::Add(a) => tag_one(root, a, true),
+        TagCommand::Rm(a) => tag_one(root, a, false),
+        TagCommand::Rename(a) => tag_rename(root, a),
+    }
+}
+
+/// Refuse a blank tag, wherever one can be supplied.
+///
+/// `tag add` has said this since `A1-213`: a tag is a word, and the empty string
+/// is not one. `add --tag ""` and `supersede --tag ""` wrote `tags: ['']`
+/// instead, a tag no rule reports and nobody meant, so the same argument reached
+/// two answers depending on which command took it (`A1-251`, audit). One guard,
+/// called by all three.
+fn refuse_blank_tags(tags: &[String]) -> Result<()> {
+    if let Some(blank) = tags.iter().find(|t| t.trim().is_empty()) {
+        anyhow::bail!("a tag is a word, and `{blank}` is blank");
+    }
+    Ok(())
+}
+
+/// Refuse a blank `--owner` (`A1-359`, audit).
+///
+/// `--owner ""` wrote `owner: ''`, which is a third state the model does not
+/// have: the task is not held by anybody a reader can see, and it is not
+/// *unassigned* either, so `ready --unclaimed` passed over it and `ready`
+/// printed an empty `[]` beside it. Absent is how the model spells unassigned,
+/// and the only way to write that is to leave the key out.
+///
+/// The same stance `refuse_blank_tags` takes one function up, for the same
+/// reason: a blank the caller typed is a mistake worth naming.
+fn refuse_blank_owner(owner: Option<&String>) -> Result<()> {
+    if let Some(blank) = owner.filter(|o| o.trim().is_empty()) {
+        anyhow::bail!(
+            "`--owner {blank}` is blank, which is not the same as unassigned: leave the flag \
+             out to file a task nobody holds, or `aplan release <id>` to give one up"
+        );
+    }
+    Ok(())
+}
+
+/// Put one tag on a task, or take it off.
+fn tag_one(root: &std::path::Path, args: &TagArgs, adding: bool) -> Result<u8> {
+    let TagArgs { id, tag, verdict } = args;
+    refuse_blank_tags(std::slice::from_ref(tag))?;
+    let plan = load_checked(root)?;
+    if !loaded_cleanly(&plan) {
+        return Ok(EXIT_VIOLATIONS);
+    }
+    let lt = locate(&plan, id)?;
+
+    let mut tags = lt.task.tags.clone();
+    let held = tags.iter().any(|t| t == tag);
+    if adding && held {
+        write_stdout(&format!("`{id}` already carries `{tag}`\n"))?;
+        return Ok(EXIT_OK);
+    }
+    if !adding && !held {
+        write_stdout(&format!("`{id}` does not carry `{tag}`\n"))?;
+        return Ok(EXIT_OK);
+    }
+    // **Taking `milestone` off a cut that holds work dissolves the cut, and no
+    // rule says so** (`A1-213`, audit). Its members stop being members: nothing
+    // records that they ever were, because membership *is* a non-milestone
+    // sitting in a milestone's `blocked_by` (ADR-0013). Where
+    // `require_cut_membership` is on they at least become `APLAN022` errors and
+    // this refuses anyway; where it is off -- the default -- the only thing
+    // `check` reports is `APLAN009`, that the former cut carries no estimate,
+    // which reads as advice about an estimate rather than as "that cut is gone".
+    //
+    // Refused for the same reason `tag rename` refuses the word: there are
+    // commands that mean this on purpose. `drop --cut` cancels a cut and says so
+    // in the plan, and `mv` moves the work somewhere it will still be found.
+    // Removing the tag from an *empty* cut is allowed, because it orphans
+    // nothing and `APLAN021` already describes it.
+    if !adding && tag == "milestone" {
+        let members = lt
+            .task
+            .blocked_by
+            .iter()
+            .filter(|b| {
+                plan.tasks
+                    .iter()
+                    .any(|o| &&o.task.id == b && !o.task.is_milestone())
+            })
+            .count();
+        if members > 0 {
+            anyhow::bail!(
+                "`{id}` is a cut holding {members} task(s), and taking `milestone` off \
+                 it would leave them in no cut while nothing recorded that they were \
+                 ever in one. Move the work first (`aplan mv <id>... --cut <other>`), \
+                 or cancel the cut itself (`aplan drop --cut {id}`) if it is not going \
+                 to happen."
+            );
+        }
+    }
+    if adding {
+        tags.push(tag.clone());
+    } else {
+        tags.retain(|t| t != tag);
+    }
+
+    let original = std::fs::read_to_string(&lt.path)
+        .with_context(|| format!("reading {}", lt.path.display()))?;
+    let updated =
+        aplan_core::close::set_tags(&original, &tags).map_err(|e| close_err("tag", id, &e))?;
+    let after = aplan_core::mutation::with_replaced(&plan, id, task_of(&updated, id)?);
+    let what = if adding {
+        format!("put `{tag}` on `{id}`")
+    } else {
+        format!("take `{tag}` off `{id}`")
+    };
+    refuse_bad_mutation(root, &what, &plan, &after, *verdict)?;
+    save_one(
+        &lt.path,
+        &original,
+        &updated,
+        if adding { "tag add" } else { "tag rm" },
+    )?;
+    write_stdout(&format!(
+        "`{id}` {} `{tag}` in {}\n",
+        if adding {
+            "now carries"
+        } else {
+            "no longer carries"
+        },
+        lt.path.display()
+    ))?;
+    Ok(EXIT_OK)
+}
+
+/// Rename a tag on every task that carries it, as one change.
+///
+/// **All of them or none**, through `save_batch`, which is `A1-226`'s path: it
+/// compares each file against what was read before writing, so an edit somebody
+/// made to one of them while this ran refuses the whole rename rather than
+/// overwriting it. A vocabulary migration is the case hand editing is worst at
+/// and the worst shape for an unsafe writer, which is why this waited for that
+/// task rather than becoming the next one.
+fn tag_rename(root: &std::path::Path, args: &TagRenameArgs) -> Result<u8> {
+    let TagRenameArgs { from, to, verdict } = args;
+    refuse_blank_tags(std::slice::from_ref(to))?;
+    if from == to {
+        anyhow::bail!("`{from}` is already what it would be renamed to");
+    }
+    // **A reserved word is not a label, so renaming it is not a rename**
+    // (`A1-213`, audit). Five words are what this tool reads to decide what a
+    // plan *is* (`A1-212`), and `rename` is the one form that reaches every task
+    // at once: `tag rename milestone epic` dissolves every cut in the plan, and
+    // the only thing `check` then says is that the former cuts carry no
+    // estimate. Renaming *to* one is the same move inverted -- it makes every
+    // task carrying some ordinary word into a cut.
+    //
+    // Refused rather than warned, because unlike a typo this cannot be a slip
+    // the author meant differently: the word means what it means, and the
+    // commands for changing a plan's structure are `add`, `mv` and `drop`.
+    for (side, word) in [("from", from), ("to", to)] {
+        if aplan_core::validate::RESERVED_TAGS.contains(&word.as_str()) {
+            anyhow::bail!(
+                "`{word}` is not a label this tool renames: it is one of the words that \
+                 decide what a plan is, and renaming it {} would change the plan's \
+                 structure on every task at once rather than its vocabulary. Use `add`, \
+                 `mv` or `drop` to change what a task is, or `tag add`/`tag rm` for one \
+                 task's copy of the word.",
+                if side == "from" { "away" } else { "onto them" }
+            );
+        }
+    }
+    let plan = load_checked(root)?;
+    if !loaded_cleanly(&plan) {
+        return Ok(EXIT_VIOLATIONS);
+    }
+
+    let mut batch: Vec<aplan_core::save::Replacement> = Vec::new();
+    let mut after = aplan_core::mutation::clone_of(&plan);
+    for lt in &plan.tasks {
+        if !lt.task.tags.iter().any(|t| t == from) {
+            continue;
+        }
+        // A task already carrying the destination keeps one of it: a rename that
+        // produced `[cli, cli]` would be this tool writing a document its own
+        // loader reads as one tag and a reviewer reads as a mistake.
+        let mut tags: Vec<String> = Vec::new();
+        for t in &lt.task.tags {
+            let next = if t == from { to } else { t };
+            if !tags.iter().any(|kept| kept == next) {
+                tags.push(next.clone());
+            }
+        }
+        let original = std::fs::read_to_string(&lt.path)
+            .with_context(|| format!("reading {}", lt.path.display()))?;
+        let updated = aplan_core::close::set_tags(&original, &tags)
+            .map_err(|e| close_err("tag rename", &lt.task.id, &e))?;
+        after = aplan_core::mutation::with_replaced(
+            &after,
+            &lt.task.id,
+            task_of(&updated, &lt.task.id)?,
+        );
+        batch.push(aplan_core::save::Replacement {
+            path: lt.path.clone(),
+            expected: original,
+            updated,
+        });
+    }
+    if batch.is_empty() {
+        write_stdout(&format!("no task carries `{from}`\n"))?;
+        return Ok(EXIT_OK);
+    }
+    refuse_bad_mutation(
+        root,
+        &format!("rename `{from}` to `{to}` on {} task(s)", batch.len()),
+        &plan,
+        &after,
+        *verdict,
+    )?;
+    let n = batch.len();
+    save_batch(&batch, "tag rename")?;
+    write_stdout(&format!("renamed `{from}` to `{to}` on {n} task(s)\n"))?;
+    Ok(EXIT_OK)
 }
 
 fn cmd_dep(root: &std::path::Path, args: &DepCommand) -> Result<u8> {
@@ -4398,45 +5031,39 @@ fn refusals_before_a_successor(
     if args.title.trim().is_empty() {
         anyhow::bail!("a successor needs a title: it is what now needs doing");
     }
+    // Both added by `A1-251`, which gave this command a `--tag`: a blank tag and
+    // a nonsense estimate are facts about the arguments like the three above,
+    // and belong before the plan is touched for the same reason.
+    refuse_blank_tags(&args.tags)?;
+    refuse_blank_owner(args.owner.as_ref())?;
+    if let Some(days) = args.effort
+        && (!days.is_finite() || days < 0.0)
+    {
+        anyhow::bail!(
+            "`--effort {days}` is not a number of days; give a finite, non-negative estimate \
+             or omit it"
+        );
+    }
     Ok(())
 }
 
-fn cmd_supersede(root: &std::path::Path, args: &SupersedeArgs) -> Result<u8> {
-    use aplan_interop::{cut, emit, ids};
+/// The task a `supersede` would file, from the predecessor and the arguments.
+///
+/// Extracted from [`cmd_supersede`] when the id-race retry (`A1-230`) put its
+/// body in a closure and pushed the function past the line limit. The seam is
+/// honest: every field here is derived from the predecessor the attempt located
+/// and the arguments, so re-minting an id means building this again against the
+/// task as the plan then holds it.
+fn successor_task(
+    lt: &aplan_core::load::LoadedTask,
+    args: &SupersedeArgs,
+    id: &str,
+    phase: u32,
+) -> aplan_core::Task {
+    use aplan_interop::emit;
 
-    let plan = load_checked(root)?;
-    if !loaded_cleanly(&plan) {
-        return Ok(EXIT_VIOLATIONS);
-    }
-    let lt = locate(&plan, &args.id)?;
-    // Only a closed task has an outcome to stop holding. A `todo` task that needs
-    // different work is edited, and a `dropped` one was already dispositioned.
-    // A cut is not superseded, its members are. A milestone's outcome is that its
-    // members are terminal, so filing a successor to one would file work the cut
-    // does not contain, into no cut, under a title nobody asked for. Accepting it
-    // produced exactly that.
-    refusals_before_a_successor(lt, args)?;
-    if let Some(days) = args.effort {
-        if !days.is_finite() || days < 0.0 {
-            anyhow::bail!(
-                "`--effort {days}` is not a number of days; give a finite, non-negative estimate \
-                 or omit it"
-            );
-        }
-    }
-    // Id or label, like every other `--cut` (`A1-139`).
-    let cut = match &args.cut {
-        Some(name) => Some(cut::resolve_id(&plan, name)?),
-        None => None,
-    };
-    if let Some(cut_id) = cut.as_deref() {
-        cut::check_target(&plan, cut_id)?;
-    }
-
-    let phase = lt.task.phase;
-    let id = ids::mint(&plan, phase, id_strategy(root)?)?;
-    let successor = aplan_core::Task {
-        id: id.clone(),
+    aplan_core::Task {
+        id: id.to_string(),
         title: args.title.clone(),
         phase,
         status: aplan_core::Status::Todo,
@@ -4444,6 +5071,8 @@ fn cmd_supersede(root: &std::path::Path, args: &SupersedeArgs) -> Result<u8> {
         effort_days: args.effort,
         blocked_by: Vec::new(),
         prefer_after: Vec::new(),
+        ratified_by: Vec::new(),
+        contains: Vec::new(),
         evidence: Vec::new(),
         // Inherited, because the successor is about the same code and the same
         // document: the `traces` are what drifted, and the `paths` are what the
@@ -4452,77 +5081,148 @@ fn cmd_supersede(root: &std::path::Path, args: &SupersedeArgs) -> Result<u8> {
         paths: lt.task.paths.clone(),
         traces: lt.task.traces.clone(),
         trace_fingerprints: std::collections::BTreeMap::new(),
-        tags: Vec::new(),
+        // **Inherited for the reason `paths` and `traces` are** (`A1-251`): they
+        // are the predecessor's own answers to the same questions, and a
+        // successor is about the same work. It is also the only default that
+        // lets the command run at all where a tag family is `exactly-one` --
+        // the successor carried none, `APLAN030` refused the write, and no
+        // invocation could satisfy it because there was no way to say a tag.
+        //
+        // **Minus the five words that decide what a plan is**, which is
+        // `successor_tags`' whole argument: a tag says what work is *about*,
+        // and a reserved word says what a task *is*.
+        tags: if args.tags.is_empty() {
+            successor_tags(&lt.task.tags)
+        } else {
+            emit::deduped(&args.tags)
+        },
         revisit_at: None,
         version_impact: None,
         version_impact_reason: None,
+        version: None,
+    }
+}
+
+fn cmd_supersede(root: &std::path::Path, args: &SupersedeArgs) -> Result<u8> {
+    use aplan_interop::{cut, emit, ids};
+
+    // **One attempt at minting and writing** (`A1-230`). A successor id is
+    // minted from the plan, so another writer taking it means re-reading and
+    // minting again; the re-stamp, the gate and the cut placement all read the
+    // plan too, so the whole of it is the attempt. `None` is "the plan did not
+    // load cleanly", which is an exit code rather than an error.
+    let attempt = || -> Result<Option<String>> {
+        let plan = load_checked(root)?;
+        if !loaded_cleanly(&plan) {
+            return Ok(None);
+        }
+        let lt = locate(&plan, &args.id)?;
+        // Only a closed task has an outcome to stop holding. A `todo` task that needs
+        // different work is edited, and a `dropped` one was already dispositioned.
+        // A cut is not superseded, its members are. A milestone's outcome is that its
+        // members are terminal, so filing a successor to one would file work the cut
+        // does not contain, into no cut, under a title nobody asked for. Accepting it
+        // produced exactly that.
+        refusals_before_a_successor(lt, args)?;
+        // Id or label, like every other `--cut` (`A1-139`).
+        let cut = match &args.cut {
+            Some(name) => Some(cut::resolve_id(&plan, name)?),
+            None => None,
+        };
+        if let Some(cut_id) = cut.as_deref() {
+            cut::check_target(&plan, cut_id)?;
+        }
+
+        let phase = lt.task.phase;
+        let id = ids::mint(&plan, phase, id_strategy(root)?)?;
+        let successor = successor_task(lt, args, &id, phase);
+
+        let (config, config_dir) = config_at(root)?;
+        let opts = resolve_check_options(&config, config_dir.as_deref(), false, None, false);
+        let fingerprints = if opts.detect_drift {
+            aplan_core::trace_fingerprints(&lt.task, opts.traces_root.as_deref())
+        } else {
+            std::collections::BTreeMap::new()
+        };
+        let original = std::fs::read_to_string(&lt.path)
+            .with_context(|| format!("reading {}", lt.path.display()))?;
+        // Built before anything is written, so a predecessor this cannot re-stamp
+        // leaves the plan byte-identical rather than a successor filed against a task
+        // still reported as drifted.
+        let restamped = aplan_core::restamp(&original, &fingerprints)
+            .map_err(|e| close_err("supersede", &args.id, &e))?;
+
+        // Both writes are prepared, so the only failures left are at the point of
+        // writing. Ordering no longer carries the argument it used to -- both files
+        // go in one batch since `A1-246`, so an unwritable predecessor cannot leave
+        // the successor filed -- but the probe still earns its place: it names the
+        // file and the permission before any of the resolution work, where the
+        // batch's own failure would name it after. It opens for writing without
+        // truncating, so it proves the permission rather than assuming it from
+        // metadata.
+        std::fs::OpenOptions::new()
+            .write(true)
+            .open(&lt.path)
+            .with_context(|| format!("{} is not writable", lt.path.display()))?;
+
+        // **The `--cut` placement is part of the post-state** (`A1-251`). It was
+        // not: the successor was added and the milestone was left as it was, so the
+        // plan this gate judged held a task in no cut. Where
+        // `require_cut_membership` is on, that is `APLAN022` against a successor the
+        // caller had just placed, and the refusal named a fault the invocation had
+        // already answered. `add` has built its candidate through
+        // `post_state_for_add` since `A1-113`, for this reason, in the comment
+        // beside it -- so this is one command joining a decision the other made
+        // rather than a new one.
+        let after = post_state_for_add(
+            &aplan_core::mutation::with_replaced(&plan, &args.id, task_of(&restamped, &args.id)?),
+            &successor,
+            cut.as_deref(),
+        );
+        refuse_bad_mutation(
+            root,
+            &format!("supersede `{}`", args.id),
+            &plan,
+            &after,
+            args.verdict,
+        )?;
+
+        let out_dir = successor_dir(root);
+        let body = supersede_body(&lt.task, &args.id);
+
+        // One change, or none (`A1-246`); the argument is on `supersede_writes`.
+        let (batch, placed) = supersede_writes(
+            &plan,
+            &out_dir,
+            &id,
+            &successor,
+            &body,
+            cut.as_deref(),
+            &lt.path,
+            &original,
+            restamped,
+        )?;
+        save_batch(&batch, "supersede")?;
+        Ok(Some(superseded_said(
+            &args.id,
+            &id,
+            fingerprints.len(),
+            &emit::task_path(&out_dir, &id),
+            placed.as_deref(),
+            &successor.tags,
+            args.tags.is_empty(),
+        )))
     };
-
-    let (config, config_dir) = config_at(root)?;
-    let opts = resolve_check_options(&config, config_dir.as_deref(), false, None, false);
-    let fingerprints = if opts.detect_drift {
-        aplan_core::trace_fingerprints(&lt.task, opts.traces_root.as_deref())
-    } else {
-        std::collections::BTreeMap::new()
+    let started = std::time::Instant::now();
+    // `supersede` has no flag for the successor id, so it is always minted.
+    let (said, tries) = with_id_retry(true, ID_RACE_DEADLINE, attempt)?;
+    let Some(mut said) = said else {
+        return Ok(EXIT_VIOLATIONS);
     };
-    let original = std::fs::read_to_string(&lt.path)
-        .with_context(|| format!("reading {}", lt.path.display()))?;
-    // Built before anything is written, so a predecessor this cannot re-stamp
-    // leaves the plan byte-identical rather than a successor filed against a task
-    // still reported as drifted.
-    let restamped = aplan_core::restamp(&original, &fingerprints)
-        .map_err(|e| close_err("supersede", &args.id, &e))?;
-
-    // Both writes are prepared, so the only failures left are at the point of
-    // writing. Ordering no longer carries the argument it used to -- both files
-    // go in one batch since `A1-246`, so an unwritable predecessor cannot leave
-    // the successor filed -- but the probe still earns its place: it names the
-    // file and the permission before any of the resolution work, where the
-    // batch's own failure would name it after. It opens for writing without
-    // truncating, so it proves the permission rather than assuming it from
-    // metadata.
-    std::fs::OpenOptions::new()
-        .write(true)
-        .open(&lt.path)
-        .with_context(|| format!("{} is not writable", lt.path.display()))?;
-
-    let after = aplan_core::mutation::with_added(
-        &aplan_core::mutation::with_replaced(&plan, &args.id, task_of(&restamped, &args.id)?),
-        std::path::PathBuf::from(format!("{id}.md")),
-        successor.clone(),
-    );
-    refuse_bad_mutation(
-        root,
-        &format!("supersede `{}`", args.id),
-        &plan,
-        &after,
-        args.verdict,
-    )?;
-
-    let out_dir = successor_dir(root);
-    let body = supersede_body(&lt.task, &args.id);
-
-    // One change, or none (`A1-246`); the argument is on `supersede_writes`.
-    let (batch, placed) = supersede_writes(
-        &plan,
-        &out_dir,
-        &id,
-        &successor,
-        &body,
-        cut.as_deref(),
-        &lt.path,
-        &original,
-        restamped,
-    )?;
-    save_batch(&batch, "supersede")?;
-
-    write_stdout(&superseded_said(
-        &args.id,
-        &id,
-        fingerprints.len(),
-        &emit::task_path(&out_dir, &id),
-        placed.as_deref(),
-    ))?;
+    if let Some(note) = raced_for_the_id(tries, started.elapsed()) {
+        let _ = writeln!(said, "{note}");
+    }
+    write_stdout(&said)?;
     Ok(EXIT_OK)
 }
 
@@ -4531,12 +5231,20 @@ fn cmd_supersede(root: &std::path::Path, args: &SupersedeArgs) -> Result<u8> {
 /// Only claims a stamp where one was taken: a task with no `traces`, or a
 /// repository with drift off, has nothing to re-stamp, and "re-stamped 0 trace
 /// fingerprint(s)" is a repair reported for work that did not happen.
+///
+/// **It names the successor's tags** (`A1-251`), because they are the one field
+/// it can acquire without being asked for: inheritance is invisible otherwise,
+/// and a tag decides cut membership (`cross-cutting`) and family cardinality
+/// (`APLAN030`). Saying where they came from is what makes an inherited tag
+/// something the author accepted rather than something they later found.
 fn superseded_said(
     predecessor: &str,
     successor: &str,
     stamps: usize,
     filed: &std::path::Path,
     placed: Option<&std::path::Path>,
+    tags: &[String],
+    inherited: bool,
 ) -> String {
     let mut out = match stamps {
         0 => format!("superseded {predecessor}: filed {successor}\n"),
@@ -4547,6 +5255,18 @@ fn superseded_said(
     let _ = writeln!(out, "  -> {}", filed.display());
     if let Some(p) = placed {
         let _ = writeln!(out, "  -> {}", p.display());
+    }
+    if !tags.is_empty() {
+        let _ = writeln!(
+            out,
+            "  tags: {}{}",
+            tags.join(", "),
+            if inherited {
+                format!(" (inherited from {predecessor})")
+            } else {
+                String::new()
+            }
+        );
     }
     out
 }
@@ -4700,7 +5420,9 @@ fn cmd_amend(root: &std::path::Path, args: &AmendArgs) -> Result<u8> {
     // first, as `close` orders them: an unknown citation or a live task must be
     // told that, not told the replacement would fail `verify` (`A1-109`, audit).
     let (repaired, amended, said) = if let Some(drop) = &args.remove_evidence {
-        let drop = parse_evidence(drop)?;
+        // Names a citation the task already carries, so any kind the file
+        // can hold (`A1-361`).
+        let drop = parse_citation(drop)?;
         let remaining: Vec<aplan_core::Evidence> = lt
             .task
             .evidence
@@ -4737,7 +5459,9 @@ fn cmd_amend(root: &std::path::Path, args: &AmendArgs) -> Result<u8> {
                  the one to replace it with"
             );
         };
-        let (from, to) = (parse_evidence(from)?, parse_evidence(to)?);
+        // `from` names what is already there and `to` is written, so only
+        // `to` is judged by what `close` would record (`A1-361`).
+        let (from, to) = (parse_citation(from)?, parse_evidence(to)?);
         let amended: Vec<aplan_core::Evidence> = lt
             .task
             .evidence
@@ -4831,10 +5555,14 @@ fn replacement_resolves(
     config: &aplan_config::Config,
 ) -> Result<bool> {
     let verify_opts = aplan_evidence::VerifyOptions {
+        traces_root: None,
         execute: false,
         test_runner: config.test.clone(),
         max_unrelated_files: config.evidence.as_ref().and_then(|e| e.max_unrelated_files),
         url_check: None,
+        // Nor the version: what a closure proves is about this citation, and
+        // `APLAN048` is about the release (`A1-313`).
+        version: None,
         // No location to attach: this resolves one proposed citation rather than
         // running the plan, and its findings are about that citation.
         config_file: None,
@@ -4925,6 +5653,7 @@ fn evidence_resolves(
     verdict: VerdictFlags,
 ) -> Result<bool> {
     let verify_opts = aplan_evidence::VerifyOptions {
+        traces_root: None,
         execute: false,
         test_runner: config.test.clone(),
         max_unrelated_files: config.evidence.as_ref().and_then(|e| e.max_unrelated_files),
@@ -4933,6 +5662,9 @@ fn evidence_resolves(
         // `APLAN016` is a warning precisely because it is not a statement about
         // the plan (`A1-041`).
         url_check: None,
+        // Nor the version, for the same reason: this records one citation, and
+        // `APLAN048` is a finding about the release (`A1-313`).
+        version: None,
         // No location to attach: this resolves one proposed citation rather than
         // running the plan.
         config_file: None,
@@ -4975,6 +5707,46 @@ fn evidence_resolves(
         ))?;
     }
     Ok(true)
+}
+
+/// The version to write into a release as it closes, when one can be derived
+/// (`A1-339`, ADR-0038).
+///
+/// `None` for anything that is not a release, and for a release whose version
+/// cannot be derived. **A closure is not refused for it**: recording the number
+/// is the point of the field and failing to close a finished release over a
+/// missing config key would be this tool holding a plan hostage to an optional
+/// feature. What it does instead is say so, once, where the person closing it
+/// will see it.
+///
+/// The derivation itself is `aplan_evidence::version::version_for_release`,
+/// because `aplan_close` makes the same decision and two copies of it had the
+/// window's own refusals missing from both (`A1-339`, audit).
+fn recorded_version(
+    plan: &aplan_core::load::Plan,
+    task: &aplan_core::task::Task,
+    repo: &std::path::Path,
+    config: &aplan_config::Config,
+) -> Option<String> {
+    if !task.is_release() {
+        return None;
+    }
+    let policy = config.version.clone().unwrap_or_default();
+    let tasks: Vec<_> = plan.tasks.iter().map(|lt| &lt.task).collect();
+    let graph = Graph::new(tasks.iter().copied());
+    match aplan_evidence::version::version_for_release(repo, plan, &graph, &policy) {
+        Ok(version) => Some(version),
+        Err(why) => {
+            errln!(
+                "{}",
+                aplan_output::fold::note(&format!(
+                    "note: this release closes without recording the version it produced. \
+                     {why}"
+                ))
+            );
+            None
+        }
+    }
 }
 
 fn cmd_close(
@@ -5042,7 +5814,12 @@ fn cmd_close(
     // are hermetic and instant, and running the ladder ahead of them spent a
     // runner subprocess to report the *wrong reason* -- an already-closed task
     // was told its citation would fail `verify`, which was true and irrelevant.
-    let updated = aplan_core::close(&original, &evidence, &fingerprints)
+    // **The version a release produced is recorded when it closes** (`A1-339`,
+    // ADR-0038). Derived while open so the plan decides the number rather than
+    // grading a guess, and written into the node so a later run can ask what a
+    // release contained without re-deriving from a plan that has since moved.
+    let recorded = recorded_version(&plan, &lt.task, repo, &config);
+    let updated = aplan_core::close(&original, &evidence, &fingerprints, recorded.as_deref())
         .map_err(|e| close_err("close", id, &e))?;
 
     // Then the gate, still before anything is written (`A1-109`).
@@ -5129,6 +5906,145 @@ fn cmd_facts(require: &[String], identity: bool) -> Result<u8> {
 ///
 /// A field nothing could learn is absent rather than empty: a binary built from
 /// a tarball has no commit to name, and saying so beats naming a guess.
+/// This build, as a generated artifact's banner records it (`A1-325`).
+///
+/// Public because `xtask` writes the same artifacts this command prints, and
+/// the drift gate compares them byte for byte: two producers of one document
+/// must read the identity from one place or the gate fails on the banner
+/// itself.
+///
+/// Version and surface digest together: the version is what a human recognises,
+/// and every build from `main` carries the same one, so on its own it cannot
+/// tell two development builds apart -- which is the case `A1-256` exists for.
+///
+/// **The digest is not `facts_sha256`, and the difference is the whole point.**
+/// The facts document enumerates what a build *advertises* -- its rules,
+/// commands, config keys, formats and behaviours -- and a renderer can change
+/// what it writes without any of those moving. Measured during `A1-325`'s
+/// audit: rewording one heading in the roadmap renderer changed the artifact
+/// and left the banner byte-identical, so two builds wrote different files
+/// under the same provenance line. Since every development build here reports
+/// `0.4.0-dev`, that is not a corner case, it is the ordinary one, and it is
+/// exactly the failure this banner exists to report.
+///
+/// So the digest covers what this build *writes* as well as what it advertises:
+/// the facts document, plus this build's rendering of a fixed canonical
+/// roadmap and agent contract (`canonical_artifacts`, private: a caller reads
+/// the digest, not what went into it).
+/// `facts_sha256` keeps its published meaning for `attest` and
+/// `facts --identity`, which answer a different question -- what a consumer may
+/// rely on, not what a generator will emit.
+///
+/// Twelve digits of the digest, not sixty-four: a banner is for recognising
+/// that two builds differ, and `aplan facts --identity` is where the whole
+/// value lives for anyone who needs to check it.
+pub fn written_by() -> (String, String) {
+    static SURFACE: std::sync::OnceLock<String> = std::sync::OnceLock::new();
+    let id = tool_identity();
+    let surface = SURFACE
+        .get_or_init(|| {
+            let mut input = facts_document();
+            input.push_str(&canonical_artifacts());
+            aplan_attest::sha256_hex(input.as_bytes())
+                .chars()
+                .take(12)
+                .collect()
+        })
+        .clone();
+    (id.version, surface)
+}
+
+/// What this build renders for a fixed input, as one string to digest
+/// (`A1-325`, ADR-0037).
+///
+/// The question the banner is asked is "would another build have written this
+/// file differently", and the only honest way to answer it is to render
+/// something and look. The input is fixed and lives here rather than in a
+/// fixture file, because a digest computed from a file on disk would move when
+/// somebody edited the file and say a build had changed when it had not.
+///
+/// **Rendered with no banner of their own**, which is load-bearing twice over:
+/// [`aplan_output::render_roadmap_markdown`] and
+/// [`aplan_output::render_agents_md`] both take the provenance line as an
+/// argument, so passing this build's would recurse, and the banner is not part
+/// of what varies between builds anyway.
+///
+/// The fixture is deliberately not minimal. An empty roadmap renders a heading
+/// and a table head and nothing else, so every change to a *row* would hash the
+/// same -- the green-by-construction shape one layer down. It carries a cut with
+/// the weeks column live, a member row with evidence and a blocker, a group
+/// heading, a cross-cutting row and a critical path, so each of those renderers
+/// is in the digest.
+fn canonical_artifacts() -> String {
+    use aplan_core::graph::{CriticalPath, CriticalTask};
+    use aplan_core::roadmap::{Cut, CutGroup, Roadmap, RoadmapTask};
+    use aplan_core::task::Status;
+
+    let member = RoadmapTask {
+        id: "X1-01".to_string(),
+        title: "a member".to_string(),
+        status: Status::Done,
+        blocked_by: vec!["X1-02".to_string()],
+        evidence: vec!["commit:abcdef123456".to_string()],
+        tags: vec!["a-tag".to_string()],
+    };
+    let roadmap = Roadmap {
+        cuts: vec![Cut {
+            version: "v0.1".to_string(),
+            title: "a cut".to_string(),
+            milestone_id: "M-v0.1".to_string(),
+            status: Status::Todo,
+            release: false,
+            borrows: false,
+            total: 2,
+            done: 1,
+            ready: 1,
+            blocked: 0,
+            effort_days: 3.0,
+            done_effort_days: 1.0,
+            closes: Vec::new(),
+            members: vec![member.clone()],
+            groups: vec![CutGroup {
+                label: Some("a-tag".to_string()),
+                members: vec![member.clone()],
+            }],
+            critical_path: CriticalPath {
+                total_effort_days: 2.0,
+                tasks: vec![CriticalTask {
+                    id: "X1-02".to_string(),
+                    title: "a blocker".to_string(),
+                    effort_days: 2.0,
+                    status: Status::Todo,
+                }],
+            },
+        }],
+        // Live, so the weeks column renders: a plan that declares no throughput
+        // renders one column fewer, and hashing only that shape would miss every
+        // change to the other.
+        effort_days_per_week: Some(5.0),
+        cross_cutting: vec![member],
+        cross_cutting_effort_days: 1.0,
+        cross_cutting_done_effort_days: 1.0,
+    };
+
+    let contract = aplan_output::AgentContract {
+        plan_dir: Some("plan".to_string()),
+        id_examples: vec!["X1-nn".to_string()],
+        min_strength: vec!["commit".to_string(), "test".to_string()],
+        exempt_tags: vec!["untestable".to_string()],
+        scoped_evidence: vec![("tag:spike".to_string(), "note".to_string())],
+        advisory: vec!["APLAN009".to_string()],
+        runners: vec!["cargo test".to_string()],
+        runner_count: 1,
+        tools: vec![("ready".to_string(), "what to work on".to_string())],
+        ..aplan_output::AgentContract::default()
+    };
+
+    let mut out = aplan_output::render_roadmap_markdown(&roadmap, None, None);
+    out.push_str(&aplan_output::render_agents_md(&contract, None));
+    out
+}
+
 fn identity_document() -> String {
     identity_json(&tool_identity())
 }
@@ -5657,6 +6573,13 @@ pub struct SelectArgs {
     /// Only tasks with this owner. Repeatable, and any of them matches.
     #[arg(long, value_name = "OWNER")]
     pub owner: Vec<String>,
+    /// Only tasks nobody holds, so a fleet can see what is free to pick up.
+    ///
+    /// The complement of `--owner`, and naming both selects nothing: a task
+    /// cannot be held by somebody and by nobody, and narrowing across
+    /// dimensions is what every other pair of these flags does.
+    #[arg(long)]
+    pub unclaimed: bool,
     /// Only tasks with this status. Repeatable, and any of them matches.
     #[arg(long, value_name = "STATUS")]
     pub status: Vec<String>,
@@ -5693,6 +6616,7 @@ impl SelectArgs {
             tags: self.tag.clone(),
             owners: self.owner.clone(),
             statuses,
+            unclaimed: self.unclaimed,
         })
     }
 }
@@ -5729,6 +6653,11 @@ pub const COMMAND_SURFACES: &[(&str, Surface, Option<&str>)] = &[
         Some("parked tasks whose revisit has arrived"),
     ),
     ("why", Surface::Report, Some("what a task is waiting on")),
+    (
+        "version",
+        Surface::Report,
+        Some("the version the plan says must ship next"),
+    ),
     ("paths", Surface::Report, None),
     ("vacuity", Surface::Report, None),
     ("stale", Surface::Report, None),
@@ -6207,6 +7136,7 @@ fn cmd_stale(
             status: lt.task.status.to_string(),
             idle_days,
             ready: ready.contains(lt.task.id.as_str()),
+            held_by: lt.task.owner.clone(),
         });
     }
     // Readiest first, then idlest, then by id: what a reader can pick up now,
@@ -6276,10 +7206,14 @@ fn cmd_attest(
     aplan_attest::refuse_dirty(repo).map_err(anyhow::Error::from)?;
     let mut report = validate(&plan, &check_opts);
     let opts = aplan_evidence::VerifyOptions {
+        traces_root: None,
         execute,
         test_runner: config.test.clone(),
         max_unrelated_files: config.evidence.as_ref().and_then(|e| e.max_unrelated_files),
         url_check: config.url.clone(),
+        // An attestation says this plan verified, so it says what `verify` says
+        // (`A1-313`).
+        version: config.version.clone(),
         config_file: config_dir
             .as_deref()
             .map(|d| d.join(aplan_config::CONFIG_FILE)),
@@ -6449,6 +7383,313 @@ fn cmd_due(root: &std::path::Path, args: &DueArgs) -> Result<u8> {
     };
     render_tolerant(|| aplan_output::render_due(&report, format))?;
     Ok(EXIT_OK)
+}
+
+/// `aplan version [<ID>]` (`A1-313`, ADR-0034, ADR-0041).
+///
+/// **With an id this is hermetic**, which is why it resolves in `check`: what a
+/// task owes is its declaration or its level's floor, and what a cut owes is an
+/// aggregate over its members. Neither reads anything outside the plan.
+///
+/// Without an id, the question is what the *next release* must be, and that
+/// needs the window ADR-0038 defines -- everything closed since the newest
+/// release tag reachable from HEAD. That reads git, so the bare form says which
+/// window it used rather than leaving the caller to guess which of the two
+/// shapes answered them.
+/// What `aplan version` is asked, and where it reads the answer from
+/// (`A1-313`, ADR-0041).
+#[derive(Debug, clap::Args)]
+pub struct VersionArgs {
+    /// A task, a cut or a release. Omit to ask what the next release must be.
+    ///
+    /// The rung follows the argument, which is something the caller can see: a
+    /// named node is answered from the plan alone and prints what it *owes*,
+    /// while the bare form reads the repository -- the window over history, and
+    /// the version a declared command says ships today -- and prints the number.
+    /// The window it used is named on stderr, because the two windows give
+    /// different answers and stdout is a version somebody is piping into a
+    /// release command.
+    id: Option<String>,
+    /// Repository to read the release window from, and to run
+    /// `version.current` in (default: the current directory). Unused by the
+    /// form that names a node, which reads nothing outside the plan.
+    #[arg(long, default_value = ".")]
+    repo: PathBuf,
+    /// Output format: human (the answer) or json (the answer and what raised it).
+    #[arg(long, default_value = "human")]
+    format: String,
+}
+
+fn cmd_version(root: &std::path::Path, args: &VersionArgs) -> Result<u8> {
+    let (repo, id) = (args.repo.as_path(), args.id.clone());
+    let format = format_for("version", &args.format)?;
+    let plan = load_checked(root)?;
+    if !loaded_cleanly(&plan) {
+        return Ok(EXIT_VIOLATIONS);
+    }
+    let (config, _) = config_at(root)?;
+    let policy = config.version.clone().unwrap_or_default();
+    let floors = policy.floors();
+    let tasks: Vec<_> = plan.tasks.iter().map(|lt| &lt.task).collect();
+    let graph = Graph::new(tasks.iter().copied());
+
+    let Some(id) = id else {
+        return cmd_version_next(&plan, &graph, repo, &policy, floors, format);
+    };
+    let Some(owed) = aplan_core::version::owed(&graph, floors, &id) else {
+        anyhow::bail!("no task `{id}` in this plan");
+    };
+    // **A release that recorded what it produced answers with the record**
+    // (`A1-339`). Re-deriving an impact for work that has already shipped reads
+    // a plan that has since moved, which is the whole reason the number is
+    // written down at close.
+    let recorded = graph.get(&id).and_then(|t| t.version.clone());
+    if format == Format::Json {
+        return write_json(
+            &serde_json::json!({
+                "id": id,
+                "owes": owed.impact.to_string(),
+                "raised_by": owed.raised_by,
+                // What this release produced, written when it closed. `null`
+                // for everything that has not shipped.
+                "recorded": recorded,
+                // What this answer cannot see, for the consumer that has no
+                // stderr to read it from (`A1-348`).
+                "unclaimed_by_any_cut": unclaimed_by_any_cut(&plan, &graph, floors, &id),
+            }),
+            "aplan/version/v1",
+        );
+    }
+    if let Some(recorded) = recorded {
+        // **A record this tool cannot read back is not an answer.** `APLAN050`
+        // refuses it in `check`, and handing it to stdout anyway would put it
+        // straight into a `cargo release "$(aplan version <release>)"` that
+        // `check` was about to refuse (`A1-339`, audit).
+        if aplan_core::version::triple(&recorded).is_none() {
+            anyhow::bail!(
+                "`{id}` records `version: {recorded}`, which is not a version this tool can \
+                 read back, so it will not hand it on. Correct the field to \
+                 `major.minor.patch`, or remove it and let the number be derived."
+            );
+        }
+        write_stdout(&format!("{recorded}\n"))?;
+        errln!(
+            "{}",
+            aplan_output::fold::note(&format!(
+                "note: this is the version `{id}` recorded when it closed, not a fresh \
+                 derivation. What it owes today reads a plan that has moved since: \
+                 `--format json` carries both"
+            ))
+        );
+        return Ok(EXIT_OK);
+    }
+    // **What it owes, not what it becomes.** A node is answered from the plan
+    // alone, which is the rung ADR-0041 put it on, and turning an impact into a
+    // number needs the version that ships today -- which is outside the plan.
+    // The bare form asks that question; this one deliberately does not.
+    write_stdout(&format!("{}\n", owed.impact))?;
+    if let Some(note) = unclaimed_note(&plan, &graph, floors, &id) {
+        errln!("{note}");
+    }
+    Ok(EXIT_OK)
+}
+
+/// What a named *release* cannot see, said rather than left to be discovered
+/// (`A1-348`).
+///
+/// A release's members are cuts, and a task no cut claims is in none of them, so
+/// this answer is about the cuts and not about everything that will ship with
+/// them. The bare form accounts for the difference because it has a window to
+/// measure it over; this one has no way to know which of those tasks ship now,
+/// and inventing one would be worse than saying so.
+///
+/// `None` for anything that is not a release, and for a plan where every task is
+/// claimed: a cut genuinely does not contain a cross-cutting task, so its own
+/// answer is right and there is nothing to warn about.
+fn unclaimed_note(
+    plan: &aplan_core::load::Plan,
+    graph: &Graph<'_>,
+    floors: aplan_core::task::VersionFloors,
+    id: &str,
+) -> Option<String> {
+    let unclaimed = unclaimed_by_any_cut(plan, graph, floors, id)?;
+    Some(aplan_output::fold::note(&format!(
+        "note: this is what `{id}`'s members owe. {unclaimed} task(s) in this plan are claimed \
+         by no cut, so no release's members reach them; `aplan version` with no id adds the \
+         ones that ship with this release"
+    )))
+}
+
+/// How many tasks no cut claims, when `id` is a release and the answer is not
+/// zero (`A1-348`). `None` otherwise, which is the case with nothing to say.
+fn unclaimed_by_any_cut(
+    plan: &aplan_core::load::Plan,
+    graph: &Graph<'_>,
+    floors: aplan_core::task::VersionFloors,
+    id: &str,
+) -> Option<usize> {
+    if !graph.get(id)?.is_release() {
+        return None;
+    }
+    let mut claimed = std::collections::BTreeSet::new();
+    for lt in &plan.tasks {
+        if lt.task.is_milestone() {
+            claimed.extend(aplan_core::version::reached(graph, floors, &lt.task.id));
+        }
+    }
+    // **A dropped task is not work a release fails to account for.** The walk
+    // skips cancelled members, so one sitting inside a cut never enters
+    // `claimed` -- and the note counted it as unclaimed, which is the walk's own
+    // exclusion read backwards (`A1-348`, audit).
+    let unclaimed = plan
+        .tasks
+        .iter()
+        .filter(|lt| {
+            !lt.task.is_milestone()
+                && lt.task.status != aplan_core::task::Status::Dropped
+                && !claimed.contains(&lt.task.id)
+        })
+        .count();
+    (unclaimed > 0).then_some(unclaimed)
+}
+
+/// `aplan version` with no id: the number the next release must carry
+/// (`A1-313`, ADR-0038, ADR-0040, ADR-0041).
+///
+/// **stdout is the version and nothing else**, because both demonstrated
+/// consumers are one line of shell from a bare number (`A1-319`) and a note
+/// mixed into it would break them. The window is named on stderr instead, which
+/// ADR-0041 requires and `--format json` carries as a field.
+///
+/// Every way this cannot answer refuses rather than guesses: no declared
+/// command, a command that would not run, a shallow clone, two open releases, a
+/// version scheme this does not understand. A number invented from any of those
+/// is exactly the confidently wrong answer this feature exists to prevent.
+fn cmd_version_next(
+    plan: &aplan_core::load::Plan,
+    graph: &Graph<'_>,
+    repo: &std::path::Path,
+    policy: &aplan_config::VersionPolicy,
+    floors: aplan_core::task::VersionFloors,
+    format: Format,
+) -> Result<u8> {
+    // The repository first, and `--repo` before anything reads it: standing
+    // outside one is a fact about where the caller is standing, and reporting a
+    // missing config key instead would send them to the wrong file.
+    let handle = aplan_evidence::Repo::discover(repo)?;
+    let Some(declared) = &policy.current else {
+        anyhow::bail!(
+            "`aplan version` needs to know what this repository ships today, and nothing \
+             declares it. Add `version.current.command` to `.aplan.yml` -- argv that prints \
+             the current version -- or ask about a node instead: `aplan version <cut>` \
+             answers what that cut owes, from the plan alone."
+        );
+    };
+    let current = aplan_evidence::version::current_version(declared, repo)?;
+
+    // **One window decision, used by the number and by `APLAN048`** (`A1-348`).
+    let next = aplan_evidence::version::next_release(
+        &handle,
+        repo,
+        plan,
+        graph,
+        floors,
+        policy.release_tag(),
+    )?;
+    let (owed, window_said, window_json) = describe_window(&next)?;
+
+    // The baseline is the last release, whichever window was used: what the plan
+    // demands is demanded *of the number that shipped*, and measuring from the
+    // staged one instead skips the release being prepared.
+    let tag = handle.newest_release_tag(policy.release_tag())?;
+    let since = tag.as_ref().and_then(aplan_evidence::ReleaseTag::version);
+    // A tag matching the pattern whose *name* spells no version this tool reads
+    // -- `release-2026-09` under a custom pattern. There is then nothing to
+    // measure from but the version the tree declares, which is the same
+    // baseline a first release gets. Said rather than silently substituted: the
+    // two answers differ, and the caller cannot see which applied.
+    let unread = match (&tag, since) {
+        (Some(t), None) => format!(
+            ". `{}` spells no version this tool reads, so the number is measured from \
+             `{current}` instead",
+            t.name
+        ),
+        _ => String::new(),
+    };
+    let Some(next) = aplan_evidence::version::required(&current, since, owed.impact) else {
+        anyhow::bail!(
+            "`{current}` is not a version this tool can do arithmetic on, so it will not \
+             guess what comes after it. It understands `major.minor.patch`, with or \
+             without a pre-release suffix."
+        );
+    };
+    if format == Format::Json {
+        return write_json(
+            &serde_json::json!({
+                "version": next,
+                "current": current,
+                "owes": owed.impact.to_string(),
+                "raised_by": owed.raised_by,
+                "measured_from": since,
+                "window": window_json,
+            }),
+            "aplan/version/v1",
+        );
+    }
+    write_stdout(&format!("{next}\n"))?;
+    // Which window, and what it owed, so the caller can tell the two apart
+    // (ADR-0041). On stderr because stdout is a version being piped somewhere.
+    errln!(
+        "{}",
+        aplan_output::fold::note(&format!(
+            "note: {window_said}, owing `{}`{}{unread}",
+            owed.impact,
+            owed.raised_by
+                .as_deref()
+                .map_or_else(String::new, |id| format!(" ({id})"))
+        ))
+    );
+    Ok(EXIT_OK)
+}
+
+/// The chosen window, said and serialised, or a refusal for one that could not
+/// answer (`A1-348`).
+///
+/// The choice itself is `aplan_evidence::version::next_release`, because
+/// `APLAN048` makes it too and the two disagreed: this command preferred the
+/// release node the plan models and the rule always took the tag window, so a
+/// plan whose release held an unfinished break had `aplan version` say `2.0.0`
+/// while `verify` reported `ok` on a tree declaring `1.0.1`. This function is
+/// only the saying.
+fn describe_window(
+    next: &aplan_evidence::version::NextRelease,
+) -> Result<(aplan_core::version::Owed, String, serde_json::Value)> {
+    use aplan_evidence::version::Chosen;
+    let json = match &next.window {
+        Chosen::SinceTag { closed } => serde_json::json!({
+            "kind": "since_tag",
+            "since": next.since.as_ref().map(|t| t.name.clone()),
+            "closed": closed,
+        }),
+        Chosen::Release { id, unclaimed } => serde_json::json!({
+            "kind": "release",
+            "release": id,
+            "since": next.since.as_ref().map(|t| t.name.clone()),
+            "unclaimed": unclaimed,
+        }),
+        // A guess here would be a number, and a wrong one is worse than none.
+        Chosen::Ambiguous { ids } => anyhow::bail!(
+            "this plan models {} open releases ({}), so which one ships next is its \
+             question rather than this tool's. Close the ones that shipped, or ask about \
+             one by name: `aplan version <release>`.",
+            ids.len(),
+            ids.join(", ")
+        ),
+        Chosen::Unmeasurable { why } => {
+            anyhow::bail!("the release window could not be read: {why}")
+        }
+    };
+    Ok((next.owed.clone(), next.said(), json))
 }
 
 fn cmd_why(root: &std::path::Path, id: &str, all: bool, format: &str) -> Result<u8> {
@@ -6736,7 +7977,14 @@ fn cmd_export_agents_md(
     // nothing and the block simply says less.
     let plan = aplan_core::load_plan(root);
     let contract = agent_contract(root, config_dir.as_deref(), &config, &plan);
-    let block = aplan_output::render_agents_md(&contract);
+    let wb = written_by();
+    let block = aplan_output::render_agents_md(
+        &contract,
+        Some(&aplan_output::WrittenBy {
+            version: &wb.0,
+            surface: &wb.1,
+        }),
+    );
 
     if let Some(path) = check {
         let text =
@@ -6745,13 +7993,40 @@ fn cmd_export_agents_md(
         return Ok(match replace_block(&text, &block) {
             Some(updated) if updated == text => EXIT_OK,
             _ => {
+                // Which build is asking is half the answer (`A1-325`, ADR-0037).
+                // The pilot's thirty-line diff was a pinned CI binary against a
+                // newer local one, and the refusal named neither, so it could
+                // not be reproduced where it was made.
+                // Both sides as the *inner* text: `block` carries its markers
+                // and what a file yields does not, so comparing them whole
+                // would answer "different" for every file.
+                let inner = |t: &str| match aplan_core::contract::block_in(t) {
+                    aplan_core::contract::Block::Present(b) => Some(b.to_string()),
+                    _ => None,
+                };
+                let same_policy = match (inner(&text), inner(&block)) {
+                    (Some(found), Some(want)) => {
+                        aplan_core::contract::differs_only_by_build(&found, &want)
+                    }
+                    _ => false,
+                };
+                let why = if same_policy {
+                    " It says what this repository's policy says and names a different build \
+                     as its author, so the difference is the build and not the policy."
+                } else {
+                    ""
+                };
                 errln!(
                     "{}",
                     aplan_output::fold::fold(
                         &format!(
-                            "{} disagrees with `aplan export-agents-md`. Regenerate it with \
-                             `aplan export-agents-md --write {}`.",
+                            "{} disagrees with `aplan export-agents-md`, checked by aplan {} \
+                             (surface {}).{} Regenerate it with `aplan export-agents-md \
+                             --write {}`.",
                             path.display(),
+                            wb.0,
+                            wb.1,
+                            why,
                             path.display()
                         ),
                         aplan_output::fold::err_width(),
@@ -7011,7 +8286,16 @@ fn with_agents_block(
     let contract = agent_contract(root, config_dir, config, plan);
     opts.agents_block = Some(aplan_core::AgentsBlock {
         path,
-        current: block_between_markers(&aplan_output::render_agents_md(&contract)),
+        current: {
+            let wb = written_by();
+            block_between_markers(&aplan_output::render_agents_md(
+                &contract,
+                Some(&aplan_output::WrittenBy {
+                    version: &wb.0,
+                    surface: &wb.1,
+                }),
+            ))
+        },
     });
     opts
 }
@@ -7447,6 +8731,338 @@ fn cmd_summary(root: &std::path::Path, format: &str, select: &SelectArgs) -> Res
 ///
 /// Dropping a cut was forty hand edits in the pilot that asked for this, and a
 /// half-applied one leaves a plan that says something nobody decided (`A1-077`).
+/// The commands that move a task without editing what it says (`A1-359`).
+///
+/// `drop` and `mv` change a task's state and its placement; `claim`, `release`,
+/// `start` and `stop` change who holds it and whether it is under way. None of
+/// them touches the task's own content, which is the line this split is drawn
+/// on -- `add`, `close`, `amend`, `tag` and `supersede` all do, and stay in
+/// [`dispatch`].
+fn dispatch_placement(command: Command, cli_root: Option<PathBuf>) -> Result<u8> {
+    match command {
+        Command::Drop { ids, cut, verdict } => {
+            cmd_drop(&resolve_root(cli_root)?, &ids, cut, verdict)
+        }
+        Command::Mv {
+            ids,
+            cut,
+            phase,
+            verdict,
+        } => cmd_mv(
+            &resolve_root(cli_root)?,
+            &ids,
+            cut.as_deref(),
+            phase,
+            verdict,
+        ),
+        Command::Claim {
+            id,
+            as_name,
+            from,
+            verdict,
+        } => cmd_claim(
+            &resolve_root(cli_root)?,
+            &id,
+            as_name.as_deref(),
+            from.as_deref(),
+            verdict,
+        ),
+        Command::Release { id, verdict } => cmd_release(&resolve_root(cli_root)?, &id, verdict),
+        Command::Start { id, verdict } => cmd_working(&resolve_root(cli_root)?, &id, true, verdict),
+        Command::Stop { id, verdict } => cmd_working(&resolve_root(cli_root)?, &id, false, verdict),
+        // Unreachable by construction: the caller matches these four before
+        // routing here. A refusal rather than `unreachable!`, so a fifth arm
+        // added to that pattern cannot panic in a consumer's terminal.
+        other => anyhow::bail!("`{other:?}` is not a placement command"),
+    }
+}
+
+/// Who this invocation is acting as, or a refusal naming every source.
+///
+/// One function so `claim` and anything after it resolve identically, and so
+/// the precedence lives in `aplan_interop::identity` where it is tested without
+/// an environment (`A1-359`).
+fn acting_as(root: &std::path::Path, as_name: Option<&str>) -> Result<String> {
+    let sources = aplan_interop::identity::from_environment(as_name, root);
+    aplan_interop::identity::resolve(&sources).map_err(anyhow::Error::from)
+}
+
+/// A name as it is safe to print back.
+///
+/// The plan already holds an `owner` carrying an ANSI escape, written by
+/// `import` from a terminal capture, so every message that names a holder reads
+/// it through the same filter the renderers use (`A1-290`).
+fn shown(name: &str) -> String {
+    aplan_output::sanitize::visible(name).into_owned()
+}
+
+/// `aplan claim`: record who holds a task (`A1-359`).
+///
+/// **The mutual exclusion is the compare-and-swap, not the name.** Two agents
+/// both read "unassigned", both write their own name, and without a swap the
+/// last writer wins while `check` reports a perfectly valid plan -- two actors
+/// doing the same work, and nothing in the plan able to say so. `save_one`
+/// carries `expected`, so the second writer is told the file no longer holds
+/// what it read. That is the invariant hand-editing cannot maintain, which is
+/// the bar `A1-077` set for a write surface and the reason this one earns its
+/// place where a bare `status` setter did not.
+///
+/// Identity is a *label* here rather than a boundary: nothing stops a caller
+/// passing `--as` somebody else's name, and nothing needs to, because the
+/// exclusion does not depend on who you say you are.
+fn cmd_claim(
+    root: &std::path::Path,
+    id: &str,
+    as_name: Option<&str>,
+    from: Option<&str>,
+    verdict: VerdictFlags,
+) -> Result<u8> {
+    let plan = aplan_core::load_plan(root);
+    if !loaded_cleanly(&plan) {
+        anyhow::bail!("the plan did not load; run `aplan check` before mutating it");
+    }
+    let lt = locate(&plan, id)?;
+    let who = acting_as(root, as_name)?;
+
+    let original = std::fs::read_to_string(&lt.path)
+        .with_context(|| format!("reading {}", lt.path.display()))?;
+    // **The holder as this file holds it now, not as the plan snapshot had
+    // it** (`A1-359`, found by its own concurrency test). The snapshot is taken
+    // before this read, so a claimant that loaded the plan while the task was
+    // free and read the file after somebody else claimed it would check the
+    // snapshot (free, so no `--from` needed), then compare-and-swap against the
+    // content it had just read (which matches), and win -- two callers told
+    // they hold one task, which is the single thing this command exists to
+    // prevent. Measured at two of eight.
+    //
+    // Checking the bytes that are about to be swapped closes it: the check and
+    // the `expected` now describe the same state, and anything that moves
+    // between them fails the swap.
+    let current = task_of(&original, id)?;
+
+    // **Both sides named**, which is `amend --replace-evidence`'s idiom: a
+    // takeover that only names the taker leaves a diff nobody can read back.
+    match (current.owner.as_deref(), from) {
+        (Some(holder), None) => anyhow::bail!(
+            "`{id}` is held by `{}`; naming them is how a takeover is recorded, so run \
+             `aplan claim {id} --from {}` if you mean to take it, or \
+             `aplan release {id}` first if they are done with it",
+            shown(holder),
+            shown(holder)
+        ),
+        (Some(holder), Some(named)) if holder != named => anyhow::bail!(
+            "`{id}` is held by `{}`, not `{}`; `--from` is checked rather than taken on \
+             trust, because a stale name means you are taking it from somebody you \
+             have not seen",
+            shown(holder),
+            shown(named)
+        ),
+        (None, Some(named)) => anyhow::bail!(
+            "`{id}` is held by nobody, so there is nothing to take it from: drop \
+             `--from {}` and claim it",
+            shown(named)
+        ),
+        _ => {}
+    }
+
+    let updated = aplan_core::close::set_owner(&original, Some(&who))
+        .map_err(|e| close_err("claim", id, &e))?;
+    // **The gate runs**, because `owner` is not inert: a `policy` scope may
+    // select on it, so a claim can move a task into a stricter evidence
+    // standard and make a closure that was clean report a finding. Judged
+    // before the write, like every other mutation (`A1-113`).
+    let after = aplan_core::mutation::with_replaced(&plan, id, task_of(&updated, id)?);
+    refuse_bad_mutation(root, &format!("claim `{id}`"), &plan, &after, verdict)?;
+    save_one(&lt.path, &original, &updated, "claim")?;
+
+    let mut out = String::new();
+    let _ = writeln!(out, "`{id}` is held by `{}`", shown(&who));
+    if let Some(holder) = current.owner.as_deref() {
+        let _ = writeln!(out, "  taken from `{}`", shown(holder));
+    }
+    let _ = writeln!(out, "  -> {}", lt.path.display());
+    // Starting is a separate act, and saying so once is better than a reader
+    // assuming a claim moved the status.
+    if current.status == aplan_core::Status::Todo {
+        let _ = writeln!(
+            out,
+            "  still `todo`: `aplan start {id}` records that work has begun"
+        );
+    } else if current.status.is_terminal() {
+        // Allowed rather than refused: this is the only way to attribute
+        // finished work without hand-editing the file, and `owner` on a closed
+        // task is ordinary -- this plan carries 228 of them. Said out loud so a
+        // caller who meant a live task sees it (`A1-359`, audit).
+        let _ = writeln!(
+            out,
+            "  note: `{id}` is `{}`, so this records who did it rather than who is on it",
+            current.status
+        );
+    }
+    write_stdout(&out)?;
+    Ok(EXIT_OK)
+}
+
+/// `aplan release`: drop a claim, naming whose it was (`A1-359`).
+///
+/// **Anybody may run it**, deliberately. A claim with no expiry needs a way out
+/// that does not depend on the holder being available, and the alternative --
+/// only the holder may release -- turns an abandoned claim into something no
+/// command can clear, which is the hand-editing this exists to remove. The
+/// two-step bypass (release, then claim) is therefore open, and it leaves a
+/// record: this names the holder it dropped, and the diff shows it.
+fn cmd_release(root: &std::path::Path, id: &str, verdict: VerdictFlags) -> Result<u8> {
+    let plan = aplan_core::load_plan(root);
+    if !loaded_cleanly(&plan) {
+        anyhow::bail!("the plan did not load; run `aplan check` before mutating it");
+    }
+    let lt = locate(&plan, id)?;
+    // **The holder as this file holds it now** (`A1-359`, audit). Read from the
+    // plan snapshot, this could report the wrong displaced holder: the snapshot
+    // is taken before the file, so a release could say it dropped a claim that
+    // was already gone, or name a holder a concurrent takeover had replaced.
+    // The write was never wrong -- the compare-and-swap refuses an interleaving
+    // it cannot account for, measured at five of eight under contention -- but
+    // the *record* of what was displaced is what this command exists to leave.
+    //
+    // It also makes the two surfaces agree: `aplan_release` has read the file
+    // since it was written, and `mcp_parity` cannot see a difference that only
+    // shows up under concurrency.
+    let original = std::fs::read_to_string(&lt.path)
+        .with_context(|| format!("reading {}", lt.path.display()))?;
+    let current = task_of(&original, id)?;
+    let Some(holder) = current.owner.clone() else {
+        // Not an error: a caller clearing a claim that is already clear got the
+        // outcome it asked for. Said plainly so a script does not have to parse
+        // a failure to learn nothing needed doing.
+        write_stdout(&format!("`{id}` is held by nobody; nothing to release\n"))?;
+        return Ok(EXIT_OK);
+    };
+
+    let updated =
+        aplan_core::close::set_owner(&original, None).map_err(|e| close_err("release", id, &e))?;
+    let after = aplan_core::mutation::with_replaced(&plan, id, task_of(&updated, id)?);
+    refuse_bad_mutation(root, &format!("release `{id}`"), &plan, &after, verdict)?;
+    save_one(&lt.path, &original, &updated, "release")?;
+
+    write_stdout(&format!(
+        "`{id}` released; it was held by `{}`\n  -> {}\n",
+        shown(&holder),
+        lt.path.display()
+    ))
+    .map(|()| EXIT_OK)
+}
+
+/// `aplan start` and `aplan stop`: set and clear `in_progress` (`A1-359`).
+///
+/// One function because they are one edit in two directions, and the asymmetry
+/// is only in what is refused: `start` on a terminal task is a reopen, which
+/// ADR-0020 settled, and `set_status` refuses it for both.
+///
+/// **This is a claim, and the product's own argument says a claim is not
+/// proof.** `done` is believed because `verify` resolves what it cites; a
+/// stored `in_progress` has nothing to resolve against by itself. So it is
+/// stored *and* checked: `APLAN053` reports one the repository contradicts.
+/// Storing it was the alternative to deleting the status, and the premise is
+/// not "do not store claims", it is "do not take claims on trust".
+fn cmd_working(
+    root: &std::path::Path,
+    id: &str,
+    starting: bool,
+    verdict: VerdictFlags,
+) -> Result<u8> {
+    let plan = aplan_core::load_plan(root);
+    if !loaded_cleanly(&plan) {
+        anyhow::bail!("the plan did not load; run `aplan check` before mutating it");
+    }
+    let lt = locate(&plan, id)?;
+    let want = if starting {
+        aplan_core::Status::InProgress
+    } else {
+        aplan_core::Status::Todo
+    };
+    let verb = if starting { "start" } else { "stop" };
+    // **Every guard below reads this, not the plan snapshot** (`A1-359`,
+    // audit). The snapshot predates the read, so a status that moved in between
+    // made each guard answer about a task that no longer looked like that: the
+    // "already there" path could report success for a change it did not make,
+    // and the "not `in_progress`" refusal could decline a stop that was legal.
+    // `set_status` re-parses and refuses a terminal task independently, so
+    // nothing was ever corrupted -- but a command that reports what it did has
+    // to decide from what it is about to write. `aplan_start` has read the file
+    // since it was written.
+    let original = std::fs::read_to_string(&lt.path)
+        .with_context(|| format!("reading {}", lt.path.display()))?;
+    let current = task_of(&original, id)?;
+    if current.status == want {
+        write_stdout(&format!("`{id}` is already `{want}`; nothing to {verb}\n"))?;
+        return Ok(EXIT_OK);
+    }
+    // **Refused here rather than by `set_status`**, which refuses it too but
+    // explains it as `close` would: its advice is about adding a citation to
+    // finished work, which is the right answer to a different question and
+    // reads as a non sequitur after `aplan start` (`A1-359`, measured on the
+    // real message). Nothing reopens a terminal task (ADR-0020), and the
+    // project's answer for work that turns out to need more is a successor.
+    if current.status.is_terminal() {
+        // The remedy differs by which terminal state it is, and getting that
+        // wrong is worse than not offering one: `supersede` refuses anything
+        // that is not `done`, so advising it for a `dropped` task sends the
+        // reader to a second refusal (`A1-359`, audit).
+        let remedy = if current.status == aplan_core::Status::Done {
+            format!(
+                "its record describes work that was finished and resolved. File what is \
+                 left with `aplan supersede {id} <title>`, which keeps that record and \
+                 files the successor against it"
+            )
+        } else {
+            "it records a decision not to do this. File what is now wanted as its own task \
+             with `aplan add <title>`; `aplan supersede` is for finished work rather than \
+             cancelled work, and refuses this"
+                .to_string()
+        };
+        anyhow::bail!(
+            "`{id}` is `{}`, a terminal state, and nothing returns it to being worked: {remedy}",
+            current.status
+        );
+    }
+    // `stop` means "no longer being worked", and the only status that says that
+    // without claiming anything is `todo`. A task that is `blocked` is parked
+    // for a reason outside the graph, which stopping does not answer.
+    if !starting && current.status != aplan_core::Status::InProgress {
+        anyhow::bail!(
+            "`{id}` is `{}`, not `in_progress`, so there is nothing to stop",
+            current.status
+        );
+    }
+
+    let updated =
+        aplan_core::close::set_status(&original, want).map_err(|e| close_err(verb, id, &e))?;
+    let after = aplan_core::mutation::with_replaced(&plan, id, task_of(&updated, id)?);
+    refuse_bad_mutation(root, &format!("{verb} `{id}`"), &plan, &after, verdict)?;
+    save_one(&lt.path, &original, &updated, verb)?;
+
+    let mut out = String::new();
+    let _ = writeln!(out, "`{id}` is now `{want}`\n  -> {}", lt.path.display());
+    // Who is on it is a different question, and an unclaimed task that somebody
+    // has started is the coordination gap this pair exists to close.
+    if starting {
+        match current.owner.as_deref() {
+            None => {
+                let _ = writeln!(
+                    out,
+                    "  held by nobody: `aplan claim {id}` records who is on it"
+                );
+            }
+            Some(holder) => {
+                let _ = writeln!(out, "  held by `{}`", shown(holder));
+            }
+        }
+    }
+    write_stdout(&out)?;
+    Ok(EXIT_OK)
+}
+
 fn cmd_drop(
     root: &std::path::Path,
     ids: &[String],
@@ -7495,10 +9111,11 @@ fn cmd_drop(
             // and `check` called that clean (`A1-084`). The roadmap has always
             // drawn this line the same way.
             for member in &lt.task.blocked_by {
-                if let Some(m) = by_id.get(member.as_str()) {
-                    if !m.task.is_milestone() && !m.task.status.is_terminal() {
-                        targets.push(m);
-                    }
+                if let Some(m) = by_id.get(member.as_str())
+                    && !m.task.is_milestone()
+                    && !m.task.status.is_terminal()
+                {
+                    targets.push(m);
                 }
             }
         }
@@ -7873,6 +9490,28 @@ fn save_one(path: &std::path::Path, expected: &str, updated: &str, command: &str
     )
 }
 
+/// A save that did not happen, carrying both the sentence a reader needs and the
+/// error a retrying caller needs.
+///
+/// `save_batch` used to flatten its error into a string, which is the right
+/// message and loses the one fact a caller minting an id has to branch on: was
+/// this an id somebody else took, or something else entirely (`A1-230`)? The
+/// `Display` is the advice alone and there is no `source`, so `{e:#}` prints
+/// exactly what it printed before.
+#[derive(Debug)]
+struct SaveFailed {
+    advice: String,
+    kind: aplan_core::save::SaveError,
+}
+
+impl std::fmt::Display for SaveFailed {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(&self.advice)
+    }
+}
+
+impl std::error::Error for SaveFailed {}
+
 fn save_batch(batch: &[aplan_core::save::Replacement], command: &str) -> Result<()> {
     if batch.is_empty() {
         return Ok(());
@@ -7881,8 +9520,119 @@ fn save_batch(batch: &[aplan_core::save::Replacement], command: &str) -> Result<
     // invocation this tool prints parses what it finds in the source, and a
     // format placeholder where a subcommand goes is not one (`A1-089`).
     let retry = format!("aplan {command}");
-    aplan_core::save::replace_all(batch)
-        .map_err(|e| anyhow::anyhow!("{}", aplan_core::save::advice(&e, &retry)))
+    aplan_core::save::replace_all(batch).map_err(|e| {
+        let advice = aplan_core::save::advice(&e, &retry);
+        anyhow::Error::new(SaveFailed { advice, kind: e })
+    })
+}
+
+/// How long a command that mints an id keeps trying when another writer takes it
+/// first (`A1-230`).
+///
+/// Generous against measurement rather than guessed, over five runs of each on
+/// an idle machine: 8 concurrent `add` all succeed with the slowest writer
+/// taking about 40ms over at most five attempts, and 24 all succeed with the
+/// slowest taking about 160ms over at most ten. So the deadline is roughly
+/// thirty times the worst case observed, and a run on a loaded machine measured
+/// about twice those figures, which is still inside two orders of it. A config
+/// key is the obvious extension if a repository ever reports reaching this, and
+/// none has.
+const ID_RACE_DEADLINE: std::time::Duration = std::time::Duration::from_secs(5);
+
+/// Whether this failure is "another writer took the id I minted".
+///
+/// The two writers report it with their own types -- `emit` writes a new file
+/// directly and `save` writes a batch -- and a retry is right for both and for
+/// nothing else here. A `Changed` is somebody editing a file this command had
+/// read, which `save`'s own advice already tells the caller to re-run, and a
+/// `Busy` or an `Io` is not an id question at all.
+///
+/// **A retry is only safe because `Exists` is raised before anything is
+/// written**, and both writers earn that separately. `emit::write_task_placed`
+/// writes the task file first and places it in a cut second, so a collision
+/// cannot leave a membership behind; `save::replace_all` runs every
+/// `check_replaceable` under its locks before it stages a single temporary
+/// file, so a batch that loses one id writes none of it. The partial case a
+/// batch does have -- a `rename` failing part-way through the second phase --
+/// is an `Io`, which is not retried, so this list is the boundary of the
+/// guarantee rather than a summary of it.
+fn lost_the_id(error: &anyhow::Error) -> bool {
+    if let Some(failed) = error.downcast_ref::<SaveFailed>() {
+        return matches!(failed.kind, aplan_core::save::SaveError::Exists { .. });
+    }
+    error
+        .downcast_ref::<aplan_interop::emit::EmitError>()
+        .is_some_and(|e| matches!(e, aplan_interop::emit::EmitError::Exists { .. }))
+}
+
+/// Run `attempt` until it stops losing an id race, or `deadline` passes
+/// (`A1-230`). Every caller passes [`ID_RACE_DEADLINE`]; it is a parameter so a
+/// test can reach the refusal without holding real contention open for seconds.
+///
+/// **Every attempt re-reads the plan**, which is the whole point: the id that
+/// collided is now taken, so minting again from the plan as it is finds the next
+/// free one. That is why this wraps the caller's whole mint-and-write rather
+/// than retrying a prepared write, which would collide forever -- the reason
+/// `SaveError::Exists` says a retry is not the remedy (`A1-241`). It is not the
+/// remedy for the *same* id; it is for a freshly minted one.
+///
+/// `add` is no longer a pure function of the plan it read, and that is the trade
+/// taken deliberately: the id a caller gets now depends on who else was writing.
+/// The count comes back so the caller can say so, because contention a fleet
+/// cannot see is contention it never fixes.
+fn with_id_retry<T>(
+    minted: bool,
+    deadline: std::time::Duration,
+    mut attempt: impl FnMut() -> Result<T>,
+) -> Result<(T, u32)> {
+    let started = std::time::Instant::now();
+    let mut tries = 0u32;
+    loop {
+        tries += 1;
+        match attempt() {
+            Ok(value) => return Ok((value, tries)),
+            Err(e) if minted && lost_the_id(&e) => {
+                if started.elapsed() < deadline {
+                    std::thread::sleep(aplan_interop::ids::race_backoff(tries));
+                    continue;
+                }
+                // **What a script can act on** (`A1-230`, and `A1-109`'s
+                // standard for a refusal). The underlying error names the file
+                // that was already there, which tells a reader what went wrong
+                // and not what to do. This says the id was taken by another
+                // writer, how hard this tried, and that running again mints a
+                // different one.
+                //
+                // It does not mention `id_strategy`: ADR-0024 settled that no
+                // command recommends a feature because it saw a condition, and
+                // a fleet that reaches this deadline is exactly the reader
+                // `docs/upgrading.md` is written for.
+                return Err(e.context(format!(
+                    "another writer took every id this minted, {tries} times over \
+                     {}ms; nothing was written. Run the command again to mint from \
+                     the plan as it is now",
+                    started.elapsed().as_millis()
+                )));
+            }
+            Err(e) => return Err(e),
+        }
+    }
+}
+
+/// What a run says about an id race it won on a later attempt.
+///
+/// Only when there was one, and it names the cost rather than the mechanism: a
+/// reader who sees this on every run has a fleet contending for sequential ids,
+/// which is the condition `docs/upgrading.md` discusses. Per ADR-0024 this does
+/// not recommend a config key.
+fn raced_for_the_id(tries: u32, elapsed: std::time::Duration) -> Option<String> {
+    (tries > 1).then(|| {
+        format!(
+            "  another writer held the id this was going to use; minted again \
+             ({tries} attempts over {}ms)",
+            elapsed.as_millis()
+        )
+    })
 }
 
 /// Open every file this move will write, before any of them is written.
@@ -8035,24 +9785,71 @@ fn cmd_tasks(root: &std::path::Path, format: &str, select: &SelectArgs) -> Resul
     Ok(EXIT_OK)
 }
 
+/// `aplan critical-path`'s arguments.
+///
+/// A struct rather than inline fields, for the reason `cmd_schema` is its own
+/// function: the arms of `dispatch` are a table of what each command is wired
+/// to, and a second argument pushed this one onto three lines and the match past
+/// its line limit.
+#[derive(clap::Args, Debug)]
+pub struct CriticalPathArgs {
+    /// A task, cut, container or release the chain must end at. Omit for the
+    /// whole plan.
+    to: Option<String>,
+    /// Output format: human (a table) or json.
+    #[arg(long, default_value = "human")]
+    format: String,
+}
+
 /// `aplan critical-path`, the longest `effort_days`-weighted chain of dependent
 /// tasks. Advisory: it never fails the build, a plan is not wrong for being long.
-fn cmd_critical_path(root: &std::path::Path, format: &str) -> Result<u8> {
-    let format = format_for("critical-path", format)?;
+fn cmd_critical_path(root: &std::path::Path, args: &CriticalPathArgs) -> Result<u8> {
+    let to = args.to.as_deref();
+    let format = format_for("critical-path", &args.format)?;
     let plan = load_checked(root)?;
     if !loaded_cleanly(&plan) {
         return Ok(EXIT_VIOLATIONS);
     }
     let tasks: Vec<_> = plan.tasks.iter().map(|lt| &lt.task).collect();
     let graph = Graph::new(tasks.iter().copied());
-    let Some(path) = graph.critical_path() else {
-        // A cycle has no longest path; `check` reports it as APLAN004. This is a
-        // problem with the plan (exit 2), not with aplan.
+    // **What is left, measured rather than subtracted** (`A1-352`). Not the
+    // live tail of the chain above: a chain that is mostly finished can be the
+    // longest one while a shorter all-live chain is the real bound on what
+    // remains, so the walk is re-run with `done` weighing nothing.
+    let remaining = match to {
+        Some(id) => graph.weighted_path_to(id, aplan_core::Weigh::Remaining),
+        None => graph.weighted_path(aplan_core::Weigh::Remaining),
+    };
+    let path = match to {
+        // **Named endpoint, whole graph** (`A1-345`). Every edge is kept,
+        // including prerequisites that cross a cut; only the chain's end is
+        // chosen. That is why it is sound where a selector is not (`A1-214`).
+        Some(id) => {
+            let Some(task) = graph.get(id) else {
+                anyhow::bail!("no task `{id}` in this plan");
+            };
+            if task.status == aplan_core::Status::Dropped {
+                anyhow::bail!(
+                    "`{id}` is `dropped`, so nothing leads to it: work that is not going to \
+                     happen has no chain. Ask about a checkpoint that is still live."
+                );
+            }
+            graph.critical_path_to(id)
+        }
+        None => graph.critical_path(),
+    };
+    let Some(path) = path else {
+        // A cycle has no longest path, and there are two kinds: a `blocked_by`
+        // cycle and a `contains` loop, which the weighted walk reads as an
+        // ordering edge. `check` reports both, so name both rather than send a
+        // reader looking for the wrong one. This is a problem with the plan
+        // (exit 2), not with aplan.
         anyhow::bail!(
-            "cannot compute the critical path: the plan has a dependency cycle (run `aplan check`)"
+            "cannot compute the critical path: the plan has a cycle in its dependencies or a \
+             loop in its containment (run `aplan check`, which reports each by name)"
         );
     };
-    render_tolerant(|| render_critical_path(&path, format))?;
+    render_tolerant(|| render_critical_path(&path, remaining.as_ref(), to, format))?;
     Ok(EXIT_OK)
 }
 
@@ -8164,7 +9961,17 @@ fn cmd_roadmap(root: &std::path::Path, args: &RoadmapArgs) -> Result<u8> {
         roadmap = roadmap.grouped_by(members.members());
     }
     let text = match out {
-        Out::Markdown => render_roadmap_markdown(&roadmap, regenerate_with),
+        Out::Markdown => {
+            let (version, surface) = written_by();
+            render_roadmap_markdown(
+                &roadmap,
+                regenerate_with,
+                Some(&aplan_output::WrittenBy {
+                    version: &version,
+                    surface: &surface,
+                }),
+            )
+        }
         Out::Shared(f) => render_roadmap(&roadmap, f),
     };
     render_tolerant(|| {
@@ -8199,6 +10006,87 @@ mod suggestion_tests {
 mod tests {
     use super::*;
     use aplan_config::Config;
+
+    /// **The fixture the banner's digest is computed over really exercises the
+    /// renderers it claims to** (`A1-325`, ADR-0037).
+    ///
+    /// The digest answers "would another build have written this file
+    /// differently" by rendering a fixed input and hashing it, so its reach is
+    /// exactly the reach of that input. A fixture trimmed to an empty roadmap
+    /// would still produce a digest, still change when the *facts* changed, and
+    /// quietly stop noticing every change to a row -- the green-by-construction
+    /// shape this task exists to remove, one layer down from where it was
+    /// found. So each shape is named here: deleting one from the fixture fails
+    /// this rather than narrowing the digest in silence.
+    #[test]
+    fn the_digested_fixture_renders_every_shape_it_claims() {
+        let rendered = canonical_artifacts();
+        for (shape, needle) in [
+            ("the cut rollup table", "| cut | status | done/total |"),
+            ("the weeks column", "| weeks |"),
+            ("a cut row", "| v0.1 |"),
+            ("a member row", "X1-01"),
+            ("cited evidence", "commit:abcdef123456"),
+            ("a blocker", "X1-02"),
+            ("a group heading", "a-tag"),
+            // The markdown rollup renders the path's *total*, not its task
+            // titles, so that number is what the digest actually reaches. Named
+            // as what it is rather than as what the fixture happens to carry.
+            ("the critical path total", "2.0d |"),
+            ("the agent contract", "## The plan is the source of truth"),
+            ("the contract's plan dir", "plan/"),
+            ("the contract's id convention", "X1-nn"),
+        ] {
+            assert!(
+                rendered.contains(needle),
+                "the digested fixture no longer renders {shape} (`{needle}`), so the banner \
+                 stopped noticing changes to it:\n{rendered}"
+            );
+        }
+    }
+
+    /// The digested renders carry no banner of their own (`A1-325`).
+    ///
+    /// Both renderers take the provenance line as an argument, so handing them
+    /// this build's would be unbounded recursion through `written_by`. It is
+    /// also wrong on the merits: the banner is not part of what varies between
+    /// builds, so hashing it would make the digest a function of itself.
+    #[test]
+    fn the_digested_fixture_carries_no_banner() {
+        assert!(
+            !canonical_artifacts().contains(aplan_core::contract::WRITTEN_BY_PREFIX),
+            "the digest is computed over a document containing the digest"
+        );
+    }
+
+    /// **The banner's digest is not the facts digest**, which is the whole
+    /// correction `A1-325`'s audit made (`ADR-0037`).
+    ///
+    /// Measured before this: rewording one heading in the roadmap renderer
+    /// changed the artifact and left the banner byte-identical, because
+    /// `facts_sha256` covers what a build advertises and not what it writes.
+    /// Asserting they differ is the cheap half; the expensive half is the
+    /// fixture test above, which is what keeps the difference meaningful.
+    #[test]
+    fn the_banner_digest_is_not_the_facts_digest() {
+        let (_, surface) = written_by();
+        let facts_prefix: String = tool_identity().facts_sha256.chars().take(12).collect();
+        assert_ne!(
+            surface, facts_prefix,
+            "the banner is back to digesting only the advertised surface, so a \
+             rendering-only change between two builds of one version is invisible again"
+        );
+        assert_eq!(surface.len(), 12, "the banner digest changed width");
+        assert!(surface.chars().all(|c| c.is_ascii_hexdigit()));
+    }
+
+    /// One build, one answer. `written_by` is called by two producers of the
+    /// same bytes, and a digest that varied per call would fail the drift gate
+    /// on the banner itself.
+    #[test]
+    fn the_banner_is_stable_across_calls() {
+        assert_eq!(written_by(), written_by());
+    }
 
     /// **The two readers of `--color` agree, on every shape `clap` accepts.**
     ///
@@ -8624,6 +10512,161 @@ mod tests {
         assert_eq!(
             resolve_check_options(&c, None, false, None, false).traces_root,
             None
+        );
+    }
+}
+
+#[cfg(test)]
+mod id_race {
+    use super::*;
+
+    fn taken(path: &str) -> anyhow::Error {
+        anyhow::Error::new(SaveFailed {
+            advice: format!("`{path}` already exists"),
+            kind: aplan_core::save::SaveError::Exists {
+                path: std::path::PathBuf::from(path),
+            },
+        })
+    }
+
+    /// **A command that gives up still tells a script what to do** (`A1-230`,
+    /// criterion 1).
+    ///
+    /// The error underneath names the file that was already there, which is
+    /// what went wrong and not what to do about it. A fleet that hits the
+    /// deadline needs to know the id was lost rather than the task rejected,
+    /// that nothing was written, and that running again is the remedy -- and
+    /// per ADR-0024 it must learn that without the command recommending
+    /// `id_strategy` at it.
+    #[test]
+    fn a_command_that_runs_out_of_deadline_says_what_to_do() {
+        let e = with_id_retry(true, std::time::Duration::from_millis(1), || {
+            Err::<(), _>(taken("plan/v1/A1-001.md"))
+        })
+        .expect_err("a writer that never wins must refuse, not loop");
+        let said = format!("{e:#}");
+        for needle in [
+            "another writer took every id this minted",
+            "nothing was written",
+            "Run the command again",
+            // Still carries the mechanical detail underneath, so a human
+            // reading the whole chain sees which file collided.
+            "plan/v1/A1-001.md",
+        ] {
+            assert!(
+                said.contains(needle),
+                "the refusal omits `{needle}`:\n{said}"
+            );
+        }
+        assert!(
+            !said.contains("id_strategy") && !said.contains("ulid"),
+            "ADR-0024: no command recommends a feature because it saw a condition:\n{said}"
+        );
+    }
+
+    /// **A supplied id is refused at once, not after the deadline** (`A1-230`).
+    ///
+    /// Retrying re-mints, so it is the remedy for an id this command chose and
+    /// never for one the caller named: `--id A1-001` against an existing
+    /// `A1-001` means the same collision however long it waits. Measured as
+    /// well as asserted -- the real command refuses a supplied collision in
+    /// 43ms -- but this is what keeps it that way.
+    #[test]
+    fn a_supplied_id_does_not_wait_out_the_deadline() {
+        let mut tries = 0;
+        let e = with_id_retry(false, std::time::Duration::from_secs(30), || {
+            tries += 1;
+            Err::<(), _>(taken("plan/v1/A1-001.md"))
+        })
+        .expect_err("a named id that is taken is taken");
+        assert_eq!(tries, 1, "a supplied id was retried");
+        assert!(
+            !format!("{e:#}").contains("another writer took"),
+            "a supplied collision was reported as a race"
+        );
+    }
+
+    /// **The typed wrapper is invisible to whoever reads the error** (`A1-230`,
+    /// audit).
+    ///
+    /// `save_batch` used to lose the typed `SaveError` by rendering it straight
+    /// to advice, which is why `lost_the_id` could not tell an id collision
+    /// from a file that changed underneath. Keeping the type meant wrapping it,
+    /// and a wrapper is exactly the kind of change that quietly alters what a
+    /// user sees: give `SaveFailed` a `source()` and `{e:#}` starts appending
+    /// the inner error to advice that was already a whole sentence. The advice
+    /// is the message; the type is for this file.
+    #[test]
+    fn wrapping_the_save_error_did_not_change_what_is_printed() {
+        let advice = "`plan/v1/A1-001.md` already exists; it was not overwritten";
+        let wrapped = anyhow::Error::new(SaveFailed {
+            advice: advice.to_string(),
+            kind: aplan_core::save::SaveError::Exists {
+                path: std::path::PathBuf::from("plan/v1/A1-001.md"),
+            },
+        });
+        assert_eq!(format!("{wrapped:#}"), advice, "`{{:#}}` gained a chain");
+        assert_eq!(format!("{wrapped}"), advice, "`{{}}` gained a chain");
+        assert!(
+            std::error::Error::source(&SaveFailed {
+                advice: advice.to_string(),
+                kind: aplan_core::save::SaveError::Exists {
+                    path: std::path::PathBuf::from("x"),
+                },
+            })
+            .is_none(),
+            "a `source` on this wrapper appends the inner error to every save failure \
+             a user reads"
+        );
+    }
+
+    /// **Only losing an id is retried** (`A1-230`).
+    ///
+    /// `Changed` is somebody editing a file this command had read, and
+    /// re-minting does not address it: `save`'s own advice tells the caller to
+    /// look and re-run. Retrying it would spin through the deadline and then
+    /// report a race that never happened.
+    #[test]
+    fn a_file_that_changed_under_the_command_is_not_a_race() {
+        let mut tries = 0;
+        with_id_retry(true, std::time::Duration::from_secs(30), || {
+            tries += 1;
+            Err::<(), _>(anyhow::Error::new(SaveFailed {
+                advice: "re-read and try again".into(),
+                kind: aplan_core::save::SaveError::Changed {
+                    path: std::path::PathBuf::from("plan/v1/A1-001.md"),
+                },
+            }))
+        })
+        .expect_err("a changed file is still a failure");
+        assert_eq!(tries, 1, "a `Changed` was retried as an id race");
+    }
+
+    /// **A run that won on the first attempt says nothing** (`A1-230`).
+    ///
+    /// The note exists so a fleet can see contention it is paying for. On an
+    /// uncontended `add` -- every `add` in a single-writer repository -- there
+    /// is nothing to see, and a line about races on every run would train a
+    /// reader to skip it.
+    #[test]
+    fn an_uncontended_run_is_silent_about_the_race_it_did_not_have() {
+        assert_eq!(
+            raced_for_the_id(1, std::time::Duration::from_millis(3)),
+            None
+        );
+        let noisy = raced_for_the_id(4, std::time::Duration::from_millis(37))
+            .expect("four attempts is contention worth reporting");
+        assert!(
+            noisy.contains("4 attempts") && noisy.contains("37ms"),
+            "{noisy}"
+        );
+        // The other half of ADR-0024 (`A1-230`, criterion 4). A reader seeing
+        // this on every run has a fleet contending for sequential ids, and the
+        // temptation is for the note to say what to do about it. The guide
+        // says; the command reports.
+        assert!(
+            !noisy.contains("id_strategy") && !noisy.contains("ulid"),
+            "ADR-0024: the race note recommends a config key:\n{noisy}"
         );
     }
 }

@@ -1,0 +1,309 @@
+[
+  {
+    "description": "Name the build of this server: its version, the commit it was built from, and the digests of its capability document and its own image. Asking an installed CLI does not answer this -- a configured MCP process may be a different executable, which is how a pilot spent a pass on a defect the checkout had already fixed. Needs no plan and no repository.",
+    "inputSchema": {
+      "additionalProperties": false,
+      "properties": {},
+      "type": "object"
+    },
+    "name": "aplan_identity"
+  },
+  {
+    "description": "List tasks whose blockers are all done, so an agent can pick real work.",
+    "inputSchema": {
+      "additionalProperties": false,
+      "properties": {
+        "root": {
+          "description": "Plan root. Defaults to the server's configured root.",
+          "type": "string"
+        }
+      },
+      "type": "object"
+    },
+    "name": "aplan_ready"
+  },
+  {
+    "description": "Explain what is blocking a task: its own blockers, and any unfinished cut, without expanding that cut's membership. Pass `all` for the complete transitive closure; every answer names its `traversal`.",
+    "inputSchema": {
+      "additionalProperties": false,
+      "properties": {
+        "all": {
+          "description": "Walk through cuts into their membership as well. Off by default: a cut is reported as itself, with `behind` counting what was folded, because the complete closure of a sequenced plan is mostly the roadmap you can query separately. Every answer names its `traversal`.",
+          "type": "boolean"
+        },
+        "id": {
+          "description": "Task id.",
+          "type": "string"
+        },
+        "root": {
+          "description": "Plan root. Defaults to the server's configured root.",
+          "type": "string"
+        }
+      },
+      "required": [
+        "id"
+      ],
+      "type": "object"
+    },
+    "name": "aplan_why"
+  },
+  {
+    "description": "Validate the plan and return its diagnostics, and `denied`: whether this plan fails the build under the repository's warning policy. Hermetic: no git, no network.",
+    "inputSchema": {
+      "additionalProperties": false,
+      "properties": {
+        "root": {
+          "description": "Plan root. Defaults to the server's configured root.",
+          "type": "string"
+        }
+      },
+      "type": "object"
+    },
+    "name": "aplan_check"
+  },
+  {
+    "description": "Resolve the plan's evidence against the repository (L1/L2): a cited commit must exist and touch the task's `paths`, a cited file must exist. Opens git. Never runs tests.",
+    "inputSchema": {
+      "additionalProperties": false,
+      "properties": {
+        "root": {
+          "description": "Plan root. Defaults to the server's configured root.",
+          "type": "string"
+        }
+      },
+      "type": "object"
+    },
+    "name": "aplan_verify"
+  },
+  {
+    "description": "Create a task: the next id in this plan's own convention (or its prefix and a ULID, where the repository set `id_strategy: ulid`), placed in a cut, whose `phase` it takes. Refuses before writing what `check` would reject after, by running the rules on the plan this would produce; what it would only warn about is named in `notes` instead.",
+    "inputSchema": {
+      "additionalProperties": false,
+      "properties": {
+        "blocked_by": {
+          "items": {
+            "type": "string"
+          },
+          "type": "array"
+        },
+        "cut": {
+          "description": "The cut to place it in: its milestone id (`M-v0.8`) or the label it reports itself under (`v0.8`). A plan with `require_cut_membership` rejects a task in no cut.",
+          "type": "string"
+        },
+        "effort_days": {
+          "description": "Estimate in days.",
+          "type": "number"
+        },
+        "owner": {
+          "type": "string"
+        },
+        "paths": {
+          "description": "Globs this task owns. Without them its future evidence cannot be bound to it (`APLAN023`).",
+          "items": {
+            "type": "string"
+          },
+          "type": "array"
+        },
+        "root": {
+          "description": "Plan root. Defaults to the server's configured root.",
+          "type": "string"
+        },
+        "tags": {
+          "items": {
+            "type": "string"
+          },
+          "type": "array"
+        },
+        "title": {
+          "description": "What the task is, in a line.",
+          "type": "string"
+        },
+        "traces": {
+          "description": "Document sections this task answers to, as `path/to/doc.md#anchor`: what caused it, which exists, rather than what it will write. An anchor that does not resolve is refused (`APLAN008`).",
+          "items": {
+            "type": "string"
+          },
+          "type": "array"
+        }
+      },
+      "required": [
+        "title"
+      ],
+      "type": "object"
+    },
+    "name": "aplan_add"
+  },
+  {
+    "description": "One task whole: its `paths`, `traces` and `evidence`, which no other tool returns, plus what the graph resolves (its cut, whether it is ready, what it waits on and what it releases) and every finding attached to it. Reads the evidence ladder, so a closed task whose citation rotted looks different from a healthy one.",
+    "inputSchema": {
+      "additionalProperties": false,
+      "properties": {
+        "id": {
+          "description": "The task to show.",
+          "type": "string"
+        },
+        "root": {
+          "description": "Plan root. Defaults to the server's configured root.",
+          "type": "string"
+        }
+      },
+      "required": [
+        "id"
+      ],
+      "type": "object"
+    },
+    "name": "aplan_show"
+  },
+  {
+    "description": "Add or remove one dependency edge: `after` is the task that must finish first. `blocked_by` is the only ordering the model has and it was writable only at creation, so re-sequencing meant editing files by hand. Refuses before writing what `check` would reject after: a cycle, an id that does not exist, a cancelled blocker, or a done task acquiring an unfinished one. A milestone's `blocked_by` is which tasks are in that cut rather than what it comes after, so editing that is refused here and belongs to `aplan mv`.",
+    "inputSchema": {
+      "additionalProperties": false,
+      "properties": {
+        "add": {
+          "description": "True to record the edge, false to remove it.",
+          "type": "boolean"
+        },
+        "after": {
+          "description": "The task it comes after, which must finish first.",
+          "type": "string"
+        },
+        "id": {
+          "description": "The task that comes second.",
+          "type": "string"
+        },
+        "root": {
+          "description": "Plan root. Defaults to the server's configured root.",
+          "type": "string"
+        }
+      },
+      "required": [
+        "id",
+        "after",
+        "add"
+      ],
+      "type": "object"
+    },
+    "name": "aplan_dep"
+  },
+  {
+    "description": "Close a task with evidence, resolved before it is written: a cited commit must exist and touch the task's `paths`, a cited file must exist, and a cited test must be one a configured runner lists. Refuses exactly what the CLI refuses; evidence is a citation to be resolved, never a score the caller asserts. It never runs a test and never fetches a url, and whatever nothing here could check is named in `unchecked` rather than left looking like a pass. `aplan_verify` resolves the whole plan.",
+    "inputSchema": {
+      "additionalProperties": false,
+      "properties": {
+        "evidence": {
+          "description": "Evidence as `kind:ref`, e.g. `commit:d213c9a`, `test:mod::name`, `file:path`, `url:https://...`. Required: a status is a claim, and this server will not make it without proof to resolve.",
+          "items": {
+            "type": "string"
+          },
+          "type": "array"
+        },
+        "id": {
+          "description": "Task id to close.",
+          "type": "string"
+        },
+        "root": {
+          "description": "Plan root. Defaults to the server's configured root.",
+          "type": "string"
+        }
+      },
+      "required": [
+        "id",
+        "evidence"
+      ],
+      "type": "object"
+    },
+    "name": "aplan_close"
+  },
+  {
+    "description": "Record that you are working on a task, so other agents sharing this repository can see it and `aplan_ready` can be filtered to what nobody holds. Two agents cannot both be told they hold one task: the write is a compare-and-swap, and the second is refused rather than overwriting the first. Taking a task somebody holds needs `from` naming them, which is checked. The name comes from `as`, else `APLAN_OWNER`, else the repository's git user, else the operating system's; it is never read from `.aplan.yml`, because several actors share one repository.",
+    "inputSchema": {
+      "additionalProperties": false,
+      "properties": {
+        "as": {
+          "description": "The name to record. Otherwise `APLAN_OWNER`, then this repository's `git config user.name`, then the operating system's user. Never read from `.aplan.yml`.",
+          "type": "string"
+        },
+        "from": {
+          "description": "Who the task is being taken from. Required when somebody holds it, and checked rather than taken on trust.",
+          "type": "string"
+        },
+        "id": {
+          "description": "The task to claim.",
+          "type": "string"
+        },
+        "root": {
+          "description": "Plan root. Defaults to the server's configured root.",
+          "type": "string"
+        }
+      },
+      "required": [
+        "id"
+      ],
+      "type": "object"
+    },
+    "name": "aplan_claim"
+  },
+  {
+    "description": "Drop a claim, reporting whose it was. Any caller may release, because a claim lasts until it is released or taken over and an abandoned one has to be clearable by somebody else; the record of who held it is in the diff. Releasing a task nobody holds changes nothing and says so.",
+    "inputSchema": {
+      "additionalProperties": false,
+      "properties": {
+        "id": {
+          "description": "The task to release.",
+          "type": "string"
+        },
+        "root": {
+          "description": "Plan root. Defaults to the server's configured root.",
+          "type": "string"
+        }
+      },
+      "required": [
+        "id"
+      ],
+      "type": "object"
+    },
+    "name": "aplan_release"
+  },
+  {
+    "description": "Record that work on a task has begun, setting `in_progress`. A claim rather than a proof, and checked like one: `aplan_verify` reports `APLAN053` where the repository holds nothing matching the task's `paths`, so a status nobody acted on does not pass as progress. Refuses a task that is already terminal, because nothing reopens finished work.",
+    "inputSchema": {
+      "additionalProperties": false,
+      "properties": {
+        "id": {
+          "description": "The task whose `in_progress` status is being set or cleared.",
+          "type": "string"
+        },
+        "root": {
+          "description": "Plan root. Defaults to the server's configured root.",
+          "type": "string"
+        }
+      },
+      "required": [
+        "id"
+      ],
+      "type": "object"
+    },
+    "name": "aplan_start"
+  },
+  {
+    "description": "Record that work on a task has stopped, returning it to `todo`. Not a closure: it claims nothing about what was done, which is what `aplan_close` is for. Refuses a task that is not `in_progress`, since there is then nothing to stop.",
+    "inputSchema": {
+      "additionalProperties": false,
+      "properties": {
+        "id": {
+          "description": "The task whose `in_progress` status is being set or cleared.",
+          "type": "string"
+        },
+        "root": {
+          "description": "Plan root. Defaults to the server's configured root.",
+          "type": "string"
+        }
+      },
+      "required": [
+        "id"
+      ],
+      "type": "object"
+    },
+    "name": "aplan_stop"
+  }
+]

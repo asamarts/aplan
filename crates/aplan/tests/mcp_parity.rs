@@ -108,7 +108,194 @@ const PARITY: &[(&str, Option<(Parity, Comparison)>)] = &[
         "aplan_close",
         Some((Parity::File, close_leaves_the_same_file)),
     ),
+    // `A1-359`'s four. Each writes a task file, so each is a `File` parity: the
+    // two surfaces must leave the byte-identical task, or an agent and a person
+    // working the same repository disagree about who holds what.
+    (
+        "aplan_claim",
+        Some((Parity::File, claim_leaves_the_same_file)),
+    ),
+    (
+        "aplan_release",
+        Some((Parity::File, release_leaves_the_same_file)),
+    ),
+    (
+        "aplan_start",
+        Some((Parity::File, start_leaves_the_same_file)),
+    ),
+    (
+        "aplan_stop",
+        Some((Parity::File, stop_leaves_the_same_file)),
+    ),
 ];
+
+/// The two surfaces write the same claim, and refuse the same takeover
+/// (`A1-359`).
+fn claim_leaves_the_same_file() -> Result<(), String> {
+    let (cli_dir, mcp_dir) = two_fixtures();
+
+    // `--as` on both sides, because the derived identity is the machine's and a
+    // comparison that depended on it would be measuring the environment.
+    let out = common::output(cli_dir.path(), &["claim", "A-1", "--as", "ada"]);
+    if !out.status.success() {
+        return Err(format!(
+            "the CLI refused a free task: {}",
+            String::from_utf8_lossy(&out.stderr)
+        ));
+    }
+    tools::claim(
+        &mcp_dir.path().join("aplan"),
+        "A-1",
+        Some("ada"),
+        None,
+        &policy(mcp_dir.path(), false),
+    )
+    .map_err(|e| format!("the MCP claim failed: {e}"))?;
+    same_file(&cli_dir, &mcp_dir, "aplan/tasks/A-1.md")?;
+
+    // And both refuse an unnamed takeover of what `ada` now holds.
+    let out = common::output(cli_dir.path(), &["claim", "A-1", "--as", "grace"]);
+    if out.status.success() {
+        return Err("the CLI took a held task without naming the holder".to_string());
+    }
+    if tools::claim(
+        &mcp_dir.path().join("aplan"),
+        "A-1",
+        Some("grace"),
+        None,
+        &policy(mcp_dir.path(), false),
+    )
+    .is_ok()
+    {
+        return Err("the MCP tool took a held task without naming the holder".to_string());
+    }
+    same_file(&cli_dir, &mcp_dir, "aplan/tasks/A-1.md")
+}
+
+/// Releasing leaves the same file on both surfaces, key removed rather than
+/// emptied (`A1-359`).
+fn release_leaves_the_same_file() -> Result<(), String> {
+    let (cli_dir, mcp_dir) = two_fixtures();
+    for dir in [&cli_dir, &mcp_dir] {
+        let p = dir.path().join("aplan/tasks/A-1.md");
+        let held = std::fs::read_to_string(&p)
+            .map_err(|e| e.to_string())?
+            .replace("status: todo", "status: todo\nowner: ada");
+        std::fs::write(&p, held).map_err(|e| e.to_string())?;
+    }
+
+    let out = common::output(cli_dir.path(), &["release", "A-1"]);
+    if !out.status.success() {
+        return Err(format!(
+            "the CLI refused a release: {}",
+            String::from_utf8_lossy(&out.stderr)
+        ));
+    }
+    tools::release(
+        &mcp_dir.path().join("aplan"),
+        "A-1",
+        &policy(mcp_dir.path(), false),
+    )
+    .map_err(|e| format!("the MCP release failed: {e}"))?;
+    same_file(&cli_dir, &mcp_dir, "aplan/tasks/A-1.md")
+}
+
+/// Starting leaves the same file on both surfaces (`A1-359`).
+fn start_leaves_the_same_file() -> Result<(), String> {
+    let (cli_dir, mcp_dir) = two_fixtures();
+    let out = common::output(cli_dir.path(), &["start", "A-1"]);
+    if !out.status.success() {
+        return Err(format!(
+            "the CLI refused a start: {}",
+            String::from_utf8_lossy(&out.stderr)
+        ));
+    }
+    tools::working(
+        &mcp_dir.path().join("aplan"),
+        "A-1",
+        true,
+        &policy(mcp_dir.path(), false),
+    )
+    .map_err(|e| format!("the MCP start failed: {e}"))?;
+    same_file(&cli_dir, &mcp_dir, "aplan/tasks/A-1.md")
+}
+
+/// Stopping leaves the same file, and both refuse a task that is not under way
+/// (`A1-359`).
+fn stop_leaves_the_same_file() -> Result<(), String> {
+    let (cli_dir, mcp_dir) = two_fixtures();
+    for dir in [&cli_dir, &mcp_dir] {
+        let p = dir.path().join("aplan/tasks/A-1.md");
+        let running = std::fs::read_to_string(&p)
+            .map_err(|e| e.to_string())?
+            .replace("status: todo", "status: in_progress");
+        std::fs::write(&p, running).map_err(|e| e.to_string())?;
+    }
+
+    let out = common::output(cli_dir.path(), &["stop", "A-1"]);
+    if !out.status.success() {
+        return Err(format!(
+            "the CLI refused a stop: {}",
+            String::from_utf8_lossy(&out.stderr)
+        ));
+    }
+    tools::working(
+        &mcp_dir.path().join("aplan"),
+        "A-1",
+        false,
+        &policy(mcp_dir.path(), false),
+    )
+    .map_err(|e| format!("the MCP stop failed: {e}"))?;
+    same_file(&cli_dir, &mcp_dir, "aplan/tasks/A-1.md")?;
+
+    // `A-2` is `todo`, so neither surface has anything to stop.
+    let out = common::output(cli_dir.path(), &["stop", "A-2"]);
+    let cli_refused = !out.status.success();
+    let mcp_refused = tools::working(
+        &mcp_dir.path().join("aplan"),
+        "A-2",
+        false,
+        &policy(mcp_dir.path(), false),
+    )
+    .is_err();
+    if cli_refused != mcp_refused {
+        return Err(format!(
+            "the surfaces disagree about stopping a `todo` task: cli refused \
+             {cli_refused}, mcp refused {mcp_refused}"
+        ));
+    }
+    Ok(())
+}
+
+/// Two identical fixtures, one per surface.
+fn two_fixtures() -> (tempfile::TempDir, tempfile::TempDir) {
+    let cli_dir = tempfile::Builder::new()
+        .tempdir_in(aplan_core::fixture::fixture_root())
+        .expect("tempdir");
+    let mcp_dir = tempfile::Builder::new()
+        .tempdir_in(aplan_core::fixture::fixture_root())
+        .expect("tempdir");
+    for dir in [&cli_dir, &mcp_dir] {
+        fixture(dir.path());
+    }
+    (cli_dir, mcp_dir)
+}
+
+/// The two surfaces left byte-identical content at `rel`.
+fn same_file(
+    cli_dir: &tempfile::TempDir,
+    mcp_dir: &tempfile::TempDir,
+    rel: &str,
+) -> Result<(), String> {
+    let from_cli = std::fs::read_to_string(cli_dir.path().join(rel)).map_err(|e| e.to_string())?;
+    let from_mcp = std::fs::read_to_string(mcp_dir.path().join(rel)).map_err(|e| e.to_string())?;
+    if from_cli != from_mcp {
+        return Err(format!(
+            "the two surfaces wrote different files:\n--- cli\n{from_cli}\n--- mcp\n{from_mcp}"
+        ));
+    }
+    Ok(())
+}
 
 #[test]
 fn every_tool_is_classified_and_every_classification_is_exercised() {
@@ -191,6 +378,7 @@ fn fixture(dir: &Path) {
 /// The runner both surfaces are given: it lists one test, bare.
 fn runner() -> aplan_config::TestRunner {
     aplan_config::TestRunner {
+        output_lines: None,
         max_memory: None,
         max_processes: None,
         wrap: None,
@@ -528,6 +716,8 @@ fn close_leaves_the_same_file() -> Result<(), String> {
             options: validate::Options::default(),
             verdict: aplan_core::Verdict::default(),
             verify: aplan_evidence::VerifyOptions {
+                version: None,
+                traces_root: None,
                 config_file: None,
                 execute: false,
                 test_runner: Some(aplan_config::TestRunners::One(runner())),
@@ -572,6 +762,8 @@ fn policy_with(dir: &Path, deny_warnings: bool, advisory: Vec<String>) -> aplan_
             advisory,
         },
         verify: aplan_evidence::VerifyOptions {
+            version: None,
+            traces_root: None,
             config_file: None,
             execute: false,
             test_runner: None,

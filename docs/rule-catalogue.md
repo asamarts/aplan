@@ -69,12 +69,18 @@ a done task does not depend on an unfinished one
 
 ## APLAN008 (error)
 
-traces anchors resolve to real headings
+traces anchors resolve to a real heading or node
 
+- **says:** `traces` anchor `#$.states[*]` is not an address into `spec.yaml`: `[*]` cannot be part of one, because a wildcard selects every member, and an anchor addresses one node
+  - **fix:** Address one node of `spec.yaml`: a JSON Pointer (`#/states/provisioning`, RFC 6901) or a JSONPath (`#$.states.provisioning`, RFC 9535). Only the singular subset of JSONPath is accepted, names and whole-number indices, because a fingerprint is taken of one node, and this tool resolves an address rather than running a query.
+- **says:** `traces` anchor `#/states/provisionng` addresses no node in `spec.yaml`
+  - **fix:** Add that node to `spec.yaml`, or did you mean `#/states/provisioning`? An address is checked against the document as it is now, so a key that was renamed is reported here rather than silently tracing nothing.
 - **says:** `traces` anchor `#renamed` matches no heading or table row in `DOC.md`
   - **fix:** Add to `DOC.md` a heading, or a table row, whose text slugifies to `renamed`; or correct the anchor to one the document already has. A **list item is not an anchor**, deliberately: a bullet's identity would be its whole text, so rewording it would break the reference rather than report drift. Give the item a heading or a table row, which is what an author tracking items one by one wants anyway.
 - **says:** `traces` target `NOPE.md` does not exist
   - **fix:** Create `NOPE.md` or correct the trace path.
+- **says:** `traces` target `spec.yaml` is not one YAML document this tool can address into: it does not parse, holds more than one document, nests deeper than 128 levels, or uses a shape with no JSON equivalent such as a non-string key
+  - **fix:** Fix `spec.yaml` so it parses, or trace a document that does. Addressing half of a file this tool could not fully read would make the fingerprint mean something nobody chose.
 
 ## APLAN009 (warning)
 
@@ -119,8 +125,8 @@ test evidence names a test the runner can find
 
 test evidence names a test that passes
 
-- **says:** test `known` failed under `--execute`
-  - **fix:** Make the cited test pass, or stop citing it as evidence.
+- **says:** test `known` failed under `--execute` and printed nothing
+  - **fix:** Nothing was captured, so the runner is silent on failure or `test.output_lines: 0` is set. Run `known` through the configured command to see why, then make it pass or stop citing it as evidence.
 - **says:** test `known` was not run under `--execute`: the runner lists it among the tests it skips, and no test this task cites was run
   - **fix:** Cite a test this runner actually runs as well, so the claim has proof the gate executes. The skipped citation may stay: it says where the rest of the proof lives.
 
@@ -159,6 +165,8 @@ done evidence meets the configured minimum strength
 
 a closed task's traced section is unchanged since closure
 
+- **says:** traced node `spec.yaml#/states/provisioning` has changed since this task was closed
+  - **fix:** See what moved with `git diff <sha> -- <tmp>/spec.yaml`, then re-review the task; if it still holds, re-stamp with `aplan close --restamp`, otherwise `aplan supersede` it with the task that now needs doing.
 - **says:** traced section `DOC.md#intro` has changed since this task was closed
   - **fix:** See what moved with `git diff <sha> -- <tmp>/DOC.md`, then re-review the task; if it still holds, re-stamp with `aplan close --restamp`, otherwise `aplan supersede` it with the task that now needs doing.
 
@@ -186,6 +194,10 @@ a live task is not blocked by a dropped one
 
 a milestone has members and carries no effort or paths
 
+- **says:** is a checkpoint over cuts and holds `A-1` directly: a release closes cuts, so a task in it is a task in two cuts
+  - **fix:** List the cuts this release closes in its `blocked_by`, and leave the work in them. A release is a checkpoint over cuts, not a second cut.
+- **says:** is a checkpoint over cuts and holds `W-1` directly: a milestone declaring `contains` holds the checkpoints beneath it, so a task in it is a task in two cuts
+  - **fix:** Move the work into one of the checkpoints this one contains, or stop declaring `contains` if this is a cut rather than a checkpoint over cuts. A checkpoint borrows the work beneath it; work it also holds itself belongs to two cuts at once.
 - **says:** is tagged `milestone` but carries `effort_days`
   - **fix:** Remove the `milestone` tag if this is work, or make it a checkpoint: give it its cut's tasks as `blocked_by`, and drop `effort_days` and `paths`.
 - **says:** is tagged `milestone` but declares `paths`
@@ -196,8 +208,6 @@ a milestone has members and carries no effort or paths
   - **fix:** Move the work that belongs to this cut into its `blocked_by` (`aplan mv <id>... --cut <this>`), or cancel the cut too (`aplan drop --cut <this>`) if it is not going to happen.
 - **says:** is tagged `milestone` but has no work in it: its `blocked_by` names only other cuts
   - **fix:** Move the work that belongs to this cut into its `blocked_by` (`aplan mv <id>... --cut <this>`), or cancel the cut too (`aplan drop --cut <this>`) if it is not going to happen.
-- **says:** is tagged `release` and holds `A-1` directly: a release closes cuts, so a task in it is a task in two cuts
-  - **fix:** List the cuts this release closes in its `blocked_by`, and leave the work in them. A release is a checkpoint over cuts, not a second cut.
 
 ## APLAN022 (error)
 
@@ -247,12 +257,14 @@ a cancelled cut's members are cancelled too
 
 ## APLAN028 (error)
 
-a done task stamps every trace it stamps any of
+a done task stamps every trace that can be stamped
 
-- **says:** is `done` and does not stamp `DOC.md#11`, `DOC.md#7`, and stamps `DOC.md#intro`, which it no longer traces: drift is not checked for them, so these sections can change and nothing will say so
+- **says:** is `done` and does not stamp `DOC.md#11`, `DOC.md#7`, and stamps `DOC.md#intro`, which it no longer traces: drift is not checked for them, so what they trace can change and nothing will say so
   - **fix:** Re-review `DOC.md#11`, `DOC.md#7`, then `aplan close A-1 --restamp`, which stamps every trace and drops keys no trace names.
-- **says:** is `done` and does not stamp `DOC.md#7`, and stamps `DOC.md#intro`, which it no longer traces: drift is not checked for it, so this section can change and nothing will say so
+- **says:** is `done` and does not stamp `DOC.md#7`, and stamps `DOC.md#intro`, which it no longer traces: drift is not checked for it, so what it traces can change and nothing will say so
   - **fix:** Re-review `DOC.md#7`, then `aplan close A-1 --restamp`, which stamps every trace and drops keys no trace names.
+- **says:** is `done` and does not stamp `DOC.md#intro`: drift is not checked for it, so what it traces can change and nothing will say so
+  - **fix:** Re-review `DOC.md#intro`, then `aplan close A-1 --restamp`, which stamps every trace and drops keys no trace names.
 
 ## APLAN029 (warning)
 
@@ -377,4 +389,73 @@ a closed task claims less of the released version than its level implies, withou
 
 - **says:** claims `none` of the released version where its level implies `fix`, and says nowhere why
   - **fix:** Add `version_impact_reason` saying what this task changed that the level's floor gets wrong -- a plan edit or a pilot log really does change nothing that ships. If it did change the artifact after all, raise `version_impact` instead.
+
+## APLAN045 (warning)
+
+a live task's traced section is unchanged since the task was last touched
+
+- **says:** is still open and `DOC.md#intro` has changed since this task was last touched: the ground it was written on has moved
+  - **fix:** Re-read `DOC.md#intro` against this task. If the work is already done, close it with the evidence; if the task still holds, editing it records that somebody looked and clears this.
+
+## APLAN046 (error)
+
+a done task's ratifiers are done
+
+- **says:** is `done` but its ratifier `A-2` is `todo`
+  - **fix:** Close `A-2` first, or drop the ratification if this task does not actually need its blessing. The work itself was never blocked by it: `ratified_by` says who signs off, not what this waits on.
+
+## APLAN047 (error)
+
+a `contains` names a milestone that exists, and closes no loop
+
+- **says:** `contains: M-1` is not also in `blocked_by`, so this checkpoint does not wait for what it holds and may be closed while it is unfinished
+  - **fix:** Name a milestone that exists and list it in `blocked_by` too, or move the id to `blocked_by` alone if it is work this cut holds rather than a checkpoint beneath it.
+- **says:** containment cycle through `contains`: M-1 → M-2 → M-1
+  - **fix:** Decide which of these contains the other and remove the reverse edge. A rollup over a loop has no answer: whichever checkpoint is walked first swallows the other, and the number changes with iteration order.
+
+## APLAN048 (error)
+
+the released version has moved as far as the closed tasks require
+
+- **says:** this tree declares version `0.2.0`, which is older than `v0.3.0` -- the last release tag reachable from HEAD. Either the version was reverted, or `version.release_tag` is matching tags that do not name this artifact's releases, in which case every version this derives is measured from the wrong place
+  - **fix:** Set this repository's version to something at or above `0.3.0`, or narrow `version.release_tag` in `.aplan.yml` so it matches only the tags that name this artifact's releases.
+- **says:** this tree declares version `0.3.1` and the plan requires `0.4.0`, measured over 1 task(s) closed since `v0.3.0`: `A-1` is `breaking`
+  - **fix:** Set this repository's version to `0.4.0` before tagging, or change the impact the window declares if `0.3.1` is the honest number.
+
+## APLAN049 (error)
+
+the artifact agrees with what the plan claims about compatibility
+
+- **says:** the configured checker found this artifact is not compatible with its last release, and the plan claims `fix`, measured over 1 task(s) closed since `v0.3.0`
+  - **fix:** Declare `version_impact: breaking` on the task that made the incompatible change, or correct the artifact if the break was not intended. The checker compared the built artifact; the plan is what disagrees with it.
+
+## APLAN050 (error)
+
+a recorded `version` is on a release, and is a version this tool can read
+
+- **says:** records `version: 1.2.3`, which says what a *release* produced. This node is not one, and a cut is a planning bucket rather than a delivery
+  - **fix:** Remove `version`, or tag this node `release` if it really is the thing that ships.
+
+## APLAN051 (warning)
+
+a tag is not one edit from a word that changes what this tool does
+
+- **says:** tag `milestne` is one edit from `milestone`, which changes what this tool does: did you mean `milestone`?
+  - **fix:** Correct the tag to `milestone` if that is what was meant. If `milestne` is the repository's own word, declare it in `tag_families` so it is a vocabulary rather than a near miss.
+
+## APLAN052 (warning)
+
+`cross-cutting` is not on a task that is a member of a cut
+
+- **says:** tagged `cross-cutting` and a member of a cut: the tag is how `APLAN022` is told a task belongs to no cut, which this task's own membership contradicts
+  - **fix:** Remove `cross-cutting` from this task's `tags`: it is in a cut, so the requirement it waives is one this task already meets. If the word was meant to say the work spans components, declare a family for that in `tag_families` and use a word of your own.
+
+## APLAN053 (warning)
+
+a task that is `in_progress` has something in the repository to show for it
+
+- **says:** this task is `in_progress`, and nothing the repository tracks matches its `paths`, so there is nothing to show the work has started
+  - **fix:** Either the work has not started, in which case `aplan stop <id>` says so, or it has and its files are not added yet, in which case `git add` them. If the task owns files that do not exist yet, its `paths` are a plan rather than a claim and the status is the thing to change.
+- **says:** this task is `in_progress`, and nothing the repository tracks matches its `paths`, so there is nothing to show the work has started
+  - **fix:** `src` names a directory, and a glob without a wildcard names one file. Write `src/**` to own everything under it. The work may well have started; nothing can tell while the declaration matches nothing.
 

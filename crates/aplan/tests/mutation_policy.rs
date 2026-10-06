@@ -15,6 +15,8 @@
 
 mod common;
 
+use crate::common::census::{NOT_RUN, RUNS, Start, a_plan_to_act_on, plan_bytes};
+
 use std::path::Path;
 
 /// A live task whose body leaves one criterion unticked, so closing it adds
@@ -115,18 +117,266 @@ fn the_config_can_be_overridden_in_both_directions() {
     );
 }
 
-/// **Every command that writes takes the pair.**
+/// The commands that run the post-state gate, and so must take the pair.
 ///
-/// Read off clap's own tree rather than listed here, so a mutating command added
-/// later without them is a failure rather than an omission nobody notices. The
-/// set is the commands that run the post-state gate.
+/// `tag` was missing from this list for the whole of its existence (`A1-356`).
+/// It *had* the flags, so nothing was broken; the guarantee simply went
+/// unchecked, which is worse than a failure because it looks like coverage.
+const GATED: &[&str] = &[
+    "add",
+    "amend",
+    "claim",
+    "close",
+    "dep",
+    "drop",
+    "mv",
+    "release",
+    "start",
+    "stop",
+    "supersede",
+    "tag",
+];
+
+/// Every other command, with why the pair does not apply to it.
+///
+/// Some of these do write files -- `export-agents-md --write` writes a
+/// document, `import` and `init` create a plan -- and the distinction the pair
+/// belongs to is narrower than "writes": it is running the rules against the
+/// plan this command would produce and refusing one that adds a finding. A
+/// command with no prior plan to compare against has nothing to refuse.
+const UNGATED: &[(&str, &str)] = &[
+    (
+        "check",
+        "is the gate; it reports rather than running a post-state of its own",
+    ),
+    ("verify", "resolves evidence and reports; it writes nothing"),
+    (
+        "ready",
+        "orders the workable tasks and reports; it changes no file",
+    ),
+    (
+        "due",
+        "reports what a date-bearing plan owes and when; it writes nothing",
+    ),
+    ("why", "explains one task's position and reports"),
+    ("version", "derives a version and reports"),
+    (
+        "graph",
+        "renders the dependency graph and reports; it changes no file",
+    ),
+    ("show", "renders one task and reports; it changes no file"),
+    (
+        "tree",
+        "renders the plan as a tree and reports; it changes no file",
+    ),
+    ("paths", "measures `paths` against history and reports"),
+    ("vacuity", "asks whether a rule ran on anything and reports"),
+    (
+        "stale",
+        "names work nothing has touched lately and reports; it changes no file",
+    ),
+    (
+        "deprecations",
+        "reads the runways a plan declares and reports",
+    ),
+    (
+        "attest",
+        "signs what `verify` proved; it writes an attestation, not a task",
+    ),
+    (
+        "export-agents-md",
+        "writes a document rather than a task, so no plan post-state exists",
+    ),
+    (
+        "export-roadmap-json",
+        "writes a rollup of the plan, not a change to it",
+    ),
+    ("export", "writes the plan out in another format"),
+    ("check-docs", "compares prose against the plan and reports"),
+    (
+        "summary",
+        "rolls up effort per phase and reports; it changes no file",
+    ),
+    (
+        "tasks",
+        "lists the plan's tasks and reports; it changes no file",
+    ),
+    ("critical-path", "derives the longest chain and reports"),
+    (
+        "roadmap",
+        "rolls up the cuts and reports; the committed copy is written by xtask",
+    ),
+    (
+        "import",
+        "creates a plan from a document, one way, so there is no prior plan to \
+         compare a post-state against (`A1-039`). Whether it should judge what it \
+         creates the way `add` judges one task is open, and is `A1-356`'s to ask",
+    ),
+    (
+        "init",
+        "writes `.aplan.yml` and nothing else: it scaffolds the configuration, so there is \
+         no task for a post-state to be about",
+    ),
+    (
+        "mcp",
+        "serves the tools, each of which is one of the commands above",
+    ),
+    ("facts", "prints what this build is and reports"),
+    (
+        "schema",
+        "prints the schema this build derives from its types; it changes no file",
+    ),
+];
+
+/// A command that creates a plan rather than changing one.
+///
+/// It writes task files and runs no post-state gate, because there is no prior
+/// plan to compare against. Kept apart from [`UNGATED`] so the measurement below
+/// can tell "writes and should" from "writes and should not".
+///
+/// `init` was listed here and is not one: the measurement below said so on its
+/// first run, because `aplan init` writes `.aplan.yml` and nothing else. It
+/// scaffolds the *configuration*, and a directory with no tasks in it is not a
+/// plan this command made. The hand-written classification was wrong and the
+/// measured one was right, which is the argument for measuring it.
+const CREATES: &[&str] = &["import"];
+
+/// **Whether a command writes the plan is measured, not declared** (`A1-356`,
+/// audit).
+///
+/// The classification above is still written by hand, and a hand-written
+/// classification is the thing this task exists to distrust. So it is checked
+/// against the tool's actual behaviour: each command is run against a plan it
+/// can act on, and the plan directory is compared byte for byte before and
+/// after. A command that writes must be classified as one that writes, and one
+/// that does not must not be -- whichever way round the disagreement is.
+///
+/// This cannot derive *which gate* a writing command runs, because that is not
+/// observable from outside. What it removes is the larger half of the
+/// hand-written claim: the set of commands that touch the plan at all.
+#[test]
+fn whether_a_command_writes_the_plan_is_measured_not_declared() {
+    let declared_to_write: std::collections::BTreeSet<&str> =
+        GATED.iter().chain(CREATES.iter()).copied().collect();
+    let mut wrong = Vec::new();
+    let mut ran = 0usize;
+
+    for (name, argv, start) in RUNS {
+        let dir = tempfile::Builder::new()
+            .prefix("writes-")
+            .tempdir_in(aplan_core::fixture::fixture_root())
+            .expect("tempdir");
+        if *start == Start::Populated {
+            a_plan_to_act_on(dir.path());
+        }
+        let before = plan_bytes(dir.path());
+        let out = common::run(dir.path(), argv);
+        let after = plan_bytes(dir.path());
+        ran += 1;
+        let wrote = before != after;
+        let declared = declared_to_write.contains(name);
+        if wrote != declared {
+            wrong.push(format!(
+                "`{name}` {} the plan, and is classified as a command that {}: `aplan {}` \
+                 exited {}\n      {}",
+                if wrote { "writes" } else { "does not write" },
+                if declared { "does" } else { "does not" },
+                argv.join(" "),
+                out.code,
+                out.text().lines().take(2).collect::<Vec<_>>().join(" / ")
+            ));
+        }
+    }
+
+    assert!(
+        wrong.is_empty(),
+        "{} command(s) whose classification disagrees with what they do:\n  - {}",
+        wrong.len(),
+        wrong.join("\n  - ")
+    );
+    assert!(ran > 30, "the measurement drove only {ran} command(s)");
+}
+
+/// **Every command is either driven by the measurement or excused from it.**
+#[test]
+fn every_command_is_measured_or_says_why_not() {
+    let cli = aplan::cli_command();
+    let declared: std::collections::BTreeSet<String> = cli
+        .get_subcommands()
+        .map(|c| c.get_name().to_string())
+        .collect();
+    let covered: std::collections::BTreeSet<String> = RUNS
+        .iter()
+        .map(|(c, _, _)| (*c).to_string())
+        .chain(NOT_RUN.iter().map(|(c, _)| (*c).to_string()))
+        .collect();
+    let missing: Vec<&String> = declared.difference(&covered).collect();
+    assert!(
+        missing.is_empty(),
+        "a command the measurement never runs, so nothing checks what it writes: {missing:?}"
+    );
+    let stale: Vec<&String> = covered.difference(&declared).collect();
+    assert!(
+        stale.is_empty(),
+        "driven, but no longer a command: {stale:?}"
+    );
+    for (command, why) in NOT_RUN {
+        assert!(
+            why.len() > 30,
+            "`{command}` is excused from the measurement with no reason worth reading: {why:?}"
+        );
+    }
+}
+
+/// **Every command is classified, and a new one is refused until it is**
+/// (`A1-356`).
+///
+/// The list above used to be seven names written inline, under a doc comment
+/// saying the set was "read off clap's own tree rather than listed here, so a
+/// mutating command added later without them is a failure rather than an
+/// omission nobody notices". Only the *flags* were read off clap. `tag` was
+/// added, ran the post-state gate, and was never checked -- which is the exact
+/// outcome that sentence promised to prevent.
+#[test]
+fn every_command_says_whether_the_pair_applies_to_it() {
+    let cli = aplan::cli_command();
+    let declared: std::collections::BTreeSet<String> = cli
+        .get_subcommands()
+        .map(|c| c.get_name().to_string())
+        .collect();
+    let answered: std::collections::BTreeSet<String> = GATED
+        .iter()
+        .map(|c| (*c).to_string())
+        .chain(UNGATED.iter().map(|(c, _)| (*c).to_string()))
+        .collect();
+
+    let unclassified: Vec<&String> = declared.difference(&answered).collect();
+    assert!(
+        unclassified.is_empty(),
+        "a command that says neither that it runs the post-state gate nor why it does not; \
+         a guarantee is not carried to a new command by itself (`A1-356`): {unclassified:?}"
+    );
+    let stale: Vec<&String> = answered.difference(&declared).collect();
+    assert!(
+        stale.is_empty(),
+        "classified, but no longer a command: {stale:?}"
+    );
+    for (command, why) in UNGATED {
+        assert!(
+            why.len() > 20,
+            "`{command}` is excused with no reason worth reading: {why:?}"
+        );
+    }
+}
+
+/// **Every command that writes takes the pair.**
 #[test]
 fn every_mutating_command_can_be_told_the_policy() {
-    let writes = ["close", "amend", "supersede", "add", "drop", "mv", "dep"];
+    let writes = GATED;
     let mut missing = Vec::new();
     let cli = aplan::cli_command();
     for name in writes {
-        let Some(cmd) = cli.get_subcommands().find(|c| c.get_name() == name) else {
+        let Some(cmd) = cli.get_subcommands().find(|c| c.get_name() == *name) else {
             missing.push(format!("`{name}` is not a command any more"));
             continue;
         };
@@ -187,6 +437,14 @@ fn each_mutating_command_accepts_the_pair_when_run() {
         &["mv", "T-1", "--cut", "M-a"],
         &["dep", "add", "T-1", "--after", "M-a"],
         &["dep", "rm", "T-1", "--after", "M-a"],
+        // `A1-359`'s four. Each runs the post-state gate, so each takes the
+        // pair, and the surface ratchet counts a declared flag no invocation
+        // ever passes as unexercised -- which is how a flag nothing reads gets
+        // noticed.
+        &["claim", "T-1", "--as", "ada"],
+        &["release", "T-1"],
+        &["start", "T-1"],
+        &["stop", "T-1"],
     ];
     for base in runs {
         for flag in ["--deny-warnings", "--no-deny-warnings"] {

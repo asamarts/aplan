@@ -219,6 +219,8 @@ fn the_two_surfaces_report_it_identically() {
             options: aplan_core::validate::Options::default(),
             verdict: aplan_core::Verdict::default(),
             verify: aplan_evidence::VerifyOptions {
+                version: None,
+                traces_root: None,
                 config_file: None,
                 execute: false,
                 test_runner: None,

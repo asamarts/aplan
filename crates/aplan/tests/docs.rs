@@ -78,6 +78,59 @@ fn command_names() -> BTreeSet<String> {
         .collect()
 }
 
+fn format_names() -> BTreeSet<String> {
+    facts()["formats"]
+        .as_array()
+        .expect("formats array")
+        .iter()
+        .map(|f| f.as_str().expect("format name").to_string())
+        .collect()
+}
+
+/// One second-level Markdown section, through the next one or EOF.
+fn hld_section<'a>(hld: &'a str, heading: &str) -> &'a str {
+    let marker = format!("\n## {heading}\n");
+    let rest = hld
+        .split_once(&marker)
+        .unwrap_or_else(|| panic!("HLD.md has a `{heading}` section"))
+        .1;
+    rest.split_once("\n## ")
+        .map_or(rest, |(section, _)| section)
+}
+
+fn first_code_cell(cells: &[String]) -> Option<String> {
+    let first = cells.first()?;
+    (first.starts_with('`') && first.ends_with('`')).then(|| first.trim_matches('`').to_string())
+}
+
+fn workspace_crates() -> BTreeSet<String> {
+    let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
+    let mut manifests = vec![root.join("xtask/Cargo.toml")];
+    manifests.extend(
+        std::fs::read_dir(root.join("crates"))
+            .expect("read workspace crates")
+            .flatten()
+            .map(|entry| entry.path().join("Cargo.toml"))
+            .filter(|path| path.is_file()),
+    );
+    manifests
+        .into_iter()
+        .map(|path| {
+            let manifest = std::fs::read_to_string(&path)
+                .unwrap_or_else(|e| panic!("read {}: {e}", path.display()));
+            manifest
+                .lines()
+                .find_map(|line| {
+                    line.trim()
+                        .strip_prefix("name = \"")
+                        .and_then(|name| name.strip_suffix('"'))
+                })
+                .unwrap_or_else(|| panic!("{} has no package name", path.display()))
+                .to_string()
+        })
+        .collect()
+}
+
 /// The cells of a markdown pipe-table row, trimmed, with the empty strings that
 /// the leading and trailing `|` produce dropped.
 ///
@@ -712,8 +765,32 @@ fn is_finding(line: &str) -> bool {
     else {
         return false;
     };
-    rest.split_once('.')
+    // `### N. ...`, the numbered form.
+    if rest
+        .split_once('.')
         .is_some_and(|(n, _)| !n.is_empty() && n.chars().all(|c| c.is_ascii_digit()))
+    {
+        return true;
+    }
+    // `### 2026-09-27 -- ...`, the dated form. `p000000000018` writes nearly
+    // every entry this way and `p00002` writes some, and this gate used to
+    // report each of them as "opens with a number but is not `### N. ...`" --
+    // the partial-vacuity guard firing on a convention the gate did not know
+    // rather than on a real gap (`A1-284`). Recognising it *adds* coverage:
+    // these entries now have to carry a disposition like any other.
+    dated(rest)
+}
+
+/// Whether a heading opens with an ISO date, which is the second entry form
+/// these logs use.
+fn dated(rest: &str) -> bool {
+    let bytes = rest.as_bytes();
+    bytes.len() >= 10
+        && bytes[..4].iter().all(u8::is_ascii_digit)
+        && bytes[4] == b'-'
+        && bytes[5..7].iter().all(u8::is_ascii_digit)
+        && bytes[7] == b'-'
+        && bytes[8..10].iter().all(u8::is_ascii_digit)
 }
 
 /// Whether a finding says what became of it.
@@ -730,6 +807,13 @@ fn is_finding(line: &str) -> bool {
 /// accident (`A1-166`'s audit).
 fn dispositioned(window: &str) -> bool {
     window.contains("**Disposition")
+        // The same paragraph without the bold markers, which is how
+        // `p000000000018` writes every one of them: `Disposition: not a defect
+        // -- ...`. Matched at a line start, so the word used in prose is not a
+        // decision.
+        || window
+            .lines()
+            .any(|l| l.trim_start().starts_with("Disposition:"))
         || task_id_in(window)
         // The other two forms the README documents, written as it documents
         // them rather than wrapped in a `**Disposition` paragraph. Every use of
@@ -744,6 +828,22 @@ fn dispositioned(window: &str) -> bool {
         // a body could fall into.
         || window.contains("Fixed in `")
         || window.contains("not worth fixing")
+        // Two more the corpus writes, found when `p0000021` and `p00023` landed
+        // and this gate failed on ten entries that were all decided (`A1-284`,
+        // which is about exactly this: a vocabulary narrower than the logs).
+        //
+        // `**Became work:` is how a log records that the *pilot repository*
+        // took the work, naming its own task (`SX-063`, `MN-142`), which
+        // `task_id_in` cannot see because it looks for this repository's ids.
+        // It is the "Fixed in `<project>`" disposition under the spelling five
+        // logs actually use.
+        //
+        // `Not a defect` is the README's second disposition without the
+        // `**Disposition` wrapper. Kept as the bold lead-in the corpus uses, so
+        // prose that merely argues a thing is not a defect does not read as a
+        // decision.
+        || window.contains("**Became work:")
+        || window.contains("**Not a defect")
 }
 
 /// The predicate itself, over the three forms the README documents and the
@@ -962,22 +1062,117 @@ fn every_documented_invocation_actually_parses() {
 }
 
 #[test]
-fn every_command_has_a_row_in_the_hld_cli_table() {
-    // Likewise a row rather than a mention. Every command already has one, so
-    // this pins a property the HLD holds today instead of permitting it to lapse.
-    let documented: BTreeSet<String> = table_rows(&repo_file("HLD.md"))
-        .iter()
-        .filter_map(|c| cli_row_command(c))
-        .collect();
-    let missing: Vec<String> = command_names()
-        .into_iter()
-        .filter(|name| !documented.contains(name))
-        .collect();
+fn every_command_has_exactly_one_row_in_the_hld_cli_table() {
+    // A set was the wrong audit structure: it made the shipped and planned rows
+    // for both `attest` and `export-agents-md` look exactly like one correct row.
+    // Keep the multiplicity beside the name, as the rule census above does.
+    let mut documented: BTreeMap<String, usize> = BTreeMap::new();
+    for cells in table_rows(hld_section(&repo_file("HLD.md"), "8. CLI surface")) {
+        if let Some(name) = cli_row_command(&cells) {
+            *documented.entry(name).or_default() += 1;
+        }
+    }
+    let mut problems = Vec::new();
+    for name in command_names() {
+        match documented.get(&name).copied().unwrap_or(0) {
+            1 => {}
+            0 => problems.push(format!("`aplan {name}`: no row")),
+            n => problems.push(format!("`aplan {name}`: {n} rows, expected 1")),
+        }
+    }
 
     assert!(
-        missing.is_empty(),
-        "commands with no row in HLD.md's CLI surface table:\n  {}",
-        missing.join("\n  ")
+        problems.is_empty(),
+        "HLD.md's CLI surface table is not one row per command:\n  {}",
+        problems.join("\n  ")
+    );
+}
+
+#[test]
+fn every_workspace_crate_has_exactly_one_existing_hld_row() {
+    let hld = repo_file("HLD.md");
+    let rows = table_rows(hld_section(&hld, "7. Crate architecture"));
+    let mut documented: BTreeMap<String, Vec<Vec<String>>> = BTreeMap::new();
+    for cells in rows {
+        if let Some(name) = first_code_cell(&cells)
+            && (name == "xtask" || name == "aplan" || name.starts_with("aplan-"))
+        {
+            documented.entry(name).or_default().push(cells);
+        }
+    }
+
+    let actual = workspace_crates();
+    let mut problems = Vec::new();
+    for name in &actual {
+        match documented.get(name).map(Vec::as_slice).unwrap_or_default() {
+            [row] if row.last().is_some_and(|status| claims_to_exist(status)) => {}
+            [row] => problems.push(format!(
+                "`{name}` exists in the workspace but HLD.md says `{}`",
+                row.last().map_or("no status", String::as_str)
+            )),
+            [] => problems.push(format!("`{name}`: no HLD crate row")),
+            rows => problems.push(format!("`{name}`: {} HLD crate rows", rows.len())),
+        }
+    }
+    for (name, rows) in &documented {
+        if !actual.contains(name)
+            && rows
+                .iter()
+                .any(|row| row.last().is_some_and(|status| claims_to_exist(status)))
+        {
+            problems.push(format!(
+                "`{name}` is absent from the workspace but its HLD row claims it exists"
+            ));
+        }
+    }
+
+    assert!(
+        problems.is_empty(),
+        "HLD.md's crate table disagrees with the workspace:\n  {}",
+        problems.join("\n  ")
+    );
+}
+
+#[test]
+fn every_output_format_has_exactly_one_existing_hld_row() {
+    let hld = repo_file("HLD.md");
+    let rows = table_rows(hld_section(&hld, "10. Output"));
+    let mut documented: BTreeMap<String, Vec<Vec<String>>> = BTreeMap::new();
+    for cells in rows {
+        if let Some(name) = first_code_cell(&cells) {
+            documented.entry(name).or_default().push(cells);
+        }
+    }
+
+    let actual = format_names();
+    let mut problems = Vec::new();
+    for name in &actual {
+        match documented.get(name).map(Vec::as_slice).unwrap_or_default() {
+            [row] if row.last().is_some_and(|status| claims_to_exist(status)) => {}
+            [row] => problems.push(format!(
+                "`{name}` exists in `aplan facts` but HLD.md says `{}`",
+                row.last().map_or("no status", String::as_str)
+            )),
+            [] => problems.push(format!("`{name}`: no HLD output row")),
+            rows => problems.push(format!("`{name}`: {} HLD output rows", rows.len())),
+        }
+    }
+    for (name, rows) in &documented {
+        if !actual.contains(name)
+            && rows
+                .iter()
+                .any(|row| row.last().is_some_and(|status| claims_to_exist(status)))
+        {
+            problems.push(format!(
+                "`{name}` is absent from `aplan facts` but its HLD row claims it exists"
+            ));
+        }
+    }
+
+    assert!(
+        problems.is_empty(),
+        "HLD.md's output table disagrees with `aplan facts`:\n  {}",
+        problems.join("\n  ")
     );
 }
 
@@ -1666,6 +1861,94 @@ fn every_behaviour_is_documented_where_an_adopter_stages_a_binary() {
         "behaviours absent from docs/upgrading.md, where a consumer staging a binary looks:\n  {}",
         missing.join("\n  ")
     );
+}
+
+/// **The MSRV gate derives its toolchain instead of naming one** (`A1-330`).
+///
+/// The gate compiles this workspace with the declared `rust-version`, and the
+/// obvious way to write it is `cargo +1.88 check`. That would be a third copy
+/// of the number, free to drift from `Cargo.toml` the moment the floor moves,
+/// and a gate asserting a compiler nobody promised. `A1-327` exists because a
+/// contract nothing checked went false; its follow-up must not add one.
+///
+/// So: the script reads the number, and this refuses a literal version in it.
+#[test]
+fn the_msrv_gate_derives_the_toolchain_rather_than_naming_it() {
+    let script = repo_file("ci/scripts/msrv-build.sh");
+    assert!(
+        script.contains("Cargo.toml"),
+        "the MSRV gate no longer reads `Cargo.toml`, so the compiler it asks for is not \
+         derived from the promise it checks"
+    );
+    // A version literal in an executable line. Comments may name one -- the
+    // measured cost and the rationale both do, and forbidding that would make
+    // the script undocumentable.
+    let literal = regex_like_version_in_code(&script);
+    assert!(
+        literal.is_none(),
+        "`ci/scripts/msrv-build.sh` names a Rust version in code: {}. That is a second copy \
+         of `rust-version`, which is the defect `A1-327` fixed",
+        literal.unwrap_or_default()
+    );
+}
+
+/// A `1.NN` literal outside a comment, if there is one. Deliberately crude:
+/// the point is to refuse a hardcoded toolchain, not to parse shell.
+fn regex_like_version_in_code(script: &str) -> Option<String> {
+    for line in script.lines() {
+        let code = line.split('#').next().unwrap_or_default();
+        // `sed -n 's/^rust-version = "\([0-9.]*\)"...` is the line that reads
+        // the number, and its own pattern contains digits and dots. What is
+        // forbidden is a *concrete* version: `1.` followed by a digit.
+        if code.contains("rust-version") {
+            continue;
+        }
+        let bytes: Vec<char> = code.chars().collect();
+        for i in 0..bytes.len().saturating_sub(2) {
+            if bytes[i] == '1' && bytes[i + 1] == '.' && bytes[i + 2].is_ascii_digit() {
+                return Some(code.trim().to_string());
+            }
+        }
+    }
+    None
+}
+
+/// **The MSRV an adopter reads is the one the workspace declares** (`A1-327`).
+///
+/// `A1-327` fixed a declared `rust-version` that nothing checked and that had
+/// been false for as long as the lockfile existed. Writing the corrected number
+/// into prose without a gate would recreate exactly that defect one document
+/// over: two more copies of a contract, drifting from `Cargo.toml` the next
+/// time the floor moves, in the two places a source adopter actually looks.
+///
+/// `cargo xtask msrv` holds the *declaration* to the dependency graph. This
+/// holds the *documents* to the declaration. Neither is the other's job.
+#[test]
+fn the_documented_msrv_is_the_one_the_workspace_declares() {
+    let manifest = repo_file("Cargo.toml");
+    let declared = manifest
+        .lines()
+        .find_map(|l| l.strip_prefix("rust-version = "))
+        .map(|v| v.trim().trim_matches('"').to_string())
+        .expect("the workspace declares a rust-version");
+    // `1.88`, not `1.88.0`: what a person writes in prose. A patch-level floor
+    // would need the documents to say one too, and nothing here has ever
+    // needed one.
+    assert_eq!(
+        declared.split('.').count(),
+        2,
+        "the declared rust-version gained a patch level, so the prose below needs \
+         revisiting rather than this assertion loosening: {declared}"
+    );
+    for doc in ["README.md", "docs/upgrading.md"] {
+        let text = repo_file(doc);
+        assert!(
+            text.contains(&format!("Rust {declared}")),
+            "{doc} does not say `Rust {declared}`, so the compiler a source adopter is told \
+             to use has drifted from the one `Cargo.toml` declares. That is the defect \
+             `A1-327` fixed, moved into the documentation"
+        );
+    }
 }
 
 /// The timeout defaults an adopter reads are the ones the code uses (`A1-121`).

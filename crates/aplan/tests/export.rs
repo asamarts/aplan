@@ -482,6 +482,24 @@ fn every_field_the_schema_declares_is_carried_or_named() {
         .tempdir_in(aplan_core::fixture::fixture_root())
         .expect("tempdir");
     fixture(dir.path());
+    // A checkpoint that contains another, so `contains` is exercised too. It has
+    // to be a milestone: `APLAN047` refuses containment declared by work, and a
+    // fixture that would not pass `check` is a poor witness for what `export`
+    // says about a real plan.
+    write_task(
+        dir.path(),
+        "M-OUT",
+        "---\nid: M-OUT\ntitle: outer\nphase: 1\nstatus: todo\n\
+         tags:\n- milestone\ncontains:\n- M-IN\nblocked_by:\n- M-IN\n\
+         ---\n\n## Why\n\nBecause.\n",
+    );
+    write_task(
+        dir.path(),
+        "M-IN",
+        "---\nid: M-IN\ntitle: inner\nphase: 1\nstatus: todo\n\
+         tags:\n- milestone\nblocked_by:\n- T-003\n\
+         ---\n\n## Why\n\nBecause.\n",
+    );
     // A second phase and a second live status, so the two fields that are only
     // reported when a plan exercises them are exercised.
     write_task(
@@ -492,6 +510,17 @@ fn every_field_the_schema_declares_is_carried_or_named() {
          tags:\n- cross-cutting\nprefer_after:\n- T-003\nblocked_by:\n- T-003\n\
          revisit_at: '2026-12-01T00:00:00Z'\ntrace_fingerprints:\n  docs/x.md#y: abc\n\
          version_impact: fix\nversion_impact_reason: a note, not a release\n\
+         ratified_by:\n- T-003\n\
+         ---\n\n## Why\n\nBecause.\n",
+    );
+    // A closed release carrying the number it produced, so the field that only a
+    // release may hold is exercised too (`A1-339`).
+    write_task(
+        dir.path(),
+        "M-shipped",
+        "---\nid: M-shipped\ntitle: A release that shipped\nphase: 2\nstatus: done\n\
+         tags:\n- milestone\n- release\nversion: 0.9.0\n\
+         evidence:\n  - kind: note\n    ref: shipped\n    captured: 2026-09-24\n\
          ---\n\n## Why\n\nBecause.\n",
     );
 
