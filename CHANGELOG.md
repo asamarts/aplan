@@ -6,7 +6,17 @@ to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+## [0.5.0] - 2026-11-03
+
 ### Added
+
+- **Releases now publish the complete workspace to crates.io before creating GitHub assets**
+  (`A2-011`). Ten public packages publish in dependency order. Each step binds to the validated
+  commit, packages locally, compares the archive checksum with an existing registry version, and
+  waits for a new version to become visible before its dependents proceed. GitHub Actions obtains
+  a short-lived crates.io token through OIDC from the protected `release` environment; no durable
+  registry secret is stored in the repository. A rerun accepts only identical crate and GitHub
+  asset bytes, fills a missing asset, and refuses drift instead of overwriting it.
 
 - **The TUI now owns quick capture and the complete retained Inbox workflow** (`A1-518`). `Ctrl-N`
   opens a minimal typed capture form without changing the current destination, while destination

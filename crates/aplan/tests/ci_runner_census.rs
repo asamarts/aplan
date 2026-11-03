@@ -80,6 +80,10 @@ const PINNED_ACTIONS: &[(&str, &str)] = &[
         "actions/upload-artifact",
         "cf430e030ddbb5b0abf93d22962f4752f3646cd9",
     ),
+    (
+        "rust-lang/crates-io-auth-action",
+        "3268eb413133e2960fa4ae0e963ca76380c54cd9",
+    ),
 ];
 
 #[derive(Clone, Copy)]
@@ -146,6 +150,14 @@ const SCRIPT_WARNING_POLICY: &[(&str, WarningPolicy)] = &[
     (
         "prepare-hosted.sh",
         WarningPolicy::NoWorkspaceCompilation("prepares tools and queries cargo-llvm-cov"),
+    ),
+    (
+        "publish-crates.sh",
+        WarningPolicy::NoWorkspaceCompilation("packages and publishes workspace crates"),
+    ),
+    (
+        "publish-github-release.sh",
+        WarningPolicy::NoWorkspaceCompilation("publishes and verifies GitHub release assets"),
     ),
     (
         "pushed.sh",
