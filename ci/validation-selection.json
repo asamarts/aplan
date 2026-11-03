@@ -287,11 +287,11 @@
       },
       {
         "path": "Cargo.lock",
-        "sha256": "6c48c35dc63a1433cf1b57f02807d3f32446f4454053a99bcbe14390044f13dd"
+        "sha256": "c176ec362d70cd31fac2dad4538d018a8fb28f4b082bb3f2428f3ba84798ad7a"
       },
       {
         "path": "Cargo.toml",
-        "sha256": "fb73c57b617200d15c425d0e264885076cc1c8896c3b9313ff51aab9c64efa9c"
+        "sha256": "2b764a82fcb0ccfc651fa716e1ca95666c4b299d7e7b92316a659f3bf3e6af18"
       },
       {
         "path": "crates/aplan-app/Cargo.toml",

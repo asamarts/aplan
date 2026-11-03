@@ -1577,10 +1577,11 @@ matching every `uses: ...@vX.Y.Z` found four, all of them quotations -- a CHANGE
 entry, two task bodies, and an observation record. A record of an instruction is not an instruction.
 
 So the gate checks install pins in the documents that *instruct* an adopter, and leaves
-records alone. And it compares against the newest **release tag**, not the workspace
-version: this workspace carries `X.Y.Z-dev` between releases (`A1-060`), so no published
-release ever equals it. `alint`'s equivalent gate does compare against the workspace
-version, correctly for `alint` and wrongly for this: inherit the lesson, not the script.
+records alone. On an ordinary `X.Y.Z-dev` tree it compares against the newest release
+tag. On a release tree with a bare `X.Y.Z` workspace version it instead requires
+`vX.Y.Z` before that tag exists. The distinction is necessary: using only the tag lets
+the pre-tag release profile accept the previous pin, then makes the exact same source
+fail as soon as its public tag exists.
 
 ---
 

@@ -6,6 +6,18 @@ to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+## [0.5.1] - 2026-11-03
+
+### Fixed
+
+- **Release validation now requires the release's own install pins before its tag exists**
+  (`A2-011`). A bare workspace version such as `0.5.1` makes the pin gate expect `v0.5.1`, while
+  ordinary `-dev` builds continue to follow the newest reachable release. This removes the
+  transition where a source passed locally before tagging and the same source failed on the hosted
+  runner after its tag made the new version visible. The release runbook now places consumer pin
+  updates in release preparation, and the repository Actions allowlist admits the full-SHA-pinned
+  official crates.io OIDC action without allowing arbitrary third-party actions.
+
 ## [0.5.0] - 2026-11-03
 
 ### Added
