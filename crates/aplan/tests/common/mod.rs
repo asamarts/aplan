@@ -342,7 +342,7 @@ fn copy_committed_tree(repository: &git2::Repository, tree: &git2::Tree<'_>, des
                 });
                 copy_committed_tree(repository, &child, &path);
             }
-            (Some(git2::ObjectType::Blob), mode @ (0o100_644 | 0o100_755)) => {
+            (Some(git2::ObjectType::Blob), 0o100_644 | 0o100_755) => {
                 let blob = repository.find_blob(entry.id()).unwrap_or_else(|error| {
                     panic!("read committed plan blob {}: {error}", entry.id())
                 });
@@ -352,6 +352,7 @@ fn copy_committed_tree(repository: &git2::Repository, tree: &git2::Tree<'_>, des
                 #[cfg(unix)]
                 {
                     use std::os::unix::fs::PermissionsExt as _;
+                    let mode = entry.filemode();
                     let permissions = std::fs::Permissions::from_mode(mode.cast_unsigned() & 0o777);
                     std::fs::set_permissions(&path, permissions).unwrap_or_else(|error| {
                         panic!(

@@ -375,8 +375,8 @@ fn body_criteria_rules() -> Vec<Scenario> {
             )
         },
         // Silent with the reason given: overriding the floor downwards is
-        // legitimate -- a pilot log really does change nothing that ships -- and
-        // the rule is about doing it in silence.
+        // legitimate -- an operational record can change nothing that ships --
+        // and the rule is about doing it in silence.
         Scenario {
             require_impact: true,
             ..scen(
@@ -385,7 +385,7 @@ fn body_criteria_rules() -> Vec<Scenario> {
                 Silent,
                 vec![tf(
                     "a",
-                    "id: A-1\ntitle: A-1\nphase: 0\nstatus: done\nversion_impact: none\nversion_impact_reason: a pilot log, which ships nothing\nevidence:\n  - kind: commit\n    ref: abc1234",
+                    "id: A-1\ntitle: A-1\nphase: 0\nstatus: done\nversion_impact: none\nversion_impact_reason: an operational record, which ships nothing\nevidence:\n  - kind: commit\n    ref: abc1234",
                 )],
             )
         },

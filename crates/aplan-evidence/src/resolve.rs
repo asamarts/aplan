@@ -6430,17 +6430,17 @@ mod tests {
     }
 
     /// The defaults are a contract with an adopter, not an implementation
-    /// detail: they are written in `README.md` and `docs/upgrading.md`, and a
-    /// silent change to either number would leave those documents lying
+    /// detail: they are written in `docs/upgrading.md`, and a silent change to
+    /// either number would leave that document lying
     /// (`A1-121`, found by its audit -- nothing pinned them).
     #[test]
     fn the_documented_defaults_are_the_ones_a_run_uses() {
-        assert_eq!(URL_TIMEOUT_SECS, 30, "the number `README.md` states");
-        assert_eq!(LIST_TIMEOUT_SECS, 600, "the number `README.md` states");
+        assert_eq!(URL_TIMEOUT_SECS, 30, "the documented URL timeout");
+        assert_eq!(LIST_TIMEOUT_SECS, 600, "the documented test-list timeout");
         assert_eq!(
             DEFAULT_MAX_OUTPUT_BYTES,
             1024 * 1024,
-            "the per-stream byte bound `README.md` states"
+            "the documented per-stream byte bound"
         );
 
         // And they are what an unconfigured runner or checker actually gets,

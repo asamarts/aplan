@@ -24,6 +24,60 @@ fn git(root: &Path, args: &[&str]) {
     );
 }
 
+fn audit_public_history(root: &Path) -> Output {
+    Command::new("python3")
+        .arg(workspace().join("ci/scripts/audit-public-history.py"))
+        .arg(root)
+        .output()
+        .expect("public history auditor runs")
+}
+
+#[test]
+fn every_reachable_public_object_passes_the_privacy_boundary() {
+    let output = audit_public_history(&workspace());
+    assert!(
+        output.status.success(),
+        "reachable public history failed the privacy audit:\n{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+}
+
+#[test]
+fn deleted_private_material_is_still_rejected_from_history() {
+    let temp = tempfile::Builder::new()
+        .prefix("public-history-boundary-")
+        .tempdir_in(aplan_core::fixture::fixture_root())
+        .expect("temporary history fixture");
+    git(temp.path(), &["init", "-q", "-b", "main"]);
+    git(temp.path(), &["config", "user.name", "Fixture"]);
+    git(
+        temp.path(),
+        &["config", "user.email", "fixture@example.invalid"],
+    );
+    std::fs::create_dir_all(temp.path().join("docs/design")).expect("private path parent");
+    std::fs::write(
+        temp.path().join("docs/design/evolution.md"),
+        "# private strategy\n",
+    )
+    .expect("private historical file");
+    git(temp.path(), &["add", "."]);
+    git(temp.path(), &["commit", "-q", "-m", "private fixture"]);
+    std::fs::remove_file(temp.path().join("docs/design/evolution.md"))
+        .expect("remove private historical file");
+    std::fs::write(temp.path().join("README.md"), "# clean tip\n").expect("clean fixture tip");
+    git(temp.path(), &["add", "-A"]);
+    git(temp.path(), &["commit", "-q", "-m", "clean tip"]);
+
+    let output = audit_public_history(temp.path());
+    assert!(!output.status.success(), "deleted private history passed");
+    assert!(
+        String::from_utf8_lossy(&output.stderr)
+            .contains("forbidden historical path docs/design/evolution.md"),
+        "the refusal did not name the historical path:\n{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+}
+
 struct CandidateFixture {
     temp: tempfile::TempDir,
     source: PathBuf,

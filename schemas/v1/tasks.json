@@ -387,7 +387,7 @@
       "oneOf": [
         {
           "const": "none",
-          "description": "Changes nothing that ships. A pilot log, a plan edit, a note.",
+          "description": "Changes nothing that ships. An operational log, a plan edit, or a note.",
           "type": "string"
         },
         {

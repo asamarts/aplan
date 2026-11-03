@@ -759,7 +759,7 @@
         },
         "covers": {
           "default": null,
-          "description": "Path globs this runner's tests cover, for `APLAN025`.\n\nSeparate from [`dir`](Self::dir) because *where a runner runs* is not\n*what it covers*: `cargo test --manifest-path server/Cargo.toml`, an npm\nworkspace filter, and `pytest --rootdir` all select a component while\nrunning at the repository root, which is usually where the lockfile is.\nReading `dir` alone left `APLAN025` unable to fire on any real pilot\n(`A1-065`).\n\nTakes precedence over `dir` when both are set, being the more specific\nclaim. Absent, and with no `dir` either, the runner makes no claim about\nlocality and `APLAN025` stays silent.",
+          "description": "Path globs this runner's tests cover, for `APLAN025`.\n\nSeparate from [`dir`](Self::dir) because *where a runner runs* is not\n*what it covers*: `cargo test --manifest-path server/Cargo.toml`, an npm\nworkspace filter, and `pytest --rootdir` all select a component while\nrunning at the repository root, which is usually where the lockfile is.\nReading `dir` alone cannot distinguish those cases (`A1-065`).\n\nTakes precedence over `dir` when both are set, being the more specific\nclaim. Absent, and with no `dir` either, the runner makes no claim about\nlocality and `APLAN025` stays silent.",
           "items": {
             "type": "string"
           },
@@ -860,7 +860,7 @@
         },
         "output_lines": {
           "default": null,
-          "description": "How many lines of a failed test's output a finding may carry. Default:\neight; `0` suppresses it (`A1-365`).\n\n**Present by default, which is a decision with a recorded cost.** A pilot\nrejected two cited tests that failed only inside its nested-Podman\nrunner, and the whole actionable output was \"failed under `--execute`\"\nwith the instruction to make the test pass: both streams had been\ncaptured and thrown away, so the cause could only be found by entering\nthe runner by hand. `test.list` has retained one line of stderr for a\nlaunch failure since it was written, and this is that precedent applied\nto the other half. An opt-in would reproduce the pilot's experience\nexactly: they met the opaque failure first, and would only then have\ndiscovered a key existed.\n\nThe cost is that a CI log can contain a little output nobody explicitly\nasked for. Three things bound it: the default is small, every line goes\nthrough the sanitizer a generated document uses, and recognisable\ncredential shapes are masked. Set `0` for a repository whose tests print\nthings it would rather not publish -- redaction is a best-effort filter\nover shapes that look like credentials, not a secret scanner, and the\nupgrade guidance says so in those words.",
+          "description": "How many lines of a failed test's output a finding may carry. Default:\neight; `0` suppresses it (`A1-365`).\n\n**Present by default, which is a decision with a recorded cost.** Without\nan excerpt, a test that fails only in an isolated runner reports merely\n\"failed under `--execute`\" even though both streams were captured.\n`test.list` already retains one line of stderr for a launch failure, and\nthis applies the same principle to the execution half.\n\nThe cost is that a CI log can contain a little output nobody explicitly\nasked for. Three things bound it: the default is small, every line goes\nthrough the sanitizer a generated document uses, and recognisable\ncredential shapes are masked. Set `0` for a repository whose tests print\nthings it would rather not publish -- redaction is a best-effort filter\nover shapes that look like credentials, not a secret scanner, and the\nupgrade guidance says so in those words.",
           "format": "uint",
           "minimum": 0,
           "type": [
@@ -1060,7 +1060,7 @@
       "oneOf": [
         {
           "const": "none",
-          "description": "Changes nothing that ships. A pilot log, a plan edit, a note.",
+          "description": "Changes nothing that ships. An operational log, a plan edit, or a note.",
           "type": "string"
         },
         {
@@ -1122,7 +1122,7 @@
         },
         "release_tag": {
           "default": null,
-          "description": "Which tags name a release, as a glob (`A1-317`, ADR-0038). Default: `v*`.\n\nADR-0038 decided the window with no release node is everything closed\nsince the nearest release tag reachable from `HEAD`, and that a\nrepository tagging things other than releases has to say which tags are\nreleases. `v*` is what this project and its pilots use; a project tagging\n`release-2026-09` says so here rather than being told its vocabulary is\nwrong (`A1-037`).",
+          "description": "Which tags name a release, as a glob (`A1-317`, ADR-0038). Default: `v*`.\n\nADR-0038 decided the window with no release node is everything closed\nsince the nearest release tag reachable from `HEAD`, and that a\nrepository tagging things other than releases has to say which tags are\nreleases. `v*` is this project's convention; a project tagging\n`release-2026-09` says so here rather than being told its vocabulary is\nwrong (`A1-037`).",
           "type": [
             "string",
             "null"
@@ -1146,7 +1146,7 @@
   "properties": {
     "advisory": {
       "default": null,
-      "description": "Rule codes this repository hears without failing its build on them.\n\nThe severity stays the rule's own: `APLAN022` is an error in `facts` and\nin the catalogue whatever is listed here. What this changes is the\n*verdict*, which is where `deny_warnings` already lives. It exists because\nthe check most useful during a migration was the one a migration could not\nturn on until it was finished: four tasks of thirty-three without a cut\nkept `APLAN022` off for the other twenty-nine\n(pre-public adoption evidence, item 3, `A1-112`).\n\nEvery finding downgraded this way is still printed, and the run says how\nmany there were, because a build that passed on a downgraded rule must not\nread like one that had nothing to say.",
+      "description": "Rule codes this repository hears without failing its build on them.\n\nThe severity stays the rule's own: `APLAN022` is an error in `facts` and\nin the catalogue whatever is listed here. What this changes is the\n*verdict*, which is where `deny_warnings` already lives. It exists because\nthe check most useful during a migration was the one a migration could not\nturn on until it was finished. `advisory` keeps findings visible while\nallowing an incremental migration (`A1-112`).\n\nEvery finding downgraded this way is still printed, and the run says how\nmany there were, because a build that passed on a downgraded rule must not\nread like one that had nothing to say.",
       "items": {
         "type": "string"
       },
@@ -1197,7 +1197,7 @@
     },
     "effort_days_per_week": {
       "default": null,
-      "description": "Effort days this repository absorbs in a week, for the *derived*\nduration `summary` and `roadmap` report (`A1-147`, ADR-0023).\n\nOne ratio, declared once, and nothing else about time: no start date, no\ncalendar, no per-cut duration. A duration is then arithmetic over numbers\nthe plan already carries -- `effort_days` and cut membership -- so it\ncannot drift from them, which is the failure the sixth pilot measured\nthree times in nine audits of its own hand-written schedule\n(pre-public adoption evidence item 2).\n\nIt is a *capacity*, not a promise: `7.5` says \"five days at an assumed\n1.5x\", and the derived weeks say what that capacity implies about the\neffort in the plan. Absent, nothing is reported.",
+      "description": "Effort days this repository absorbs in a week, for the *derived*\nduration `summary` and `roadmap` report (`A1-147`, ADR-0023).\n\nOne ratio, declared once, and nothing else about time: no start date, no\ncalendar, no per-cut duration. A duration is then arithmetic over numbers\nthe plan already carries -- `effort_days` and cut membership -- so it\ncannot drift from them as a hand-maintained duration can.\n\nIt is a *capacity*, not a promise: `7.5` says \"five days at an assumed\n1.5x\", and the derived weeks say what that capacity implies about the\neffort in the plan. Absent, nothing is reported.",
       "format": "double",
       "type": [
         "number",
@@ -1321,7 +1321,7 @@
         "$ref": "#/$defs/TagFamily"
       },
       "default": null,
-      "description": "Tag vocabularies this plan uses, as family name to its members\n(`APLAN026`).\n\nA second task-membership dimension ends up in tags, because tags are\nwhat exists: a pilot put 22 epics there and a build/measure/review\ntaxonomy beside them, and nothing noticed a typo in either. Declaring\nthe vocabulary makes a claim the repository already believes checkable,\nwithout making tags into a containment model.\n\n```yaml\ntag_families:\n  epic: [epic-a, epic-b]\n  kind: [kind-b, kind-m, kind-r]\n```\n\nAbsent, nothing changes. Tags outside every declared family stay legal\nand silent, or the feature would be a migration.",
+      "description": "Tag vocabularies this plan uses, as family name to its members\n(`APLAN026`).\n\nA second task-membership dimension ends up in tags, because tags are\nwhat exists. Declaring a vocabulary makes misspelled family members\ncheckable without making tags into a containment model.\n\n```yaml\ntag_families:\n  epic: [epic-a, epic-b]\n  kind: [kind-b, kind-m, kind-r]\n```\n\nAbsent, nothing changes. Tags outside every declared family stay legal\nand silent, or the feature would be a migration.",
       "type": [
         "object",
         "null"
@@ -1341,7 +1341,7 @@
     },
     "traces_external": {
       "default": null,
-      "description": "Roots outside this repository that a `traces` target may name (`A1-143`,\nADR-0021). Resolved against `traces_root`, exactly as a trace target is,\nso `[\"../p0000007\"]` means the sibling beside the root the traces\nthemselves are read from.\n\nAbsent, and a trace that escapes the repository is refused (`APLAN034`).\nThe refusal is the default because such a trace resolves *fully* -- a bad\nanchor is caught, drift fires across the boundary -- whenever the sibling\nhappens to be checked out, and reports a per-task `APLAN008` on the day a\njob runs without it. That is an undeclared hard dependency on another\nrepository's presence and ref, which is the class of failure this tool\nexists to remove: a plan that passes on one machine and not another, for\na reason the plan does not state.\n\nDeclaring one makes the dependency the repository's stated position: its\nabsence is then a configuration error naming this key, rather than a\nfinding about a task that is fine.",
+      "description": "Roots outside this repository that a `traces` target may name (`A1-143`,\nADR-0021). Resolved against `traces_root`, exactly as a trace target is,\nso `[\"../sibling\"]` means the sibling beside the root the traces\nthemselves are read from.\n\nAbsent, and a trace that escapes the repository is refused (`APLAN034`).\nThe refusal is the default because such a trace resolves *fully* -- a bad\nanchor is caught, drift fires across the boundary -- whenever the sibling\nhappens to be checked out, and reports a per-task `APLAN008` on the day a\njob runs without it. That is an undeclared hard dependency on another\nrepository's presence and ref, which is the class of failure this tool\nexists to remove: a plan that passes on one machine and not another, for\na reason the plan does not state.\n\nDeclaring one makes the dependency the repository's stated position: its\nabsence is then a configuration error naming this key, rather than a\nfinding about a task that is fine.",
       "items": {
         "type": "string"
       },

@@ -1,4 +1,5 @@
 use crate::common;
+#[cfg(target_os = "linux")]
 use std::io::Write as _;
 
 fn fixture() -> tempfile::TempDir {
@@ -419,7 +420,6 @@ fn benchmark_harness_kills_timed_out_process_group() {
     );
 }
 
-#[cfg(target_os = "linux")]
 fn assert_receipt_phases(case: &serde_json::Value) {
     for phase in [
         "receipt_manifest",

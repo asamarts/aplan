@@ -1,4 +1,4 @@
-# Pre-public workflow ergonomics
+# Workflow ergonomics
 
 Status: proposed, implementation planned in `M-v0.14`
 
@@ -519,7 +519,7 @@ record.
 
 ## Cross-cutting release plan
 
-The work is one pre-public cut because partial combinations are misleading. A completion field
+The work is one release cut because partial combinations are misleading. A completion field
 without a query does not answer the request; a renderer without raw/artifact boundaries can break
 automation; capture without promotion becomes a second backlog; CLI-only features make the TUI
 release gate immediately stale.
@@ -554,7 +554,7 @@ for completion history, task inspector for Markdown and task-add mutations for c
 CLI, MCP and TUI adapters depend on their shared engine result but not on one another merely for
 parity, so a transport migration cannot hold an otherwise complete human surface hostage.
 `A1-519` waits on all three lanes and on the completed `M-v0.13` cut, so it is the final proof over
-the complete pre-public surface without putting every domain task behind that earlier cut. Waiting
+the complete release surface without putting every domain task behind that earlier cut. Waiting
 on the milestone rather than only its last member preserves the claim that v0.13 itself is done.
 
 ## Research basis

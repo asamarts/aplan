@@ -645,11 +645,121 @@ mod tests {
             max_processes: None,
             wrap: None,
             run_selects: None,
-            list: vec!["printf".to_string(), format!("{listed}\n")],
-            run: vec!["true".to_string(), "{test}".to_string()],
+            list: list_command(listed),
+            run: successful_run_command(),
             batch: None,
             timeout_seconds: None,
         }
+    }
+
+    #[cfg(unix)]
+    fn list_command(listed: &str) -> Vec<String> {
+        vec!["printf".to_string(), format!("{listed}\n")]
+    }
+
+    #[cfg(windows)]
+    fn list_command(listed: &str) -> Vec<String> {
+        let writes = listed
+            .lines()
+            .map(|line| format!("Write-Output '{}'", line.replace('\'', "''")))
+            .collect::<Vec<_>>()
+            .join("; ");
+        vec![
+            "powershell.exe".to_string(),
+            "-NoProfile".to_string(),
+            "-NonInteractive".to_string(),
+            "-Command".to_string(),
+            writes,
+        ]
+    }
+
+    #[cfg(unix)]
+    fn successful_run_command() -> Vec<String> {
+        vec!["true".to_string(), "{test}".to_string()]
+    }
+
+    #[cfg(windows)]
+    fn successful_run_command() -> Vec<String> {
+        vec![
+            "powershell.exe".to_string(),
+            "-NoProfile".to_string(),
+            "-NonInteractive".to_string(),
+            "-Command".to_string(),
+            "Write-Output".to_string(),
+            "{test}".to_string(),
+        ]
+    }
+
+    #[cfg(unix)]
+    fn failing_list_command() -> Vec<String> {
+        vec!["false".to_string()]
+    }
+
+    #[cfg(windows)]
+    fn failing_list_command() -> Vec<String> {
+        vec![
+            "powershell.exe".to_string(),
+            "-NoProfile".to_string(),
+            "-NonInteractive".to_string(),
+            "-Command".to_string(),
+            "exit 1".to_string(),
+        ]
+    }
+
+    #[cfg(unix)]
+    fn marked_list_command(marker: &Path, listed: &str) -> Vec<String> {
+        vec![
+            "sh".to_string(),
+            "-c".to_string(),
+            format!("touch '{}'; printf '{listed}\\n'", marker.display()),
+        ]
+    }
+
+    #[cfg(windows)]
+    fn marked_list_command(marker: &Path, listed: &str) -> Vec<String> {
+        vec![
+            "powershell.exe".to_string(),
+            "-NoProfile".to_string(),
+            "-NonInteractive".to_string(),
+            "-Command".to_string(),
+            format!(
+                "[IO.File]::WriteAllText('{}', ''); Write-Output '{}'",
+                marker.display().to_string().replace('\'', "''"),
+                listed.replace('\'', "''")
+            ),
+        ]
+    }
+
+    #[cfg(unix)]
+    fn marked_run_command(marker: &Path) -> Vec<String> {
+        vec![
+            "sh".to_string(),
+            "-c".to_string(),
+            format!("printf executed > '{}'", marker.display()),
+            "focused-close".to_string(),
+            "{test}".to_string(),
+        ]
+    }
+
+    #[cfg(windows)]
+    fn marked_run_command(marker: &Path) -> Vec<String> {
+        let script = marker.with_extension("ps1");
+        std::fs::write(
+            &script,
+            format!(
+                "param([string]$TestName)\nif ($TestName -ne 'proof') {{ exit 1 }}\n[IO.File]::WriteAllText('{}', 'executed')\n",
+                marker.display().to_string().replace('\'', "''")
+            ),
+        )
+        .expect("write Windows test runner");
+        vec![
+            "powershell.exe".to_string(),
+            "-NoProfile".to_string(),
+            "-NonInteractive".to_string(),
+            "-File".to_string(),
+            script.display().to_string(),
+            "{test}".to_string(),
+        ]
     }
 
     fn submission(mut form: MutationForm, edits: &[(&str, &str)]) -> FormSubmission {
@@ -811,7 +921,7 @@ mod tests {
         assert_eq!(missing.summary.matched_pairs, 0);
 
         let mut failed = runner("broken", "ignored");
-        failed.list = vec!["false".to_string()];
+        failed.list = failing_list_command();
         let partial_context = context(
             dir.path(),
             Some(aplan_config::TestRunners::Many(vec![
@@ -964,11 +1074,7 @@ mod tests {
             .expect("tempdir");
         let marker = dir.path().join("runner-was-started");
         let mut configured = runner("observable", "ignored");
-        configured.list = vec![
-            "sh".to_string(),
-            "-c".to_string(),
-            format!("touch '{}'; printf 'proof\\n'", marker.display()),
-        ];
+        configured.list = marked_list_command(&marker, "proof");
         let _ = context(dir.path(), None);
         for args in [
             &["init", "-q"][..],
@@ -1043,13 +1149,7 @@ mod tests {
         }
         let mut configured = runner("focused", "proof");
         configured.run_selects = Some(true);
-        configured.run = vec![
-            "sh".to_string(),
-            "-c".to_string(),
-            format!("printf executed > '{}'", marker.display()),
-            "focused-close".to_string(),
-            "{test}".to_string(),
-        ];
+        configured.run = marked_run_command(&marker);
         let context = context_with_trust(
             dir.path(),
             Some(aplan_config::TestRunners::One(configured)),

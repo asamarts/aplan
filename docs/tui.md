@@ -242,12 +242,12 @@ For sequential output, use `NO_COLOR=1`, `--color never`, and the ordinary CLI (
 
 ## Terminal support and recovery
 
-Linux x86_64 is the currently automated full PTY and signal-lifecycle surface. Portable launch,
-navigation, resize and restoration tests are staged for public macOS arm64 and Windows x86_64 CI;
-they are not represented as observed passes while this repository is private. The current manual
-record includes a partial tmux smoke pass. SSH-allocated TTY and the named GUI emulator matrix are
-still unobserved on this non-GUI development host. This is an evidence boundary, not a claim that
-those terminals are known to fail.
+The public hosted matrix passed on Linux x86_64, macOS arm64 and Windows x86_64 on 2026-11-03.
+Linux and macOS ran the four portable PTY cases; Windows ran the three cases that do not require a
+POSIX signal. Linux also carries the full Unix signal and job-control suite in the complete local
+profile. The manual record remains narrower: it includes a partial tmux smoke pass, while an
+SSH-allocated TTY and the named GUI emulator matrix remain unobserved. Automated ConPTY coverage
+does not claim a Windows console-control event that its harness cannot generate.
 
 Normal quit, `Ctrl-C`, catchable Unix termination, suspend/resume, panic unwinding and partial
 initialization restore the modes the process acquired: raw mode, alternate screen, cursor,

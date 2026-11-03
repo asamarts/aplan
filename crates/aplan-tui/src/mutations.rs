@@ -1297,11 +1297,9 @@ mod tests {
             .expect("sparse source length");
         let error = read_captured_source(&oversized).expect_err("oversized source refused");
         assert!(error.contains("interactive safety bound"), "{error}");
-        assert!(
-            read_captured_source(&dir.path().join("missing.md"))
-                .expect_err("missing source refused")
-                .contains("No such file")
-        );
+        let error = read_captured_source(&dir.path().join("missing.md"))
+            .expect_err("missing source refused");
+        assert!(!error.trim().is_empty(), "missing source returned no error");
     }
 
     /// Proof for `tui.authoring_capture_refuses_non_regular_before_blocking`:

@@ -15,7 +15,7 @@ cargo clippy --workspace --all-targets -- -D warnings
 RUSTDOCFLAGS="-D warnings" cargo doc --workspace --no-deps  # intra-doc links resolve
 cargo xtask gen-schema --check  # the schema is derived from the types, not hand-written
 cargo xtask gen-roadmap --check # ROADMAP.status.md is generated from the plan (ADR-0009)
-cargo xtask check-docs          # ROADMAP.md and private pre-public adoption records agree with the plan
+cargo xtask check-docs          # declared current documents agree with the plan
 cargo xtask lint                # house style: no typographic tells (see below)
 cargo deny --locked check advisories bans licenses sources
 cargo xtask dependency-audit   # admitted dependencies and default/headless budgets
@@ -82,7 +82,8 @@ consumer contract, so adding one is a breaking change for anyone parsing our out
    it in its emitting crate; the registry guard in `diagnostic.rs` does not count, because it
    lists every code by construction. This step exists because `APLAN023` satisfied step 3
    and was still wrong three ways (`A1-043`, `A1-046`).
-5. Update the rule table in `README.md` and the catalog in `HLD.md §6`.
+5. Update the rule catalogue in `HLD.md Section 6` and regenerate
+   `docs/rule-catalogue.md` when its generated contract changes.
 6. Regenerate `facts.json` (`cargo run -p aplan -- facts > facts.json`): it lists every rule
    with its severity, derived from the code, and `tests/facts.rs` fails CI if the committed
    file is stale.
@@ -103,9 +104,9 @@ arms (the compiler forces the render arm), and list it in the format audit, or C
   by `gen-schema --check`. Never hand-edit a schema; adding a config key is a field on
   `Config`, then `cargo xtask gen-schema`.
 - **Design** lives in `HLD.md`; **sequencing** in `ROADMAP.md`; **decisions** in
-  `docs/adr/` (immutable; supersede, don't rewrite); **competitive rationale** in
-  `pre-public product research`. If code and a doc disagree, the code is right and the doc is stale; fix
-  the doc.
+  `docs/adr/` (immutable; supersede, don't rewrite). Confidential product, market, and adoption
+  records live in the private maintainer repository, not this public source tree. If code and a doc
+  disagree, the code is right and the doc is stale; fix the doc.
 
 ## Style
 

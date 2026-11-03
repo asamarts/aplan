@@ -5,8 +5,8 @@ on:
     tags: ["v*"]
   workflow_dispatch:
 
-# Runs on the self-hosted runner while private and a standard GitHub-hosted
-# runner when public (the pre-public repository-boundary decision, the pre-public repository-boundary decision). This still publishes one portable
+# Public releases use a standard GitHub-hosted runner; the private maintainer
+# repository retains the self-hosted route. This still publishes one portable
 # Linux x86_64 binary; multi-platform packaging remains a distribution decision,
 # not a side effect of changing CI placement (HLD Section 17).
 env:

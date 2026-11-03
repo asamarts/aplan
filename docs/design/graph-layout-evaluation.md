@@ -424,7 +424,7 @@ process startup and output redirected to disk. Under load 11.04, 14.61, 19.74, t
 80.26 ms for the complete plan at 240. The post-promotion `1c813efe` audit restored exact
 membership and reach-edge scope disclosure, then repeated the functional matrix and stability
 digests against the frozen source. Its largest document was 17,140 bytes. No promotion sample or
-failure was discarded; pre-public technical evaluation
+failure was discarded; technical evaluation
 contains the complete matrix, digests and blinded formative results.
 
 The full rerun found four work leaks rather than relaxing budgets: hidden Graph reprojected during

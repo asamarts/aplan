@@ -1925,7 +1925,7 @@ fn terminating_signals_restore_the_terminal_and_keep_the_exit_reason() -> termle
     Ok(())
 }
 
-#[cfg(unix)]
+#[cfg(target_os = "linux")]
 fn send_signal(pid: u32, name: &str) {
     common::send_signal(pid, name);
 }
@@ -1963,7 +1963,7 @@ fn wait_for_resumed_process(pid: u32) {
     }
 }
 
-#[cfg(target_os = "linux")]
+#[cfg(unix)]
 fn wait_for_file(path: &Path) {
     let deadline = Instant::now() + Duration::from_secs(10);
     while !path.exists() {

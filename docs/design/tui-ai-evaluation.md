@@ -7,13 +7,13 @@ against aplan's paper prototype and, later, its real terminal UI. It uses the ex
 authentication and configured defaults of Claude Code, Codex, OpenCode and OMP. It does not put a
 model in aplan, add a product dependency or grant an agent access to the repository. It supplies a
 formative structural review for `A1-418` and a repeated product-wide release gate in `A1-528`; it
-does not turn either layer into human evidence or replace the pre-public human research in
+does not turn either layer into human evidence or replace the deferred human evaluation in
 `A1-449`.
 
 ## Decision
 
 Build this as a local, opt-in evaluation layer. Use it as a formative structural review for
-`A1-418`, as a supplementary discovery layer during implementation and as the pre-public product
+`A1-418`, as a supplementary discovery layer during implementation and as the release
 gate defined by `A1-528`.
 
 The useful claim is narrow: repeated synthetic actors can cheaply explore more routes, terminal
@@ -674,7 +674,7 @@ layer rather than preserving it because its transcripts look sophisticated.
 | synthetic smoke | local opt-in after meaningful TUI change | one pairwise scenario set on available adapters | exploratory; deterministic failures block locally |
 | synthetic structure | paper-prototype development | fixed cohort across profiles and conforming adapters plus blind critique | formative structure/safety review after the standalone acceptance cohort was retired; never participant evidence |
 | synthetic full | `A1-528`, before human study and release evaluation | predeclared repetitions across profiles, geometries and adapters plus blind critique | required public-release product gate; never participant evidence |
-| human | `A1-449` protocol | observed consented sessions | required pre-public usability evidence |
+| human | `A1-449` protocol | observed consented sessions | required release usability evidence |
 
 Subscription-backed CLIs belong on a developer host, not an unattended shared runner. Their
 quotas, product terms and organization policies may differ. Do not copy host auth into CI or make
@@ -756,7 +756,7 @@ and explicit expected facts do.
 Package 5 depends on the real implementation and human study; it cannot become a blocker that
 prevents the humans whose observations calibrate it.
 
-### Package 6: repeated product-wide pre-public evaluation (`A1-528`, 8 days, public gate)
+### Package 6: repeated product-wide release evaluation (`A1-528`, 8 days, public gate)
 
 - extend the corpus across the complete CLI, typed engine, MCP and TUI product rather than
   re-running only the paper structure;

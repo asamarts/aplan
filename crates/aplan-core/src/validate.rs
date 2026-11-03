@@ -2897,9 +2897,10 @@ fn check_scaffold_leftover(lt: &crate::load::LoadedTask, out: &mut Vec<Diagnosti
 /// rather than a demand that every one of them be annotated.
 ///
 /// What is reported is the author overriding that floor *downwards* in silence.
-/// Overriding it is legitimate -- a pilot log really does change nothing that
-/// ships -- and a reviewer should be told, because the claim is the one thing
-/// nothing else can check: no hermetic rule knows whether a task broke an API.
+/// Overriding it is legitimate -- an operational record can change nothing
+/// that ships -- and a reviewer should be told, because the claim is the one
+/// thing nothing else can check: no hermetic rule knows whether a task broke
+/// an API.
 ///
 /// Closed tasks only, and `done` rather than terminal: a `dropped` task ships
 /// nothing, so what it would have done to the version is not a question anyone
@@ -2976,8 +2977,8 @@ fn check_version_impact(lt: &crate::load::LoadedTask, opts: &Options, out: &mut 
     .with_file(&lt.path)
     .with_agent_instruction(
         "Add `version_impact_reason` saying what this task changed that the level's floor gets \
-         wrong -- a plan edit or a pilot log really does change nothing that ships. If it did \
-         change the artifact after all, raise `version_impact` instead.",
+         wrong -- a plan edit or an operational record really can change nothing that ships. If \
+         it did change the artifact after all, raise `version_impact` instead.",
     );
     if let Some(at) = lt.fields.get("version_impact") {
         d = d.at(*at);

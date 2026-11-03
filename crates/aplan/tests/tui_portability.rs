@@ -87,6 +87,12 @@ fn assert_owned(screen: &termlens::Screen) {
 fn assert_restored(screen: &termlens::Screen) {
     assert!(!screen.alternate_screen());
     assert!(!screen.bracketed_paste());
+    // Crossterm documents focus events as permanently enabled by the Windows
+    // console API. Its disable command is consequently a no-op there: aplan
+    // did not acquire that state and cannot restore it. On terminals where
+    // mode 1004 is owned by the application, the disable sequence is part of
+    // the observable restoration contract.
+    #[cfg(not(windows))]
     assert!(!screen.focus_events());
     assert!(screen.cursor_visible());
 }
@@ -176,19 +182,21 @@ fn editor_environment(directory: &Path, marker: &Path, gate: &Path) -> Vec<(Stri
 
 #[cfg(windows)]
 fn editor_environment(directory: &Path, marker: &Path, gate: &Path) -> Vec<(String, String)> {
-    let script = directory.join("portable-editor.ps1");
+    let script = directory.join("portable-editor.cmd");
     std::fs::write(
         &script,
-        "param([string]$Draft)\n\
-         New-Item -ItemType File -Force $env:APLAN_EDITOR_MARKER | Out-Null\n\
-         while (Test-Path $env:APLAN_EDITOR_GATE) { Start-Sleep -Milliseconds 10 }\n\
-         [IO.File]::WriteAllText($Draft, \"## Why`n`nEdited outside the TUI.`n\")\n",
+        "@echo off\r\n\
+         type nul > \"%APLAN_EDITOR_MARKER%\"\r\n\
+         :wait\r\n\
+         if exist \"%APLAN_EDITOR_GATE%\" goto wait\r\n\
+         > \"%~1\" (\r\n\
+           echo ## Why\r\n\
+           echo(\r\n\
+           echo Edited outside the TUI.\r\n\
+         )\r\n",
     )
     .expect("editor script");
-    let command = format!(
-        "powershell.exe -NoProfile -NonInteractive -File '{}'",
-        script.display()
-    );
+    let command = "cmd.exe /D /Q /C portable-editor.cmd".to_string();
     let mut environment = portable_process_environment();
     environment.extend([
         ("VISUAL".to_string(), command),
@@ -214,35 +222,6 @@ fn blocked_provider(fixture: &Fixture, marker: &Path, gate: &Path) -> Vec<(Strin
     std::fs::write(
         fixture.directory().join(".aplan.yml"),
         "root: plan\ntest:\n  list: [/bin/sh, blocked-provider.sh]\n  run: ['true', '{test}']\n",
-    )
-    .expect("provider configuration");
-    let mut environment = portable_process_environment();
-    environment.extend([
-        (
-            "APLAN_PROVIDER_MARKER".to_string(),
-            marker.display().to_string(),
-        ),
-        (
-            "APLAN_PROVIDER_GATE".to_string(),
-            gate.display().to_string(),
-        ),
-    ]);
-    environment
-}
-
-#[cfg(windows)]
-fn blocked_provider(fixture: &Fixture, marker: &Path, gate: &Path) -> Vec<(String, String)> {
-    let script = fixture.directory().join("blocked-provider.ps1");
-    std::fs::write(
-        &script,
-        "New-Item -ItemType File -Force $env:APLAN_PROVIDER_MARKER | Out-Null\n\
-         while (Test-Path $env:APLAN_PROVIDER_GATE) { Start-Sleep -Milliseconds 10 }\n\
-         Write-Output 'suite::proof'\n",
-    )
-    .expect("provider script");
-    std::fs::write(
-        fixture.directory().join(".aplan.yml"),
-        "root: plan\ntest:\n  list: [powershell.exe, -NoProfile, -NonInteractive, -File, blocked-provider.ps1]\n  run: [powershell.exe, -NoProfile, -NonInteractive, -Command, exit 0, '{test}']\n",
     )
     .expect("provider configuration");
     let mut environment = portable_process_environment();
@@ -320,7 +299,7 @@ fn external_editor_handoff_restores_modes_and_refreshes_identity() -> termlens::
     terminal.wait_until(|screen| {
         !screen.alternate_screen()
             && !screen.bracketed_paste()
-            && !screen.focus_events()
+            && (cfg!(windows) || !screen.focus_events())
             && screen.cursor_visible()
     })?;
     assert_restored(&terminal.screen());
@@ -340,7 +319,11 @@ fn external_editor_handoff_restores_modes_and_refreshes_identity() -> termlens::
     terminal.wait_until_for(
         |screen| {
             screen.alternate_screen()
-                && screen.contains("External body: 32 byte(s)")
+                && screen.contains(if cfg!(windows) {
+                    "External body: 35 byte(s)"
+                } else {
+                    "External body: 32 byte(s)"
+                })
                 && screen.contains("Ctrl-E reopens it")
         },
         TIMEOUT,
@@ -376,6 +359,12 @@ fn portable_control_c_restores_terminal_modes() -> termlens::Result<()> {
 /// a real slow provider removes the attended progress row, leaves the cursor
 /// visible and returns a non-success process result without acquiring TUI
 /// modes.
+///
+/// `termlens` can deliver the POSIX signal produced by a cooked PTY's Ctrl-C
+/// byte. `ConPTY` accepts the byte but exposes no equivalent API for generating
+/// a Windows console control event in the child's pseudoconsole, so claiming
+/// this observation there would test the harness rather than aplan's handler.
+#[cfg(unix)]
 #[test]
 fn portable_cli_progress_interrupt_cleans_its_terminal_row() -> termlens::Result<()> {
     let fixture = Fixture::new();

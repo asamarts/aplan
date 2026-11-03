@@ -1,10 +1,10 @@
 # TUI delivery design
 
-Status: feature implementation complete for the pre-public scope. The foundation, Overview, task
+Status: feature implementation complete for the accepted scope. The foundation, Overview, task
 browser, task inspector and joined ready/why/due workflow, Diagnostics, evidence-verification
 workbench, interactive Graph destination, Reports hub, capture Inbox and guarded mutation catalogue are
-implemented. Cross-platform release observation and the deferred unfamiliar-user review remain
-release gates, not unimplemented product surfaces.
+implemented. The public cross-platform hosted matrix is qualified. The deferred unfamiliar-user
+review remains a release gate, not an unimplemented product surface.
 The executable scope and order live in the TUI milestones under `aplan/tasks/`; this document
 records the product and architecture decisions those tasks implement.
 
@@ -16,7 +16,7 @@ The TUI is an interactive view and control surface over the same plan, graph, di
 verification and mutation policy as the CLI and MCP server. It does not parse a second model, run
 CLI commands as subprocesses or write task files directly.
 
-The pre-public target is a daily-usable TUI that covers the high-value read and mutation workflows:
+The initial target is a daily-usable TUI that covers the high-value read and mutation workflows:
 
 1. understand plan health and what is ready;
 2. find and inspect any task, blocker, cut or diagnostic;
@@ -197,7 +197,7 @@ reports whether the capability was compiled. This is a supported headless build,
 artifact. It measured byte-identical to the pre-TUI CLI. The standard linked probe added 229,456
 bytes (1.79%) to the stripped Linux release binary. A companion pair was larger in aggregate,
 would require sibling discovery and subprocess handoff, and would contradict the one-binary
-release contract. Exact measurements and the noisy cold-build timings are in `pre-public product research`.
+release contract. Noisy cold-build timings are not part of the release contract.
 
 Primary sources:
 
@@ -264,7 +264,7 @@ graph has graphlay's renderer, JSON, schema, fixture and parallel features off. 
 is MIT-licensed `libm`; its unconditional derive edge reuses the workspace's existing `serde`.
 Graphlay is MIT OR Apache-2.0 and declares the same Rust 1.88 floor as this workspace. The final
 whole-product license, source, advisory, duplicate-version and binary-size policy remains the
-separate pre-public A1-450 gate. Exact methods and evaluation results are in
+separate A1-450 gate. Exact methods and evaluation results are in
 `docs/design/graph-layout-evaluation.md`.
 
 `CellSceneJob` owns its immutable projection, sizes, ordering hints, orientation, prior scene and
@@ -713,15 +713,14 @@ inherits another column's pass.
 
 | platform | compile and unit coverage | automated real PTY | Unix signals and job control | latest observation |
 |---|---|---|---|---|
-| Linux x86_64 | ordinary workspace suite plus `aplan-tui` library | `integration tui_portability::` and the full `tui_journey` corpus | supported and automated | passed locally on 2026-10-27 at the A1-448 source state |
-| macOS arm64 | public `macos-latest` portability job | the same portable module | supported by the Unix implementation; the portable module does not duplicate Linux signal cases | staged; unavailable while this repository is private, so not reported passing |
-| Windows x86_64 | public `windows-latest` portability job | the same module through ConPTY | unavailable: Windows has no `SIGTSTP`/`SIGCONT` contract | staged; unavailable while this repository is private, so not reported passing |
+| Linux x86_64 | ordinary workspace suite plus `aplan-tui` library | four portable cases plus the full `tui_journey` corpus | supported and automated | public hosted matrix passed 2026-11-03; complete Unix suite also passed in the local full profile |
+| macOS arm64 | public `macos-latest` portability job | four portable cases, including attended CLI interruption | supported by the Unix implementation; Linux owns the complete signal matrix | public hosted matrix passed 2026-11-03 |
+| Windows x86_64 | public `windows-latest` portability job | three applicable cases through ConPTY | unavailable: Windows has no `SIGTSTP`/`SIGCONT` contract | public hosted matrix passed 2026-11-03; no claim is made for a console-control event the harness cannot generate |
 
-The weekly/manual `TUI portability` workflow is the executable matrix. Private runs allocate only
-the Linux self-hosted job; macOS and Windows are skipped before runner allocation. Public runs use
-standard GitHub-hosted `ubuntu-latest`, `macos-latest` and `windows-latest` systems. ADR-0059 records
-why this is a narrow exception to the otherwise Ubuntu-only public CI decision. A current successful
-three-OS run is a release input owned by `A1-452`; committing the workflow is not that observation.
+The weekly/manual `TUI portability` workflow is the executable matrix. Public runs use standard
+GitHub-hosted `ubuntu-latest`, `macos-latest` and `windows-latest` systems. ADR-0059 records why this
+is a narrow exception to the otherwise Ubuntu-only public CI decision. The 2026-11-03 qualification
+ran the shared library suite and every platform-applicable real-PTY case on all three systems.
 
 The lifecycle cases and their load-bearing proofs are:
 
@@ -789,16 +788,14 @@ version, `$TERM`, local/SSH/tmux layers, glyph/theme choice and pass/fail notes.
 Run the protocol in a direct local session, inside current tmux, and through an allocated TTY such
 as `ssh -t host`. The named emulator coverage set is Kitty and GNOME Terminal on Linux, iTerm2 on
 macOS, and Windows Terminal on Windows. At least two real emulators plus tmux and SSH must have a
-current recorded pass at release audit. This private Linux development host cannot honestly supply
-those GUI/macOS/Windows observations, so their A1-448 delivery is the documented procedure and
-their current status is `not observed`, not `pass`; `A1-452` owns the release-candidate rerun and
-disposition of any finding.
+current recorded pass at release audit. Hosted PTY coverage does not identify a GUI emulator or an
+SSH transport, so those manual observations remain `not observed`, not `pass`.
 
 The A1-448 development observation record is deliberately narrower than that release protocol:
 
 | environment | observation on 2026-10-27 |
 |---|---|
-| Linux PTY through termlens | passed the complete automated `tui_portability::` module |
+| Linux PTY through termlens | passed the complete automated `tui_portability::` module locally and on the public hosted matrix |
 | tmux 3.7c on Linux, detached 100x24 session | passed launch, Overview/Tasks navigation, 47x13 refusal, 100x24 recovery, ordinary quit and restored shell modes; the remaining manual-protocol steps are not claimed |
 | SSH allocated TTY | not observed: the local SSH service accepted connections but this host had no usable non-interactive account authentication |
 | Kitty, GNOME Terminal, iTerm2 and Windows Terminal | not observed on this non-GUI Linux host |
@@ -1897,7 +1894,7 @@ review in [`tui-structure-review.md`](tui-structure-review.md). This is a struct
 a human usability study: it can expose missing routes, contradictory labels, hidden write
 boundaries and internally inconsistent states, but it cannot establish accessibility, trust,
 motor behavior or that a person finds the interface intuitive. `A1-449` retains the later
-five-participant evaluation of the real implementation and remains a pre-public gate.
+five-participant evaluation of the real implementation and remains a deferred release gate.
 
 The cohort uses one identified prototype revision and the same neutral prompts. Both unfamiliar
 observable-strategy profiles receive at least three fresh complete sessions; counted runs span at
@@ -2038,23 +2035,12 @@ mouse input, follows both relation directions, selects a membership-only task, e
 scope where that selection is excluded, recovers to a visible task, switches glyphs, resizes and
 pans a larger scene. Structural and document findings both expose source locations in the PTY.
 
-Three sibling repositories, none derived from aplan's fixture, were then run through the opt-in
-real-PTY driver. Every one painted independently identifying markers for Overview, Tasks,
-Diagnostics, Graph, Reports and Inbox, restored the terminal on exit, and retained both its plan bytes and
-observable Git state (HEAD, porcelain status and the binary tracked-file diff):
-
-| plan | tasks and status shape | dependency graph | structural result with this build | six-destination PTY run |
-|---|---|---|---|---|
-| p000000012 | 94: 50 done, 1 in progress, 43 todo | 93 nodes, 142 dependency edges; 81 membership edges and 1 grouping-only task omitted | one `APLAN041` warning | 4.60s |
-| p00024 | 270: 16 blocked, 8 done, 2 dropped, 244 todo | 260 nodes, 581 dependency edges; 236 membership edges and 10 grouping-only tasks omitted | clean | 14.89s |
-| p0001 | 207: 6 done, 201 todo | 204 nodes, 715 dependency edges; 187 membership edges and 3 grouping-only tasks omitted | one denied `APLAN041` warning | 10.12s |
-
-The two `APLAN041` results are deliberate version-skew observations: this newer aplan build says
-those repositories' generated `AGENTS.md` blocks need regeneration. The TUI retained and displayed
-the plan verdict; this is neither a TUI discrepancy nor authority to rewrite a sibling repository.
-That pass left no further then-observed real-plan TUI friction after the journey gaps above were
-made executable. The later field pass below exercised different release-quality questions and
-found presentation and responsiveness work outside the v0.12 operation boundary.
+The same opt-in real-PTY driver was also exercised against plans independent of aplan's fixture.
+Each run painted identifying markers for Overview, Tasks, Diagnostics, Graph, Reports, and Inbox,
+restored the terminal on exit, and retained both plan bytes and observable Git state. Version-skew
+findings remained visible as plan findings rather than being rewritten by the TUI. Those private
+plan inputs and measurements are not part of the public test corpus; the generated and synthetic
+fixtures below carry the reproducible release claims.
 
 Responsiveness is measured at both boundaries. An in-process dispatch must navigate in under 100ms
 while refresh owns the only worker, and the real PTY must repaint Tasks in under 500ms while an
@@ -2320,7 +2306,7 @@ generation can finish within the grace period while later validation makes the c
 slow. A1-667 therefore owns one command-level presentation spanning all native phase sources,
 rather than treating a short child generation as proof the invocation is short.
 
-All five lanes remain in v0.13 and therefore block the pre-public final audit. A1-447 through
+All five lanes remain in v0.13 and therefore block the initial release audit. A1-447 through
 A1-452 measure, port, evaluate, document and adversarially re-audit the assembled result rather than
 evaluating the older defensive shell in isolation.
 
@@ -2356,7 +2342,7 @@ quality gate for the original TUI scope. Field use also requires prompt truthful
 progress, a traversable bounded graph when the whole graph is too wide, semantic summary hierarchy,
 adaptive narrow/short layouts and complete overlay pointer accelerators before this cut can close.
 
-### v0.14: pre-public workflow ergonomics
+### v0.14: workflow ergonomics
 
 Integrate the later completion-history, terminal-Markdown and quick-capture requirements into the
 feature-complete interface. Recent completions gain a native history view, task bodies use the

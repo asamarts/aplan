@@ -1,6 +1,6 @@
 //! `aplan close`: set a task `done` and attach evidence, in place.
 //!
-//! Evidence is friction, and friction is the top adoption risk: hand-typing a SHA
+//! Evidence should be easy to record correctly: hand-typing a SHA
 //! into YAML is the tax that stops people closing tasks honestly. `close` makes it
 //! a one-liner (and can derive the commit for free). It is the first thing that
 //! *writes* a task file, so the rewrite is deliberately surgical: it changes only

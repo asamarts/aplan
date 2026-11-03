@@ -13,9 +13,8 @@ concurrency:
 
 # Dogfoods `action.yml`, which is the only way to know the adoption path works:
 # the unit of value is "a consumer adds four lines to a workflow and gets
-# annotations", and nothing but running it proves that. It uses the self-hosted
-# runner while this repository is private and a fresh GitHub-hosted VM once it
-# is public (the pre-public repository-boundary decision, the pre-public repository-boundary decision).
+# annotations", and nothing but running it proves that. Public runs use a fresh
+# GitHub-hosted VM; the private maintainer repository retains the self-hosted route.
 #
 # Against `ci/fixtures/action-selftest/` and not this repository's own plan
 # (`A1-278`). The action installs a *pinned release*, `.aplan.yml` tracks `main`,
@@ -33,8 +32,8 @@ permissions:
 jobs:
   selftest:
     name: the action checks aplan's own plan
-    # A private pull request cannot reach the persistent box. Once public, this
-    # self-test is a required context on every public pull request, and no
+    # A private pull request cannot reach the persistent box. In this public
+    # repository the self-test is a required context on every pull request, and no
     # persistent runner remains registered for attacker-authored labels to name.
     if: github.event_name == 'push' || github.event_name == 'workflow_dispatch' || (github.event_name == 'pull_request' && github.event.repository.private == false)
     runs-on: ${{ (github.event.repository.private && fromJSON('["self-hosted","linux","aplan"]')) || fromJSON('["ubuntu-latest"]') }}

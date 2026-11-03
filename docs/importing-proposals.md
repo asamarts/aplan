@@ -175,8 +175,8 @@ file that holds it, not a silent replacement.
 
 ## A markdown checklist
 
-`--format checklist` reads `- [ ]` / `- [x]` items under `##` headings, which is the
-commonest planning shape there is and what the first pilot kept before it adopted `aplan`.
+`--format checklist` reads `- [ ]` / `- [x]` items under `##` headings, a common
+planning shape that carries proposed work but no typed ids or dependencies.
 A wrapped item is joined into one title, the heading becomes a tag, and the prose under
 that heading is carried into each task's body, because a list of one-liners loses its
 context otherwise.
@@ -196,19 +196,16 @@ It carries less than a KEP does, so it says more:
 
 ```console
 $ aplan import ROADMAP.md --format checklist --id-prefix AL --dry-run
-would import 18 task(s) from ROADMAP.md
-  AL-001  todo  [phase-0-de-risk-the-hard-20]  `p0000004-core`: tokio runtime + a minimal INDI client ...
+would import 3 task(s) from ROADMAP.md
+  AL-001  todo  [phase-0-foundation]  Create the shared client
 ```
 
-That is the first pilot's real roadmap, the one it hand-authored thirty-three tasks from;
-the import produces eighteen tasks that pass `check`.
+The importer reports every generated id and heading-derived tag before a dry run can be accepted.
 
 ## A spec-driven task list
 
 `--format spec-kit` reads `specs/NNN-feature/tasks.md`, and `--format openspec` reads
-`openspec/changes/<name>/tasks.md`. RESEARCH section 15 ranked this camp first: spec-kit
-discussion #2726 asks for "a deterministic gate... no LLM, `exit 0/1`", which is what this
-tool is.
+`openspec/changes/<name>/tasks.md`. Both are checklist formats with explicit item ids.
 
 Both documents are markdown checklists whose items carry **ids**, which is the difference
 that matters:
@@ -266,10 +263,8 @@ There is no table importer, and that is a decision rather than a gap (ADR-0019).
 
 A checkbox has one meaning. `- [ ]` is a proposal, everywhere it appears, which is why
 `--format checklist` can read a document it has never seen and be right about it. A table
-row has no such meaning. The fifth pilot's programme plan is 1,887 lines with **45 tables
-and 451 data rows**, describing streams, gates, risks, deliverables, metrics, budgets,
-role assignments and comparisons. Perhaps two of those tables are work. Only the author
-knows which.
+row has no such meaning. The adversarial fixture uses **45 tables and 451 data rows** describing
+different kinds of records. Only the author knows which rows, if any, represent work.
 
 So `aplan` says what it read and what it wanted:
 
@@ -298,15 +293,14 @@ $ awk '/^## 6\. Stream registry/,/^## 7\./' PLAN.md \
     > streams.md
 $ aplan import streams.md --format checklist --id-prefix STR --dry-run
 would import 62 task(s) from streams.md
-  STR-001  todo  []  `V0`: Fixed scope, evidence register, weekly kill-criterion review
-  STR-002  todo  []  `V1`: npm/PyPA/native differential domain prototype
+  STR-001  todo  []  `V0`: Implement the parser
+  STR-002  todo  []  `V1`: Add the regression tests
 ```
 
-That is the fifth pilot's real stream registry, and those are its real numbers. The middle
-pass is what makes it a table rather than a section: section 6 of that document contains
-several tables, and a range over the whole section would have swept up eighty rows from
-three of them. This repository runs that exact pipeline in its own test suite, so the
-commands above are ones that have been executed rather than ones that look plausible.
+The middle pass is what makes it a table rather than a section: the fixture's section 6 contains
+several tables, and a range over the whole section would sweep up unrelated rows. This repository
+runs that exact pipeline against a committed synthetic fixture, so the commands above are
+executable documentation.
 
 Three properties make this the supported path rather than a workaround:
 

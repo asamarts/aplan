@@ -8273,6 +8273,10 @@ mod tests {
         current_buffer(model, width, height)
     }
 
+    fn fixture_snapshot(snapshot: &str) -> String {
+        snapshot.lines().collect::<Vec<_>>().join("\n")
+    }
+
     fn current_buffer(model: &Model, width: u16, height: u16) -> String {
         let backend = TestBackend::new(width, height);
         let mut terminal = Terminal::new(backend).expect("terminal");
@@ -10841,7 +10845,7 @@ mod tests {
             assert_eq!(model.route, Route::Overview);
             assert_eq!(model.selected, 0);
             assert_eq!(model.glyphs, Glyphs::Ascii);
-            assert_eq!(view, expected.strip_suffix('\n').unwrap_or(expected));
+            assert_eq!(view, fixture_snapshot(expected));
         }
 
         let mut model = ModelBuilder::default()
@@ -12156,7 +12160,7 @@ mod tests {
         let mut model = graph_model();
         let view = buffer(&mut model, 80, 18);
         let expected = include_str!("snapshots/graph-layered-normal-ascii.txt");
-        assert_eq!(view, expected.strip_suffix('\n').unwrap_or(expected));
+        assert_eq!(view, fixture_snapshot(expected));
     }
 
     #[test]

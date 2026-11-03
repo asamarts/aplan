@@ -4394,7 +4394,7 @@ fn no_cut_to_join(
              members -- so neither can be added first. Write the cut and its first tasks in \
              one file and run `aplan add --from plan.yml`: the entries are applied as one \
              change, and a task naming `cut:` joins a milestone the same file declares. \
-             `README.md`, under \"Starting a plan\", has the file."
+             `docs/quickstart.md`, under \"Starting a plan\", has the file."
             .to_string(),
     }
 }
@@ -18358,6 +18358,16 @@ mod tests {
             (["amend", "I-0"].as_slice(), "amend"),
             (["discard", "I-0"].as_slice(), "discard"),
             (["restore", "I-0"].as_slice(), "restore"),
+            (
+                [
+                    "promote",
+                    "I-01K8Z3A4H00000000000000000",
+                    "--task-id",
+                    "A-1",
+                ]
+                .as_slice(),
+                "promote",
+            ),
         ] {
             let cli = Cli::try_parse_from(
                 ["aplan", "inbox"]
@@ -18571,6 +18581,18 @@ mod tests {
                 .expect_err("unknown evidence kind")
                 .to_string()
                 .contains("commit, test, file, url")
+        );
+        assert_eq!(
+            citation("note:recorded", true)
+                .expect("an existing note citation can be named")
+                .kind,
+            aplan_core::EvidenceKind::Note
+        );
+        assert!(
+            citation("unknown:value", true)
+                .expect_err("the naming form still refuses unknown kinds")
+                .to_string()
+                .contains("commit, test, file, url, note")
         );
     }
 
@@ -20623,6 +20645,40 @@ mod tests {
         );
     }
 
+    #[test]
+    fn version_window_refusals_preserve_ambiguity_and_checkout_cause() {
+        use aplan_core::task::VersionImpact;
+        use aplan_evidence::version::{Chosen, NextRelease};
+
+        let next = |window| NextRelease {
+            owed: aplan_core::version::Owed {
+                impact: VersionImpact::None,
+                raised_by: None,
+            },
+            since: None,
+            window,
+        };
+        let ambiguous = describe_window(&next(Chosen::Ambiguous {
+            ids: vec!["R-1".to_string(), "R-2".to_string()],
+        }))
+        .expect_err("several open releases have no honest single answer");
+        assert!(
+            ambiguous.to_string().contains("2 open releases (R-1, R-2)"),
+            "{ambiguous:#}"
+        );
+
+        let unavailable = describe_window(&next(Chosen::Unmeasurable {
+            why: "HEAD has no readable history".to_string(),
+        }))
+        .expect_err("an unreadable checkout cannot produce a release window");
+        assert!(
+            unavailable
+                .to_string()
+                .contains("release window could not be read: HEAD has no readable history"),
+            "{unavailable:#}"
+        );
+    }
+
     /// The exit-code contract (ADR-0007): an ordinary error is a usage/config
     /// problem (2); only an error tagged `Bug` is internal (3).
     #[test]
@@ -22444,6 +22500,20 @@ mod id_race {
         assert!(
             !noisy.contains("id_strategy") && !noisy.contains("ulid"),
             "ADR-0024: the race note recommends a config key:\n{noisy}"
+        );
+        let mixed = authoring_contention_note(
+            AuthoringRetryStats {
+                attempts: 3,
+                id_collisions: 1,
+                snapshot_changes: 1,
+            },
+            std::time::Duration::from_millis(19),
+        )
+        .expect("both forms of contention are worth reporting");
+        assert!(
+            mixed.contains("changed the plan and held ids")
+                && mixed.contains("3 attempts over 19ms"),
+            "{mixed}"
         );
     }
 }

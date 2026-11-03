@@ -2203,7 +2203,7 @@ mod tests {
                 digest_continuation = false;
             } else {
                 digest_continuation = false;
-                normalized.push(line.to_string());
+                normalized.push(line.replace('\\', "/"));
             }
         }
         normalized.join("\n")
@@ -2505,8 +2505,8 @@ mod tests {
 
         let output = stable_snapshot(&output.replace('\u{2192}', "->"));
         assert_eq!(
-            format!("{output}\n"),
-            include_str!("snapshots/form-states-ascii.txt")
+            output,
+            stable_snapshot(include_str!("snapshots/form-states-ascii.txt"))
         );
     }
 
@@ -2841,14 +2841,17 @@ mod tests {
         assert!(review.contains("Affected tasks (2)"), "{review}");
         assert!(review.contains("TASK 1/2: A-1"), "{review}");
         assert!(review.contains("TASK 2/2: A-2"), "{review}");
-        assert!(
-            review.contains("FILE 1/2 [replace]: tasks/A-1.md"),
-            "{review}"
-        );
-        assert!(
-            review.contains("FILE 2/2 [replace]: tasks/A-2.md"),
-            "{review}"
-        );
+        for (index, task) in ["A-1.md", "A-2.md"].into_iter().enumerate() {
+            let path = Path::new("tasks").join(task);
+            assert!(
+                review.contains(&format!(
+                    "FILE {}/2 [replace]: {}",
+                    index + 1,
+                    path.display()
+                )),
+                "{review}"
+            );
+        }
         assert!(review.contains("Arm broad change"), "{review}");
 
         let change = confirm_broad_change(&mut form);

@@ -29,11 +29,10 @@ gate was treated as if it had to repeat all component work itself.
 
 ## Measured problem
 
-P0000021's 256-task plan had 241 test citations over 199 distinct test identities and eight
-configured runners. A warm structural check took 0.101 seconds. Git/file verification without
-providers took 0.861 seconds. Warm provider catalogue discovery took 27.017 seconds locally and 2
-minutes 58 seconds in one CI run. Direct L3 then ran 199 commands serially for 39 minutes 36 seconds,
-after component jobs had already run the same suites.
+The motivating large-plan shape had 241 test citations over 199 distinct test identities and eight
+configured runners. Direct L3 replayed every distinct test serially after component jobs had already
+run the same suites. The checked-in synthetic corpus preserves those citation, identity, and runner
+counts without publishing the source plan or its operational measurements.
 
 The executable corpus in `ci/scripts/evidence-gate-performance.py` fixes that shape as
 `140, 16, 21, 9, 6, 1, 5, 1` distinct tests across eight runners, plus 42 repeated citations. On the
@@ -176,7 +175,7 @@ claiming direct provenance or rollout authority.
 | cached structural `check` | p95 below 100 ms | observed on controlled release baselines; deterministic read work gates regressions |
 | local receipt-backed whole-plan verify | p95 below 1 s | rollout target, zero provider spawns is blocking |
 | CI receipt-backed whole-plan verify after artifacts are available locally | p95 below 10 s | rollout target including parsing, authentication and exact-plan resolution; transfer is measured by the next row |
-| P0000021 post-setup evidence-gate path | below 60 s | rollout target including receipt artifact transfer, excluding job queue/setup/install |
+| post-setup evidence-gate path | below 60 s | rollout target including receipt artifact transfer, excluding job queue/setup/install |
 | direct product-test replay | no seconds-scale promise | report catalogue, adapter, queue and test phases; nightly/release/manual budget |
 
 On the shared development host, the 15-run release-build `receipt-current` audit on 2026-10-24
@@ -287,23 +286,12 @@ audited binary under the same minimal declared `PATH`, locale, timezone and colo
 everything omitted is absent rather than guessed equivalent. A test proves that substituting an
 untrusted consumer context refuses before extraction-derived trust can be used.
 
-The final private-runner dispatch, Actions run `40152120519` at source
-`05ca3eb6ffc9b752e095b2739d97df9e9899abee`, passed both jobs. The producer job took 1 minute 43
-seconds, of which 87 seconds was the separately reported release build; its batched direct oracle
-took 4.202 seconds. The dependent consumer took 9 seconds as a job. From the clock immediately before
-artifact download, download plus validation and five receipt-backed samples took 3.975 seconds. The
-samples started zero provider processes, matched the direct verdict digest, and measured 168.10 ms
-p50 and 185.98 ms p95/maximum after the artifact was local. This passes the 10-second
-artifact-available and 60-second post-setup budgets without crediting queue, checkout or build time
-to the evidence gate.
-
-The first live dispatch found that the private runner's external `CARGO_TARGET_DIR` made a
-workspace-relative binary path false. The second found that its supported Python predates
-`TarFile.extractall`'s filter parameter. The delivered workflow now follows Cargo's configured
-target directory, and the consumer manually materializes only prevalidated regular files and
-directories with normalized permissions and exact size checks. The final dispatch also uses the
-current pinned Node 24 artifact actions. These were rollout findings fixed in `A1-647`, not waived
-host assumptions.
+The rollout workflow passed both budgets while starting zero provider processes and matching the
+direct verdict digest. It follows Cargo's configured target directory rather than assuming a
+workspace-relative binary path. Artifact extraction manually materializes only prevalidated regular
+files and directories with normalized permissions and exact size checks, avoiding reliance on a
+newer Python extraction API. These were rollout findings fixed in `A1-647`, not waived host
+assumptions.
 
 `APLAN_EVIDENCE_ROUTE` is the one rollback switch. Its normal value is `receipt`; changing it to
 `direct` makes the consumer run the independently invocable direct oracle against the same artifact
