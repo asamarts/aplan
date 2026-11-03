@@ -15,16 +15,17 @@ EOF
 
 read_contract() {
     local manifest="$1"
-    local -a channel_lines component_lines profile_lines components
-    local component_line component_csv component
+    local -a channel_lines component_lines profile_lines components seen_components
+    local component_line component_csv component seen prior line
 
     [[ -f "$manifest" ]] || {
         echo "toolchain: contract file does not exist: $manifest" >&2
         return 1
     }
-    mapfile -t channel_lines < <(
-        sed -n 's/^[[:space:]]*channel[[:space:]]*=[[:space:]]*"\([^"]*\)"[[:space:]]*$/\1/p' "$manifest"
-    )
+    channel_lines=()
+    while IFS= read -r line; do
+        channel_lines+=("$line")
+    done < <(sed -n 's/^[[:space:]]*channel[[:space:]]*=[[:space:]]*"\([^"]*\)"[[:space:]]*$/\1/p' "$manifest")
     if [[ "${#channel_lines[@]}" -ne 1 ]]; then
         echo "toolchain: $manifest must declare exactly one channel" >&2
         return 1
@@ -35,17 +36,19 @@ read_contract() {
         return 1
     fi
 
-    mapfile -t profile_lines < <(
-        sed -n 's/^[[:space:]]*profile[[:space:]]*=[[:space:]]*"\([^"]*\)"[[:space:]]*$/\1/p' "$manifest"
-    )
+    profile_lines=()
+    while IFS= read -r line; do
+        profile_lines+=("$line")
+    done < <(sed -n 's/^[[:space:]]*profile[[:space:]]*=[[:space:]]*"\([^"]*\)"[[:space:]]*$/\1/p' "$manifest")
     if [[ "${#profile_lines[@]}" -ne 1 || "${profile_lines[0]}" != "minimal" ]]; then
         echo "toolchain: $manifest must declare exactly one minimal profile" >&2
         return 1
     fi
 
-    mapfile -t component_lines < <(
-        sed -n '/^[[:space:]]*components[[:space:]]*=/p' "$manifest"
-    )
+    component_lines=()
+    while IFS= read -r line; do
+        component_lines+=("$line")
+    done < <(sed -n '/^[[:space:]]*components[[:space:]]*=/p' "$manifest")
     if [[ "${#component_lines[@]}" -ne 1 ]]; then
         echo "toolchain: $manifest must declare exactly one components list" >&2
         return 1
@@ -57,16 +60,30 @@ read_contract() {
     fi
     component_csv="$(sed -E 's/^[^[]*\[//; s/\][[:space:]]*$//; s/[[:space:]\"]//g' <<<"$component_line")"
     IFS=',' read -r -a components <<<"$component_csv"
-    declare -A seen=()
+    seen_components=()
     for component in "${components[@]}"; do
-        if [[ -n "${seen[$component]-}" ]]; then
+        seen=false
+        for prior in "${seen_components[@]}"; do
+            if [[ "$prior" == "$component" ]]; then
+                seen=true
+                break
+            fi
+        done
+        if [[ "$seen" == true ]]; then
             echo "toolchain: component '$component' is declared more than once" >&2
             return 1
         fi
-        seen[$component]=1
+        seen_components+=("$component")
     done
     for component in rustfmt clippy; do
-        if [[ -z "${seen[$component]-}" ]]; then
+        seen=false
+        for prior in "${seen_components[@]}"; do
+            if [[ "$prior" == "$component" ]]; then
+                seen=true
+                break
+            fi
+        done
+        if [[ "$seen" != true ]]; then
             echo "toolchain: required component '$component' is missing" >&2
             return 1
         fi

@@ -757,6 +757,8 @@ fn stage_for(
     let mode = std::fs::metadata(mode_from.unwrap_or(path))
         .map(|m| m.permissions())
         .ok();
+    #[cfg(not(unix))]
+    let _ = private_new;
 
     let (temp, mut handle) = create_temp(path)?;
     #[cfg(unix)]

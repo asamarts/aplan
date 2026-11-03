@@ -4394,7 +4394,7 @@ fn no_cut_to_join(
              members -- so neither can be added first. Write the cut and its first tasks in \
              one file and run `aplan add --from plan.yml`: the entries are applied as one \
              change, and a task naming `cut:` joins a milestone the same file declares. \
-             `README.md`, under \"Starting a plan\", has the file."
+             `docs/quickstart.md`, under \"Starting a plan\", has the file."
             .to_string(),
     }
 }

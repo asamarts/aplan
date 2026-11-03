@@ -187,7 +187,7 @@ fn section_prose(doc: &str, heading: &str) -> String {
 /// The setting a plan with nothing to cite yet starts at.
 ///
 /// Typed here rather than derived, because it is not what this repository runs:
-/// it is the wide end of the arc, and the README has to name both.
+/// it is the wide end of the arc, and the adopter guide has to name both.
 const WIDE: &str = "[commit, test, file]";
 
 /// **The progression an adopter is told to follow names the end this repository
@@ -196,7 +196,7 @@ const WIDE: &str = "[commit, test, file]";
 /// The two ends of `require_min_strength` look like disagreement if nobody says
 /// so: the configuration example shows the wide setting and this repository runs
 /// `[test]`, and the pilot that noticed wrote the pairing down in its own log and
-/// filed nothing. So the README carries the arc now.
+/// filed nothing. So the adopter guide carries the arc now.
 ///
 /// Three things make this a check rather than a spell-check. The values are read
 /// out of `.aplan.yml` rather than typed here, so widening the policy without
@@ -205,7 +205,7 @@ const WIDE: &str = "[commit, test, file]";
 /// because two mentions in different places are the state this task was filed
 /// about.
 #[test]
-fn the_readme_names_the_narrow_end_this_repository_stands_at() {
+fn the_adopter_guide_names_the_narrow_end_this_repository_stands_at() {
     let config = std::fs::read_to_string(repo_root().join(".aplan.yml")).expect(".aplan.yml");
     let declared = |key: &str| {
         config
@@ -218,11 +218,15 @@ fn the_readme_names_the_narrow_end_this_repository_stands_at() {
     let narrow = declared("require_min_strength");
     let exempt = declared("exempt_tags");
 
-    let readme = std::fs::read_to_string(repo_root().join("README.md")).expect("README.md");
-    let prose = section_prose(&readme, "Configuration");
+    let upgrading =
+        std::fs::read_to_string(repo_root().join("docs/upgrading.md")).expect("docs/upgrading.md");
+    let prose = section_prose(
+        &upgrading,
+        "What is new since a build made before 2026-08-06",
+    );
     assert!(
         !prose.contains("```") && prose.len() > 2_000,
-        "the section walk is not reading the Configuration prose: {} bytes",
+        "the section walk is not reading the upgrade guidance: {} bytes",
         prose.len()
     );
 
@@ -230,16 +234,18 @@ fn the_readme_names_the_narrow_end_this_repository_stands_at() {
     // which is what a paragraph is in this document.
     let arc = prose
         .split("\n\n")
-        .find(|p| p.contains(&format!("require_min_strength: {narrow}")))
+        .find(|p| {
+            p.contains("evidence.require_min_strength") && p.contains(&format!("is `{narrow}`"))
+        })
         .unwrap_or_else(|| {
             panic!(
-                "no paragraph in `## Configuration` names `require_min_strength: {narrow}`, \
+                "no paragraph in the upgrade guidance names `require_min_strength: {narrow}`, \
                  which is what this repository runs, so the progression it describes is about \
                  somebody else's policy"
             )
         });
     assert!(
-        arc.contains(&format!("exempt_tags: {exempt}")),
+        arc.contains(&format!("evidence.exempt_tags` is `{exempt}")),
         "the paragraph names the strength this repository runs and not the exemption beside \
          it, and the two are one decision:\n{arc}"
     );

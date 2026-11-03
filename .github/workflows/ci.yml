@@ -18,12 +18,9 @@ concurrency:
     ${{ (github.event_name == 'pull_request' && format('{0}-development-pr-{1}', github.workflow, github.event.pull_request.number)) || (github.event_name == 'push' && format('{0}-development-ref-{1}', github.workflow, github.ref)) || format('{0}-full-run-{1}', github.workflow, github.run_id) }}
   cancel-in-progress: ${{ github.event_name == 'push' || github.event_name == 'pull_request' }}
 
-# While the repository is private, every job uses the persistent runner from
-# the pre-public repository-boundary decision and consumes no billed hosted minutes. When it becomes public, every
-# job uses a fresh standard GitHub-hosted VM instead (the pre-public repository-boundary decision). Standard hosted
-# runners are free for public repositories, and the persistent runner is
-# deregistered before the visibility flip. The checks remain `ci/scripts/*.sh`,
-# the same scripts the local pre-push hook runs.
+# Public jobs use fresh GitHub-hosted VMs. The visibility branch is retained so
+# the separate private maintainer repository can run the same scripts on its
+# persistent runner. Public `asamarts/aplan` has no registered self-hosted runner.
 env:
   CARGO_TERM_COLOR: always
   CARGO_BUILD_WARNINGS: deny

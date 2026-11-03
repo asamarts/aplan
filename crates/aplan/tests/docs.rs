@@ -5,21 +5,19 @@
 //!
 //! **What changed, and why it is a check rather than a generator (`A1-092`).**
 //! The first version of this file asked whether `HLD.md` *contained* each rule
-//! code, anywhere in the file, and never consulted `README.md` for a rule at all.
+//! code, anywhere in the file.
 //! A rule named once in a paragraph satisfied it forever, so everything about
 //! *how* a rule was documented went unchecked. Two defects were sitting in the
 //! tree that it could not see: `HLD.md` carried the `APLAN027` row twice, and
-//! `README.md` claimed three warnings above a table marking seven.
+//! a second rule summary claimed three warnings above a table marking seven.
 //!
 //! The obvious fix was to generate the tables, the way `schemas/v1/*.json` and
 //! `ROADMAP.status.md` are generated. Reading them first showed that to be wrong.
 //! None of these tables is purely derived: the HLD catalog documents `APLAN016`
 //! which is planned and absent from `facts`, and cites the task
 //! that shipped each rule; the HLD CLI table carries planned commands with a
-//! status column; the README command block is curated examples with arguments;
-//! and the README rule table is the *always-on* set on purpose, with the three
-//! opt-in rules covered in their own paragraph below it. Generating any of them
-//! would delete real content in order to gate a fraction of it.
+//! status column. Generating either would delete real content in order to gate a
+//! fraction of it.
 //!
 //! So the tables stay hand-written and this gate reads their *structure*: one row
 //! per rule, severity agreeing with the code, a rule absent from `facts` allowed
@@ -29,11 +27,11 @@
 //! **What the adversarial pass added.** The first version strengthened the *rule*
 //! half and left the *command* half on the same anywhere-in-the-file `contains`
 //! test it had removed as useless: it passed while `drop`, `mv` and `tasks` were
-//! absent from the README's command list, satisfied by incidental mentions in
-//! prose. Commands are now held to a row and to a place in that list. Two further
-//! properties came out of the same pass: tables inside code fences are not read as
-//! tables (a doc *showing* this format would otherwise break the gate), and every
-//! invocation the README documents is handed to the real clap parser, which is how
+//! absent from the old README command list, satisfied by incidental mentions in
+//! prose. Commands are now held to the canonical HLD row. Two further properties
+//! came out of the same pass: tables inside code fences are not read as tables (a
+//! doc *showing* this format would otherwise break the gate), and every invocation
+//! the README documents is handed to the real clap parser, which is how
 //! `aplan mv --to`, a flag that does not exist, was caught minutes after being
 //! written into the file this gate protects.
 
@@ -420,63 +418,6 @@ fn a_rule_row_for_a_rule_that_does_not_exist_says_planned() {
     );
 }
 
-#[test]
-fn every_rule_is_mentioned_in_the_readme() {
-    // Deliberately weaker than the HLD check, and deliberately present at all.
-    // The README's rule table is the *always-on* set: the three opt-in rules
-    // (`APLAN017`, `APLAN018`, `APLAN022`) are covered in their own paragraph
-    // below it, and the evidence-ladder rules in the section after that. That is
-    // editorial structure worth keeping, so this asks only that a reader can find
-    // every rule somewhere. Before `A1-092` the README was not consulted for a
-    // rule at all.
-    let readme = repo_file("README.md");
-    let missing: Vec<String> = rule_severities()
-        .into_keys()
-        .filter(|code| !readme.contains(code.as_str()))
-        .collect();
-
-    assert!(
-        missing.is_empty(),
-        "rules `aplan facts` knows that README.md never mentions:\n  {}",
-        missing.join("\n  ")
-    );
-}
-
-#[test]
-fn the_readme_table_marks_exactly_the_warnings_the_code_declares() {
-    // The README table annotates warnings inline, e.g. *(warning, `verify`)*.
-    // That is a hand-maintained copy of a fact the code owns: the prose above the
-    // table named three warnings while the table itself marked seven.
-    let declared = rule_severities();
-    let mut problems = Vec::new();
-
-    for (code, cells) in rule_rows(&repo_file("README.md")) {
-        let Some(want) = declared.get(&code) else {
-            problems.push(format!(
-                "{code}: in the README table, absent from `aplan facts`"
-            ));
-            continue;
-        };
-        let text = cells.get(1).map(String::as_str).unwrap_or_default();
-        let marked = if text.to_lowercase().contains("warning") {
-            "warning"
-        } else {
-            "error"
-        };
-        if marked != want {
-            problems.push(format!(
-                "{code}: the README table reads as `{marked}`, the code declares `{want}`"
-            ));
-        }
-    }
-
-    assert!(
-        problems.is_empty(),
-        "README.md's rule table disagrees with `aplan facts`:\n  {}",
-        problems.join("\n  ")
-    );
-}
-
 /// Every `N of ... M rules are warnings` claim in a document's prose, as `(N, M)`.
 ///
 /// Hand-parsed rather than matched with a pattern, because this crate has no
@@ -527,11 +468,11 @@ fn warning_counts(text: &str) -> Vec<(usize, usize)> {
 /// The CI guidance persuades an adopter with a number -- *17 of this tool's 40
 /// rules are warnings* -- and a number written into prose is a copy of a fact the
 /// code owns. This file exists because one of those copies had already rotted
-/// once: the README's prose said three warnings above a table marking seven.
+/// once: a prose summary said three warnings above a table marking seven.
 /// `APLAN040` moved the total from 39 to 40 the day before this was written.
 ///
 /// Two assertions, because either alone is half a gate. Every claim found must be
-/// right, and the four documents that make the argument must each still make it:
+/// right, and the documents that make the argument must each still make it:
 /// a gate that only checks claims it finds passes a document that dropped the
 /// sentence, which is the failure mode that lets guidance quietly disappear.
 #[test]
@@ -544,7 +485,7 @@ fn every_document_counting_the_warning_tier_counts_it_correctly() {
     // `CHANGELOG.md`, deliberately: it records what a release said, so a living
     // number in it would have to either rot or be rewritten after the fact, and
     // this gate would be demanding the second (`A1-272`'s second audit).
-    let documents = ["README.md", "action.yml", "ci/README.md"];
+    let documents = ["action.yml", "ci/README.md"];
     let mut problems = Vec::new();
 
     for name in documents {
@@ -614,69 +555,17 @@ fn cli_row_command(cells: &[String]) -> Option<String> {
         .then(|| name.to_string())
 }
 
-/// The body of the README's `## Commands` block: the curated list a reader scans
-/// to find out what the tool can do.
-fn readme_command_list(readme: &str) -> String {
-    let after = readme
-        .split_once("\n## Commands\n")
-        .expect("README.md has a `## Commands` section")
-        .1;
-    let mut parts = after.split("```");
-    parts.next();
-    parts
-        .next()
-        .expect("the `## Commands` section opens a fenced block")
-        .to_string()
-}
-
-/// Whether the command list names `aplan <name>` as a command, rather than as
-/// the prefix of a longer one.
-///
-/// A plain `contains` reads `aplan export-roadmap-json` as satisfying `export`,
-/// so the day `export` was added it was already documented as far as this gate
-/// could tell (`A1-189`). The next character has to end the word.
-fn lists_command(list: &str, name: &str) -> bool {
-    let needle = format!("aplan {name}");
-    list.match_indices(&needle).any(|(at, _)| {
-        list[at + needle.len()..]
-            .chars()
-            .next()
-            .is_none_or(|c| !c.is_ascii_alphanumeric() && c != '-')
-    })
-}
-
-#[test]
-fn every_command_is_in_the_readme_command_list() {
-    // This asked `readme.contains("aplan <name>")` until the audit of `A1-092`,
-    // which is the same anywhere-in-the-file test that made the *rule* half of
-    // this gate useless. It passed for every command, and three of them
-    // (`drop`, `mv`, `tasks`) were absent from the command list entirely,
-    // satisfying it through incidental mentions in prose.
-    let list = readme_command_list(&repo_file("README.md"));
-    let missing: Vec<String> = command_names()
-        .into_iter()
-        .filter(|name| !lists_command(&list, name))
-        .collect();
-
-    assert!(
-        missing.is_empty(),
-        "commands missing from README.md's `## Commands` list:\n  {}",
-        missing.join("\n  ")
-    );
-}
-
-/// The blueprint guidance is one product boundary on five reader surfaces
-/// (`A1-393`), not five opportunities to widen it independently.
+/// The blueprint guidance is one product boundary on four reader surfaces
+/// (`A1-393`), not four opportunities to widen it independently.
 ///
 /// This checks stable facts and names rather than whole sentences: the
 /// generated agent block must tell an author how to preview, the adopter guide
 /// must retain the parameter/reference and trust contracts, the HLD must retain
 /// the evidence limit and staged exclusions, and the changelog must publish the
-/// require-able behavior. The README's separate command census above proves the
-/// command remains discoverable and exhaustive.
+/// require-able behavior. The HLD command census proves the command remains
+/// discoverable and exhaustive.
 #[test]
 fn blueprint_guidance_agrees_on_scope_trust_and_evidence_limits() {
-    let readme = repo_file("README.md");
     let upgrading = repo_file("docs/upgrading.md");
     let hld = repo_file("HLD.md");
     let changelog = repo_file("CHANGELOG.md");
@@ -687,7 +576,6 @@ fn blueprint_guidance_agrees_on_scope_trust_and_evidence_limits() {
     let agents_flat = flatten(&agents);
 
     for (name, text, command) in [
-        ("README.md", readme.as_str(), "aplan blueprint apply"),
         (
             "docs/upgrading.md",
             upgrading.as_str(),
@@ -1234,7 +1122,7 @@ fn commands_named_in(text: &str) -> Vec<String> {
 
 #[test]
 fn every_documented_invocation_actually_parses() {
-    // The README's command list reads as copy-pasteable, so it has to be. Written
+    // The README's command examples read as copy-pasteable, so they have to be. Written
     // during the audit of `A1-092`, after two of the three lines added moments
     // earlier were wrong: `aplan mv P1-003 --to M-v0.7` names a flag that does not
     // exist (it is `--cut`), and `drop --cut` is a boolean rather than a flag
@@ -1245,12 +1133,11 @@ fn every_documented_invocation_actually_parses() {
     // ids in the examples exist.
     let mut problems = Vec::new();
 
-    for line in readme_command_list(&repo_file("README.md")).lines() {
-        let line = line.trim();
+    for line in commands_named_in(&repo_file("README.md")) {
         if !line.starts_with("aplan ") {
             continue;
         }
-        let argv = common::argv_of(line);
+        let argv = common::argv_of(&line);
         if let Err(e) = aplan::cli_command().try_get_matches_from(&argv) {
             let first = e.to_string().lines().next().unwrap_or_default().to_string();
             problems.push(format!("{line}\n      {first}"));
@@ -1412,17 +1299,6 @@ mod parsing {
     use super::*;
 
     #[test]
-    fn a_longer_command_does_not_document_a_shorter_one() {
-        // The defect this helper replaced: `export` counted as listed because
-        // `export-roadmap-json` is in the block.
-        let list = "aplan export-roadmap-json roadmap.json  # a foreign contract\n";
-        assert!(!lists_command(list, "export"));
-        assert!(lists_command(list, "export-roadmap-json"));
-        assert!(lists_command("aplan facts\n", "facts"));
-        assert!(lists_command("aplan check --format json\n", "check"));
-    }
-
-    #[test]
     fn a_separator_row_is_not_a_row() {
         assert!(cells("|------|-----------|").is_none());
         assert!(cells("| --- | :---: |").is_none());
@@ -1485,15 +1361,11 @@ mod parsing {
     }
 
     #[test]
-    fn the_readme_command_list_is_the_fenced_block_under_its_heading() {
-        let doc = "intro\n\n## Commands\n\n```sh\naplan check\n```\n\nafter `aplan nonesuch`\n";
-        let list = readme_command_list(doc);
-        assert!(list.contains("aplan check"));
-        assert!(
-            !list.contains("aplan nonesuch"),
-            "prose after the block is not the command list, which is the whole \
-             point: mentions elsewhere used to satisfy this gate"
-        );
+    fn the_markdown_command_scanner_reads_fences_and_inline_code() {
+        let doc = "intro `aplan ready`\n\n```sh\naplan check\n```\n";
+        let commands = commands_named_in(doc);
+        assert!(commands.contains(&"aplan ready".to_string()));
+        assert!(commands.contains(&"aplan check".to_string()));
     }
 
     #[test]
@@ -2202,17 +2074,14 @@ fn the_documented_msrv_is_the_one_the_workspace_declares() {
 
 /// The timeout defaults an adopter reads are the ones the code uses (`A1-121`).
 ///
-/// `README.md` and `docs/upgrading.md` state 600 seconds for `test.list` and 30
-/// for `url.check`, and an adopter plans a slow runner around those numbers. A
+/// `docs/upgrading.md` states 600 seconds for `test.list` and 30 for `url.check`,
+/// and an adopter plans a slow runner around those numbers. A
 /// unit test pins the constants; this pins the documents to them, so changing
 /// one without the other is a failure here rather than a surprise in somebody
 /// else's CI.
 #[test]
 fn the_documented_timeout_defaults_match_the_ones_that_ship() {
-    for (doc, needles) in [
-        ("README.md", ["600", "30"]),
-        ("docs/upgrading.md", ["10 minutes", "30 seconds"]),
-    ] {
+    for (doc, needles) in [("docs/upgrading.md", ["10 minutes", "30 seconds"])] {
         let text = repo_file(doc);
         for needle in needles {
             assert!(
@@ -2488,11 +2357,11 @@ fn every_relative_link_in_the_repositorys_docs_resolves() {
         }
     }
     assert!(problems.is_empty(), "{}", problems.join("\n"));
-    // Measured at 54 when this was written, over every markdown file in the tree.
-    // The floor is well under that: it exists to catch a scan that stopped
-    // reading, not to pin a count that moves whenever a link is added or dropped.
+    // Measured at 40 after the public landing page became a compact index. The
+    // floor is well under that: it catches a scan that stopped reading without
+    // pinning a count that moves whenever a link is added or dropped.
     assert!(
-        checked > 40,
+        checked >= 30,
         "only {checked} links were read, so this gate is not looking"
     );
 }

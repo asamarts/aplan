@@ -1,9 +1,8 @@
-# ci/ - private self-hosted CI, public hosted CI
+# ci/ - public hosted CI and private self-hosted compatibility
 
-While the pre-split `aplan` repository is private, its CI runs on a self-hosted GitHub Actions
-runner, so it consumes zero GitHub-hosted minutes and incurs no Actions billing (the pre-public repository-boundary decision). The
-fresh public repository created by the pre-public repository-boundary decision starts with zero registered self-hosted runners and
-uses standard GitHub-hosted runners. The old runner remains attached only to private `aplan.dev`.
+Public `asamarts/aplan` uses standard GitHub-hosted runners and has no registered self-hosted
+runners. The separate private `aplan.dev` maintainer repository retains the persistent runner. The
+same scripts deliberately support both placements.
 This directory holds both execution profiles:
 
 - `Containerfile` - the runner image (Debian + Rust toolchain + Python for the
@@ -88,10 +87,8 @@ unconditional nextest installer supplies the same boundary on a private runner. 
 sum of the Clippy, rustdoc and MSRV gate wall times when any ran; test, provider and coverage map to
 their named gates. An omitted phase is `deferred` or `not_selected`, never a successful duration.
 
-When the repository becomes public and branch protection is available, require exactly
-`CI / development validation` for ordinary merges. The current private repository/account tier
-cannot enable that protection; the stable name is in place now so the visibility transition does
-not also change the required-check contract.
+Public branch protection requires exactly `CI / development validation` and the action self-test
+for ordinary merges. Keep the stable context name when changing workflow internals.
 
 The gates: `fmt` (rustfmt), `clippy`, `doc` (intra-doc links, `RUSTDOCFLAGS=-D
 warnings`), `test`, `spec` (gen-schema and gen-roadmap `--check`), `msrv-build` (declared compiler
@@ -328,27 +325,21 @@ unless you also `podman volume rm aplan-runner-config`):
 bash ci/runner/teardown.sh --purge
 ```
 
-## Going public: use a fresh repository identity
+## Public/private runner boundary
 
 The workflow router is not a security boundary. A pull request supplies its own workflow and can
-write `[self-hosted, linux, aplan]` directly. The public boundary is that the fresh public
-repository id has no registered runner for those labels at all (the pre-public repository-boundary decision, the pre-public repository-boundary decision).
+write `[self-hosted, linux, aplan]` directly. The boundary is repository identity: public
+`asamarts/aplan` has no registered runner for those labels, while private `aplan.dev` owns the
+persistent runner and confidential operational history.
 
-The former in-place visibility procedure is superseded. The existing private repository becomes
-the private maintainer repository, retaining its runner and confidential GitHub-side history. A separately
-audited repository with a new object database becomes public `asamarts/aplan` and starts with zero
-runners. The fail-closed construction, name cutover, settings assertions, consumer migration and
-rollback procedure is [the private publication runbook](../the private publication runbook).
-
-After cutover, assert the public half independently:
+Assert the public half independently:
 
 ```sh
 ci/scripts/check-public-runner-boundary.sh asamarts/aplan
 ```
 
-Then dispatch CI and the action self-test, confirm every job reports a GitHub-hosted runner, and
-repeat `A1-382`'s direct-label canary. Never register the private persistent runner to public
-`aplan` as a temporary fix.
+Hosted workflow runs must report GitHub-hosted runners. Never register the private persistent runner
+to public `aplan` as a temporary fix.
 
 ## Cutting a release
 
@@ -655,151 +646,28 @@ or missing run delays remote/full confirmation rather than claiming it already h
 
 ## Running aplan in someone else's CI
 
-Everything above is about *this* repository's runner. This section is about a
-different repository running `aplan` as a gate, which is the case `README.md`
-documents with the GitHub Action -- and the one path a cross-account adopter
-cannot use.
-
-`asamarts/aplan` is private, and a private repository's action is usable only
-where its **Actions access policy** allows it. Measured on this repository, whose
-owner is a personal account rather than an organisation:
-
-```console
-$ gh api repos/asamarts/aplan/actions/permissions/access
-{"access_level":"none"}
-```
-
-`none` means no other repository at all, including ones the same account owns.
-Raising it to `user` would let `asamarts/*` use the action; it can go no further,
-because sharing beyond the owner is an organisation feature. So for a repository
-under **another account** this is not a setting anybody can change and not
-something a token fixes -- `uses: asamarts/aplan@v0.4.0` fails to resolve before
-any of the adopter's plan is read. Two pilots hit it in a row, which is why it is
-written down here rather than left to be rediscovered.
-
-The four ways out, with what each costs:
-
-| Path | Cost |
-|---|---|
-| Stage the binary into a self-hosted runner image | an image to build, and nothing else. No token, and provenance rests on an image the operator built |
-| Download the release asset in the workflow | a cross-account fine-grained PAT in a repository secret, on every repository that runs the gate |
-| `cargo install --git` | the same token, and a full build on every CI run |
-| Commit the binary | a multi-megabyte opaque blob in the repository's history |
-
-The first is what `p0000004` invented and `p00025` copied, and it is the one
-described below. It suits a repository that has a self-hosted runner already or
-wants one; a repository on hosted runners pays the second row's token instead,
-and the same digest pin applies.
-
-### Staging the binary
-
-Get a binary. Either the published release, which is statically linked and comes
-with its checksum -- and since `v0.3.0` that is usually enough. The two pilots that
-built from a checkout did so when the newest release was `v0.2.0` and six weeks of
-work sat on `main` only; `v0.3.0` closed that gap, so check what your gate needs
-against `aplan facts --require` and download unless it names something newer:
-
-```sh
-gh release download v0.4.0 --repo asamarts/aplan \
-  --pattern 'aplan-v0.4.0-x86_64-unknown-linux-musl.tar.gz*' --dir /tmp/aplan-dl --clobber
-( cd /tmp/aplan-dl && sha256sum -c aplan-v0.4.0-x86_64-unknown-linux-musl.tar.gz.sha256 )
-tar -xzf /tmp/aplan-dl/aplan-v0.4.0-x86_64-unknown-linux-musl.tar.gz -C /tmp/aplan-dl
-```
-
-or a build from a checkout, when the gate needs something no release carries yet.
-It must be statically linked or the image will not start it, and
-[`docs/upgrading.md`](../docs/upgrading.md) gives the containerised build that
-works along with the two traps on the direct route.
-
-Stage it into the image's build context. For a runner set up the way this file
-describes -- rootless, built from a checkout on the host -- that is a directory in
-the consumer's own repository:
-
-```sh
-install -m 0755 /tmp/aplan-dl/aplan ci/vendor/aplan
-sha256sum ci/vendor/aplan
-```
-
-Where the image is instead built by a dedicated service account, install as that
-account (`sudo install -o <user> -g <user> ...`) into whatever directory that
-account's build context lives in. Both pilots differ here and neither is more
-right; what matters is that the file is readable by whoever runs the build.
-
-Keep the binary itself out of git and commit only a README beside it saying which
-version is staged. Record that `sha256sum` in the consumer's `Containerfile` and
-have the build check it, so the image says which binary it has rather than
-whichever one was lying in the directory:
-
-```dockerfile
-ARG APLAN_SHA256=<the digest above>
-COPY vendor/aplan /usr/local/bin/aplan
-RUN echo "${APLAN_SHA256}  /usr/local/bin/aplan" | sha256sum -c - \
- && aplan --version
-```
-
-Where the staged binary is a build rather than `v0.4.0`, assert the *capability*
-the gate depends on rather than the version string, so an image built from the
-wrong binary fails at build time instead of during a run:
-
-```sh
-aplan facts --require test.covers --require APLAN024
-```
-
-`--require` shipped in `v0.3.0`, so this now works against the published release
-as well as against a build. On `v0.2.0` it does not exist and the smoke test is
-`aplan --version` and nothing finer, which was the strongest reason to build
-rather than download while that was the newest tag.
-
-Bump the pinned version and the digest together; they are one fact written twice
-and this is the arrangement's only place to get that wrong.
-
-### On hosted runners, where there is no image to bake into
-
-The second row of the table, spelled out, because "pays a token" is not something
-a reader can act on. `gh` is preinstalled on GitHub-hosted runners, so the install
-is the same three commands as above with a secret in front of them:
+Everything above is about this repository's runner. A consumer repository can use the public action
+directly, including across GitHub accounts, without a repository token:
 
 ```yaml
-- name: Install aplan
-  env:
-    GH_TOKEN: ${{ secrets.APLAN_RELEASE_TOKEN }}
-  run: |
-    gh release download v0.4.0 --repo asamarts/aplan \
-      --pattern 'aplan-v0.4.0-x86_64-unknown-linux-musl.tar.gz*' --clobber
-    sha256sum -c aplan-v0.4.0-x86_64-unknown-linux-musl.tar.gz.sha256
-    tar -xzf aplan-v0.4.0-x86_64-unknown-linux-musl.tar.gz
-    sudo install -m 0755 aplan /usr/local/bin/aplan
-- run: aplan check --format github
+- uses: actions/checkout@v4
+  with:
+    fetch-depth: 0
+- uses: asamarts/aplan@v0.4.0
+  with:
+    command: verify
 ```
 
-Whichever row you took, `aplan check` fails the job on an error and not on a
-warning, and 27 of aplan's 57 rules are warnings -- so a good deal of what it
-checks annotates the pull request without gating it until `deny_warnings: true`
-is in the consumer's `.aplan.yml`. `README.md`'s *In CI* section has the reasoning; the trap is that
-turning the rule on and automating the gate are two decisions nobody makes in the
-same sitting.
+Use a full commit SHA for both actions in a production repository. `verify` needs full history to
+resolve commit evidence. `check` is hermetic and may use the default shallow checkout.
 
-`APLAN_RELEASE_TOKEN` is a fine-grained PAT scoped to `asamarts/aplan` with
-read-only Contents, and nothing else. Two things it is worth being clear-eyed
-about before choosing this row. The secret is a standing cross-account credential
-in every repository that runs the gate, which is the cost the image path does not
-pay. And a workflow triggered by a fork pull request must not see it, so the gate
-either runs only on trusted events or an outside contributor's pull request runs
-no plan check -- the same routing question this repository has open for itself.
+By default, errors fail and warnings annotate. Currently 27 of aplan's 57 rules are warnings. Set
+`deny_warnings: true` in the consumer's `.aplan.yml` when every warning should block.
 
-The `sha256sum -c` line is not decoration: it is what makes the download as
-pinned as the staged binary, and the published `.sha256` asset is there to be
-used. Every command in the block was run against the real release while this was
-written, including the digest check, which was confirmed to fail on a wrong digest
-as well as to pass on the right one. The workflow around them is the shape, not a
-tested artefact: nothing here has run a GitHub-hosted job.
-
-### What retires this
-
-The fresh public repository in the pre-public repository-boundary decision, after which the action resolves for
-everyone and this section becomes a historical migration note. Existing consumers
-keep this path until the public tags, release assets and their own pins have been
-verified; visibility alone is not permission to remove a working gate.
+For an unreleased capability, build from the audited source commit or stage a locally built binary
+in a self-hosted runner image. For a released binary outside the action, download both the archive
+and its `.sha256` asset, verify the checksum, and assert required capabilities with `aplan facts
+--require`. Do not commit an opaque binary to the consumer repository.
 
 ## Security notes
 

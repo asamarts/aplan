@@ -1942,6 +1942,23 @@ fn a_public_repository_cannot_name_a_persistent_self_hosted_runner() {
     );
 }
 
+/// The macOS hosted image invokes `/bin/bash` 3.2 when a workflow asks for
+/// `shell: bash`. Keep the shared reader free of builtins introduced later,
+/// because portability preparation calls it before any test can run (`A2-007`).
+#[test]
+fn portability_toolchain_reader_accepts_the_macos_system_bash_surface() {
+    let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
+    let reader = std::fs::read_to_string(root.join("ci/scripts/toolchain.sh"))
+        .expect("read toolchain contract reader");
+
+    for unsupported in ["mapfile", "readarray", "declare -A"] {
+        assert!(
+            !reader.contains(unsupported),
+            "ci/scripts/toolchain.sh uses `{unsupported}`, which macOS /bin/bash 3.2 does not provide"
+        );
+    }
+}
+
 #[test]
 fn every_compiling_job_prepares_its_hosted_environment() {
     let files = workflows();

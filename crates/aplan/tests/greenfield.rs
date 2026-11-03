@@ -7,7 +7,7 @@
 //! members (`APLAN021`), and each refusal used to point at the other.
 //!
 //! What these pin is that the way through is *written down and works*. The recipe
-//! is not retyped here: it is read out of `README.md` and run, so a documented
+//! is not retyped here: it is read out of `docs/quickstart.md` and run, so a documented
 //! path that stops working fails a test rather than an adopter.
 
 use std::path::Path;
@@ -18,16 +18,16 @@ use common::{aplan, run};
 /// The policy this repository runs on itself, which is the one that traps.
 const STRICT: &str = "root: aplan\ndeny_warnings: true\nrequire_cut_membership: true\n";
 
-fn readme() -> String {
+fn quickstart() -> String {
     let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
-    std::fs::read_to_string(root.join("README.md")).expect("README.md")
+    std::fs::read_to_string(root.join("docs/quickstart.md")).expect("docs/quickstart.md")
 }
 
 /// The body of the first fenced block of `kind` under a `## ` heading.
 fn fenced_under(doc: &str, heading: &str, kind: &str) -> String {
     let after = doc
         .split_once(&format!("\n## {heading}\n"))
-        .unwrap_or_else(|| panic!("README.md has a `## {heading}` section"))
+        .unwrap_or_else(|| panic!("docs/quickstart.md has a `## {heading}` section"))
         .1;
     let end = after.find("\n## ").unwrap_or(after.len());
     let section = &after[..end];
@@ -38,7 +38,7 @@ fn fenced_under(doc: &str, heading: &str, kind: &str) -> String {
         + open.len();
     let close = section[start..]
         .find("```")
-        .expect("an unclosed fence in the README");
+        .expect("an unclosed fence in docs/quickstart.md");
     section[start..start + close].to_string()
 }
 
@@ -47,9 +47,9 @@ fn greenfield(dir: &Path) {
     std::fs::write(dir.join(".aplan.yml"), STRICT).expect("config");
 }
 
-/// **The recipe in `README.md` is run, not described.**
+/// **The recipe in `docs/quickstart.md` is run, not described.**
 ///
-/// The YAML is the bytes the README shows, so the documented path and the tested
+/// The YAML is the bytes the quickstart shows, so the documented path and the tested
 /// one cannot drift apart: an edit that breaks the recipe fails here.
 #[test]
 fn the_documented_recipe_reaches_a_valid_plan_under_the_strict_policy() {
@@ -57,10 +57,10 @@ fn the_documented_recipe_reaches_a_valid_plan_under_the_strict_policy() {
         .tempdir_in(aplan_core::fixture::fixture_root())
         .expect("tempdir");
     greenfield(dir.path());
-    let recipe = fenced_under(&readme(), "Starting a plan", "yaml");
+    let recipe = fenced_under(&quickstart(), "Starting a plan", "yaml");
     assert!(
         recipe.contains("tags: [milestone]") && recipe.contains("cut: M-v0.1"),
-        "the README's recipe is not a cut and its work: {recipe}"
+        "the quickstart's recipe is not a cut and its work: {recipe}"
     );
     std::fs::write(dir.path().join("plan.yml"), &recipe).expect("plan.yml");
 
@@ -75,13 +75,13 @@ fn the_documented_recipe_reaches_a_valid_plan_under_the_strict_policy() {
     assert!(out.contains("ok: 3 tasks, 0 warning(s)"), "{out}");
 }
 
-/// What the README says the recipe prints is what it prints.
+/// What the quickstart says the recipe prints is what it prints.
 #[test]
 fn the_documented_output_is_the_output() {
     let dir = tempfile::Builder::new()
         .tempdir_in(aplan_core::fixture::fixture_root())
         .expect("tempdir");
-    let doc = readme();
+    let doc = quickstart();
     std::fs::write(
         dir.path().join("plan.yml"),
         fenced_under(&doc, "Starting a plan", "yaml"),
@@ -112,7 +112,7 @@ fn the_documented_output_is_the_output() {
                 || l.starts_with("edit it")
         })
         .collect();
-    // **Counted, because a `contains` loop over an empty list passes.** A README
+    // **Counted, because a `contains` loop over an empty list passes.** A quickstart
     // edit that reworded every quoted line would otherwise leave this asserting
     // nothing at all.
     assert_eq!(
@@ -123,7 +123,7 @@ fn the_documented_output_is_the_output() {
     for line in quoted {
         assert!(
             real.contains(line),
-            "README.md shows a line the run does not print: {line:?}\n{real}"
+            "docs/quickstart.md shows a line the run does not print: {line:?}\n{real}"
         );
     }
 }
@@ -169,7 +169,7 @@ fn neither_refusal_sends_the_reader_at_the_one_that_refuses_them() {
 }
 
 /// A cut is created with its members, and where the members already exist and
-/// are in no cut, one command does it. The other half of what the README's table
+/// are in no cut, one command does it. The other half of what the quickstart's table
 /// promises.
 #[test]
 fn a_cut_can_be_created_around_work_the_plan_already_has() {
