@@ -19,6 +19,19 @@ cd "$REPO_ROOT"
 
 export CARGO_BUILD_WARNINGS=deny
 
+# Release binaries retain line-table source paths, including paths belonging to
+# dependencies in Cargo and Rustup homes. Bind the artifact to stable public
+# prefixes before the first build so a release is byte-comparable across
+# builders and cannot disclose a maintainer or runner home directory (A2-005).
+# Refuse inherited flags instead of silently mixing an unreviewed artifact
+# fingerprint into the release contract.
+if [[ -n "${RUSTFLAGS:-}" || -n "${CARGO_ENCODED_RUSTFLAGS:-}" ]]; then
+    echo "ERROR: release builds require an empty RUSTFLAGS and CARGO_ENCODED_RUSTFLAGS" >&2
+    exit 1
+fi
+rustflags_separator=$'\x1f'
+export CARGO_ENCODED_RUSTFLAGS="--remap-path-prefix=${REPO_ROOT}=/aplan/source${rustflags_separator}--remap-path-prefix=${HOME:?}=/aplan/home"
+
 release_started="$(date +%s)"
 why=""
 release_phase_on_exit() {
@@ -143,6 +156,13 @@ if ! "$binary" facts --require build.tui >/dev/null; then
     echo "ERROR: the release artifact does not advertise build.tui" >&2
     exit 1
 fi
+
+for private_build_prefix in "${REPO_ROOT}/" "${HOME}/"; do
+    if LC_ALL=C grep -aFq "$private_build_prefix" "$binary"; then
+        echo "ERROR: the release artifact retained private build prefix ${private_build_prefix}" >&2
+        exit 1
+    fi
+done
 
 # Prove the artifact is what it claims: a static binary is the whole reason a
 # consumer's runner can execute it regardless of that image's glibc.

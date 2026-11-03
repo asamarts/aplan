@@ -886,6 +886,26 @@ def private_identity_in_stream(
     return None
 
 
+def forbidden_content_in_stream(
+    stream: Any, manifest: dict[str, Any]
+) -> str | None:
+    rules = [
+        (rule["id"], rule["literal"].encode("utf-8"))
+        for rule in manifest.get("forbidden_content", [])
+    ]
+    if not rules:
+        return None
+    overlap = max(len(needle) for _rule_id, needle in rules) - 1
+    tail = b""
+    while chunk := stream.read(1024 * 1024):
+        window = tail + chunk
+        for rule_id, needle in rules:
+            if needle in window:
+                return rule_id
+        tail = window[-overlap:] if overlap else b""
+    return None
+
+
 def worktree_records(root: Path) -> dict[str, dict[str, Any]]:
     records: dict[str, dict[str, Any]] = {}
     for directory, names, files in os.walk(root, topdown=True, followlinks=False):
@@ -984,6 +1004,12 @@ def audit_release_assets(manifest: dict[str, Any], root: Path | None) -> None:
                                 f"private identity {literal!r} in release archive "
                                 f"member name {relative}:{member.name}"
                             )
+                    for rule in manifest.get("forbidden_content", []):
+                        if rule["literal"] in member.name:
+                            refuse(
+                                f"forbidden content {rule['id']} in release archive "
+                                f"member name {relative}:{member.name}"
+                            )
                     if member.isfile():
                         extracted = archive.extractfile(member)
                         if extracted is None:
@@ -995,6 +1021,18 @@ def audit_release_assets(manifest: dict[str, Any], root: Path | None) -> None:
                         if literal is not None:
                             refuse(
                                 f"private identity {literal!r} in release archive "
+                                f"payload {relative}:{member.name}"
+                            )
+                        extracted = archive.extractfile(member)
+                        if extracted is None:
+                            refuse(
+                                f"release archive member could not be read in "
+                                f"{relative}: {member.name}"
+                            )
+                        rule_id = forbidden_content_in_stream(extracted, manifest)
+                        if rule_id is not None:
+                            refuse(
+                                f"forbidden content {rule_id} in release archive "
                                 f"payload {relative}:{member.name}"
                             )
         if relative.endswith(".tar.gz.sha256"):

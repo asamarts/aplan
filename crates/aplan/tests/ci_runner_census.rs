@@ -226,7 +226,11 @@ fn shell_assignments<'a>(text: &'a str, variable: &str) -> Vec<(usize, &'a str)>
         .enumerate()
         .filter_map(|(index, line)| {
             let line = line.trim();
-            (!line.starts_with('#') && line.contains(&needle)).then_some((index, line))
+            (!line.starts_with('#')
+                && line
+                    .split_ascii_whitespace()
+                    .any(|word| word.starts_with(&needle)))
+            .then_some((index, line))
         })
         .collect()
 }
@@ -376,9 +380,49 @@ fn audit_script_warning_policy(scripts: &std::path::Path) {
     rustflags.sort();
     assert_eq!(
         rustflags,
-        ["msrv-build.sh:export RUSTFLAGS=\"-D warnings\""],
-        "only the isolated MSRV build may change rustc's artifact fingerprint"
+        [
+            "msrv-build.sh:export RUSTFLAGS=\"-D warnings\"",
+            "release.sh:export CARGO_ENCODED_RUSTFLAGS=\"--remap-path-prefix=${REPO_ROOT}=/aplan/source${rustflags_separator}--remap-path-prefix=${HOME:?}=/aplan/home\"",
+        ],
+        "only the isolated MSRV policy and audited release path remapping may change rustc's artifact fingerprint"
     );
+}
+
+#[test]
+fn release_artifact_paths_are_host_neutral() {
+    let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
+    let release = std::fs::read_to_string(root.join("ci/scripts/release.sh"))
+        .expect("read the release builder");
+    let remap = release
+        .find("export CARGO_ENCODED_RUSTFLAGS=\"--remap-path-prefix=${REPO_ROOT}=/aplan/source")
+        .expect("release builds remap their source and home paths");
+    let first_build = release
+        .find("cargo build")
+        .expect("release builds with Cargo");
+    let retained_prefix_check = release
+        .find("grep -aFq \"$private_build_prefix\" \"$binary\"")
+        .expect("release builds inspect the produced binary for retained paths");
+    let packaging = release
+        .find("echo \"==> Packaging ${archive}\"")
+        .expect("release packaging boundary");
+    assert!(
+        remap < first_build,
+        "path remapping starts after compilation"
+    );
+    assert!(
+        retained_prefix_check < packaging,
+        "a binary can be packaged before its private paths are refused"
+    );
+    for required in [
+        "if [[ -n \"${RUSTFLAGS:-}\" || -n \"${CARGO_ENCODED_RUSTFLAGS:-}\" ]]",
+        "--remap-path-prefix=${HOME:?}=/aplan/home",
+        "for private_build_prefix in \"${REPO_ROOT}/\" \"${HOME}/\"",
+    ] {
+        assert!(
+            release.contains(required),
+            "release path contract lost {required}"
+        );
+    }
 }
 
 fn audit_workflow_warning_policy() {
@@ -430,8 +474,9 @@ fn audit_workflow_warning_policy() {
     }
 }
 
-/// `A1-631`: warning denial is a Cargo policy on every ordinary compiler, and
-/// the MSRV's isolated target is the only deliberate rustflag exception.
+/// `A1-631`: warning denial is a Cargo policy on every ordinary compiler. The
+/// MSRV's isolated target and the release's host-path remapping are the only
+/// deliberate rustflag exceptions.
 #[test]
 fn every_compiling_gate_denies_warnings_without_forking_pinned_artifacts() {
     let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
@@ -459,6 +504,13 @@ fn warning_policy_census_sees_multiline_commands_assignments_and_nested_override
             "RUSTFLAGS"
         ),
         [(1, "env RUSTFLAGS=-Dwarnings cargo test")]
+    );
+    assert!(
+        shell_assignments(
+            "export CARGO_ENCODED_RUSTFLAGS=--remap-path-prefix=/private=/public",
+            "RUSTFLAGS"
+        )
+        .is_empty()
     );
 
     let workflow: yaml_compat::Value = yaml_compat::from_str(

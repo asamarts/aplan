@@ -11,7 +11,7 @@
 
 ## Cross-cutting (in no cut)
 
-3.0d effort, 0.1 weeks (<0.1 left), held by tasks in no cut and not counted in the table above.
+4.0d effort, 0.1 weeks (<0.1 left), held by tasks in no cut and not counted in the table above.
 
 | task | title | status | blocked_by | evidence |
 | --- | --- | --- | --- | --- |
@@ -19,5 +19,6 @@
 | A2-002 | Re-audit imported dependency admissions | todo | A2-001 | - |
 | A2-003 | Make the diagnostic workbench journey deterministic under coverage | done | - | test:tui_journey::diagnostic_workbench_runs_end_to_end_in_a_real_terminal |
 | A2-004 | Keep the public-plan exemption audit valid after qualification | done | A2-001 | test:policy::the_exemption_free_epoch_is_only_a2, test:policy::the_exemption_is_used_and_stays_a_minority |
+| A2-005 | Remove private build paths from release artifacts | done | A2-001 | test:ci_runner_census::release_artifact_paths_are_host_neutral, test:publication_boundary::release_archive_payloads_apply_forbidden_content_rules_across_chunks |
 
 > Statuses are as claimed in the plan and gated by `aplan verify` in CI.

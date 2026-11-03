@@ -303,20 +303,16 @@ fn private_identity_added_after_construction_is_rejected_by_the_audit() {
     );
 }
 
-#[test]
-fn release_archive_payloads_with_private_identities_are_rejected() {
+fn audit_release_payload(payload_bytes: &[u8], policy: &str) -> Output {
     let temp = tempfile::Builder::new()
-        .prefix("publication-release-identity-")
+        .prefix("publication-release-payload-")
         .tempdir_in(aplan_core::fixture::fixture_root())
-        .expect("release identity fixture");
+        .expect("release payload fixture");
     let payload = temp.path().join("payload");
     let release = temp.path().join("assets/v0.0.1");
     std::fs::create_dir_all(&payload).expect("payload directory");
     std::fs::create_dir_all(&release).expect("release directory");
-    let mut hostile_payload = vec![b'x'; 1024 * 1024 - 8];
-    hostile_payload.extend_from_slice(b" PrivateAdopter\n");
-    std::fs::write(payload.join("aplan"), hostile_payload)
-        .expect("hostile release payload crossing the audit chunk boundary");
+    std::fs::write(payload.join("aplan"), payload_bytes).expect("release payload");
     let archive = release.join("aplan-v0.0.1.tar.gz");
     let tar = Command::new("tar")
         .args(["-czf"])
@@ -356,10 +352,7 @@ fn release_archive_payloads_with_private_identities_are_rejected() {
       "size": {size}
     }}]
   }}],
-  "private_identities": [{{
-    "literal": "privateadopter",
-    "replacement": "publicadopter1"
-  }}]
+  {policy}
 }}
 "#
         ),
@@ -381,19 +374,61 @@ try:
     )
 except publication.PublicationError as error:
     print(error, file=sys.stderr)
-    raise SystemExit(0 if "private identity 'privateadopter'" in str(error) else 2)
+    raise SystemExit(0)
 raise SystemExit(1)
 "#;
-    let output = Command::new("python3")
+    Command::new("python3")
         .args(["-B", "-c", probe])
         .arg(workspace().join("ci/publication/publication.py"))
         .arg(&manifest)
         .arg(temp.path().join("assets"))
         .output()
-        .expect("release identity auditor runs");
+        .expect("release payload auditor runs")
+}
+
+#[test]
+fn release_archive_payloads_with_private_identities_are_rejected() {
+    let mut payload = vec![b'x'; 1024 * 1024 - 8];
+    payload.extend_from_slice(b" PrivateAdopter\n");
+    let output = audit_release_payload(
+        &payload,
+        r#""private_identities": [{
+    "literal": "privateadopter",
+    "replacement": "publicadopter1"
+  }]"#,
+    );
     assert!(
         output.status.success(),
         "release identity audit did not refuse the payload:\n{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert!(
+        String::from_utf8_lossy(&output.stderr).contains("private identity 'privateadopter'"),
+        "the refusal did not identify the release identity:\n{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+}
+
+#[test]
+fn release_archive_payloads_apply_forbidden_content_rules_across_chunks() {
+    let mut payload = vec![b'x'; 1024 * 1024 - 3];
+    payload.extend_from_slice(b"/home/private-builder/source\n");
+    let output = audit_release_payload(
+        &payload,
+        r#""forbidden_content": [{
+    "id": "absolute-home",
+    "literal": "/home/"
+  }]"#,
+    );
+    assert!(
+        output.status.success(),
+        "release forbidden-content audit did not refuse the payload:\n{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert!(
+        String::from_utf8_lossy(&output.stderr)
+            .contains("forbidden content absolute-home in release archive payload"),
+        "the refusal did not identify the release content rule:\n{}",
         String::from_utf8_lossy(&output.stderr)
     );
 }
