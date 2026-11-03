@@ -3,8 +3,8 @@
 Status: feature implementation complete for the accepted scope. The foundation, Overview, task
 browser, task inspector and joined ready/why/due workflow, Diagnostics, evidence-verification
 workbench, interactive Graph destination, Reports hub, capture Inbox and guarded mutation catalogue are
-implemented. Cross-platform release observation and the deferred unfamiliar-user review remain
-release gates, not unimplemented product surfaces.
+implemented. The public cross-platform hosted matrix is qualified. The deferred unfamiliar-user
+review remains a release gate, not an unimplemented product surface.
 The executable scope and order live in the TUI milestones under `aplan/tasks/`; this document
 records the product and architecture decisions those tasks implement.
 
@@ -713,15 +713,14 @@ inherits another column's pass.
 
 | platform | compile and unit coverage | automated real PTY | Unix signals and job control | latest observation |
 |---|---|---|---|---|
-| Linux x86_64 | ordinary workspace suite plus `aplan-tui` library | `integration tui_portability::` and the full `tui_journey` corpus | supported and automated | passed locally on 2026-10-27 at the A1-448 source state |
-| macOS arm64 | public `macos-latest` portability job | the same portable module | supported by the Unix implementation; the portable module does not duplicate Linux signal cases | staged; unavailable while this repository is private, so not reported passing |
-| Windows x86_64 | public `windows-latest` portability job | the same module through ConPTY | unavailable: Windows has no `SIGTSTP`/`SIGCONT` contract | staged; unavailable while this repository is private, so not reported passing |
+| Linux x86_64 | ordinary workspace suite plus `aplan-tui` library | four portable cases plus the full `tui_journey` corpus | supported and automated | public hosted matrix passed 2026-11-03; complete Unix suite also passed in the local full profile |
+| macOS arm64 | public `macos-latest` portability job | four portable cases, including attended CLI interruption | supported by the Unix implementation; Linux owns the complete signal matrix | public hosted matrix passed 2026-11-03 |
+| Windows x86_64 | public `windows-latest` portability job | three applicable cases through ConPTY | unavailable: Windows has no `SIGTSTP`/`SIGCONT` contract | public hosted matrix passed 2026-11-03; no claim is made for a console-control event the harness cannot generate |
 
-The weekly/manual `TUI portability` workflow is the executable matrix. Private runs allocate only
-the Linux self-hosted job; macOS and Windows are skipped before runner allocation. Public runs use
-standard GitHub-hosted `ubuntu-latest`, `macos-latest` and `windows-latest` systems. ADR-0059 records
-why this is a narrow exception to the otherwise Ubuntu-only public CI decision. A current successful
-three-OS run is a release input owned by `A1-452`; committing the workflow is not that observation.
+The weekly/manual `TUI portability` workflow is the executable matrix. Public runs use standard
+GitHub-hosted `ubuntu-latest`, `macos-latest` and `windows-latest` systems. ADR-0059 records why this
+is a narrow exception to the otherwise Ubuntu-only public CI decision. The 2026-11-03 qualification
+ran the shared library suite and every platform-applicable real-PTY case on all three systems.
 
 The lifecycle cases and their load-bearing proofs are:
 
@@ -789,16 +788,14 @@ version, `$TERM`, local/SSH/tmux layers, glyph/theme choice and pass/fail notes.
 Run the protocol in a direct local session, inside current tmux, and through an allocated TTY such
 as `ssh -t host`. The named emulator coverage set is Kitty and GNOME Terminal on Linux, iTerm2 on
 macOS, and Windows Terminal on Windows. At least two real emulators plus tmux and SSH must have a
-current recorded pass at release audit. This private Linux development host cannot honestly supply
-those GUI/macOS/Windows observations, so their A1-448 delivery is the documented procedure and
-their current status is `not observed`, not `pass`; `A1-452` owns the release-candidate rerun and
-disposition of any finding.
+current recorded pass at release audit. Hosted PTY coverage does not identify a GUI emulator or an
+SSH transport, so those manual observations remain `not observed`, not `pass`.
 
 The A1-448 development observation record is deliberately narrower than that release protocol:
 
 | environment | observation on 2026-10-27 |
 |---|---|
-| Linux PTY through termlens | passed the complete automated `tui_portability::` module |
+| Linux PTY through termlens | passed the complete automated `tui_portability::` module locally and on the public hosted matrix |
 | tmux 3.7c on Linux, detached 100x24 session | passed launch, Overview/Tasks navigation, 47x13 refusal, 100x24 recovery, ordinary quit and restored shell modes; the remaining manual-protocol steps are not claimed |
 | SSH allocated TTY | not observed: the local SSH service accepted connections but this host had no usable non-interactive account authentication |
 | Kitty, GNOME Terminal, iTerm2 and Windows Terminal | not observed on this non-GUI Linux host |

@@ -1462,7 +1462,8 @@ runs, no `HashMap` iteration order leaking into diagnostics. `aplan-core` alread
 `BTreeMap` throughout and sorts diagnostics by a *total* `(code, task, file, message)`
 key (the determinism fix, `(code, task)` alone let ties reorder with walk order). Test it.
 
-**Cycle detection.** Keep the iterative DFS so deep cyclic input cannot exhaust the call stack. Add a `proptest` that throws deep and pathological graphs at it.
+**Cycle detection.** Keep the current iterative DFS so deep cyclic input cannot exhaust the
+call stack. Add a `proptest` that throws deep and pathological graphs at it.
 
 **Adopt `petgraph` 0.8.3** anyway. Not for cycle *detection*, we have that, but for
 cycle **diagnostics**: `tarjan_scc` returns the actual strongly-connected components, so
