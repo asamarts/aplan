@@ -87,6 +87,12 @@ fn assert_owned(screen: &termlens::Screen) {
 fn assert_restored(screen: &termlens::Screen) {
     assert!(!screen.alternate_screen());
     assert!(!screen.bracketed_paste());
+    // Crossterm documents focus events as permanently enabled by the Windows
+    // console API. Its disable command is consequently a no-op there: aplan
+    // did not acquire that state and cannot restore it. On terminals where
+    // mode 1004 is owned by the application, the disable sequence is part of
+    // the observable restoration contract.
+    #[cfg(not(windows))]
     assert!(!screen.focus_events());
     assert!(screen.cursor_visible());
 }
@@ -176,19 +182,24 @@ fn editor_environment(directory: &Path, marker: &Path, gate: &Path) -> Vec<(Stri
 
 #[cfg(windows)]
 fn editor_environment(directory: &Path, marker: &Path, gate: &Path) -> Vec<(String, String)> {
-    let script = directory.join("portable-editor.ps1");
+    let script = directory.join("portable-editor.cmd");
     std::fs::write(
         &script,
-        "param([string]$Draft)\n\
-         New-Item -ItemType File -Force $env:APLAN_EDITOR_MARKER | Out-Null\n\
-         while (Test-Path $env:APLAN_EDITOR_GATE) { Start-Sleep -Milliseconds 10 }\n\
-         [IO.File]::WriteAllText($Draft, \"## Why`n`nEdited outside the TUI.`n\")\n",
+        "@echo off\r\n\
+         type nul > \"%APLAN_EDITOR_MARKER%\"\r\n\
+         :wait\r\n\
+         if exist \"%APLAN_EDITOR_GATE%\" (\r\n\
+           ping -n 2 127.0.0.1 > nul\r\n\
+           goto wait\r\n\
+         )\r\n\
+         > \"%~1\" (\r\n\
+           echo ## Why\r\n\
+           echo(\r\n\
+           echo Edited outside the TUI.\r\n\
+         )\r\n",
     )
     .expect("editor script");
-    let command = format!(
-        "powershell.exe -NoProfile -NonInteractive -File '{}'",
-        script.display()
-    );
+    let command = "cmd.exe /D /Q /C portable-editor.cmd".to_string();
     let mut environment = portable_process_environment();
     environment.extend([
         ("VISUAL".to_string(), command),
@@ -232,17 +243,27 @@ fn blocked_provider(fixture: &Fixture, marker: &Path, gate: &Path) -> Vec<(Strin
 
 #[cfg(windows)]
 fn blocked_provider(fixture: &Fixture, marker: &Path, gate: &Path) -> Vec<(String, String)> {
-    let script = fixture.directory().join("blocked-provider.ps1");
+    let script = fixture.directory().join("blocked-provider.cmd");
     std::fs::write(
         &script,
-        "New-Item -ItemType File -Force $env:APLAN_PROVIDER_MARKER | Out-Null\n\
-         while (Test-Path $env:APLAN_PROVIDER_GATE) { Start-Sleep -Milliseconds 10 }\n\
-         Write-Output 'suite::proof'\n",
+        "@echo off\r\n\
+         type nul > \"%APLAN_PROVIDER_MARKER%\"\r\n\
+         :wait\r\n\
+         if exist \"%APLAN_PROVIDER_GATE%\" (\r\n\
+           ping -n 2 127.0.0.1 > nul\r\n\
+           goto wait\r\n\
+         )\r\n\
+         echo suite::proof\r\n",
     )
     .expect("provider script");
     std::fs::write(
+        fixture.directory().join("successful-run.cmd"),
+        "@exit /B 0\r\n",
+    )
+    .expect("successful runner script");
+    std::fs::write(
         fixture.directory().join(".aplan.yml"),
-        "root: plan\ntest:\n  list: [powershell.exe, -NoProfile, -NonInteractive, -File, blocked-provider.ps1]\n  run: [powershell.exe, -NoProfile, -NonInteractive, -Command, exit 0, '{test}']\n",
+        "root: plan\ntest:\n  list: [cmd.exe, /D, /Q, /C, blocked-provider.cmd]\n  run: [cmd.exe, /D, /Q, /C, successful-run.cmd, '{test}']\n",
     )
     .expect("provider configuration");
     let mut environment = portable_process_environment();
