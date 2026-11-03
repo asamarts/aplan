@@ -66,7 +66,7 @@ available.
 - [Quickstart](docs/quickstart.md)
 - [Rule catalogue](docs/rule-catalogue.md)
 - [Design and CLI reference](HLD.md)
-- [Configuration and upgrading](docs/upgrading.md)
+- [Upgrading](docs/upgrading.md)
 - [TUI guide](docs/tui.md)
 - [Contributing](CONTRIBUTING.md)
 

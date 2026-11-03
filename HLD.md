@@ -64,42 +64,42 @@ explicit trust decision.
 
 ## 4. Domain model and format
 
-A task is one markdown file. The frontmatter is data; the body is prose and is never
-parsed. One file per task is a load-bearing choice: task-master's monolithic
-`tasks.json` is **merge-hostile** across parallel agents and branches (pre-public product research §6).
+A task is one Markdown file. The frontmatter is data; the body is prose and is never
+parsed. One file per task is a load-bearing choice: independent task files reduce merge
+conflicts across parallel agents and branches.
 
 ```markdown
 ---
 id: P0-003
-title: Confirm Delaware ICIS XML filing access
+title: Confirm the external approval path
 phase: 0
 status: in_progress          # todo | in_progress | blocked | done | dropped
-owner: kaminsod
+owner: release-team
 effort_days: 3
 blocked_by: [P0-001]
 paths:                       # NEW (§5.2), what this task is allowed to touch
   - crates/aplan-core/src/**
 traces:
-  - INITIAL_RESEARCH.md#21-delaware-the-filing-channel
+  - docs/requirements.md#external-approval
 evidence:
   - kind: commit             # commit | url | file | test | note
     ref: d213c9a
   - kind: note
-    ref: Division of Corporations confirmed by phone
+    ref: Approval authority confirmed the required filing path
     captured: 2026-07-09     # required for `note`; an undated note is a rumour
-tags: [delaware, blocking]
+tags: [external, blocking]
 ---
 
 ## Why
 ## Acceptance criteria
-- [ ] Written confirmation of the access model
+- [ ] Written confirmation of the approval path
 ```
 
 **`Status` semantics.** `Done` is the only status that satisfies a dependency.
 `Dropped` deliberately does **not**, a dropped blocker means its dependents can never
 legitimately start, and pretending otherwise silently unblocks work that has no
 foundation. `APLAN020` raises this to a hard error, so a deadlocked plan fails `check`
-rather than sitting there looking healthy. No surveyed tool checks this.
+rather than sitting there looking healthy.
 
 `Blocked` is *parked*, not merely unstarted: it has no unmet blockers in the graph, so
 `ready` must exclude it by status. A tool that answers "what can I work on now" with a
@@ -139,27 +139,18 @@ a release claims none, and `APLAN021` reports a release that holds work directly
 second task-membership dimension stays in tags where ADR-0014 put it.
 
 **Membership stays an edge** (ADR-0030, `A1-228`). Whether a cut's members should be a `cut:` field
-on the task instead was a spike, because it reopened an accepted ADR. Three measured symptoms had
-been traced to the edge, and all three now have shipped fixes that left the model alone: `A1-216`
-derived grouping from the pair, `A1-227` found the quadratic was a traversal defect, and `A1-226`
-fixed the write loss with a compare-and-swap and a lock. Both shapes were then measured at 25,000
-tasks, on a fixture where both render a comparable graph, and are within 1.6% on every cell at both
-cut widths (898ms against 897ms at forty cuts).
-The remaining write contention is the sequential id, proved by 24 agents into 24 *different* cuts
-refusing 22 of 24 exactly as they do into one, which is `A1-230` and not this. The migration that is
-not being paid: 2,457 task files across fifteen plans, a drift-gated schema change, and a public
-`cut` field going from derived to declared under the same name.
+on the task instead was measured because it reopened an accepted ADR. The symptoms attributed to
+the edge had narrower fixes: `A1-216` derived grouping from the existing pair, `A1-227` corrected a
+quadratic traversal, and `A1-226` made writes compare-and-swap guarded. Large synthetic fixtures
+showed no material read advantage for a new field. A migration would still rewrite task files,
+change the drift-gated schema, and turn a derived public field into a declaration under the same
+name, so the model remains unchanged.
 
 **And the level above a cut is a repository** (ADR-0029, `A1-200`). One repository holds one plan,
 and `blocked_by` names a task in *this* plan and nothing else: no qualified id, no second `root`, no
-cross-plan edge. `p00011` was read to decide it (pre-public adoption evidence) because it had built the
-alternative by hand -- 148 stream documents in one tree, 23 of them unfinished -- and every field
-that distinguished a stream turned out to be a status, a `paths` list or an edge the model already
-has, with `owner` and its one policy flag taking a single value across all of them. Its costs came
-from splitting a plan rather than from holding one: of ten unresolvable references, five pointed at
-*finished* streams that a directory move had put out of view, which cannot happen where a done task
-keeps its id and stays. This is what keeps `APLAN003` answerable ("exists" means "is in this plan"),
-`APLAN022` countable, and every rollup a single answer.
+cross-plan edge. Repository scope keeps `APLAN003` answerable ("exists" means "is in this plan"),
+`APLAN022` countable, and every rollup a single answer. A portfolio view may aggregate validated
+plans, but it does not weaken task identity inside any one plan.
 
 **New field: `prefer_after`.** A list of task ids this one prefers to follow: **discretionary**
 order, which `ready` honours and nothing else reads (ADR-0025, superseding ADR-0017). It never
@@ -169,16 +160,10 @@ start this" must never be shown an opinion. `APLAN033` refuses a preference that
 honoured: an unknown id, the task itself, a pair that is already a `blocked_by` edge, or a cycle.
 
 **And no second declared signal, for now** (ADR-0031, `A1-231`). `prefer_after` is pairwise, so
-"this one matters" against forty-seven others is forty-seven edges; the question was whether an
-ordered declared family should rank instead. Measured across the twelve plans on this host, 88% of
-207 ready tasks score nothing on the first two derived terms, which is the case for one. Two things
-refuse it for now. This repository's own plan carries **0.04** dependency edges per live task, the
-lowest of any plan with more than twenty live tasks, where the rest run 0.40 to 2.11 -- so the doubt
-was measured on the least-connected plan of its size available. And
-`releases` walks one step: counting what sits *transitively* behind a task, over dependency edges
-only, discriminates on seven of ten plans -- `p00016` from 23 of 24 ready tasks with no signal to 21
-of 24 with one. Adopting an opinion while a derivation is uncounted would trade what the tool can
-check for what it cannot, so `A1-298` counts it and the measurement is re-taken after.
+"this one matters" against many peers can require many edges; the question was whether an ordered
+declared family should rank instead. Existing dependency structure remains sparse enough that a
+new opinionated priority field would outrun what the graph can derive. `A1-298` therefore extends
+the derived ranking before another declaration is considered.
 
 **Phase, cut, and a declared family are different axes** (ADR-0046). `phase` is a required `u32`
 on every task: an ordered coordinate for the default summary and a hint to the plan's convention
@@ -298,8 +283,8 @@ describe the current run. A date written by the task author is none of those thi
 captured test-report provider must carry a digest, subject, producer and execution identity rather
 than reuse an unbound date beside a test name.
 
-`note` remains the escape hatch, because most Phase 0 work on the motivating project
-is phone calls. But it is now visibly **the weakest rung on a published ladder**,
+`note` remains the escape hatch for human assertions that have no machine-resolvable
+artifact. It is visibly **the weakest rung on the evidence ladder**,
 rather than an undifferentiated peer of a commit SHA. Config can ban it for any selected subset,
 including a tag or phase, with `policy[].evidence.require_min_strength`. That is the honest way to
 let a team tighten the screw on itself without us pretending we removed the escape hatch.
@@ -311,14 +296,9 @@ agent cites a real commit that has nothing to do with the task. With `paths`, th
 question "does the cited commit touch anything this task claims responsibility for?"
 becomes a tree-diff, and the answer is a diagnostic.
 
-This is the single mechanism that separates us from a linter that checks a field is
-non-empty, **and it is also what separates us from the execution-harnesses.** loki-mode
-and prd-taskmaster *run tests*, which aplan does only at opt-in L3. But none of them
-checks the **binding** between a task's claim and a specific artifact: that *this* cited
-commit touches *this* task's declared files. That claim-to-artifact binding, verified
-deterministically and persisted in the plan, is the differentiator, not "we execute and
-they don't," which is false. State it that way; the first knowledgeable reader will
-notice if we don't.
+The path set binds a task's claim to a specific artifact: this cited commit or file must
+overlap this task's declared responsibility. Execution alone cannot establish that
+relationship. The binding is verified deterministically and persisted in the plan.
 
 ### 5.3 Command split, and why
 
@@ -364,8 +344,8 @@ not make plain inspection fail; `--require-current-evidence` renders it and retu
 
 `APLAN008`, the rule the README singles out as the one people underestimate, once
 **did not implement GitHub's anchor algorithm.** The old `validate.rs::slugify` mapped
-`.` to `-` and handled only ASCII, so `## 2.1 Delaware: the filing channel` anchored as
-`2-1-delaware-...` where GitHub produces `21-delaware-...`, the `traces` example printed
+`.` to `-` and handled only ASCII, so `## 2.1 External approval` anchored as
+`2-1-external-approval` where GitHub produces `21-external-approval`, the `traces` example printed
 in our own README did not resolve, the exact drift this tool
 exists to catch. It is fixed; documented here as the reference algorithm and as a
 cautionary tale about a validator whose own docs drifted.
@@ -472,16 +452,9 @@ Because `traces` anchors are checked and mutable file evidence can carry a conte
 detect a subtler drift: **a document section changed after the task that owned it was
 closed.**
 
-This is **not novel**, and we should say so. `doorstop` has done it since **2014** (v0.8;
-the tool itself dates to 2013): a link stores a **fingerprint, a content hash, its
-"stamp", of the parent item at the time of review**, and validation flags the link
-**suspect** when the parent's stamp no longer matches, cleared explicitly via `doorstop
-clear`. That mechanism is better than anything we would invent, it is content-addressed
-rather than time-addressed, so it survives rebases, file moves, and reformatting, all of
-which would defeat a naive `captured:`-vs-`git log` comparison. One caveat to inherit
-honestly: in doorstop a suspect link is a *warning* by default (it gates CI only under
-`--error-all`), while a dangling link is a hard error, decide our own severity
-deliberately.
+The mechanism is a content fingerprint captured at review time. Content addressing is
+independent of commit identity and file location, while a timestamp comparison would be
+invalidated by rebases and unrelated history.
 
 **The trace half landed** in `A1-010`, opt-in via `detect_drift`. `aplan close` stores
 `trace_fingerprints:` for each resolvable trace anchor, and `APLAN018` warns when the live
@@ -489,7 +462,7 @@ section no longer matches. Markdown section fingerprints trim only line endings 
 blank lines; reindentation and prose reflow are material changes. Structured-document anchors
 use the canonical addressed value. The fingerprint is content-addressed, so it is independent
 of commit ids and file location. `aplan close --restamp` takes a new stamp after deliberate
-re-review (doorstop's `clear`). `APLAN028` reports a closed task that could have stamped a trace
+re-review. `APLAN028` reports a closed task that could have stamped a trace
 but did not, so trace adoption is explicit rather than silently unverifiable.
 
 **The evidence half landed** in `A1-196`, behind the same switch. A mutable `file`
@@ -960,15 +933,10 @@ around every ordinary output write and on every terminal outcome without hiding 
 | `aplan roadmap` | render the plan grouped by cut: rollups, per-cut critical path, `--format markdown` companion (ADR-0009) | exists (`A1-015`) |
 | `aplan migrate` | schema version upgrades | when `v2` exists |
 
-The blueprint boundary is deliberately smaller than the abstraction's broader familiarity might
-suggest. The demand audit in `pre-public product research` section 16 found no adjacent open-source request for
-reusable task sets. Hosted project-management templates establish that the concept is legible, and
-first-party history establishes recurring one-task conventions, but neither proves one universal
-template or market pull for this implementation. The execution spike justified the multi-task
-surface narrowly: parameters remove repeated text edits and local keys preserve sibling topology
-while ids are minted. That is why V1 stops at one reviewed explicit file, preview and atomic apply;
-discovery, catalogues, composition, replay, built-ins, installation and fetching remain staged
-behind new usage and trust evidence rather than implied by the shipped command.
+The execution spike justified the multi-task surface narrowly: parameters remove repeated text
+edits and local keys preserve sibling topology while ids are minted. V1 therefore stops at one
+reviewed explicit file, preview, and atomic apply. Discovery, catalogues, composition, replay,
+built-ins, installation, and fetching remain outside the accepted boundary.
 
 **Flag conventions**, from `alint`: `--format` is a bare `String` on the clap struct
 plus a hand-written `FromStr` on `aplan_output::Format`, specifically so `aplan-output`
@@ -995,12 +963,10 @@ cross that repository boundary implicitly, whether or not it would find a curren
 
 `aplan close P0-003 --evidence commit:d213c9a` is *easier* than editing YAML by hand,
 and `aplan close P0-003` with no flag is easier still: it derives the current `HEAD`.
-Evidence is friction; friction is the top adoption risk (pre-public product research §11). Where we can
-derive evidence for free, the commit currently being made, the test that just passed, we
-do (`A1-008`, `A1-705`). Focused `close --execute` derives the just-passed test only after the
-user requests the configured-process boundary; ordinary close remains L2. The write
-lands in the working tree, never an auto-commit: surprise writes are the top-reacted
-git-native pain (pre-public product research §15).
+Where evidence can be derived without ambiguity, the current commit or the test that just passed,
+the command does so (`A1-008`, `A1-705`). Focused `close --execute` derives the just-passed test
+only after the user requests the configured-process boundary; ordinary close remains L2. The write
+lands in the working tree and never creates a commit.
 
 ---
 
@@ -1110,9 +1076,8 @@ exact command an agent can run to fix one diagnostic (regression-tested against 
 parser, so it can never name a flag the binary does not accept), and a **strict
 stdout/stderr split** so progress noise never contaminates the parseable stream.
 
-**SARIF earns its Phase-1 slot.** It is how a validator becomes visible in GitHub's
-security tab and in every static-analysis dashboard on earth, and no competitor emits
-it.
+**SARIF earns its Phase-1 slot.** It makes diagnostics visible in forge security views
+and other static-analysis consumers.
 
 ---
 
@@ -1132,9 +1097,7 @@ Two surfaces, and both matter.
 
 1. **`--format agent`.** Structured stdout an agent's shell loop can consume. This is
    `alint`'s entire agent story, and it is a good one: no protocol, no server.
-2. **An MCP server** (`aplan mcp`). Unlike `alint`, we should ship one. beads,
-   Backlog.md, task-master, mdplanner and saga-mcp all expose MCP; in this category it
-   is table stakes, not differentiation. The official Rust SDK,
+2. **An MCP server** (`aplan mcp`). The official Rust SDK,
    [`rmcp`](https://github.com/modelcontextprotocol/rust-sdk) **2.2.0 (2026-07-08)**, is
    maintained under the Model Context Protocol org with a weekly cadence and is
    production-usable.
@@ -1155,15 +1118,11 @@ Two surfaces, and both matter.
    exclusion reason. An executable census compares the rows with both the clap command tree and
    the tool registry, so neither a new command nor a new tool can be forgotten or counted twice.
 
-   task-master's ~36 MCP tools load ~21k tokens by default and it had to ship an env var
-   to trim them (pre-public product research §6). Context bloat is a measured, published cost: an ETH
-   Zurich study over 138 repos found context files raise inference cost >20% and can
-   *lower* success. **A small tool surface is a feature.**
+   A small tool surface limits duplicated policy and unnecessary context. The command-policy
+   census keeps that boundary explicit and executable.
 
-   `close` must go through the same evidence gate as everything else. An MCP `close`
-   that skips verification would reproduce `mcp-shrimp-task-manager`'s `verify_task`,
-   which accepts a `score: 0-100` **supplied by the calling agent** and auto-completes
-   at ≥80. That is the anti-pattern this project exists to refuse.
+   `close` must go through the same evidence gate as everything else. An MCP mutation
+   cannot replace repository evidence with a caller-supplied confidence score.
 
    **Per-call repository selection is atomic context selection** (`A1-604`). Omitting `root`
    uses the context fixed when the server starts. Supplying it accepts either (a) a repository
@@ -1471,16 +1430,9 @@ the one operation where libgit2's maturity is a real advantage and correctness h
 load-bearing. Revisit `gix` once the ladder is proven; the C-toolchain-free build is
 worth real money for distribution.
 
-**Forges.** One-way mirror only (pre-public product research §8). A CI job renders the *already
-validated* plan into GitHub Issues, sub-issues, and native dependencies for stakeholder
-visibility, each marked read-only: *"managed by `aplan`; edit the plan file."*
-
-We validate the DAG **before** we mirror, which is quietly delicious, because GitHub's
-own dependencies (GA 2025-08-21, confirmed) have **no documented cycle detection**, are
-capped at 50 per relation, and are advisory (nothing in the docs prevents closing a
-blocked issue). *`aplan` can give GitHub Issues a property GitHub does not give itself.*
-That is a launch blog post. (Do not claim "same-repo only", the `gh` CLI accepts
-cross-repo blocked-by URLs, so that earlier claim is retracted.)
+**Forges.** One-way mirror only. A CI job may render the *already validated* plan into
+forge issues and native dependencies for stakeholder visibility, each marked read-only:
+*"managed by `aplan`; edit the plan file."* The plan DAG is validated before projection.
 
 Never sync back. If tracker-side edits must be accepted, they arrive as a **proposed PR
 a human reviews**.
@@ -1489,15 +1441,12 @@ a human reviews**.
 
 ## 13. Interop
 
-Being the checker that runs over *other people's* artifacts is our distribution
-strategy, and yes, we both **compete with** Backlog.md and beads (§3.9) and **import
-from** them here. That is deliberate embrace-and-extend: import is how we convert a
-competitor's users, not a contradiction. `aplan import` should read, at minimum:
+Import adapters translate supported external plan formats into aplan's typed model:
 
 | Source | Shape | Notes |
 |---|---|---|
-| **Backlog.md** | md + YAML frontmatter, `dependencies[]` | Nearest neighbour. Near-lossless. |
-| **task-master** | `tasks.json` | Emphasize that we split it into one file per task, curing its documented merge conflicts. |
+| **Backlog.md** | md + YAML frontmatter, `dependencies[]` | Near-lossless. |
+| **task-master** | `tasks.json` | Split into one file per task. |
 | **spec-kit** | `specs/NNN/tasks.md` | Ordering is prose; import is lossy and must say so. |
 | **beads** | `issues.jsonl` export | Dolt is the source of truth there; we read the export. |
 
@@ -1624,7 +1573,7 @@ an occurrence and not a file: `docs/upgrading.md` says on one line that a reposi
 needs a feature "newer than `v0.3.0`", which must move when v0.4.0 ships, and on the
 next that most of the page "shipped in `v0.3.0`", which must not. Nor is syntax enough:
 matching every `uses: ...@vX.Y.Z` found four, all of them quotations -- a CHANGELOG
-entry, two task bodies, a pilot log. A record of an instruction is not an instruction.
+entry, two task bodies, and an observation record. A record of an instruction is not an instruction.
 
 So the gate checks install pins in the documents that *instruct* an adopter, and leaves
 records alone. And it compares against the newest **release tag**, not the workspace
@@ -1652,17 +1601,15 @@ this document is the design that sits under it.
 
 Each of these is a real fork in the road, not a formality.
 
-1. **ADR-0003: numeric rule codes.** `alint` has *no* numeric codes, rule identity is a
-   snake_case string in a registry, deliberately open to plugins. We use `APLAN001`. This
-   is a **divergence, not a mirror**, and it is defensible (our rule set is closed and
-   fixed; `rustc`/`clippy`/ESLint all number theirs; a stable code is a consumer
-   contract). Write it down so nobody "fixes" it later.
+1. **ADR-0003: numeric rule codes.** We use `APLAN001` because a stable code is a
+   consumer contract. Write the closed-numbering decision down so nobody changes it
+   accidentally.
 2. **ADR-0004: evidence verification levels.** The ladder, and why `check` is hermetic
    while `verify` is not.
 3. **ADR-0005: trust boundary for `--execute`.** Why a task file can never name a
    command. Mirrors `alint`'s ADR-0004.
-4. **ADR-0006: one-way mirror only.** Cite the git-bug bridge failures; make the refusal
-   permanent and public.
+4. **ADR-0006: one-way mirror only.** Record the multi-writer ambiguity and make the
+   refusal permanent and public.
 
 Two more were on this list and have since been written: the exit-code contract is
 `ADR-0007`, and `paths` as the relevance mechanism is `ADR-0008`. A list telling a reader
@@ -1673,15 +1620,9 @@ its record lands (`A1-222`, which added the gate that noticed).
 
 ## 20. Open questions
 
-- **Kiro (AWS), researched; the claim survives.** Kiro is GA (IDE v1.0.116, 2026-07-09)
-  with `PreTaskExec` hooks that block on exit code 2, but hooks block *starting* a task,
-  not the checkbox transition; there is no `PreTaskComplete` trigger, so a hook cannot
-  veto marking a task done, and its spec workflow does not verify completion. Pre-empt
-  "just build a gate in a hook" (RESEARCH §14.5). *(Backlog.md's cycle detection, once an
-  open question here, is settled: no, see §3.5.)*
 - Should `traces` support line ranges, not just heading anchors? Anchors are stable
   across edits; line numbers are not. Probably no.
 - Signed evidence (git notes / sigstore) is **no longer an open question**, it is planned
-  as `aplan attest` (ROADMAP v0.6), promoted on 2026 market demand (RESEARCH §15).
-- Multi-repo plans. We are repo-scoped, which is our moat (offline CI) and our ceiling
-  (portfolio rollup). Do not solve this before someone asks twice.
+  as `aplan attest` (ROADMAP v0.6).
+- Multi-repo plans. The current model is repository-scoped. Do not add portfolio
+  semantics without a concrete technical contract and evidence that it is needed.

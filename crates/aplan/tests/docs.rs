@@ -561,7 +561,7 @@ fn cli_row_command(cells: &[String]) -> Option<String> {
 /// This checks stable facts and names rather than whole sentences: the
 /// generated agent block must tell an author how to preview, the adopter guide
 /// must retain the parameter/reference and trust contracts, the HLD must retain
-/// the evidence limit and staged exclusions, and the changelog must publish the
+/// the technical scope limit and exclusions, and the changelog must publish the
 /// require-able behavior. The HLD command census proves the command remains
 /// discoverable and exhaustive.
 #[test]
@@ -606,10 +606,10 @@ fn blueprint_guidance_agrees_on_scope_trust_and_evidence_limits() {
     }
 
     for fact in [
-        "no adjacent open-source request",
-        "first-party history establishes recurring one-task conventions",
-        "neither proves one universal template or market pull",
-        "discovery, catalogues, composition, replay, built-ins, installation and fetching",
+        "parameters remove repeated text edits",
+        "local keys preserve sibling topology",
+        "V1 therefore stops at one reviewed explicit file",
+        "Discovery, catalogues, composition, replay, built-ins, installation, and fetching remain outside",
     ] {
         assert!(
             hld_flat.contains(fact),

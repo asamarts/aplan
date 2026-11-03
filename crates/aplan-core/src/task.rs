@@ -675,19 +675,14 @@ pub struct Task {
     /// `blocked_by` was carrying two relationships that behave nothing alike. A
     /// **producer** edge means the work cannot begin, because it consumes what
     /// the blocker makes. A **ratification** edge means somebody must approve
-    /// the result, and the work can be built, tested and gated today. The sixth
-    /// pilot modelled eleven of the second kind as the first, `ready` reported
-    /// none of them, and it was right to: nothing in the file said which was
-    /// meant. Five of those artefacts already existed and were gated in CI while
-    /// the plan called them blocked, which cost two days of wrong belief
-    /// (pre-public adoption evidence).
+    /// the result, while the work can be built, tested, and gated before that
+    /// approval. Using `blocked_by` for both hides startable work.
     ///
     /// Following `prefer_after`'s precedent exactly (ADR-0025): the answer to
     /// "`blocked_by` is being asked to mean two things" is a second field that
     /// means one of them, not a second kind of edge. `ready` does not read this,
     /// so a ratification never hides startable work; `APLAN046` refuses `done`
-    /// while a ratifier is unfinished, which is where the gate the pilot was
-    /// accidentally relying on actually belongs.
+    /// while a ratifier is unfinished, which is where that gate belongs.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub ratified_by: Vec<String>,
     /// The milestones this one **contains**: its children, whose work rolls up
@@ -749,19 +744,16 @@ pub struct Task {
     /// When a parked task is worth re-evaluating, as an RFC 3339 instant
     /// (`A1-264`).
     ///
-    /// **It says when to look again, never that the wait is over.** `p00013`'s
-    /// `DN0-29` waits on GitHub creating a real weekday `schedule` event: the
-    /// earliest useful revisit is computable from a committed cron and a
-    /// measured delay, and reaching it proves nothing about whether the event
-    /// exists. So this changes no status, satisfies no dependency, and is read
-    /// by `aplan due` and nothing else -- `check`, `ready` and `verify` never
+    /// **It says when to look again, never that the wait is over.** Reaching a
+    /// scheduled revisit proves nothing about whether an external condition is
+    /// now true. This changes no status, satisfies no dependency, and is read by
+    /// `aplan due` and nothing else -- `check`, `ready` and `verify` never
     /// consult a clock.
     ///
     /// This does not reverse `A1-175`, which declined a structured *reason*:
-    /// all 22 measured parks waited on an unfalsifiable human judgement, and a
-    /// field holding one would be a claim nothing could check. A revisit
-    /// instant is the narrower claim *do not look before this*, which is
-    /// checkable, and the reason still lives in the body.
+    /// a structured reason would be a claim nothing could check. A revisit
+    /// instant is the narrower, checkable claim *do not look before this*, and
+    /// the reason still lives in the body.
     ///
     /// Meaningful only while the task is parked, which `APLAN042` reports.
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -829,7 +821,7 @@ pub struct Task {
 )]
 #[serde(rename_all = "lowercase")]
 pub enum VersionImpact {
-    /// Changes nothing that ships. A pilot log, a plan edit, a note.
+    /// Changes nothing that ships. An operational log, a plan edit, or a note.
     None,
     /// A compatible correction.
     Fix,

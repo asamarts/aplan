@@ -1,6 +1,6 @@
 # TUI delivery design
 
-Status: feature implementation complete for the pre-public scope. The foundation, Overview, task
+Status: feature implementation complete for the accepted scope. The foundation, Overview, task
 browser, task inspector and joined ready/why/due workflow, Diagnostics, evidence-verification
 workbench, interactive Graph destination, Reports hub, capture Inbox and guarded mutation catalogue are
 implemented. Cross-platform release observation and the deferred unfamiliar-user review remain
@@ -16,7 +16,7 @@ The TUI is an interactive view and control surface over the same plan, graph, di
 verification and mutation policy as the CLI and MCP server. It does not parse a second model, run
 CLI commands as subprocesses or write task files directly.
 
-The pre-public target is a daily-usable TUI that covers the high-value read and mutation workflows:
+The initial target is a daily-usable TUI that covers the high-value read and mutation workflows:
 
 1. understand plan health and what is ready;
 2. find and inspect any task, blocker, cut or diagnostic;
@@ -197,7 +197,7 @@ reports whether the capability was compiled. This is a supported headless build,
 artifact. It measured byte-identical to the pre-TUI CLI. The standard linked probe added 229,456
 bytes (1.79%) to the stripped Linux release binary. A companion pair was larger in aggregate,
 would require sibling discovery and subprocess handoff, and would contradict the one-binary
-release contract. Exact measurements and the noisy cold-build timings are in `pre-public product research`.
+release contract. Noisy cold-build timings are not part of the release contract.
 
 Primary sources:
 
@@ -264,7 +264,7 @@ graph has graphlay's renderer, JSON, schema, fixture and parallel features off. 
 is MIT-licensed `libm`; its unconditional derive edge reuses the workspace's existing `serde`.
 Graphlay is MIT OR Apache-2.0 and declares the same Rust 1.88 floor as this workspace. The final
 whole-product license, source, advisory, duplicate-version and binary-size policy remains the
-separate pre-public A1-450 gate. Exact methods and evaluation results are in
+separate A1-450 gate. Exact methods and evaluation results are in
 `docs/design/graph-layout-evaluation.md`.
 
 `CellSceneJob` owns its immutable projection, sizes, ordering hints, orientation, prior scene and
@@ -1897,7 +1897,7 @@ review in [`tui-structure-review.md`](tui-structure-review.md). This is a struct
 a human usability study: it can expose missing routes, contradictory labels, hidden write
 boundaries and internally inconsistent states, but it cannot establish accessibility, trust,
 motor behavior or that a person finds the interface intuitive. `A1-449` retains the later
-five-participant evaluation of the real implementation and remains a pre-public gate.
+five-participant evaluation of the real implementation and remains a deferred release gate.
 
 The cohort uses one identified prototype revision and the same neutral prompts. Both unfamiliar
 observable-strategy profiles receive at least three fresh complete sessions; counted runs span at
@@ -2038,23 +2038,12 @@ mouse input, follows both relation directions, selects a membership-only task, e
 scope where that selection is excluded, recovers to a visible task, switches glyphs, resizes and
 pans a larger scene. Structural and document findings both expose source locations in the PTY.
 
-Three sibling repositories, none derived from aplan's fixture, were then run through the opt-in
-real-PTY driver. Every one painted independently identifying markers for Overview, Tasks,
-Diagnostics, Graph, Reports and Inbox, restored the terminal on exit, and retained both its plan bytes and
-observable Git state (HEAD, porcelain status and the binary tracked-file diff):
-
-| plan | tasks and status shape | dependency graph | structural result with this build | six-destination PTY run |
-|---|---|---|---|---|
-| p000000012 | 94: 50 done, 1 in progress, 43 todo | 93 nodes, 142 dependency edges; 81 membership edges and 1 grouping-only task omitted | one `APLAN041` warning | 4.60s |
-| p00024 | 270: 16 blocked, 8 done, 2 dropped, 244 todo | 260 nodes, 581 dependency edges; 236 membership edges and 10 grouping-only tasks omitted | clean | 14.89s |
-| p0001 | 207: 6 done, 201 todo | 204 nodes, 715 dependency edges; 187 membership edges and 3 grouping-only tasks omitted | one denied `APLAN041` warning | 10.12s |
-
-The two `APLAN041` results are deliberate version-skew observations: this newer aplan build says
-those repositories' generated `AGENTS.md` blocks need regeneration. The TUI retained and displayed
-the plan verdict; this is neither a TUI discrepancy nor authority to rewrite a sibling repository.
-That pass left no further then-observed real-plan TUI friction after the journey gaps above were
-made executable. The later field pass below exercised different release-quality questions and
-found presentation and responsiveness work outside the v0.12 operation boundary.
+The same opt-in real-PTY driver was also exercised against plans independent of aplan's fixture.
+Each run painted identifying markers for Overview, Tasks, Diagnostics, Graph, Reports, and Inbox,
+restored the terminal on exit, and retained both plan bytes and observable Git state. Version-skew
+findings remained visible as plan findings rather than being rewritten by the TUI. Those private
+plan inputs and measurements are not part of the public test corpus; the generated and synthetic
+fixtures below carry the reproducible release claims.
 
 Responsiveness is measured at both boundaries. An in-process dispatch must navigate in under 100ms
 while refresh owns the only worker, and the real PTY must repaint Tasks in under 500ms while an
@@ -2320,7 +2309,7 @@ generation can finish within the grace period while later validation makes the c
 slow. A1-667 therefore owns one command-level presentation spanning all native phase sources,
 rather than treating a short child generation as proof the invocation is short.
 
-All five lanes remain in v0.13 and therefore block the pre-public final audit. A1-447 through
+All five lanes remain in v0.13 and therefore block the initial release audit. A1-447 through
 A1-452 measure, port, evaluate, document and adversarially re-audit the assembled result rather than
 evaluating the older defensive shell in isolation.
 
@@ -2356,7 +2345,7 @@ quality gate for the original TUI scope. Field use also requires prompt truthful
 progress, a traversable bounded graph when the whole graph is too wide, semantic summary hierarchy,
 adaptive narrow/short layouts and complete overlay pointer accelerators before this cut can close.
 
-### v0.14: pre-public workflow ergonomics
+### v0.14: workflow ergonomics
 
 Integrate the later completion-history, terminal-Markdown and quick-capture requirements into the
 feature-complete interface. Recent completions gain a native history view, task bodies use the

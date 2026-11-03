@@ -388,7 +388,7 @@ a live task carries the scaffold's own prompt beside the criteria its author wro
 a closed task claims less of the released version than its level implies, without saying why
 
 - **says:** claims `none` of the released version where its level implies `fix`, and says nowhere why
-  - **fix:** Add `version_impact_reason` saying what this task changed that the level's floor gets wrong -- a plan edit or a pilot log really does change nothing that ships. If it did change the artifact after all, raise `version_impact` instead.
+  - **fix:** Add `version_impact_reason` saying what this task changed that the level's floor gets wrong -- a plan edit or an operational log really does change nothing that ships. If it did change the artifact after all, raise `version_impact` instead.
 
 ## APLAN045 (warning)
 

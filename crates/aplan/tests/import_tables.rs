@@ -1,18 +1,17 @@
 //! A table is not a checklist, and the refusal has to say so (`A1-129`).
 //!
-//! The fifth pilot passed a 1,887-line programme plan to the only Markdown
-//! importer and got three words and an exit code:
+//! A large table-only programme plan passed to the Markdown importer returns a
+//! short refusal and an exit code:
 //!
 //! ```text
 //! aplan: PLAN.md: no importable proposal found
 //! ```
 //!
 //! The refusal is right. A table row has no single meaning the way a checkbox
-//! does: that document's 451 rows describe streams, gates, risks, deliverables,
-//! metrics, budgets, role assignments and comparisons, and perhaps two of its 45
-//! tables are work. What was missing is that the message said nothing about what
-//! it read, what it wanted, or what would work instead
-//! (pre-public adoption evidence, ADR-0019).
+//! does: a table's rows can describe streams, gates, risks, deliverables, metrics,
+//! budgets, role assignments, or comparisons. What was missing is that the
+//! message said nothing about what it read, what it wanted, or what would work
+//! instead (ADR-0019).
 
 use std::fmt::Write as _;
 use std::path::Path;
@@ -25,8 +24,7 @@ fn fixture() -> &'static Path {
     Path::new(env!("CARGO_MANIFEST_DIR"))
 }
 
-/// The measured shape of the document that produced this task, reproduced
-/// exactly rather than approximated: 45 tables, 451 data rows, no checkbox rows.
+/// A large deterministic shape: 45 tables, 451 data rows, no checkbox rows.
 /// A silent empty import cannot come back without this failing.
 #[test]
 fn the_refusal_measures_the_document_it_declined() {

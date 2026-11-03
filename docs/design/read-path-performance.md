@@ -43,14 +43,14 @@ already carries and is enough to test the design. Its internal format is deliber
 contract. Admit a different encoding, a file watcher or a daemon only when the benchmark matrix
 shows the simpler design missing its budget.
 
-`docs/design/evolution.md` previously deferred both a serialized cache and a daemon until file
-watching, invalidation and lifecycle ownership were demonstrably needed. The measurements below are
-that evidence for a disposable cache: optimized structural reads already exceed the interaction
-budget, development reads exceed it by multiples, and every new process repeats unchanged parsing.
-They are not evidence for a daemon, so that half of the earlier decision remains deferred. Acceptance
-of this proposal produced ADR-0049 for cache authority/location/invalidation and ADR-0050 for its
-measured typed-report refinement. The observable `show` evidence-state change still requires its
-own ADR before implementation; existing decisions change only through supersession.
+An earlier architecture proposal deferred both a serialized cache and a daemon until file watching,
+invalidation and lifecycle ownership were demonstrably needed. The measurements below are evidence
+for a disposable cache: optimized structural reads already exceed the interaction budget,
+development reads exceed it by multiples, and every new process repeats unchanged parsing. They are
+not evidence for a daemon, so that half of the earlier decision remains deferred. Acceptance of this
+proposal produced ADR-0049 for cache authority/location/invalidation and ADR-0050 for its measured
+typed-report refinement. The observable `show` evidence-state change still requires its own ADR
+before implementation; existing decisions change only through supersession.
 
 There is one hard limit the interface must state honestly: a fresh invocation cannot both execute
 an arbitrary configured program and guarantee completion in 100 ms. Such a program can compile,

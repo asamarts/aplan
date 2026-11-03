@@ -22,18 +22,18 @@ created.
 The two useful arities solve related but different repetition:
 
 - **One task:** preserve fields people repeatedly forget: paths, tags, a body outline, effort and
-  trace conventions. Examples are an aplan rule change, an adoption pilot, an incident review or
-  a release note. This is where this repository has direct recurrence.
+  trace conventions. Examples are an aplan rule change, an incident review, a compatibility
+  review, or a release note. This is where this repository has direct recurrence.
 - **A task set:** preserve topology as well as fields. Examples are design -> implementation ->
   integration test -> documentation, an incident -> remediation -> regression test -> postmortem,
-  or a repeated release/adoption checklist. A plain copied checklist loses typed dependencies;
+  or a repeated release checklist. A plain copied checklist loses typed dependencies;
   a blueprint mints ids and resolves the local graph atomically.
 
 The practical value is consistency without pretending that completion is reusable. A blueprint
 can create the same questions and proof obligations each time, but every resulting task remains an
 ordinary task whose status and evidence must be earned in that repository.
 
-The 2026-10-30 spike narrowed the product argument. The one-task `pilot` and `rule` shapes already
+The 2026-10-30 spike narrowed the design argument. The one-task `review` and `rule` shapes already
 work as copied manifests and do not save meaningful work merely by replacing editor substitutions
 with CLI substitutions. The multi-task `feature` shape does: a copied manifest makes the author
 choose collision-free ids and update every dependency reference, while local keys remove both the
@@ -44,49 +44,21 @@ This is especially useful to agents: an agent can inspect a selected file, bind 
 set, preview the exact post-state, and submit ordinary task files for review instead of recreating
 repository conventions from prose. Humans get the same benefit through a deterministic CLI.
 
-## 3. What the evidence does and does not establish
+## 3. Scope evidence
 
-### Adjacent open-source trackers
+The implementation spike applied one-task and multi-task manifests through the existing
+`add --from` path. One-task manifests already work as copied files and gain little from
+parameter substitution alone. Multi-task manifests expose the load-bearing gap: authors must
+choose collision-free ids and update every internal relationship consistently.
 
-The demand scan found no request for reusable task sets in the closest adjacent trackers:
+That result justifies two additions and no broader subsystem:
 
-- Backlog.md [#1016](https://github.com/MrLesk/Backlog.md/issues/1016) requests configurable task
-  **filenames**, while [#618](https://github.com/MrLesk/Backlog.md/issues/618) and
-  [#581](https://github.com/MrLesk/Backlog.md/issues/581) concern milestone management.
-- claude-task-master [#591](https://github.com/eyaltoledano/claude-task-master/issues/591) calls
-  itself a template system, but templates the LLM system prompt rather than a task or task set.
+1. bind declared string parameters once; and
+2. resolve local keys to minted ids across the complete atomic batch.
 
-So this cut is not justified by market pull, and it must not delay the public milestone.
-
-### Broader project-management prior art
-
-The concept is nevertheless established and legible. Linear has both
-[issue templates](https://linear.app/docs/issue-templates) and
-[project templates](https://linear.app/docs/project-templates), with the latter able to carry
-issues and milestones. Asana supports creating repeated projects from
-[custom templates](https://help.asana.com/s/article/create-projects-quickly-with-templates), and
-Microsoft Planner supports
-[custom plan templates](https://support.microsoft.com/en-us/planner/use-custom-templates-microsoft-planner).
-That supports the use case, not demand for this implementation.
-
-### First-party recurrence
-
-The original proposal's counts mixed substring mentions with frontmatter declarations. The
-reproducible 2026-10-05 snapshot is:
-
-| measure | count | command or definition |
-|---|---:|---|
-| task files | 411 | `find aplan/tasks -maxdepth 1 -name '*.md'` |
-| pilot logs | 17 | Markdown files in `private pre-public adoption records`, excluding `README.md` |
-| task titles containing `pilot` | 25 | a noisy upper bound; includes tasks about pilot-log gates and findings |
-| tasks whose `paths` contain `crates/aplan-core/src/diagnostic.rs` | 24 | exact `aplan tasks --format json` path membership |
-| tasks whose `paths` contain `docs/rule-catalogue.md` | 8 | the same exact membership test |
-| tasks whose `paths` contain `docs/upgrading.md` | 34 | the same exact membership test |
-
-The counts establish repeated single-task conventions and repeated adoption exercises. They do
-not establish that all instances share one exact path set, or that multi-task blueprints are
-already demanded. `A1-383` therefore materialised all three representative shapes with today's
-`add --from`; section 12 records the result and the narrower justification it permits.
+The evidence does not justify discovery, catalogues, composition, replay, installation, remote
+fetching, or a continuing relationship between the recipe and the tasks it created. Those remain
+outside the accepted V1 boundary.
 
 ## 4. What exists already, and the actual gaps
 
@@ -299,7 +271,7 @@ conditions, loops, expressions or includes. A future inclusion design requires a
 shape and a new task; it does not inherit approval from this proposal.
 
 The repository should initially ship **examples and conformance fixtures, not built-in
-methodologies**. `rule` and `pilot` are useful examples for aplan contributors, but presenting them
+methodologies**. `rule` and `review` are useful examples for aplan contributors, but presenting them
 as universal built-ins contradicts the claim that aplan does not prescribe a planning method.
 `feature` is equally opinionated. `A1-392` owns the evidence threshold for promoting an example to
 a built-in later, and its census must discover whatever directory is actually chosen.
@@ -315,7 +287,7 @@ a built-in later, and its census must discover whatever directory is actually ch
 | 5 | `A1-387` | namespaced references, cut target and atomic graph resolution |
 | 6 | `A1-389` | one apply operation, renderers, MCP disposition and every surface census |
 | 7 | `A1-392` | examples/conformance fixtures; no runtime built-ins |
-| 8 | `A1-393` | adopter, agent, HLD, changelog and upgrade documentation |
+| 8 | `A1-393` | user, agent, HLD, changelog and upgrade documentation |
 
 `A1-388`, `A1-390`, `A1-391` and `A1-394` were dropped by the spike: discovery, composition,
 persistent provenance and distribution did not survive contact with the three concrete files.
@@ -345,26 +317,26 @@ syntax.
 
 ### 12.1 The files that were applied
 
-The one-task pilot:
+The one-task review:
 
 ```yaml
-- title: Pilot aplan in widget and record adoption friction
+- title: Review widget integration boundaries
   cut: M-spike
   effort: 2
-  tags: [adoption, pilot]
+  tags: [review]
   paths:
-    - pre-public-adoption-evidence
+    - docs/integrations/widget.md
     - aplan/**
     - .aplan.yml
   body: |
     ## Why
 
-    Adopt aplan in `widget` and record observations rather than status.
+    Review the `widget` integration and record concrete findings.
 
     ## Acceptance criteria
 
     - [ ] the plan exists and passes `aplan check`
-    - [ ] every pilot finding is dispositioned to a task or a recorded non-finding
+    - [ ] every finding is dispositioned to a task or a recorded non-finding
 ```
 
 The one-task rule:
@@ -469,7 +441,7 @@ An unresolved placeholder is not refused. A dry run proposed a literal task, whi
 parameter syntax cannot be layered on by documentation alone:
 
 ```text
-would write S-106  todo  Pilot aplan in {{repository}}
+would write S-106  todo  Review {{repository}} integration boundaries
   -> aplan/S-106.md
 ```
 
@@ -491,7 +463,7 @@ one operation; the count is review surface, not a claim about keystrokes.
 
 | shape | tasks | plain-manifest instance work | bound blueprint input | result |
 |---|---:|---|---|---|
-| pilot | 1 | repository at 3 sites; cut at 1 | repository and cut | 4 sites to 2 inputs, but no topology; not meaningful alone |
+| review | 1 | repository at 3 sites; cut at 1 | repository and cut | 4 sites to 2 inputs, but no topology; not meaningful alone |
 | rule | 1 | code at 3 sites; predicate/title prose at 3; cut at 1 | code, prose values and cut | preserves a useful scaffold, but copying already does; not meaningful alone |
 | feature | 3 | feature at 6 sites; cut at 3; 3 id declarations and 2 references | feature and cut; local keys are static | 14 sites to 2 inputs, removes 3 collision-free id choices and 2 consistency checks |
 

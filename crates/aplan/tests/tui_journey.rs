@@ -1925,7 +1925,7 @@ fn terminating_signals_restore_the_terminal_and_keep_the_exit_reason() -> termle
     Ok(())
 }
 
-#[cfg(unix)]
+#[cfg(target_os = "linux")]
 fn send_signal(pid: u32, name: &str) {
     common::send_signal(pid, name);
 }

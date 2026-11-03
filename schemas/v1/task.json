@@ -91,7 +91,7 @@
       "oneOf": [
         {
           "const": "none",
-          "description": "Changes nothing that ships. A pilot log, a plan edit, a note.",
+          "description": "Changes nothing that ships. An operational log, a plan edit, or a note.",
           "type": "string"
         },
         {
@@ -185,14 +185,14 @@
       "type": "array"
     },
     "ratified_by": {
-      "description": "Task IDs that must bless this one before it counts as finished: a\nconstraint on *counting done*, never on starting (`A1-306`, ADR-0036).\n\n`blocked_by` was carrying two relationships that behave nothing alike. A\n**producer** edge means the work cannot begin, because it consumes what\nthe blocker makes. A **ratification** edge means somebody must approve\nthe result, and the work can be built, tested and gated today. The sixth\npilot modelled eleven of the second kind as the first, `ready` reported\nnone of them, and it was right to: nothing in the file said which was\nmeant. Five of those artefacts already existed and were gated in CI while\nthe plan called them blocked, which cost two days of wrong belief\n(pre-public adoption evidence).\n\nFollowing `prefer_after`'s precedent exactly (ADR-0025): the answer to\n\"`blocked_by` is being asked to mean two things\" is a second field that\nmeans one of them, not a second kind of edge. `ready` does not read this,\nso a ratification never hides startable work; `APLAN046` refuses `done`\nwhile a ratifier is unfinished, which is where the gate the pilot was\naccidentally relying on actually belongs.",
+      "description": "Task IDs that must bless this one before it counts as finished: a\nconstraint on *counting done*, never on starting (`A1-306`, ADR-0036).\n\n`blocked_by` was carrying two relationships that behave nothing alike. A\n**producer** edge means the work cannot begin, because it consumes what\nthe blocker makes. A **ratification** edge means somebody must approve\nthe result, while the work can be built, tested, and gated before that\napproval. Using `blocked_by` for both hides startable work.\n\nFollowing `prefer_after`'s precedent exactly (ADR-0025): the answer to\n\"`blocked_by` is being asked to mean two things\" is a second field that\nmeans one of them, not a second kind of edge. `ready` does not read this,\nso a ratification never hides startable work; `APLAN046` refuses `done`\nwhile a ratifier is unfinished, which is where that gate belongs.",
       "items": {
         "type": "string"
       },
       "type": "array"
     },
     "revisit_at": {
-      "description": "When a parked task is worth re-evaluating, as an RFC 3339 instant\n(`A1-264`).\n\n**It says when to look again, never that the wait is over.** `p00013`'s\n`DN0-29` waits on GitHub creating a real weekday `schedule` event: the\nearliest useful revisit is computable from a committed cron and a\nmeasured delay, and reaching it proves nothing about whether the event\nexists. So this changes no status, satisfies no dependency, and is read\nby `aplan due` and nothing else -- `check`, `ready` and `verify` never\nconsult a clock.\n\nThis does not reverse `A1-175`, which declined a structured *reason*:\nall 22 measured parks waited on an unfalsifiable human judgement, and a\nfield holding one would be a claim nothing could check. A revisit\ninstant is the narrower claim *do not look before this*, which is\ncheckable, and the reason still lives in the body.\n\nMeaningful only while the task is parked, which `APLAN042` reports.",
+      "description": "When a parked task is worth re-evaluating, as an RFC 3339 instant\n(`A1-264`).\n\n**It says when to look again, never that the wait is over.** Reaching a\nscheduled revisit proves nothing about whether an external condition is\nnow true. This changes no status, satisfies no dependency, and is read by\n`aplan due` and nothing else -- `check`, `ready` and `verify` never\nconsult a clock.\n\nThis does not reverse `A1-175`, which declined a structured *reason*:\na structured reason would be a claim nothing could check. A revisit\ninstant is the narrower, checkable claim *do not look before this*, and\nthe reason still lives in the body.\n\nMeaningful only while the task is parked, which `APLAN042` reports.",
       "type": [
         "string",
         "null"

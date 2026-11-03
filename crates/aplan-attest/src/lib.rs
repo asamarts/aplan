@@ -150,11 +150,10 @@ pub struct AttestedEvidence {
 
 /// Who verified, in terms a reader can check rather than trust (`A1-154`).
 ///
-/// The fifth pilot measured the gap: every development build from `main`
-/// reported `aplan 0.3.0-dev`, while their own pin review had already found
-/// different capability sets behind that one string, so an auditor could not
-/// reconstruct what "verified" meant from the document alone
-/// (pre-public adoption evidence).
+/// A development version alone cannot identify a build: two executables can
+/// report the same version while carrying different capability sets. An
+/// auditor therefore needs the source, capability digest, and executable
+/// digest recorded by the serving process.
 ///
 /// Four fields, and what each is worth is different:
 ///
@@ -173,8 +172,7 @@ pub struct AttestedEvidence {
 /// - `binary_sha256` is this executable's digest, read from the running image.
 ///   **Self-reported**, which is worth stating plainly: it identifies rather
 ///   than authenticates, and its value is that an auditor can compare it with a
-///   digest recorded independently when the binary was pinned -- which is
-///   exactly how the pilot that asked for it works.
+///   digest recorded independently when the binary was pinned.
 #[derive(Debug, Clone, PartialEq, Eq, Default, Serialize, Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
 pub struct ToolIdentity {

@@ -52,8 +52,8 @@ pub const CONFIG_FILE: &str = ".aplan.yml";
 
 /// Which tags name a release when `version.release_tag` says nothing (ADR-0038).
 ///
-/// `v*` because it is what this project and its pilots tag with. It is a default
-/// rather than a rule: the glob exists so a repository that tags
+/// `v*` matches this project's release convention. It is a default rather than
+/// a rule: the glob exists so a repository that tags
 /// `release-2026-09` is not told its vocabulary is wrong (`A1-037`).
 pub const DEFAULT_RELEASE_TAG: &str = "v*";
 
@@ -206,7 +206,7 @@ pub struct Config {
     pub no_traces: Option<bool>,
     /// Roots outside this repository that a `traces` target may name (`A1-143`,
     /// ADR-0021). Resolved against `traces_root`, exactly as a trace target is,
-    /// so `["../p0000007"]` means the sibling beside the root the traces
+    /// so `["../sibling"]` means the sibling beside the root the traces
     /// themselves are read from.
     ///
     /// Absent, and a trace that escapes the repository is refused (`APLAN034`).
@@ -264,9 +264,8 @@ pub struct Config {
     /// in the catalogue whatever is listed here. What this changes is the
     /// *verdict*, which is where `deny_warnings` already lives. It exists because
     /// the check most useful during a migration was the one a migration could not
-    /// turn on until it was finished: four tasks of thirty-three without a cut
-    /// kept `APLAN022` off for the other twenty-nine
-    /// (pre-public adoption evidence, item 3, `A1-112`).
+    /// turn on until it was finished. `advisory` keeps findings visible while
+    /// allowing an incremental migration (`A1-112`).
     ///
     /// Every finding downgraded this way is still printed, and the run says how
     /// many there were, because a build that passed on a downgraded rule must not
@@ -289,10 +288,8 @@ pub struct Config {
     /// (`APLAN026`).
     ///
     /// A second task-membership dimension ends up in tags, because tags are
-    /// what exists: a pilot put 22 epics there and a build/measure/review
-    /// taxonomy beside them, and nothing noticed a typo in either. Declaring
-    /// the vocabulary makes a claim the repository already believes checkable,
-    /// without making tags into a containment model.
+    /// what exists. Declaring a vocabulary makes misspelled family members
+    /// checkable without making tags into a containment model.
     ///
     /// ```yaml
     /// tag_families:
@@ -327,9 +324,7 @@ pub struct Config {
     /// One ratio, declared once, and nothing else about time: no start date, no
     /// calendar, no per-cut duration. A duration is then arithmetic over numbers
     /// the plan already carries -- `effort_days` and cut membership -- so it
-    /// cannot drift from them, which is the failure the sixth pilot measured
-    /// three times in nine audits of its own hand-written schedule
-    /// (pre-public adoption evidence item 2).
+    /// cannot drift from them as a hand-maintained duration can.
     ///
     /// It is a *capacity*, not a promise: `7.5` says "five days at an assumed
     /// 1.5x", and the derived weeks say what that capacity implies about the
@@ -1007,8 +1002,7 @@ pub struct TestRunner {
     /// *what it covers*: `cargo test --manifest-path server/Cargo.toml`, an npm
     /// workspace filter, and `pytest --rootdir` all select a component while
     /// running at the repository root, which is usually where the lockfile is.
-    /// Reading `dir` alone left `APLAN025` unable to fire on any real pilot
-    /// (`A1-065`).
+    /// Reading `dir` alone cannot distinguish those cases (`A1-065`).
     ///
     /// Takes precedence over `dir` when both are set, being the more specific
     /// claim. Absent, and with no `dir` either, the runner makes no claim about
@@ -1066,16 +1060,11 @@ pub struct TestRunner {
     /// How many lines of a failed test's output a finding may carry. Default:
     /// eight; `0` suppresses it (`A1-365`).
     ///
-    /// **Present by default, which is a decision with a recorded cost.** A pilot
-    /// rejected two cited tests that failed only inside its nested-Podman
-    /// runner, and the whole actionable output was "failed under `--execute`"
-    /// with the instruction to make the test pass: both streams had been
-    /// captured and thrown away, so the cause could only be found by entering
-    /// the runner by hand. `test.list` has retained one line of stderr for a
-    /// launch failure since it was written, and this is that precedent applied
-    /// to the other half. An opt-in would reproduce the pilot's experience
-    /// exactly: they met the opaque failure first, and would only then have
-    /// discovered a key existed.
+    /// **Present by default, which is a decision with a recorded cost.** Without
+    /// an excerpt, a test that fails only in an isolated runner reports merely
+    /// "failed under `--execute`" even though both streams were captured.
+    /// `test.list` already retains one line of stderr for a launch failure, and
+    /// this applies the same principle to the execution half.
     ///
     /// The cost is that a CI log can contain a little output nobody explicitly
     /// asked for. Three things bound it: the default is small, every line goes
@@ -1351,7 +1340,7 @@ pub struct VersionPolicy {
     /// ADR-0038 decided the window with no release node is everything closed
     /// since the nearest release tag reachable from `HEAD`, and that a
     /// repository tagging things other than releases has to say which tags are
-    /// releases. `v*` is what this project and its pilots use; a project tagging
+    /// releases. `v*` is this project's convention; a project tagging
     /// `release-2026-09` says so here rather than being told its vocabulary is
     /// wrong (`A1-037`).
     #[serde(default)]
