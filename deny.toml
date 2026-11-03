@@ -24,12 +24,12 @@ workspace-default-features = "allow"
 external-default-features = "allow"
 allow-workspace = true
 skip = [
-  { crate = "getrandom@0.3.4", reason = "A1-450: jsonschema's ahash remains on getrandom 0.3 while aplan and tempfile use 0.4" },
-  { crate = "hashbrown@0.16.1", reason = "A1-450: ratatui's kasuari remains on 0.16 while the general graph uses 0.17" },
-  { crate = "r-efi@5.3.0", reason = "A1-450: follows the admitted getrandom 0.3/0.4 split on non-Linux targets" },
-  { crate = "syn@2.0.119", reason = "A1-450: stable derive crates remain on syn 2 while current clap and darling use syn 3" },
-  { crate = "thiserror@1.0.69", reason = "A1-450: crossterm's filedescriptor remains on 1.x while the workspace uses 2.x" },
-  { crate = "thiserror-impl@1.0.69", reason = "A1-450: proc-macro half of the admitted thiserror 1.x/2.x split" },
+  { crate = "getrandom@0.3.4", reason = "A2-002: jsonschema's ahash remains on getrandom 0.3 while aplan and tempfile use 0.4" },
+  { crate = "hashbrown@0.16.1", reason = "A2-002: ratatui's kasuari remains on 0.16 while the general graph uses 0.17" },
+  { crate = "r-efi@5.3.0", reason = "A2-002: follows the admitted getrandom 0.3/0.4 split on non-Linux targets" },
+  { crate = "syn@2.0.119", reason = "A2-002: stable derive crates remain on syn 2 while current clap and darling use syn 3" },
+  { crate = "thiserror@1.0.69", reason = "A2-002: crossterm's filedescriptor remains on 1.x while the workspace uses 2.x" },
+  { crate = "thiserror-impl@1.0.69", reason = "A2-002: proc-macro half of the admitted thiserror 1.x/2.x split" },
 ]
 
 [[bans.features]]

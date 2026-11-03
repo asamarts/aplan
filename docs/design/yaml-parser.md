@@ -1,7 +1,6 @@
 # YAML parser migration
 
-Status: bridge selected and implemented by `A1-702`; the first `A1-703` product qualification
-failed and the safe-Rust cutover remains blocked.
+Status: the bridge is shipped; `A2-009` owns a new public qualification and the safe Rust cutover.
 
 ## Decision
 
@@ -11,8 +10,8 @@ aplan now has one YAML ownership boundary: the root manifest's logical `yaml_com
 value and error contract.
 
 This is deliberately a bridge. `libyaml-rs` is maintained by the YAML organization, but it is
-still libyaml translated from C to unsafe Rust. `A1-703` owns the safe-Rust cutover to `d0026` and
-is a member of `M-hardening`, which `M-public` waits on. No caller names the selected backend;
+still libyaml translated from C to unsafe Rust. `A2-009` owns the public safe Rust cutover to
+`d0026`. No caller names the selected backend;
 changing it again is one root dependency change whose compiler errors enumerate the compatibility
 work, rather than another backend-name sweep. The private `aplan-core` contract module pins the
 behavior without adding a public facade or reversing the workspace's dependency-sink architecture.
@@ -43,7 +42,7 @@ boundary. A parser that serves only typed configuration is not enough.
 | option | strengths | blocking gaps | disposition |
 |---|---|---|---|
 | `yaml_serde` 0.10.7 / `libyaml-rs` 0.3.0 | YAML-organization maintenance; Rust 1.82/1.60 minimums; MIT/Apache and MIT; source compatible with all aplan calls; mature value, error and emitter behavior | parser remains an unsafe C2Rust translation | selected as the bounded bridge |
-| local `d0026` at clean immutable commit `5a9db923` | aplan-compatible safe parser goal; own scanner, events, values, Serde and emitter; native limits; Rust 1.88; 405/405 YAML Test Suite classification, 100,000 generic and 50,000 typed differential cases, and 938 mutually accepted external YAML files with no normalized differences; committed parse-throughput and peak-heap gates pass | private and `publish = false`; explicitly no current license grant; first product integration has not started; API gaps below; deep emission remains 2.40 times the bridge; the P6 status page has not caught up with the newer D8 result | target for `A1-703`, not a dependency yet |
+| local `d0026` at clean immutable commit `5a9db923` | aplan-compatible safe parser goal; own scanner, events, values, Serde and emitter; native limits; Rust 1.88; 405/405 YAML Test Suite classification, 100,000 generic and 50,000 typed differential cases, and 938 mutually accepted external YAML files with no normalized differences; committed parse-throughput and peak-heap gates pass | private and `publish = false`; explicitly no current license grant; first product integration has not started; API gaps below; deep emission remains 2.40 times the bridge; the P6 status page has not caught up with the newer D8 result | target for `A2-009`, not a dependency yet |
 | `saphyr-parser` / `saphyr` | active pure-Rust parser code, events and good throughput | parser dependency uses unsafe `arraydeque`; no Serde at parser layer; character rather than byte spans in relevant paths; no native policy limits; high-level deep load recurses; incompatible value model | reject as runtime; useful only as a test oracle |
 | `serde-saphyr` | typed Serde, budgets and serializer | no compatible `Value`, `Mapping` or `from_value` surface; tested versions either had a depth-64 default or exceeded one of the relevant MSRV baselines; measured prototype slower | reject |
 | `noyalib` 0.0.57 | broad `serde_yaml` compatibility, values, spans and limits; own safe parser code | pre-1.0 churn; unsafe general-purpose dependencies; default alias policy rejected an accepted shape; measured prototype about 2.2 times the bridge | reject for now |
@@ -115,14 +114,14 @@ because the semantic product gate had already failed.
 
 The licensing gate independently blocks consumption. At `73ebb6e`, both workspace and package
 metadata still set `publish = false`, the repository explicitly grants no license while private,
-and it contains no license files. aplan neither copied nor vendored that source. `A1-703` can resume
+and it contains no license files. aplan neither copied nor vendored that source. `A2-009` can resume
 only from a licensed immutable release whose compatibility revision passes the complete product
 inventory; it must then run the differential, hostile-input, performance, binary and release gates
 below.
 
 ## d0026 readiness gates
 
-`A1-703` may replace the bridge only when all of these are true:
+`A2-009` may replace the bridge only when all of these are true:
 
 1. **Immutable consumption.** A published crate or immutable vendored source has an explicit
    `MIT OR Apache-2.0` grant, provenance, checksum and Rust 1.88 support. A sibling path or moving
