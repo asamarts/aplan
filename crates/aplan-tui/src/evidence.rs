@@ -685,7 +685,8 @@ mod tests {
             "-NoProfile".to_string(),
             "-NonInteractive".to_string(),
             "-Command".to_string(),
-            "if ('{test}' -eq '') { exit 1 }; exit 0".to_string(),
+            "Write-Output".to_string(),
+            "{test}".to_string(),
         ]
     }
 
@@ -742,15 +743,22 @@ mod tests {
 
     #[cfg(windows)]
     fn marked_run_command(marker: &Path) -> Vec<String> {
+        let script = marker.with_extension("ps1");
+        std::fs::write(
+            &script,
+            format!(
+                "param([string]$TestName)\nif ($TestName -ne 'proof') {{ exit 1 }}\n[IO.File]::WriteAllText('{}', 'executed')\n",
+                marker.display().to_string().replace('\'', "''")
+            ),
+        )
+        .expect("write Windows test runner");
         vec![
             "powershell.exe".to_string(),
             "-NoProfile".to_string(),
             "-NonInteractive".to_string(),
-            "-Command".to_string(),
-            format!(
-                "if ('{{test}}' -ne 'proof') {{ exit 1 }}; [IO.File]::WriteAllText('{}', 'executed')",
-                marker.display().to_string().replace('\'', "''")
-            ),
+            "-File".to_string(),
+            script.display().to_string(),
+            "{test}".to_string(),
         ]
     }
 
