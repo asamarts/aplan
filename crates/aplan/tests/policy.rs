@@ -360,10 +360,32 @@ fn every_untestable_task_says_why_in_its_body() {
 
 /// A tag nobody uses is a vocabulary, not a policy: if the exemption ever falls
 /// out of use, this says so rather than leaving a dead word in the config.
+fn is_explicit_exemption_free_epoch(tasks: &[String]) -> bool {
+    !tasks.is_empty() && tasks.iter().all(|name| name.starts_with("A2-"))
+}
+
+#[test]
+fn the_exemption_free_epoch_is_only_a2() {
+    assert!(is_explicit_exemption_free_epoch(&[
+        "A2-001.md".to_string(),
+        "A2-004.md".to_string(),
+    ]));
+    assert!(!is_explicit_exemption_free_epoch(&[]));
+    assert!(!is_explicit_exemption_free_epoch(&[
+        "A2-001.md".to_string(),
+        "A3-001.md".to_string(),
+    ]));
+}
+
 #[test]
 fn the_exemption_is_used_and_stays_a_minority() {
     let closed = closed_tasks();
-    if closed.is_empty() {
+    let exempt: Vec<&String> = closed
+        .iter()
+        .filter(|(_, fm, _)| tags_of(fm).iter().any(|t| t == "untestable"))
+        .map(|(id, _, _)| id)
+        .collect();
+    if exempt.is_empty() {
         let tasks = std::fs::read_dir(repo_root().join("aplan/tasks"))
             .expect("public plan task directory")
             .flatten()
@@ -371,20 +393,11 @@ fn the_exemption_is_used_and_stays_a_minority() {
             .map(|entry| entry.file_name().to_string_lossy().into_owned())
             .collect::<Vec<_>>();
         assert!(
-            !tasks.is_empty() && tasks.iter().all(|name| name.starts_with("A2-")),
+            is_explicit_exemption_free_epoch(&tasks),
             "an exemption-free plan is valid here only at the explicit A2 public-plan epoch"
         );
         return;
     }
-    let exempt: Vec<&String> = closed
-        .iter()
-        .filter(|(_, fm, _)| tags_of(fm).iter().any(|t| t == "untestable"))
-        .map(|(id, _, _)| id)
-        .collect();
-    assert!(
-        !exempt.is_empty(),
-        "nothing claims the exemption, so `.aplan.yml` declares a tag that means nothing"
-    );
     // Measured when this landed: 14 of 108. A majority claiming it would mean the
     // rule had been routed around rather than adopted, which is the failure this
     // whole task exists to prevent.

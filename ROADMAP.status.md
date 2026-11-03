@@ -11,11 +11,13 @@
 
 ## Cross-cutting (in no cut)
 
-2.0d effort, 0.1 weeks (0.1 left), held by tasks in no cut and not counted in the table above.
+3.0d effort, 0.1 weeks (<0.1 left), held by tasks in no cut and not counted in the table above.
 
 | task | title | status | blocked_by | evidence |
 | --- | --- | --- | --- | --- |
-| A2-001 | Qualify the imported public baseline | todo | - | - |
+| A2-001 | Qualify the imported public baseline | done | - | test:ci_runner_census::a_public_repository_cannot_name_a_persistent_self_hosted_runner, test:ci_runner_census::the_public_boundary_gate_requires_public_zero_runners_and_all_external_approval, test:publication_boundary::pinned_public_release_refs_refuse_transform_drift |
 | A2-002 | Re-audit imported dependency admissions | todo | A2-001 | - |
+| A2-003 | Make the diagnostic workbench journey deterministic under coverage | done | - | test:tui_journey::diagnostic_workbench_runs_end_to_end_in_a_real_terminal |
+| A2-004 | Keep the public-plan exemption audit valid after qualification | done | A2-001 | test:policy::the_exemption_free_epoch_is_only_a2, test:policy::the_exemption_is_used_and_stays_a_minority |
 
 > Statuses are as claimed in the plan and gated by `aplan verify` in CI.

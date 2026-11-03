@@ -2359,15 +2359,20 @@ fn diagnostic_workbench_runs_end_to_end_in_a_real_terminal() -> termlens::Result
         screen.contains("check-docs DENIED E1 W0") && screen.contains("DOC-REFERENCE")
     })?;
     terminal.send(Key::Enter)?;
-    terminal.wait_until(|screen| {
-        screen.contains("scope: check-docs")
-            && screen.contains("subject: reference T-999")
-            && screen.contains("location: /")
-            && !screen.contains("location: no source location")
-            && screen.contains("Correct or remove the")
-            && screen.contains("PLAN.md")
-            && screen.contains("source: T-999 is not a task")
-    })?;
+    // `wait_until` may observe the sentinel during a repaint. Settle the
+    // completed detail view before asserting the rest or sending Esc; the
+    // coverage suite exposed the otherwise tiny input/repaint race (A2-003).
+    let detail =
+        terminal.snapshot_after(|screen| screen.contains("source: T-999 is not a task"))?;
+    assert!(detail.contains("scope: check-docs"), "{detail:?}");
+    assert!(detail.contains("subject: reference T-999"), "{detail:?}");
+    assert!(detail.contains("location: /"), "{detail:?}");
+    assert!(
+        !detail.contains("location: no source location"),
+        "{detail:?}"
+    );
+    assert!(detail.contains("Correct or remove the"), "{detail:?}");
+    assert!(detail.contains("PLAN.md"), "{detail:?}");
     terminal.send(Key::Esc)?;
     terminal.wait_until(|screen| {
         screen.contains("check-docs DENIED E1 W0") && screen.contains("Esc back to overview")
