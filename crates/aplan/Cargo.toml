@@ -9,6 +9,7 @@ license.workspace = true
 repository.workspace = true
 homepage = "https://github.com/asamarts/aplan"
 readme = "../../README.md"
+publish.workspace = true
 keywords = ["planning", "tasks", "dependencies", "ci", "cli"]
 categories = ["development-tools", "command-line-utilities"]
 authors.workspace = true

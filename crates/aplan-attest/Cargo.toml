@@ -5,7 +5,11 @@ edition.workspace = true
 rust-version.workspace = true
 license.workspace = true
 repository.workspace = true
+homepage.workspace = true
+readme.workspace = true
+publish.workspace = true
 description = "A tamper-evident record of what a plan proved, bound to a commit."
+authors.workspace = true
 
 [lints]
 workspace = true

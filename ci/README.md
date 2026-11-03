@@ -355,22 +355,33 @@ nothing (`A1-060`). So a release is an explicit bump, in this order:
 3. run a build so `Cargo.lock` records the new version: `release.sh` builds `--locked`, so a
    lockfile still naming the old one fails the release with
    `cannot update the lock file ... because --locked was passed`
-4. commit the release tree, then bind and run the same two phases the workflow runs **before
-   creating or pushing the tag**:
+4. commit the release tree, then bind and run the workflow's validation and artifact phases
+   **before creating or pushing the tag**:
    ```sh
    export APLAN_RELEASE_SHA="$(git rev-parse HEAD)"
    TAG=vX.Y.Z ci/scripts/validate.sh --profile release
    TAG=vX.Y.Z ci/scripts/release.sh
    ```
-5. create the annotated `vX.Y.Z` tag on that checked commit and push it
-6. after the release lands, set the version to the next `-dev` and update current install pins
+5. for the first crates.io release only, publish the ten new package names from that same clean
+   commit with `TAG=vX.Y.Z ci/scripts/publish-crates.sh`; then create a trusted publisher for each
+   package naming `asamarts/aplan`, `release.yml`, and the `release` environment, and require
+   trusted publishing for later versions
+6. create the annotated `vX.Y.Z` tag on that checked commit and push it
+7. after the release lands, set the version to the next `-dev` and update current install pins
 
-The release workflow performs full validation, artifact construction and publication sequentially
-in one checkout and one job. Both scripts independently refuse unless that clean checkout is the
-full commit ID in `github.sha`; another workflow's result, a ref name or an abbreviated SHA cannot
-be supplied as authorization. A failed, cancelled, skipped or stale validation therefore cannot
-reach publication. A manual dispatch on a non-tag may stage the artifact but the publish step stays
-ineligible; a tag rerun replaces its assets only after rerunning full validation.
+The release workflow performs full validation, artifact construction, crates.io publication and
+GitHub publication sequentially in one checkout and one job. Each script independently refuses
+unless that clean checkout is the full commit ID in `github.sha`; another workflow's result, a ref
+name or an abbreviated SHA cannot authorize publication. A failed, cancelled, skipped or stale
+validation therefore cannot reach publication. A manual dispatch on a non-tag may stage the
+artifact but publication stays ineligible. A tag rerun packages every crate again and compares its
+checksum with crates.io, then compares every existing GitHub asset byte for byte. It may fill a
+missing asset but never replaces different bytes.
+
+The GitHub `release` environment has no secrets. It requires approval from `kaminsod`, prevents
+self-review, and admits only `v*` tags plus manual runs from `main`. The tag path is the publishing
+path; the `main` branch rule exists only so a maintainer can stage validation and artifact
+construction with `workflow_dispatch`.
 
 The validation log and Actions summary record the exact source, tag/version, toolchain, SHA-256 of
 `ci/validation.yml`, and every gate outcome and duration. Artifact construction reports its total

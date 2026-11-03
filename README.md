@@ -4,16 +4,16 @@
 dependencies, release cuts, traceability, and the evidence behind completed work. Its core rule is
 simple: a status is a claim, not proof.
 
-The latest release is [v0.4.0](https://github.com/asamarts/aplan/releases/tag/v0.4.0). `main` is
-currently `0.5.0-dev`. Building from source requires Rust 1.88 or newer. Release assets and the
-GitHub Action currently provide a Linux x86_64 binary.
+Published releases are available on [GitHub](https://github.com/asamarts/aplan/releases) and
+[crates.io](https://crates.io/crates/aplan). Building from source requires Rust 1.88 or newer.
+Release assets and the GitHub Action currently provide a Linux x86_64 binary.
 
 ## Start
 
-Install from source:
+Install from crates.io:
 
 ```sh
-cargo install --locked --git https://github.com/asamarts/aplan --tag v0.4.0 aplan
+cargo install --locked aplan
 ```
 
 Then initialize a repository and add work:

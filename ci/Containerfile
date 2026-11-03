@@ -14,13 +14,14 @@ ARG LLVM_COV_AARCH64_SHA256=8f399d84993d13998b63fbe1084377713c719b00655c7d88d5b5
 # System packages. libicu72 + zlib1g are what the runner agent's .NET host and
 # ./bin/installdependencies.sh need; build-essential + git + pkg-config + zlib1g-dev
 # cover aplan's only -sys deps (libgit2-sys vendors libgit2 via cc; libz-sys links
-# zlib). No Node, jq, or OpenSSL: aplan's git2 is default-features = false, so the
+# zlib). No Node or OpenSSL: aplan's git2 is default-features = false, so the
 # dependency tree pulls no openssl-sys.
 RUN apt-get update && apt-get install -y --no-install-recommends \
     build-essential \
     ca-certificates \
     curl \
     git \
+    jq \
     pkg-config \
     python3 \
     libicu72 \

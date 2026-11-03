@@ -19,6 +19,7 @@ env:
 
 permissions:
   contents: write # create the release and upload its asset
+  id-token: write # exchange this job's identity for a short-lived crates.io token
 
 jobs:
   release:
@@ -26,6 +27,10 @@ jobs:
     # A pull request never publishes, regardless of runner placement.
     if: github.event_name == 'push' || github.event_name == 'workflow_dispatch'
     runs-on: ${{ (github.event.repository.private && fromJSON('["self-hosted","linux","aplan"]')) || fromJSON('["ubuntu-latest"]') }}
+    # crates.io binds its trusted publisher to this environment as well as this
+    # repository and workflow. GitHub separately requires an independent
+    # approval before the job can enter it.
+    environment: release
     # Full validation currently takes roughly 15 minutes on the private runner;
     # artifact construction follows it and reports its own duration. Leave a
     # bounded margin for cold hosted builds without returning to an unbounded job.
@@ -71,6 +76,21 @@ jobs:
           TAG: ${{ github.ref_type == 'tag' && github.ref_name || '' }}
         run: ci/scripts/release.sh
 
+      # The first public release bootstraps each new crate with a maintainer
+      # token. Every later tag exchanges this exact job identity for one
+      # short-lived token scoped by crates.io to the ten configured packages.
+      - name: authenticate with crates.io
+        id: crates_io_auth
+        if: github.ref_type == 'tag'
+        uses: rust-lang/crates-io-auth-action@3268eb413133e2960fa4ae0e963ca76380c54cd9 # v1.0.6
+
+      - name: publish the crates.io packages
+        if: github.ref_type == 'tag'
+        env:
+          CARGO_REGISTRY_TOKEN: ${{ steps.crates_io_auth.outputs.token }}
+          TAG: ${{ github.ref_name }}
+        run: ci/scripts/publish-crates.sh
+
       # A release is a claim about a commit, so publish the checksum beside the
       # archive: it is what lets the GitHub Action (A1-003) pin an exact artifact
       # rather than trusting whatever the URL serves.
@@ -79,20 +99,4 @@ jobs:
         env:
           GH_TOKEN: ${{ github.token }}
           TAG: ${{ github.ref_name }}
-        run: |
-          # Re-runnable on purpose: a re-dispatched release should replace its
-          # assets rather than fail with "already exists", which tells the
-          # operator nothing about whether the artifact is current.
-          if gh release view "$TAG" --repo "$GITHUB_REPOSITORY" >/dev/null 2>&1; then
-            echo "==> Release $TAG exists; replacing its assets"
-            gh release upload "$TAG" \
-              --repo "$GITHUB_REPOSITORY" \
-              --clobber \
-              dist/*.tar.gz dist/*.sha256
-          else
-            gh release create "$TAG" \
-              --repo "$GITHUB_REPOSITORY" \
-              --title "$TAG" \
-              --generate-notes \
-              dist/*.tar.gz dist/*.sha256
-          fi
+        run: ci/scripts/publish-github-release.sh
