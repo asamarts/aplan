@@ -15,7 +15,7 @@
 use std::path::Path;
 use std::process::Command;
 
-mod common;
+use crate::common;
 
 /// A plan with one task whose `blocked_by` names a task that is not there, and
 /// one `done` task citing nothing. The first has a field to point at; the

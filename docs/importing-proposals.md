@@ -238,9 +238,8 @@ What is reported rather than guessed:
 - **`[P]`,** which claims an item shares no files with its neighbours. That is an assertion
   about the code, not the plan, and nothing here can check it: it becomes the tag
   `spec-kit:parallel`.
-- **User stories** become tags too, with a notice: `aplan` has one modelled grouping level
-  and it is the cut (ADR-0014), so if the stories are your cuts, `aplan mv --cut` is how
-  they become one.
+- **User stories** become tags too, with a notice: `aplan` has one task-membership level and it is
+  the cut (ADR-0014), so if the stories are your cuts, `aplan mv --cut` is how they become one.
 - **File paths inside descriptions.** spec-kit's format section says "include exact file
   paths in descriptions", which reads like `paths` waiting to be extracted. Measured before
   declining: zero of the 34 items in the upstream template carry a resolvable path -- they

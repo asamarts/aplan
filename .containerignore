@@ -1,0 +1,13 @@
+# The private runner image consumes this small allowlist. Keep the root build
+# context bounded so target/, .git/ and the working tree are never uploaded to
+# the container builder merely to make rust-toolchain.toml available.
+**
+!rust-toolchain.toml
+!ci
+!ci/cargo-ci-config.toml
+!ci/nextest.env
+!ci/scripts
+!ci/scripts/install-nextest.sh
+!ci/scripts/toolchain.sh
+!ci/runner
+!ci/runner/entrypoint.sh

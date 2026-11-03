@@ -6,6 +6,7 @@ set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 CI_DIR="$(cd "$SCRIPT_DIR/.." && pwd)"
+REPO_ROOT="$(cd "$CI_DIR/.." && pwd)"
 
 # Load environment.
 ENV_FILE="${CI_DIR}/.env"
@@ -30,6 +31,39 @@ CONTAINER_NAME="${CONTAINER_NAME:-aplan-runner}"
 # drop it.
 PIDS_LIMIT="16384"
 
+# Persist the host's contention and memory boundaries on the container itself.
+# The external reconciler remains a host-wide backstop, not the only place this
+# runner's contract exists. cgroup v2's memory.high accepts a byte count here;
+# `24G` looks plausible in inspect output but crun rejects it at start.
+RUNNER_CPUS="${RUNNER_CPUS:-8}"
+RUNNER_CPU_SHARES="${RUNNER_CPU_SHARES:-64}"
+RUNNER_MEMORY_HIGH_BYTES="${RUNNER_MEMORY_HIGH_BYTES:-25769803776}"
+RUNNER_TARGET_CAP_GIB="${RUNNER_TARGET_CAP_GIB:-100}"
+
+integer_setting() {
+    local name="$1" value="$2"
+    if [[ ! "$value" =~ ^[1-9][0-9]*$ ]]; then
+        echo "ERROR: ${name} must be a positive base-10 integer, got '${value}'." >&2
+        exit 1
+    fi
+}
+integer_setting RUNNER_CPUS "$RUNNER_CPUS"
+integer_setting RUNNER_CPU_SHARES "$RUNNER_CPU_SHARES"
+integer_setting RUNNER_MEMORY_HIGH_BYTES "$RUNNER_MEMORY_HIGH_BYTES"
+integer_setting RUNNER_TARGET_CAP_GIB "$RUNNER_TARGET_CAP_GIB"
+if (( 10#$RUNNER_CPUS > 1024 )); then
+    echo "ERROR: RUNNER_CPUS must be at most 1024, got '${RUNNER_CPUS}'." >&2
+    exit 1
+fi
+if (( 10#$RUNNER_CPU_SHARES < 2 || 10#$RUNNER_CPU_SHARES > 262144 )); then
+    echo "ERROR: RUNNER_CPU_SHARES must be from 2 through 262144, got '${RUNNER_CPU_SHARES}'." >&2
+    exit 1
+fi
+if (( 10#$RUNNER_TARGET_CAP_GIB > 8191 )); then
+    echo "ERROR: RUNNER_TARGET_CAP_GIB must be at most 8191, got '${RUNNER_TARGET_CAP_GIB}'." >&2
+    exit 1
+fi
+
 # Where CARGO_TARGET_DIR lives inside the container. MUST match the ENV in
 # ci/Containerfile: the volume is mounted here so builds stay incremental across
 # jobs, and it is OUTSIDE the checkout so actions/checkout's `git clean -ffdx`
@@ -37,14 +71,16 @@ PIDS_LIMIT="16384"
 TARGET_MOUNT="/home/runner/cargo-target"
 
 echo "==> Building runner image: ${RUNNER_IMAGE}"
-podman build -t "${RUNNER_IMAGE}" -f "${CI_DIR}/Containerfile" "${CI_DIR}"
+# The root context is load-bearing: Containerfile copies the repository's
+# canonical rust-toolchain.toml instead of accepting a second version ARG.
+podman build -t "${RUNNER_IMAGE}" -f "${CI_DIR}/Containerfile" "${REPO_ROOT}"
 
 echo "==> Creating volumes"
 podman volume create aplan-runner-config 2>/dev/null || true
 podman volume create aplan-runner-registry 2>/dev/null || true
 podman volume create aplan-runner-target 2>/dev/null || true
 
-echo "==> Starting runner container: ${CONTAINER_NAME}"
+echo "==> Creating runner container: ${CONTAINER_NAME}"
 # `--network pasta:--dns-host,...` pins the resolver this container's DNS is
 # forwarded to, and it is stored in the container, so it survives a restart.
 #
@@ -63,11 +99,16 @@ echo "==> Starting runner container: ${CONTAINER_NAME}"
 # it is not applied when a single container is restarted on its own.
 DNS_HOST="${RUNNER_DNS_HOST:-192.168.8.1}"
 
-podman run -d \
+podman create \
     --name "${CONTAINER_NAME}" \
     --restart unless-stopped \
     --network "pasta:--dns-host,${DNS_HOST}" \
     --pids-limit "${PIDS_LIMIT}" \
+    --cpus "${RUNNER_CPUS}" \
+    --cpu-shares "${RUNNER_CPU_SHARES}" \
+    --cgroup-conf "memory.high=${RUNNER_MEMORY_HIGH_BYTES}" \
+    -e ACTIONS_RUNNER_HOOK_JOB_STARTED=/home/runner/job-started.sh \
+    -e TARGET_CAP_GIB="${RUNNER_TARGET_CAP_GIB}" \
     -e GITHUB_REPO_URL="${GITHUB_REPO_URL}" \
     -e GITHUB_TOKEN="${GITHUB_TOKEN}" \
     -e RUNNER_NAME="${RUNNER_NAME:-aplan-runner}" \
@@ -75,15 +116,58 @@ podman run -d \
     -v aplan-runner-config:/home/runner/_config \
     -v aplan-runner-registry:/usr/local/cargo/registry \
     -v aplan-runner-target:"${TARGET_MOUNT}" \
-    "${RUNNER_IMAGE}"
+    "${RUNNER_IMAGE}" >/dev/null
 
-# Fail loudly if the PID ceiling did not take.
+discard_bad_container() {
+    podman stop -t 1 "${CONTAINER_NAME}" >/dev/null 2>&1 || true
+    podman rm "${CONTAINER_NAME}" >/dev/null 2>&1 || true
+}
+
+verify_equal() {
+    local setting="$1" actual="$2" expected="$3"
+    if [[ "$actual" != "$expected" ]]; then
+        echo "ERROR: ${CONTAINER_NAME} ${setting} is '${actual}', expected '${expected}'." >&2
+        discard_bad_container
+        exit 1
+    fi
+    echo "==> Verified ${setting}=${expected}"
+}
+
+# Inspect before starting so a persistence failure cannot briefly admit jobs on
+# an unbounded container. NanoCpus is Podman's stored representation of --cpus.
+_expected_nano_cpus=$((10#$RUNNER_CPUS * 1000000000))
 _actual_pids="$(podman inspect --format '{{.HostConfig.PidsLimit}}' "${CONTAINER_NAME}" 2>/dev/null || echo '?')"
-if [[ "${_actual_pids}" != "${PIDS_LIMIT}" ]]; then
-    echo "ERROR: ${CONTAINER_NAME} PidsLimit is '${_actual_pids}', expected ${PIDS_LIMIT}." >&2
+_actual_nano_cpus="$(podman inspect --format '{{.HostConfig.NanoCpus}}' "${CONTAINER_NAME}" 2>/dev/null || echo '?')"
+_actual_cpu_shares="$(podman inspect --format '{{.HostConfig.CpuShares}}' "${CONTAINER_NAME}" 2>/dev/null || echo '?')"
+_actual_memory_high="$(podman inspect --format '{{index .HostConfig.CgroupConf "memory.high"}}' "${CONTAINER_NAME}" 2>/dev/null || echo '?')"
+verify_equal PidsLimit "$_actual_pids" "$PIDS_LIMIT"
+verify_equal NanoCpus "$_actual_nano_cpus" "$_expected_nano_cpus"
+verify_equal CpuShares "$_actual_cpu_shares" "$RUNNER_CPU_SHARES"
+verify_equal memory.high-config "$_actual_memory_high" "$RUNNER_MEMORY_HIGH_BYTES"
+
+podman start "${CONTAINER_NAME}" >/dev/null || {
+    echo "ERROR: ${CONTAINER_NAME} could not start with its resource limits." >&2
+    discard_bad_container
+    exit 1
+}
+echo "==> Started runner container: ${CONTAINER_NAME}"
+
+# Configuration that Podman accepted can still fail at the OCI/cgroup boundary.
+# Read the live kernel values before installing reboot persistence.
+_actual_memory_high="$(podman exec "${CONTAINER_NAME}" /bin/sh -c 'cat /sys/fs/cgroup/memory.high' 2>/dev/null || echo '?')"
+_actual_cpu_max="$(podman exec "${CONTAINER_NAME}" /bin/sh -c 'cat /sys/fs/cgroup/cpu.max' 2>/dev/null || echo '?')"
+_expected_cpu_max="$((10#$RUNNER_CPUS * 100000)) 100000"
+verify_equal memory.high "$_actual_memory_high" "$RUNNER_MEMORY_HIGH_BYTES"
+verify_equal cpu.max "$_actual_cpu_max" "$_expected_cpu_max"
+
+_runner_env="$(podman inspect --format '{{range .Config.Env}}{{println .}}{{end}}' "${CONTAINER_NAME}" 2>/dev/null || true)"
+if ! grep -Fxq 'ACTIONS_RUNNER_HOOK_JOB_STARTED=/home/runner/job-started.sh' <<<"$_runner_env" \
+    || ! grep -Fxq "TARGET_CAP_GIB=${RUNNER_TARGET_CAP_GIB}" <<<"$_runner_env"; then
+    echo "ERROR: ${CONTAINER_NAME} did not retain its job-started hook environment." >&2
+    discard_bad_container
     exit 1
 fi
-echo "==> Verified PidsLimit=${PIDS_LIMIT}"
+echo "==> Verified job-started hook and ${RUNNER_TARGET_CAP_GIB} GiB target cap"
 
 # --- Reboot persistence ------------------------------------------------------
 # `--restart unless-stopped` plus podman-restart.service start the container on
@@ -94,7 +178,6 @@ echo "==> Verified PidsLimit=${PIDS_LIMIT}"
 # as recovery so the unit's own ExecStartPre does not re-enter systemctl.
 if [[ -z "${APLAN_RUNNER_RECOVERY:-}" ]]; then
     echo "==> Installing systemd user unit (reboot persistence)"
-    REPO_ROOT="$(cd "${CI_DIR}/.." && pwd)"
     UNIT_DIR="${HOME}/.config/systemd/user"
     mkdir -p "${UNIT_DIR}"
     cat > "${UNIT_DIR}/container-${CONTAINER_NAME}.service" <<UNIT

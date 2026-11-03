@@ -72,7 +72,11 @@ pub enum EmitError {
 /// Windows with an ordinary [`EmitError::Io`], which is the honest outcome.
 #[must_use]
 pub fn is_usable_id(id: &str) -> bool {
-    !id.is_empty() && id != "." && id != ".." && !id.contains(['/', '\\', '\0']) && id.trim() == id
+    !aplan_core::task::is_vacuous_ref(id)
+        && id != "."
+        && id != ".."
+        && !id.contains(['/', '\\', '\0'])
+        && id.trim() == id
 }
 
 /// Render a task as the markdown-plus-frontmatter file `aplan` loads.
@@ -81,7 +85,7 @@ pub fn is_usable_id(id: &str) -> bool {
 /// from the model: fields the task does not carry are skipped by the type's own
 /// `skip_serializing_if`, and field order follows the struct.
 pub fn task_file(task: &Task, body: &str) -> Result<String, EmitError> {
-    let frontmatter = serde_yaml_ng::to_string(task).map_err(|e| EmitError::Serialise {
+    let frontmatter = yaml_compat::to_string(task).map_err(|e| EmitError::Serialise {
         id: task.id.clone(),
         message: e.to_string(),
     })?;
@@ -183,26 +187,49 @@ pub fn write_task_placed(
         Ok(placed) => Ok(Some(placed.path)),
         Err(e) => {
             let written = task_path(out_dir, &task.id);
-            match std::fs::remove_file(&written) {
-                Ok(()) => Err(EmitError::Place(format!(
-                    "placing `{}` in `{cut_id}`: {e}. The task file was removed, so the \
-                     plan is as it was.",
-                    task.id
-                ))),
-                // Names the command rather than a hand-edit: `mv --cut` puts a
-                // task in a cut, including one that is in none, and the tool
-                // sending an author to a text editor for something it does is
-                // the defect `A1-265` was filed about one message over.
-                Err(cleanup) => Err(EmitError::Place(format!(
-                    "placing `{}` in `{cut_id}`: {e}. Removing {} afterwards also failed \
-                     ({cleanup}), so the plan now has a task in no cut: put it in one with \
-                     `aplan mv {} --cut {cut_id}`, or delete the file.",
-                    task.id,
-                    written.display(),
-                    task.id
-                ))),
-            }
+            let cleanup = std::fs::remove_file(&written).err();
+            Err(EmitError::Place(placement_failure_message(
+                &task.id,
+                cut_id,
+                &e,
+                &written,
+                cleanup.as_ref(),
+            )))
         }
+    }
+}
+
+/// Compose a placement failure with the cleanup state, preserving one sentence
+/// boundary when the nested refusal already carries punctuation (`A1-600`).
+fn placement_failure_message(
+    task_id: &str,
+    cut_id: &str,
+    placement: &impl std::fmt::Display,
+    written: &Path,
+    cleanup: Option<&std::io::Error>,
+) -> String {
+    let mut placement = placement.to_string();
+    let trimmed = placement.trim_end().len();
+    placement.truncate(trimmed);
+    if !placement.ends_with(['.', '!', '?']) {
+        placement.push('.');
+    }
+
+    match cleanup {
+        None => format!(
+            "placing `{task_id}` in `{cut_id}`: {placement} The task file was removed, so the \
+             plan is as it was."
+        ),
+        // Names the command rather than a hand-edit: `mv --cut` puts a task in
+        // a cut, including one that is in none, and the tool sending an author
+        // to a text editor for something it does is the defect `A1-265` was
+        // filed about one message over.
+        Some(cleanup) => format!(
+            "placing `{task_id}` in `{cut_id}`: {placement} Removing {} afterwards also failed \
+             ({cleanup}), so the plan now has a task in no cut: put it in one with \
+             `aplan mv {task_id} --cut {cut_id}`, or delete the file.",
+            written.display()
+        ),
     }
 }
 
@@ -291,6 +318,7 @@ mod tests {
             paths: Vec::new(),
             traces: Vec::new(),
             trace_fingerprints: std::collections::BTreeMap::new(),
+            evidence_fingerprints: std::collections::BTreeMap::new(),
             tags: vec!["kep:implementable".to_string()],
             revisit_at: None,
             version_impact: None,
@@ -352,7 +380,9 @@ mod tests {
         let dir = tempfile::Builder::new()
             .tempdir_in(aplan_core::fixture::fixture_root())
             .unwrap();
-        for bad in ["../escape", "a/b", "", ".", "..", " leading"] {
+        // Proves `authoring.refuses_visually_empty_creation_values` at the
+        // shared filename boundary.
+        for bad in ["../escape", "a/b", "", ".", "..", " leading", "\u{200b}"] {
             let err = write_task(dir.path(), &task(bad), "body").unwrap_err();
             assert!(
                 matches!(err, EmitError::UnusableId { .. }),
@@ -420,6 +450,7 @@ mod placing {
             paths: Vec::new(),
             traces: Vec::new(),
             trace_fingerprints: std::collections::BTreeMap::new(),
+            evidence_fingerprints: std::collections::BTreeMap::new(),
             tags: Vec::new(),
             revisit_at: None,
             version_impact: None,
@@ -460,6 +491,37 @@ mod placing {
         assert!(
             !root.join("tasks/A-2.md").exists(),
             "the task file must be gone, or the plan has a task in no cut"
+        );
+    }
+
+    #[test]
+    fn placement_failures_have_one_boundary_and_retain_both_cleanup_outcomes() {
+        let written = std::path::Path::new("/plan/tasks/A-2.md");
+        let punctuated = "milestone changed while this command was preparing its edit.";
+        assert_eq!(
+            placement_failure_message("A-2", "M-s0", &punctuated, written, None),
+            "placing `A-2` in `M-s0`: milestone changed while this command was preparing its \
+             edit. The task file was removed, so the plan is as it was."
+        );
+        assert_eq!(
+            placement_failure_message(
+                "A-2",
+                "M-s0",
+                &"is the milestone still current?  \n\t",
+                written,
+                None,
+            ),
+            "placing `A-2` in `M-s0`: is the milestone still current? The task file was removed, \
+             so the plan is as it was."
+        );
+
+        let cleanup = std::io::Error::other("cleanup failed");
+        let unpunctuated = "milestone changed";
+        assert_eq!(
+            placement_failure_message("A-2", "M-s0", &unpunctuated, written, Some(&cleanup),),
+            "placing `A-2` in `M-s0`: milestone changed. Removing /plan/tasks/A-2.md afterwards \
+             also failed (cleanup failed), so the plan now has a task in no cut: put it in one \
+             with `aplan mv A-2 --cut M-s0`, or delete the file."
         );
     }
 

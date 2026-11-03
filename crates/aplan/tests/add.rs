@@ -7,7 +7,7 @@
 //! that the plan it produces is one `check` accepts, and that a second `add`
 //! continues the sequence rather than repeating it.
 
-mod common;
+use crate::common;
 use common::aplan;
 
 /// A plan with one task and one milestone, the shape every real plan has.
@@ -83,6 +83,188 @@ fn a_second_add_continues_the_sequence() {
     }
 }
 
+/// Proves `add.accepts_creation_time_model_fields` on the single-task surface.
+#[test]
+fn single_add_authors_live_state_and_every_creation_relationship() {
+    let dir = plan_tree();
+    let (out, code) = aplan(
+        dir.path(),
+        &[
+            "add",
+            "Park the next release question",
+            "--id",
+            "A1-005",
+            "--status",
+            "blocked",
+            "--tag",
+            "milestone",
+            "--blocked-by",
+            "M-v0.1",
+            "--prefer-after",
+            "A1-004",
+            "--ratified-by",
+            "A1-004",
+            "--contains",
+            "M-v0.1",
+            "--revisit-at",
+            "2030-01-02T03:04:05Z",
+            "--version-impact",
+            "feature",
+        ],
+    );
+    assert_eq!(code, 0, "{out}");
+    let task = std::fs::read_to_string(dir.path().join("aplan/tasks/A1-005.md")).expect("task");
+    for expected in [
+        "status: blocked",
+        "blocked_by:\n- M-v0.1",
+        "prefer_after:\n- A1-004",
+        "ratified_by:\n- A1-004",
+        "contains:\n- M-v0.1",
+        "revisit_at: 2030-01-02T03:04:05Z",
+        "version_impact: feature",
+    ] {
+        assert!(task.contains(expected), "missing {expected:?}:\n{task}");
+    }
+
+    for status in ["done", "dropped"] {
+        let (out, code) = aplan(
+            dir.path(),
+            &["add", "Bad terminal claim", "--status", status],
+        );
+        assert_eq!(code, 2, "{status}: {out}");
+        assert!(
+            out.contains("add --from") || out.contains("guarded `drop`"),
+            "{out}"
+        );
+        assert!(!dir.path().join("aplan/tasks/A1-006.md").exists());
+    }
+}
+
+/// Proves `authoring.refuses_visually_empty_creation_values` on ordinary add.
+#[test]
+fn creation_refuses_every_visually_empty_model_value() {
+    let invisible = "\u{200b}";
+    let cases = [
+        vec!["add", invisible],
+        vec!["add", "task", "--id", invisible],
+        vec!["add", "task", "--tag", invisible],
+        vec!["add", "task", "--paths", invisible],
+        vec!["add", "task", "--traces", invisible],
+        vec!["add", "task", "--blocked-by", invisible],
+        vec![
+            "add",
+            "task",
+            "--version-impact",
+            "none",
+            "--version-impact-reason",
+            invisible,
+        ],
+    ];
+    for args in cases {
+        let dir = plan_tree();
+        let (out, code) = aplan(dir.path(), &args);
+        assert_eq!(code, 2, "{args:?}: {out}");
+        assert!(
+            !dir.path().join("aplan/tasks/A1-005.md").exists(),
+            "{args:?} wrote a task"
+        );
+    }
+}
+
+#[test]
+fn creation_state_and_version_neighbours_are_refused_before_single_add_writes() {
+    for (args, expected) in [
+        (
+            vec!["add", "task", "--status", "unknown"],
+            "is not a status",
+        ),
+        (
+            vec![
+                "add",
+                "task",
+                "--status",
+                "todo",
+                "--revisit-at",
+                "2030-01-02T03:04:05Z",
+            ],
+            "initially `blocked`",
+        ),
+        (
+            vec![
+                "add",
+                "task",
+                "--status",
+                "blocked",
+                "--revisit-at",
+                "next Thursday",
+            ],
+            "RFC 3339",
+        ),
+        (
+            vec!["add", "task", "--version-impact", "unknown"],
+            "is not an impact",
+        ),
+    ] {
+        let dir = plan_tree();
+        let (out, code) = aplan(dir.path(), &args);
+        assert_eq!(code, 2, "{args:?}: {out}");
+        assert!(out.contains(expected), "{args:?}: {out}");
+        assert!(!dir.path().join("aplan/tasks/A1-005.md").exists());
+    }
+
+    let dir = plan_tree();
+    let (out, code) = aplan(
+        dir.path(),
+        &[
+            "add",
+            "Breaking contract",
+            "--effort",
+            "1",
+            "--paths",
+            "src/contract.rs",
+            "--version-impact",
+            "breaking",
+        ],
+    );
+    assert_eq!(code, 0, "{out}");
+    let task = std::fs::read_to_string(dir.path().join("aplan/tasks/A1-005.md")).expect("task");
+    assert!(task.contains("version_impact: breaking"), "{task}");
+}
+
+/// Proof for `authoring.task_ids_preserve_cut_labels`.
+#[test]
+fn a_new_task_id_cannot_shadow_a_cut_label() {
+    let dir = plan_tree();
+    let cut = dir.path().join("aplan/tasks/M-v0.1.md");
+    let text = std::fs::read_to_string(&cut).expect("cut");
+    std::fs::write(
+        &cut,
+        text.replace("tags: [milestone]", "tags: [milestone, s0]"),
+    )
+    .expect("label cut");
+
+    let (out, code) = aplan(
+        dir.path(),
+        &["add", "Collision", "--id", "s0", "--effort", "1"],
+    );
+    assert_eq!(code, 2, "{out}");
+    assert!(out.contains("label of cut(s) M-v0.1"), "{out}");
+    assert!(out.contains("make that label unusable"), "{out}");
+    assert!(!dir.path().join("aplan/tasks/s0.md").exists());
+
+    // The refusal preserved the vocabulary: the same label still places an
+    // ordinary task in the intended cut.
+    let (out, code) = aplan(
+        dir.path(),
+        &[
+            "add", "Later", "--id", "A1-005", "--cut", "s0", "--effort", "1",
+        ],
+    );
+    assert_eq!(code, 0, "{out}");
+    let cut = std::fs::read_to_string(cut).expect("updated cut");
+    assert!(cut.contains("A1-005"), "{cut}");
+}
+
 #[test]
 fn it_refuses_input_that_would_produce_a_file_check_rejects() {
     // The first version wrote all of these. `--effort=-1` produced a file that
@@ -109,6 +291,141 @@ fn it_refuses_input_that_would_produce_a_file_check_rejects() {
         &["add", "Fine", "--effort", "0", "--paths", "s/**"],
     );
     assert_eq!(code, 0, "zero is a real estimate: {out}");
+}
+
+/// A milestone is a checkpoint, so fields that describe work are invalid add
+/// input rather than a warning the command writes into the plan (`A1-369`).
+///
+/// Proves the named behaviour `add.refuses_milestone_work_fields` on the
+/// single-task surface. The zero estimate is the adopter's exact case: with
+/// `require_effort` enabled it looks like the least committal value, but a
+/// milestone is exempt from that policy and `APLAN021` forbids the field.
+#[test]
+fn a_milestone_with_work_fields_is_refused_before_plain_add_writes() {
+    for (flag, value, message, policy) in [
+        ("--effort", "0", "carries `effort_days`", ""),
+        (
+            "--paths",
+            "src/**",
+            "declares `paths`",
+            "advisory: [APLAN021]\n",
+        ),
+    ] {
+        let dir = plan_tree();
+        std::fs::remove_file(dir.path().join("aplan/tasks/M-v0.1.md")).expect("remove cut");
+        std::fs::write(
+            dir.path().join(".aplan.yml"),
+            format!("root: aplan\nrequire_effort: true\n{policy}"),
+        )
+        .expect("config");
+
+        let (out, code) = aplan(
+            dir.path(),
+            &[
+                "add",
+                "A bad cut",
+                "--id",
+                "M-bad",
+                "--tag",
+                "milestone",
+                "--blocked-by",
+                "A1-004",
+                flag,
+                value,
+                "--no-deny-warnings",
+            ],
+        );
+        assert_eq!(code, 2, "{flag} must be refused: {out}");
+        assert!(out.contains("APLAN021") && out.contains(message), "{out}");
+        assert!(
+            !out.contains("A cut is created with its work"),
+            "a populated milestone was misdiagnosed as empty: {out}"
+        );
+        assert!(
+            !dir.path().join("aplan/tasks/M-bad.md").exists(),
+            "{flag} was refused but wrote the milestone"
+        );
+
+        let (check, code) = aplan(dir.path(), &["check"]);
+        assert_eq!(code, 0, "the refusal must leave the plan clean: {check}");
+        assert!(check.contains("0 warning(s)"), "{check}");
+
+        let (out, code) = aplan(
+            dir.path(),
+            &[
+                "add",
+                "A clean cut",
+                "--id",
+                "M-good",
+                "--tag",
+                "milestone",
+                "--blocked-by",
+                "A1-004",
+            ],
+        );
+        assert_eq!(
+            code, 0,
+            "a milestone without work fields stays valid: {out}"
+        );
+    }
+}
+
+/// A1-369 refuses work fields on the milestone this command is adding, not on
+/// an existing malformed cut whose warning merely changes wording (`A1-406`).
+/// Proves `add.milestone_work_refusal_is_new_input_only` on plain `add`.
+#[test]
+fn an_improving_plain_add_to_an_existing_malformed_milestone_is_not_hard_refused() {
+    let dir = plan_tree();
+    let cut_path = dir.path().join("aplan/tasks/M-v0.1.md");
+    std::fs::write(
+        &cut_path,
+        "---\nid: M-v0.1\ntitle: First cut\nphase: 1\nstatus: todo\neffort_days: 1\n\
+         tags: [milestone]\n---\n",
+    )
+    .expect("write malformed milestone");
+
+    let (out, code) = aplan(
+        dir.path(),
+        &[
+            "add",
+            "A new member",
+            "--id",
+            "A1-005",
+            "--effort",
+            "1",
+            "--cut",
+            "M-v0.1",
+            "--no-deny-warnings",
+        ],
+    );
+    assert_eq!(
+        code, 0,
+        "an improving add was mistaken for a new bad milestone: {out}"
+    );
+    assert!(
+        out.contains("APLAN021") && out.contains("carries `effort_days`"),
+        "the remaining pre-existing warning must still be reported: {out}"
+    );
+    assert!(
+        !out.contains("has no members"),
+        "the fixed clause survived: {out}"
+    );
+    assert!(
+        dir.path().join("aplan/tasks/A1-005.md").exists(),
+        "the successful add did not write its task"
+    );
+    let cut = std::fs::read_to_string(cut_path).expect("read cut");
+    assert!(
+        cut.contains("A1-005"),
+        "the cut did not gain its member: {cut}"
+    );
+
+    let (check, code) = aplan(dir.path(), &["check"]);
+    assert_eq!(code, 0, "a warning is lenient by default: {check}");
+    assert!(
+        check.contains("1 warning(s)") && !check.contains("has no members"),
+        "the post-state did not strictly improve the warning: {check}"
+    );
 }
 
 #[test]

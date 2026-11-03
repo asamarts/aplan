@@ -17,14 +17,14 @@ use std::io::Write as _;
 use std::path::Path;
 use std::process::Command;
 
-mod common;
+use crate::common;
 
 /// The kinds `close` resolves before writing, and what a bad citation of each
 /// looks like. Each must be named by the description *and* refused in fact.
 const RESOLVED: &[(&str, &str, &str)] = &[
     (
         "commit",
-        "a cited commit must exist and touch the task's `paths`",
+        "a cited commit must be reachable from HEAD and touch the task's `paths`",
         "commit:0000000000000000000000000000000000000000",
     ),
     ("file", "a cited file must exist", "file:nowhere/at/all.rs"),
@@ -92,9 +92,12 @@ fn repo() -> tempfile::TempDir {
 
 fn runner() -> aplan_config::TestRunners {
     aplan_config::TestRunners::One(aplan_config::TestRunner {
+        weight: None,
+        exclusive: None,
         output_lines: None,
         max_memory: None,
         max_processes: None,
+        max_output: None,
         wrap: None,
         expect_tests: None,
         skipped: None,
@@ -104,8 +107,10 @@ fn runner() -> aplan_config::TestRunners {
         dir: None,
         covers: None,
         covers_by_test: None,
+        inputs_by_test: None,
         list: vec!["printf".into(), "a_test_that_exists\n".into()],
         run: vec!["true".into(), "{test}".into()],
+        batch: None,
     })
 }
 
@@ -120,12 +125,14 @@ fn policy(root: &Path, url_check: Option<aplan_config::UrlCheck>) -> aplan_mcp::
             advisory: Vec::new(),
         },
         verify: aplan_evidence::VerifyOptions {
+            detect_drift: false,
             version: None,
             traces_root: None,
             config_file: None,
             execute: false,
             test_runner: Some(runner()),
             max_unrelated_files: None,
+            observation_inputs: None,
             url_check,
         },
         repo_root: root.to_path_buf(),
@@ -196,6 +203,7 @@ fn the_close_description_matches_what_close_does() {
         &aplan_mcp::Policy {
             id_strategy: aplan_core::IdStrategy::Sequential,
             verify: aplan_evidence::VerifyOptions {
+                detect_drift: false,
                 version: None,
                 traces_root: None,
                 config_file: None,
@@ -219,6 +227,53 @@ fn the_close_description_matches_what_close_does() {
     );
 }
 
+/// Proves `evidence.commit_requires_head_reachability` on the agent mutation
+/// surface (`A1-572`). The side commit touches the task's path, so object
+/// existence and L2 relevance would both accept it without the ancestry gate.
+#[test]
+fn mcp_close_refuses_commit_outside_head_history() {
+    let dir = repo();
+    let run = |args: &[&str]| {
+        let output = Command::new("git")
+            .args(args)
+            .current_dir(dir.path())
+            .output()
+            .expect("git");
+        assert!(output.status.success(), "git {args:?} failed: {output:?}");
+        String::from_utf8_lossy(&output.stdout).trim().to_string()
+    };
+    let primary = run(&["branch", "--show-current"]);
+    run(&["checkout", "-qb", "isolated"]);
+    std::fs::write(dir.path().join("src/a.rs"), "side\n").expect("side work");
+    run(&["add", "src/a.rs"]);
+    run(&[
+        "-c",
+        "user.email=a@b.c",
+        "-c",
+        "user.name=t",
+        "commit",
+        "-qm",
+        "isolated work",
+    ]);
+    let side = run(&["rev-parse", "HEAD"]);
+    run(&["checkout", "-q", &primary]);
+
+    let refused = close(dir.path(), &format!("commit:{side}"), None)
+        .expect_err("an agent closure accepted locally-only evidence");
+    assert!(
+        refused.contains(&side)
+            && refused.contains("resolves locally")
+            && refused.contains("not reachable"),
+        "{refused}"
+    );
+    let task = std::fs::read_to_string(dir.path().join("aplan/tasks/T-1.md")).expect("task");
+    assert!(
+        task.contains("status: todo"),
+        "the refusal wrote status: {task}"
+    );
+    assert!(!task.contains(&side), "the refusal wrote evidence: {task}");
+}
+
 /// The other half of "never fetches a url", and the divergence that was hiding
 /// behind the wording: the CLI's close reaches no network to record a citation,
 /// because a link down for an hour must not block a closure. This surface passed
@@ -229,6 +284,7 @@ fn a_url_citation_closes_here_exactly_as_it_does_on_the_command() {
     let failing = aplan_config::UrlCheck {
         max_memory: None,
         max_processes: None,
+        max_output: None,
         wrap: None,
         timeout_seconds: None,
         check: vec!["false".into(), "{url}".into()],
@@ -288,6 +344,7 @@ fn verify_still_checks_urls_after_close_stopped() {
             Some(aplan_config::UrlCheck {
                 max_memory: None,
                 max_processes: None,
+                max_output: None,
                 wrap: None,
                 timeout_seconds: None,
                 check: vec!["false".into(), "{url}".into()],
@@ -483,6 +540,7 @@ fn a_url_is_recorded_rather_than_resolved_on_both_surfaces() {
     let failing = aplan_config::UrlCheck {
         max_memory: None,
         max_processes: None,
+        max_output: None,
         wrap: None,
         timeout_seconds: None,
         check: vec!["false".into(), "{url}".into()],
@@ -667,6 +725,7 @@ fn closing_a_release_through_mcp_records_the_version_it_produced() {
             timeout_seconds: None,
             max_memory: None,
             max_processes: None,
+            max_output: None,
             wrap: None,
         }),
         check: None,

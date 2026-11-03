@@ -11,7 +11,7 @@
 
 use std::path::Path;
 
-mod common;
+use crate::common;
 use common::aplan;
 
 /// The shapes that matter from spec-kit's template, including the ordering prose

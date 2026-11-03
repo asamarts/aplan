@@ -5,7 +5,7 @@
       "description": "A single piece of proof attached to a task.",
       "properties": {
         "captured": {
-          "description": "ISO-8601 date the evidence was captured. Required for `note`, because an\nundated note is a rumour.",
+          "description": "ISO-8601 date the inline assertion was made. Required for `note`, because\nan undated note is a rumour, and rejected on every machine-resolved kind:\nan author-entered date is not freshness proof (`APLAN055`).",
           "type": [
             "string",
             "null"
@@ -87,7 +87,7 @@
       ]
     },
     "VersionImpact": {
-      "description": "What a change did to the thing that ships (`A1-312`, ADR-0034).\n\nOrdered, and the order is the whole type: aggregation takes the strongest of\nwhat a level floors and what its members claim, so `None < Fix < Feature <\nBreaking` is what makes a `Breaking` task raise the cut above it.\n\nIt describes the **change**, and each scheme maps it to its own arithmetic:\nsemver at or past 1.0 sends `Breaking` to major, semver below 1.0 sends it to\nminor, and `CalVer` takes its number from the calendar and keeps only the\ncompatibility claim.",
+      "description": "What a change did to the thing that ships.\n\nOrdered, and the order is the whole type: aggregation takes the strongest of\nwhat a level floors and what its members claim, so `None < Fix < Feature <\nBreaking` is what makes a `Breaking` task raise the cut above it.\n\nIt describes the **change**, and each scheme maps it to its own arithmetic:\nsemver at or past 1.0 sends `Breaking` to major, semver below 1.0 sends it to\nminor, and `CalVer` takes its number from the calendar and keeps only the\ncompatibility claim.",
       "oneOf": [
         {
           "const": "none",
@@ -124,7 +124,7 @@
       "type": "array"
     },
     "contains": {
-      "description": "The milestones this one **contains**: its children, whose work rolls up\ninto it at any depth (`A1-333`, ADR-0042).\n\nThe third thing `blocked_by` was being asked to mean. ADR-0013 decided\nthat a milestone listing another milestone there *sequences* the two\ncuts, and the member filter excludes it deliberately -- so an author who\nwrites it intending containment gets a rollup of `0.0d` over real work\nand an `APLAN021` saying their cut is empty, with nothing anywhere using\nthe word \"sequence\". Measured on a four-level plan (`A1-317`'s audit),\nand misdiagnosed there as a traversal defect.\n\n`prefer_after`'s precedent again (ADR-0025), and `ratified_by`'s\n(ADR-0036): a second meaning earns a second field, never a second kind\nof edge. A release is now the special case of this rather than the\nmechanism for it.\n\n**This is not a second grouping level** (ADR-0014): a task still belongs\nto exactly one cut, the one that lists it. A container *borrows* the work\nbeneath it, which is the word ADR-0022 already used for a release.",
+      "description": "The milestones this one **contains**: its children, whose work rolls up\ninto it at any depth (`A1-333`, ADR-0042).\n\nThe third thing `blocked_by` was being asked to mean. ADR-0013 decided\nthat a milestone listing another milestone there *sequences* the two\ncuts, and the member filter excludes it deliberately -- so an author who\nwrites it intending containment gets a rollup of `0.0d` over real work\nand an `APLAN021` saying their cut is empty, with nothing anywhere using\nthe word \"sequence\". Measured on a four-level plan (`A1-317`'s audit),\nand misdiagnosed there as a traversal defect.\n\n`prefer_after`'s precedent again (ADR-0025), and `ratified_by`'s\n(ADR-0036): a second meaning earns a second field, never a second kind\nof edge. A release is now the special case of this rather than the\nmechanism for it.\n\n**This is not a second task-membership level** (ADR-0014): a task still\nbelongs to exactly one cut, the one that lists it. A container *borrows*\nthe work beneath it, which is the word ADR-0022 already used for a\nrelease.",
       "items": {
         "type": "string"
       },
@@ -146,6 +146,13 @@
       },
       "type": "array"
     },
+    "evidence_fingerprints": {
+      "additionalProperties": {
+        "type": "string"
+      },
+      "description": "Content fingerprints of mutable evidence referents, captured by `close`\nand `amend` when drift detection is enabled. Keys are full citations\n(`file:path`), so kinds cannot collide. `APLAN054` compares a stored\nfingerprint with the committed referent. Bare paths resolve at `HEAD`;\nsymbolic revisions are mutable too, while revisions that resolve as the\nobject id they spell need no stamp. Absent means unverifiable, not a\nviolation, so adoption is incremental.",
+      "type": "object"
+    },
     "id": {
       "description": "Stable identifier, unique across the plan. Convention: `P<phase>-<nnn>`.",
       "type": "string"
@@ -165,7 +172,7 @@
       "type": "array"
     },
     "phase": {
-      "description": "Phase number. Used for rollups and ordering, not for gating.",
+      "description": "Required ordered reporting coordinate. The default summary groups by it,\nand new-id minting uses it as a convention hint. It creates no\nmembership, dependency, readiness gate, or execution order.",
       "format": "uint32",
       "minimum": 0,
       "type": "integer"

@@ -1,4 +1,5 @@
 [package]
+autotests = false
 name = "aplan-interop"
 description = "Importers for aplan: read other tools' plans and proposal repositories into tasks."
 version.workspace = true
@@ -18,11 +19,17 @@ aplan-output.workspace = true
 getrandom.workspace = true
 serde.workspace = true
 serde_json.workspace = true
-serde_yaml_ng.workspace = true
+schemars.workspace = true
+yaml_compat.workspace = true
 thiserror.workspace = true
 
 [dev-dependencies]
+jsonschema.workspace = true
 tempfile.workspace = true
 
 [lints]
 workspace = true
+
+[[test]]
+name = "integration"
+path = "tests/integration/main.rs"

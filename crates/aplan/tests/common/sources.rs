@@ -54,17 +54,21 @@ pub fn shipped_sources(root: &Path) -> Vec<PathBuf> {
         dirs.len()
     );
     let mut out = collect(&mut dirs);
-    // **Build scripts, which are not under `src`.** `aplan-attest/build.rs`
-    // asks `git` for the commit the binary was built from, and it runs on an
-    // adopter's machine when they build the crate. Both scans were blind to it
-    // until this was found (`A1-354`, audit): a walk of `*/src` is not a walk
-    // of the code that ships.
-    out.extend(
-        crates
-            .iter()
-            .map(|c| c.join("build.rs"))
-            .filter(|p| p.is_file()),
-    );
+    // **Build scripts and their sibling modules, which are not under `src`.**
+    // `aplan-attest/build.rs` asks `git` for the commit the binary was built
+    // from, and `build_support.rs` now owns that process boundary. Both run on
+    // an adopter's machine when they build the crate. Scanning only the file
+    // named `build.rs` would make moving production code into a module erase it
+    // from this audit (`A1-354`, `A1-629`).
+    for crate_dir in &crates {
+        let entries = std::fs::read_dir(crate_dir).expect("read workspace crate directory");
+        out.extend(
+            entries
+                .flatten()
+                .map(|entry| entry.path())
+                .filter(|path| path.is_file() && path.extension().is_some_and(|ext| ext == "rs")),
+        );
+    }
     out.sort();
     out
 }

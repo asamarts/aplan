@@ -1,7 +1,8 @@
 # ADR-0014: One modelled grouping level, and the second is a declared tag family
 
 Date: 2026-08-08
-Status: Accepted
+Status: Accepted; superseded in part by ADR-0046, which keeps one containment level but recognises
+the built-in phase reporting coordinate.
 Tasks: `A1-032`
 Supersedes nothing. Extends ADR-0008 (milestones as cuts) and ADR-0012 (a stage is a tag).
 

@@ -7,7 +7,7 @@
 
 use std::path::Path;
 
-mod common;
+use crate::common;
 
 /// Two cuts, a dependency chain crossing between them, and one task in no cut.
 fn fixture(dir: &Path) {
@@ -154,7 +154,17 @@ fn unreachable_walks_containment_whatever_it_is_asked_over() {
     );
 
     // And it says which graph it actually walked, not the one it was given.
-    let out = graph(dir.path(), &["--reach", "unreachable", "--format", "text"]);
+    let out = graph(
+        dir.path(),
+        &[
+            "--reach",
+            "unreachable",
+            "--format",
+            "text",
+            "--layout",
+            "lanes",
+        ],
+    );
     let text = String::from_utf8_lossy(&out.stdout);
     assert!(
         text.contains("cut-membership edges"),
@@ -173,13 +183,24 @@ fn unreachable_walks_containment_whatever_it_is_asked_over() {
 /// number somebody typed here.
 #[test]
 fn unreachable_agrees_with_the_plans_own_cut_field() {
-    let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
-        .ancestors()
-        .nth(2)
-        .expect("the workspace root")
-        .to_path_buf();
-
-    let listing = common::output(&root, &["tasks", "--format", "json"]);
+    let fixture = common::workspace_plan_fixture();
+    let root = fixture.directory();
+    let listing = common::output(
+        root,
+        &[
+            "--no-config",
+            "--root",
+            "aplan",
+            "tasks",
+            "--format",
+            "json",
+        ],
+    );
+    assert!(
+        listing.status.success(),
+        "`tasks --format json` failed: {}",
+        String::from_utf8_lossy(&listing.stderr)
+    );
     let listing: serde_json::Value =
         serde_json::from_slice(&listing.stdout).expect("tasks --format json");
     let no_cut: std::collections::BTreeSet<String> = listing["tasks"]
@@ -196,8 +217,11 @@ fn unreachable_agrees_with_the_plans_own_cut_field() {
     );
 
     let out = common::output(
-        &root,
+        root,
         &[
+            "--no-config",
+            "--root",
+            "aplan",
             "graph",
             "--reach",
             "unreachable",
@@ -205,6 +229,11 @@ fn unreachable_agrees_with_the_plans_own_cut_field() {
             "--format",
             "json",
         ],
+    );
+    assert!(
+        out.status.success(),
+        "`graph --reach unreachable --membership --format json` failed: {}",
+        String::from_utf8_lossy(&out.stderr)
     );
     let doc: serde_json::Value = serde_json::from_slice(&out.stdout).expect("graph json");
     let found: std::collections::BTreeSet<String> = doc["nodes"]
@@ -243,6 +272,9 @@ fn a_traversal_says_which_graph_it_walked() {
         for format in ["mermaid", "dot", "text"] {
             let mut all = args.clone();
             all.extend(["--format", format]);
+            if format == "text" {
+                all.extend(["--width", "240"]);
+            }
             let out = graph(dir.path(), &all);
             let text = String::from_utf8_lossy(&out.stdout);
             let flat = text.split_whitespace().collect::<Vec<_>>().join(" ");
@@ -330,7 +362,8 @@ fn anything_that_is_not_one_of_the_four_is_refused() {
 /// about flags. It is a rule about the `--reach` *grammar*: the same ADR names
 /// `A1-214`'s selector -- a conjunction of equality tests over declared
 /// dimensions -- as the thing traversals compose with, and `A1-214` then gave
-/// every reporting command those four flags. A fixed set of dimensions can be
+/// every reporting command those flags. `A1-470` added the deliberately
+/// deferred phase coordinate after `A1-187` kept it. A fixed set of dimensions can be
 /// read off `--help` and cannot grow an operator; an expression naming a field
 /// can grow every operator there is. That is the difference the ADR is about, and
 /// this checks it rather than the shape of a flag name.
@@ -358,9 +391,8 @@ fn no_expression_over_a_tasks_fields_was_added() {
         "the traversal flag is missing: {flags:?}"
     );
 
-    // The declared dimensions are the ones `A1-214` settled, and no more: a
-    // fifth arriving here is a dimension somebody added without deciding it is
-    // one.
+    // The declared dimensions are the four `A1-214` settled plus the phase
+    // coordinate `A1-470` reconciled after `A1-187`, and no more.
     let dimensions: Vec<&str> = [
         "cut", "tag", "owner", "status", "phase", "effort", "evidence",
     ]
@@ -369,7 +401,7 @@ fn no_expression_over_a_tasks_fields_was_added() {
     .collect();
     assert_eq!(
         dimensions,
-        ["cut", "tag", "owner", "status"],
-        "the selector's dimensions are not the four `A1-214` decided on"
+        ["cut", "tag", "owner", "status", "phase"],
+        "the selector's dimensions are not the shared five that were decided"
     );
 }

@@ -32,7 +32,7 @@ use std::collections::BTreeSet;
 use std::fmt::Write as _;
 
 /// A structured document format this tool can address into.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
 pub enum Format {
     Yaml,
     Json,
@@ -62,7 +62,35 @@ pub fn format_for(rel: &str) -> Option<Format> {
 pub fn parse(text: &str, format: Format) -> Option<serde_json::Value> {
     match format {
         Format::Json => serde_json::from_str(text).ok(),
-        Format::Yaml => serde_yaml_ng::from_str(text).ok(),
+        Format::Yaml => yaml_compat::from_str(text).ok(),
+    }
+}
+
+/// One parsed YAML or JSON trace document.
+///
+/// Validation keeps this value for the lifetime of its snapshot so resolving,
+/// suggesting and fingerprinting any number of addresses all use the exact same
+/// parse. It is crate-private because the public trace model remains source
+/// documents and anchors rather than this execution cache.
+pub(crate) struct Document {
+    root: serde_json::Value,
+}
+
+impl Document {
+    pub(crate) fn parse(text: &str, format: Format) -> Option<Self> {
+        parse(text, format).map(|root| Self { root })
+    }
+
+    pub(crate) fn resolve(&self, steps: &[Step]) -> Option<&serde_json::Value> {
+        resolve(&self.root, steps)
+    }
+
+    pub(crate) fn fingerprint(&self, steps: &[Step]) -> Option<String> {
+        self.resolve(steps).map(fingerprint)
+    }
+
+    pub(crate) fn addresses(&self, spelling: Spelling, cap: usize) -> BTreeSet<String> {
+        addresses(&self.root, spelling, cap)
     }
 }
 

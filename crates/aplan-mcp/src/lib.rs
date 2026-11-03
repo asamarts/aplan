@@ -34,9 +34,10 @@ pub struct Policy {
     /// it hears without being stopped by (`A1-112`). A verdict policy, not a
     /// validation one.
     pub verdict: aplan_core::Verdict,
-    /// How evidence is resolved. `execute` stays off: running a repository's
-    /// tests because an agent asked is a different trust question from reading
-    /// its history, and nobody has asked for it (`A1-102`).
+    /// How evidence is resolved. `execute` stays off: running a cited test
+    /// because an agent asked is a different trust question from reading its
+    /// history, and nobody has asked for it (`A1-102`). Configured discovery
+    /// and checker commands may still run.
     pub verify: aplan_evidence::VerifyOptions,
     /// Where git lives, which is the repository the plan sits in and not the
     /// directory the client happened to start the server from.

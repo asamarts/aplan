@@ -52,7 +52,7 @@ producing a file `check` would reject:
 ```
 $ aplan add "Bad blocker" --blocked-by A9-999
 ? 2
-aplan: blocked by task(s) that do not exist: A9-999. `APLAN003` would reject the file, so the id is checked before the file is written.
+aplan: related task(s) do not exist: A9-999. Every creation-time relationship is resolved before the file is written.
 
 ```
 

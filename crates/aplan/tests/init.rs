@@ -10,7 +10,7 @@
 //! neither kind of positional until it was taught to. Nothing in the suite ever
 //! passed one.
 
-mod common;
+use crate::common;
 
 /// **The directory named is the one written to**, and the current one is left
 /// alone.

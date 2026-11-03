@@ -47,6 +47,21 @@ pub const RUNS: &[(&str, &[&str], Start)] = &[
         &["claim", "W-1", "--as", "measurement"],
         Start::Populated,
     ),
+    (
+        "blueprint",
+        &[
+            "blueprint",
+            "apply",
+            "--file",
+            "feature.blueprint.yml",
+            "--cut",
+            "M-a",
+            "--set",
+            "feature=census",
+        ],
+        Start::Populated,
+    ),
+    ("capture", &["capture", "Census capture"], Start::Populated),
     ("check", &["check"], Start::Populated),
     ("check-docs", &["check-docs", "NOTES.md"], Start::Populated),
     (
@@ -63,6 +78,11 @@ pub const RUNS: &[(&str, &[&str], Start)] = &[
     ("deprecations", &["deprecations"], Start::Populated),
     ("drop", &["drop", "W-3"], Start::Populated),
     ("due", &["due"], Start::Populated),
+    (
+        "explain",
+        &["explain", "rule", "APLAN012"],
+        Start::Populated,
+    ),
     ("export", &["export"], Start::Populated),
     (
         "export-agents-md",
@@ -71,7 +91,7 @@ pub const RUNS: &[(&str, &[&str], Start)] = &[
     ),
     (
         "export-roadmap-json",
-        &["export-roadmap-json"],
+        &["export-roadmap-json", "ROADMAP.json"],
         Start::Populated,
     ),
     ("facts", &["facts"], Start::Populated),
@@ -81,10 +101,17 @@ pub const RUNS: &[(&str, &[&str], Start)] = &[
         &["import", "NOTES.md", "--format", "checklist"],
         Start::Populated,
     ),
+    ("inbox", &["inbox"], Start::Populated),
     ("init", &["init"], Start::Empty),
     ("mv", &["mv", "W-1", "--cut", "M-b"], Start::Populated),
+    (
+        "park",
+        &["park", "W-3", "--reason", "portfolio deferred"],
+        Start::Populated,
+    ),
     ("paths", &["paths"], Start::Populated),
     ("ready", &["ready"], Start::Populated),
+    ("rekey", &["rekey", "W-1", "W-9"], Start::Populated),
     ("release", &["release", "W-4"], Start::Populated),
     ("roadmap", &["roadmap"], Start::Populated),
     ("schema", &["schema"], Start::Populated),
@@ -99,30 +126,74 @@ pub const RUNS: &[(&str, &[&str], Start)] = &[
         Start::Populated,
     ),
     ("tag", &["tag", "add", "W-1", "kept"], Start::Populated),
+    ("test", &["test", "list"], Start::Populated),
     ("tasks", &["tasks"], Start::Populated),
-    ("tree", &["tree"], Start::Populated),
+    ("tree", &["tree", "W-1"], Start::Populated),
+    ("unpark", &["unpark", "W-5"], Start::Populated),
     ("vacuity", &["vacuity"], Start::Populated),
     ("verify", &["verify"], Start::Populated),
+    // Keep the repository-reading form here. Besides exercising the command,
+    // the configured-command effect audit relies on this census entry to
+    // prove that `version.current` is the only external command it reaches.
     ("version", &["version"], Start::Populated),
     ("why", &["why", "W-1"], Start::Populated),
 ];
 
 /// The commands this measurement cannot drive, and why.
-pub const NOT_RUN: &[(&str, &str)] = &[(
-    "mcp",
-    "serves the tools over stdio and does not exit, so running it here would hang \
-     rather than answer. Each tool it serves is one of the commands above",
-)];
+pub const NOT_RUN: &[(&str, &str)] = &[
+    (
+        "mcp",
+        "serves the tools over stdio and does not exit, so running it here would hang \
+         rather than answer. Each tool it serves is one of the commands above",
+    ),
+    (
+        "tui",
+        "owns an interactive terminal until the user quits; a pipe is deliberately refused, \
+         and PTY lifecycle measurement belongs to the dedicated terminal harness",
+    ),
+];
 
 /// A plan with a cut, a live task, a closed one, and a document to import.
 pub fn a_plan_to_act_on(dir: &Path) {
     std::fs::create_dir_all(dir.join("aplan/tasks")).expect("mkdir");
-    std::fs::write(dir.join(".aplan.yml"), "root: aplan\n").expect("config");
+    // The bare `version` form is the repository-reading half of that command.
+    // Give it a deterministic artifact answer so every consumer of this
+    // census drives real work rather than treating a missing-config refusal as
+    // command coverage.
+    std::fs::write(
+        dir.join(".aplan.yml"),
+        "root: aplan\nversion:\n  current:\n    command: [printf, '0.1.0\\n']\n",
+    )
+    .expect("config");
     std::fs::write(
         dir.join("NOTES.md"),
         "# Notes\n\n- [ ] something to import\n",
     )
     .expect("doc");
+    std::fs::write(
+        dir.join("feature.blueprint.yml"),
+        concat!(
+            "schema: aplan/blueprint/v1\n",
+            "name: census\n",
+            "title: Census blueprint\n",
+            "description: Drive the command census.\n",
+            "parameters:\n",
+            "  - name: feature\n",
+            "    description: Feature name.\n",
+            "tasks:\n",
+            "  - key: work\n",
+            "    title: 'Build {{feature}}'\n",
+            "    effort: 1\n",
+            "    paths: [src/**]\n",
+        ),
+    )
+    .expect("blueprint");
+    std::fs::write(
+        dir.join("ROADMAP.json"),
+        r#"{"format_version":1,"phases":[],"workstreams":[{"id":"fixture","title":"Fixture","milestones":[{"id":"M-a","title":"a cut","status":"not_started"},{"id":"M-b","title":"another cut","status":"not_started"}]}]}
+"#,
+    )
+    .expect("foreign roadmap contract");
     std::fs::write(
         dir.join("aplan/tasks/M-a.md"),
         "---\nid: M-a\ntitle: a cut\nphase: 1\nstatus: todo\ntags:\n  - milestone\n\
@@ -148,6 +219,9 @@ pub fn a_plan_to_act_on(dir: &Path) {
         // in neither state, they would correctly write nothing, and the census
         // would conclude they are not writing commands.
         ("W-4", "in_progress", "owner: ada\n"),
+        // Parked and unclaimed, so `unpark` reaches and publishes its guarded
+        // post-state rather than being measured at an argument refusal.
+        ("W-5", "blocked", "revisit_at: 2030-01-02T03:04:05Z\n"),
     ] {
         std::fs::write(
             dir.join(format!("aplan/tasks/{id}.md")),

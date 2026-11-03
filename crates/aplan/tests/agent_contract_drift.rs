@@ -12,7 +12,7 @@
 
 use std::path::Path;
 
-mod common;
+use crate::common;
 use common::aplan;
 
 /// A plan whose `AGENTS.md` block is stale against its own config.

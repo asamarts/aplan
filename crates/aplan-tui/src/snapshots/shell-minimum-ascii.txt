@@ -1,0 +1,14 @@
+ aplan x ERROR  2 tasks  1 error >  repo/very-l>
+[1 O] [2 T] [3 D] [4 G] [5 R] [6 I]
++> Overview - where attention goes next <------+
+|> CUTS 0 | DONE 0/0 | [........]              |
+|  EFFORT 0.0/2.0d | complete estimates        |
+|  READY 0 | [........]                        |
+|  REVISIT DUE 0 | LATER 0 | AS-OF 0           |
+|  FINDINGS E:1 W:2 | DENIED | [!??.....]      |
+|  CRITICAL 0.0d | TASKS 0 | [........]        |
+|                                              |
+|                                              |
++----------------------------------------------+
+Esc/q/C-c quit | C-p commands | ? help | i about
+Idle

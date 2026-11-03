@@ -1,0 +1,6 @@
+[test-groups]
+workspace-source = { max-threads = 1 }
+
+[[profile.default.overrides]]
+filter = 'test(the_generators_note_an_untracked_plan_file) | test(evidence_gate_corpus_exercises_the_rolestat_shape_and_fault_control) | test(evidence_rollout_artifact_reconstructs_trust_and_keeps_direct_rollback)'
+test-group = 'workspace-source'

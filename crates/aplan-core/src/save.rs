@@ -174,6 +174,30 @@ pub fn replace(path: &Path, expected: &str, updated: &str) -> Result<(), SaveErr
     }])
 }
 
+/// Replace one private state file with the same guarded atomic protocol.
+///
+/// When the target is first created, its staged file is restricted to the
+/// current user before any bytes are written or published. Existing targets
+/// retain their mode exactly as [`replace`] does. Callers still have to reject
+/// an existing insecure target before invoking this function; silently fixing
+/// one would briefly trust bytes other users could have changed.
+///
+/// # Errors
+///
+/// The same errors as [`replace`].
+pub fn replace_private(path: &Path, expected: &str, updated: &str) -> Result<(), SaveError> {
+    replace_all_inner(
+        &[Replacement {
+            path: path.to_path_buf(),
+            expected: expected.to_string(),
+            updated: updated.to_string(),
+        }],
+        None,
+        true,
+        None,
+    )
+}
+
 /// One file's worth of a batch: what it must still hold, and what to put there.
 #[derive(Debug, Clone)]
 pub struct Replacement {
@@ -185,7 +209,27 @@ pub struct Replacement {
     pub updated: String,
 }
 
-/// Replace several files as one change: all of them, or none.
+/// One file whose identity moves while its content is replaced.
+///
+/// Both names are locked and checked before anything is renamed. `expected` is
+/// the content read at `from`; when the names differ, `to` must not exist. An
+/// equal pair is an in-place identity rewrite that still gets the recovering
+/// transaction used for a filename move. This is intentionally distinct from a
+/// creation plus a deletion: splitting those would expose a plan containing
+/// both ids, or neither, between the two writes.
+#[derive(Debug, Clone)]
+pub struct Relocation {
+    /// The file that currently exists.
+    pub from: PathBuf,
+    /// The free path it moves to.
+    pub to: PathBuf,
+    /// The bytes the caller read at `from`.
+    pub expected: String,
+    /// The content to install at `to`.
+    pub updated: String,
+}
+
+/// Replace several files as one guarded change.
 ///
 /// **Why a batch exists.** `mv` places a task in the destination cut and then
 /// takes it out of the source. Written one at a time, a failure between the two
@@ -200,8 +244,9 @@ pub struct Replacement {
 /// cannot observe a half-applied batch through this function: nothing is renamed
 /// until every file has been locked, checked against what the caller read, and
 /// proved writable. What remains is the rename loop itself, where only the
-/// filesystem can fail -- a full disk between two renames -- and that is the one
-/// case the message still has to describe.
+/// filesystem can fail -- a full disk between two renames -- and that late case
+/// can leave a partial publication. Callers that need to present an exact
+/// outcome must inspect the affected paths after a [`SaveError::Io`].
 ///
 /// **Locks are taken in resolved-path order**, which is what makes a deadlock
 /// impossible rather than unlikely: two moves in opposite directions ask for the
@@ -211,8 +256,74 @@ pub struct Replacement {
 /// # Errors
 /// [`SaveError::Changed`] when any file moved under the caller,
 /// [`SaveError::Busy`] when any is locked, and [`SaveError::Io`] when the
-/// filesystem refused. In every case nothing has been renamed.
+/// filesystem refused. Conflict, lock, comparison and staging failures happen
+/// before any rename; an I/O failure in the final rename loop may happen after
+/// an earlier member was published.
 pub fn replace_all(batch: &[Replacement]) -> Result<(), SaveError> {
+    replace_all_inner(batch, None, false, None)
+}
+
+/// Replace several files while holding one additional shared-snapshot lock.
+///
+/// The shared lock replaces per-destination locks for this batch, then every
+/// destination is compare-and-swap checked before the callback runs. Commands
+/// whose invariant spans directory membership use the same `guard_target`, so
+/// two otherwise independent file creations serialize and the later writer
+/// rechecks the complete snapshot. A false callback result is reported as
+/// [`SaveError::Changed`] and writes nothing. Unlike an ordinary broad batch,
+/// this shared-namespace form backs up each existing member during publication
+/// and restores every earlier rename if a later rename fails. That stronger
+/// boundary keeps a created task and its retained capture disposition from
+/// becoming observable separately.
+///
+/// # Errors
+///
+/// The same errors as [`replace_all`].
+pub fn replace_all_guarded(
+    batch: &[Replacement],
+    guard_target: &Path,
+    mut snapshot_is_current: impl FnMut() -> bool,
+) -> Result<(), SaveError> {
+    replace_all_inner(
+        batch,
+        None,
+        false,
+        Some(PublicationGuard {
+            target: guard_target,
+            snapshot_is_current: &mut snapshot_is_current,
+        }),
+    )
+}
+
+/// Replace a batch and relocate one member as one guarded change.
+///
+/// Every replacement, the relocation source, and its destination are locked
+/// and checked before a rename occurs. A stale source, a concurrently-created
+/// destination, or a stale sibling therefore leaves every file untouched. The
+/// source's permissions are carried to the destination.
+///
+/// # Errors
+///
+/// The same errors as [`replace_all`], plus [`SaveError::Exists`] when the
+/// destination is occupied. Every pre-write refusal leaves the batch unchanged.
+pub fn replace_all_relocating(
+    batch: &[Replacement],
+    relocation: &Relocation,
+) -> Result<(), SaveError> {
+    replace_all_inner(batch, Some(relocation), false, None)
+}
+
+struct PublicationGuard<'a> {
+    target: &'a Path,
+    snapshot_is_current: &'a mut dyn FnMut() -> bool,
+}
+
+fn replace_all_inner(
+    batch: &[Replacement],
+    relocation: Option<&Relocation>,
+    private_new: bool,
+    mut publication_guard: Option<PublicationGuard<'_>>,
+) -> Result<(), SaveError> {
     // Resolved first, and sorted on the resolved path: two names for one file
     // must take one lock, and two batches must agree on the order.
     let mut resolved: Vec<(PathBuf, &Replacement)> = batch
@@ -237,6 +348,21 @@ pub fn replace_all(batch: &[Replacement]) -> Result<(), SaveError> {
         }
     }
 
+    let relocation_paths = relocation.map(|moving| (moving.from.clone(), moving.to.clone()));
+    let relocation_keys = relocation_paths.as_ref().map(|(from, to)| {
+        let from_key = lock_path(from);
+        let to_key = lock_path(to);
+        (from_key, to_key)
+    });
+    if let (Some((_, to)), Some((from_key, to_key))) =
+        (relocation_paths.as_ref(), relocation_keys.as_ref())
+        && resolved
+            .iter()
+            .any(|(path, _)| path == from_key || path == to_key)
+    {
+        return Err(SaveError::Conflict { path: to.clone() });
+    }
+
     // Before any lock, because a lock file lives *in* the target's directory: a
     // creation into a directory that is not there could not even be locked, and
     // reported "No such file or directory" from the lock rather than from the
@@ -258,35 +384,280 @@ pub fn replace_all(batch: &[Replacement]) -> Result<(), SaveError> {
             })?;
         }
     }
-
-    let mut guards = Vec::with_capacity(resolved.len());
-    for (path, item) in &resolved {
-        // One lock per file even when a batch names it twice: taking the second
-        // would block on the first for the full wait and then report `Busy`
-        // against the caller's own hold.
-        if !guards.iter().any(|g: &Lock| g.covers(path)) {
-            guards.push(Lock::acquire(path)?);
-        }
-        check_replaceable(path, &item.expected)?;
-    }
-    // Staged under a guard: a failure part-way through leaves temporary files
-    // beside their targets, and the loader ignores them only because they are
-    // not named `*.md`. Litter that survives every run is what the single-file
-    // path was careful about, and a batch has more of it to lose (`A1-234`,
-    // audit).
-    let mut pending = Staged::default();
-    for (path, item) in &resolved {
-        pending
-            .files
-            .push((path.clone(), stage(path, &item.updated)?));
-    }
-    while let Some((path, temp)) = pending.files.pop() {
-        std::fs::rename(&temp, &path).map_err(|source| {
-            let _ = std::fs::remove_file(&temp);
-            SaveError::Io { path, source }
+    if let Some((_, to)) = &relocation_paths
+        && !to.exists()
+        && let Some(dir) = to.parent()
+    {
+        std::fs::create_dir_all(dir).map_err(|source| SaveError::Io {
+            path: to.clone(),
+            source,
         })?;
     }
+
+    let _guards = acquire_batch_locks(
+        &resolved,
+        relocation_keys.as_ref(),
+        publication_guard.as_ref().map(|guard| guard.target),
+    )?;
+    for (path, item) in &resolved {
+        check_replaceable(path, &item.expected)?;
+    }
+    if let (Some(moving), Some((from, to))) = (relocation, relocation_paths.as_ref()) {
+        check_replaceable(from, &moving.expected)?;
+        if from != to {
+            check_replaceable(to, "")?;
+        }
+    }
+    if let Some(guard) = &mut publication_guard
+        && !(guard.snapshot_is_current)()
+    {
+        return Err(SaveError::Changed {
+            path: guard.target.to_path_buf(),
+        });
+    }
+    // Staged under a guard: a failure part-way through leaves temporary files
+    // beside their targets. Repository loaders keep the writer's exact hidden
+    // staging names outside their data set, but litter that survives every run
+    // is what the single-file path was careful about, and a batch has more of
+    // it to lose (`A1-234`, audit).
+    let mut pending = Staged::default();
+    for (path, item) in &resolved {
+        pending.files.push((
+            path.clone(),
+            stage_for(path, &item.updated, None, private_new)?,
+        ));
+    }
+    let staged_move =
+        if let (Some(moving), Some((from, to))) = (relocation, relocation_paths.as_ref()) {
+            Some((
+                from.clone(),
+                to.clone(),
+                stage_with_mode(to, &moving.updated, Some(from))?,
+            ))
+        } else {
+            None
+        };
+
+    publish(
+        pending,
+        staged_move,
+        relocation_paths.as_ref(),
+        publication_guard.is_some(),
+    )
+}
+
+fn acquire_batch_locks(
+    resolved: &[(PathBuf, &Replacement)],
+    relocation_keys: Option<&(PathBuf, PathBuf)>,
+    publication_guard: Option<&Path>,
+) -> Result<Vec<Lock>, SaveError> {
+    // A guarded directory snapshot is the common lock for every destination
+    // in that namespace. Taking per-file locks as well would publish those
+    // implementation files into the very membership snapshot being checked,
+    // and distinct capture ids do not need a second lock once every capture
+    // writer holds the same outer one.
+    let mut targets: Vec<PathBuf> = if publication_guard.is_some() {
+        Vec::new()
+    } else {
+        resolved.iter().map(|(path, _)| path.clone()).collect()
+    };
+    if let Some((from, to)) = relocation_keys {
+        targets.push(from.clone());
+        targets.push(to.clone());
+    }
+    if let Some(target) = publication_guard {
+        targets.push(lock_path(target));
+    }
+    targets.sort();
+    targets.dedup();
+    targets
+        .into_iter()
+        .map(|path| Lock::acquire(&path))
+        .collect()
+}
+
+/// Publish staged replacements, recovering the relocation if a later rename
+/// fails.
+fn publish(
+    pending: Staged,
+    staged_move: Option<(PathBuf, PathBuf, PathBuf)>,
+    relocation_paths: Option<&(PathBuf, PathBuf)>,
+    recover_batch: bool,
+) -> Result<(), SaveError> {
+    publish_with_backup(
+        pending,
+        staged_move,
+        relocation_paths,
+        recover_batch,
+        move_to_backup,
+    )
+}
+
+/// The publish transaction with its one fallible backup operation exposed so a
+/// test can force the late failure that ordinary pre-write checks prevent.
+fn publish_with_backup(
+    mut pending: Staged,
+    staged_move: Option<(PathBuf, PathBuf, PathBuf)>,
+    relocation_paths: Option<&(PathBuf, PathBuf)>,
+    recover_batch: bool,
+    mut backup_file: impl FnMut(&Path) -> Result<PathBuf, SaveError>,
+) -> Result<(), SaveError> {
+    // Make the old task path inert before publishing the new one. If publishing
+    // fails, restore the old path; no sibling replacement has been committed at
+    // this point. The hidden backup has no `.md` suffix, so even a process that
+    // reads between the two renames cannot load two copies of the task.
+    let mut backup = None;
+    if let Some((from, to, temp)) = staged_move {
+        let backup_path = match backup_file(&from) {
+            Ok(path) => path,
+            Err(error) => {
+                let _ = std::fs::remove_file(&temp);
+                return Err(error);
+            }
+        };
+        if let Err(source) = std::fs::rename(&temp, &to) {
+            let _ = std::fs::rename(&backup_path, &from);
+            let _ = std::fs::remove_file(&temp);
+            return Err(SaveError::Io { path: to, source });
+        }
+        backup = Some(backup_path);
+    }
+    if let (Some((from, to)), Some(source_backup)) = (relocation_paths.as_ref(), backup.as_ref()) {
+        let mut committed: Vec<(PathBuf, Option<PathBuf>)> = Vec::new();
+        while let Some((path, temp)) = pending.files.last().cloned() {
+            let replacement_backup = if path.exists() {
+                let backup_path = match backup_file(&path) {
+                    Ok(path) => path,
+                    Err(error) => {
+                        // Keep the current staging file in `pending` until its
+                        // original path is recoverable. Its Drop then removes
+                        // both this file and every not-yet-attempted sibling on
+                        // the late failure (`A1-413`).
+                        rollback_relocation(&committed, from, to, source_backup);
+                        return Err(error);
+                    }
+                };
+                Some(backup_path)
+            } else {
+                None
+            };
+            let _ = pending.files.pop();
+            if let Err(source) = std::fs::rename(&temp, &path) {
+                let _ = std::fs::remove_file(&temp);
+                committed.push((path.clone(), replacement_backup));
+                rollback_relocation(&committed, from, to, source_backup);
+                return Err(SaveError::Io { path, source });
+            }
+            committed.push((path, replacement_backup));
+        }
+        for (_, backup) in committed {
+            if let Some(path) = backup {
+                let _ = std::fs::remove_file(path);
+            }
+        }
+        let _ = std::fs::remove_file(source_backup);
+    } else if recover_batch {
+        let mut committed: Vec<(PathBuf, Option<PathBuf>)> = Vec::new();
+        while let Some((path, temp)) = pending.files.last().cloned() {
+            let replacement_backup = if path.exists() {
+                match backup_file(&path) {
+                    Ok(path) => Some(path),
+                    Err(error) => {
+                        rollback_batch(&committed);
+                        return Err(error);
+                    }
+                }
+            } else {
+                None
+            };
+            let _ = pending.files.pop();
+            if let Err(source) = std::fs::rename(&temp, &path) {
+                let _ = std::fs::remove_file(&temp);
+                committed.push((path.clone(), replacement_backup));
+                rollback_batch(&committed);
+                return Err(SaveError::Io { path, source });
+            }
+            committed.push((path, replacement_backup));
+        }
+        for (_, backup) in committed {
+            if let Some(path) = backup {
+                let _ = std::fs::remove_file(path);
+            }
+        }
+    } else {
+        while let Some((path, temp)) = pending.files.pop() {
+            std::fs::rename(&temp, &path).map_err(|source| {
+                let _ = std::fs::remove_file(&temp);
+                SaveError::Io { path, source }
+            })?;
+        }
+    }
     Ok(())
+}
+
+/// Restore every already-published member of a recoverable batch.
+fn rollback_batch(committed: &[(PathBuf, Option<PathBuf>)]) {
+    for (path, backup) in committed.iter().rev() {
+        let _ = std::fs::remove_file(path);
+        if let Some(backup) = backup {
+            let _ = std::fs::rename(backup, path);
+        }
+    }
+}
+
+/// Best-effort rollback after a relocation has published its destination.
+///
+/// The only way here is a filesystem failure during the rename loop. Restoring
+/// in reverse order gives each target its original directory entry before the
+/// source identity is put back. A filesystem that refuses the rollback as well
+/// is beyond an all-or-none promise; every ordinary contention and permission
+/// refusal happened before this point.
+fn rollback_relocation(
+    committed: &[(PathBuf, Option<PathBuf>)],
+    from: &Path,
+    to: &Path,
+    source_backup: &Path,
+) {
+    for (path, backup) in committed.iter().rev() {
+        let _ = std::fs::remove_file(path);
+        if let Some(backup) = backup {
+            let _ = std::fs::rename(backup, path);
+        }
+    }
+    let _ = std::fs::remove_file(to);
+    let _ = std::fs::rename(source_backup, from);
+}
+
+/// The path whose lock every spelling of `path` agrees on, including a target
+/// that does not exist yet below a symlinked directory.
+fn lock_path(path: &Path) -> PathBuf {
+    if let Ok(real) = std::fs::canonicalize(path) {
+        return real;
+    }
+    path.parent()
+        .and_then(|parent| std::fs::canonicalize(parent).ok())
+        .and_then(|parent| path.file_name().map(|name| parent.join(name)))
+        .unwrap_or_else(|| path.to_path_buf())
+}
+
+/// Move an existing target to an unused hidden path beside it.
+///
+/// `create_temp` reserves a collision-free name by creating it. Remove that
+/// placeholder before the rename: Windows does not let `rename` replace an
+/// existing destination, while Unix does. The target's lock is held by the
+/// caller, and no repository writer targets the process-specific hidden name.
+fn move_to_backup(path: &Path) -> Result<PathBuf, SaveError> {
+    let (backup, handle) = create_temp(path)?;
+    drop(handle);
+    std::fs::remove_file(&backup).map_err(|source| SaveError::Io {
+        path: backup.clone(),
+        source,
+    })?;
+    std::fs::rename(path, &backup).map_err(|source| SaveError::Io {
+        path: path.to_path_buf(),
+        source,
+    })?;
+    Ok(backup)
 }
 
 /// Temporary files written but not yet renamed, removed if the batch does not
@@ -360,14 +731,43 @@ fn check_replaceable(path: &Path, expected: &str) -> Result<(), SaveError> {
 /// Everything that can fail on the way to a rename happens here, so the rename
 /// loop that follows is the only place a batch can come apart -- and only on a
 /// filesystem error.
+#[cfg(test)]
 fn stage(path: &Path, updated: &str) -> Result<PathBuf, SaveError> {
+    stage_with_mode(path, updated, None)
+}
+
+fn stage_with_mode(
+    path: &Path,
+    updated: &str,
+    mode_from: Option<&Path>,
+) -> Result<PathBuf, SaveError> {
+    stage_for(path, updated, mode_from, false)
+}
+
+fn stage_for(
+    path: &Path,
+    updated: &str,
+    mode_from: Option<&Path>,
+    private_new: bool,
+) -> Result<PathBuf, SaveError> {
     // The replacement is a new file, so it is created with the default mode
     // rather than the target's. Carry the target's across, or a milestone an
     // author restricted to themselves becomes world-readable the first time
     // anything is added to its cut.
-    let mode = std::fs::metadata(path).map(|m| m.permissions()).ok();
+    let mode = std::fs::metadata(mode_from.unwrap_or(path))
+        .map(|m| m.permissions())
+        .ok();
 
     let (temp, mut handle) = create_temp(path)?;
+    #[cfg(unix)]
+    if private_new && mode.is_none() {
+        use std::os::unix::fs::PermissionsExt as _;
+        if let Err(source) = handle.set_permissions(std::fs::Permissions::from_mode(0o600)) {
+            drop(handle);
+            let _ = std::fs::remove_file(&temp);
+            return Err(SaveError::Io { path: temp, source });
+        }
+    }
     let written = {
         use std::io::Write;
         handle
@@ -405,17 +805,9 @@ pub const STALE: std::time::Duration = std::time::Duration::from_secs(30);
 /// An exclusive lock on one file, released when dropped.
 struct Lock {
     path: PathBuf,
-    /// The file it was taken for, so a batch naming one file twice takes one
-    /// lock rather than blocking on its own hold.
-    target: PathBuf,
 }
 
 impl Lock {
-    /// Whether this lock is the one for `target`.
-    fn covers(&self, target: &Path) -> bool {
-        self.target == target
-    }
-
     /// Take it, waiting briefly for a live writer and breaking a dead one's.
     fn acquire(target: &Path) -> Result<Self, SaveError> {
         let dir = target.parent().unwrap_or_else(|| Path::new("."));
@@ -433,10 +825,7 @@ impl Lock {
                 .open(&path)
             {
                 Ok(_) => {
-                    return Ok(Self {
-                        path,
-                        target: target.to_path_buf(),
-                    });
+                    return Ok(Self { path });
                 }
                 Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => {}
                 Err(source) => {
@@ -527,13 +916,412 @@ fn create_temp(path: &Path) -> Result<(PathBuf, std::fs::File), SaveError> {
 #[cfg(test)]
 mod tests {
 
-    /// **A batch is all of its files or none of them.**
+    /// A relocation is the filename move and every referencing edit together.
+    #[test]
+    fn a_relocation_moves_the_source_and_replaces_its_siblings_together() {
+        let dir = tempfile::Builder::new()
+            .tempdir_in(crate::fixture::fixture_root())
+            .expect("tempdir");
+        let old = dir.path().join("OLD.md");
+        let new = dir.path().join("NEW.md");
+        let sibling = dir.path().join("cut.md");
+        std::fs::write(&old, "id: OLD\n").expect("old");
+        std::fs::write(&sibling, "blocked_by: [OLD]\n").expect("sibling");
+
+        replace_all_relocating(
+            &[Replacement {
+                path: sibling.clone(),
+                expected: "blocked_by: [OLD]\n".into(),
+                updated: "blocked_by: [NEW]\n".into(),
+            }],
+            &Relocation {
+                from: old.clone(),
+                to: new.clone(),
+                expected: "id: OLD\n".into(),
+                updated: "id: NEW\n".into(),
+            },
+        )
+        .expect("relocate");
+
+        assert!(!old.exists(), "the old identity remained loadable");
+        assert_eq!(std::fs::read_to_string(new).expect("new"), "id: NEW\n");
+        assert_eq!(
+            std::fs::read_to_string(sibling).expect("sibling"),
+            "blocked_by: [NEW]\n"
+        );
+        assert_eq!(
+            std::fs::read_dir(dir.path())
+                .expect("directory")
+                .filter_map(Result::ok)
+                .filter(|entry| entry.file_name().to_string_lossy().starts_with('.'))
+                .count(),
+            0,
+            "a successful relocation left a hidden staging or backup file"
+        );
+    }
+
+    /// A custom task filename stays put but still uses the same recovering
+    /// transaction as a conventional filename move.
+    #[test]
+    fn an_in_place_relocation_replaces_the_source_and_its_siblings_together() {
+        let dir = tempfile::Builder::new()
+            .tempdir_in(crate::fixture::fixture_root())
+            .expect("tempdir");
+        let custom = dir.path().join("custom-name.md");
+        let sibling = dir.path().join("cut.md");
+        std::fs::write(&custom, "id: OLD\n").expect("custom");
+        std::fs::write(&sibling, "blocked_by: [OLD]\n").expect("sibling");
+
+        replace_all_relocating(
+            &[Replacement {
+                path: sibling.clone(),
+                expected: "blocked_by: [OLD]\n".into(),
+                updated: "blocked_by: [NEW]\n".into(),
+            }],
+            &Relocation {
+                from: custom.clone(),
+                to: custom.clone(),
+                expected: "id: OLD\n".into(),
+                updated: "id: NEW\n".into(),
+            },
+        )
+        .expect("in-place relocation");
+
+        assert_eq!(
+            std::fs::read_to_string(custom).expect("custom"),
+            "id: NEW\n"
+        );
+        assert_eq!(
+            std::fs::read_to_string(sibling).expect("sibling"),
+            "blocked_by: [NEW]\n"
+        );
+    }
+
+    /// Every ordinary contention case is found before the source is moved.
+    #[test]
+    fn a_refused_relocation_leaves_the_source_destination_and_siblings_unchanged() {
+        for stale in ["source", "sibling", "destination"] {
+            let dir = tempfile::Builder::new()
+                .tempdir_in(crate::fixture::fixture_root())
+                .expect("tempdir");
+            let old = dir.path().join("OLD.md");
+            let new = dir.path().join("NEW.md");
+            let sibling = dir.path().join("cut.md");
+            std::fs::write(&old, "id: OLD\n").expect("old");
+            std::fs::write(&sibling, "blocked_by: [OLD]\n").expect("sibling");
+            if stale == "destination" {
+                std::fs::write(&new, "somebody else's file\n").expect("destination");
+            }
+
+            let result = replace_all_relocating(
+                &[Replacement {
+                    path: sibling.clone(),
+                    expected: if stale == "sibling" {
+                        "stale\n".into()
+                    } else {
+                        "blocked_by: [OLD]\n".into()
+                    },
+                    updated: "blocked_by: [NEW]\n".into(),
+                }],
+                &Relocation {
+                    from: old.clone(),
+                    to: new.clone(),
+                    expected: if stale == "source" {
+                        "stale\n".into()
+                    } else {
+                        "id: OLD\n".into()
+                    },
+                    updated: "id: NEW\n".into(),
+                },
+            );
+            assert!(result.is_err(), "{stale} did not refuse");
+            assert_eq!(std::fs::read_to_string(&old).expect("old"), "id: OLD\n");
+            assert_eq!(
+                std::fs::read_to_string(&sibling).expect("sibling"),
+                "blocked_by: [OLD]\n"
+            );
+            if stale == "destination" {
+                assert_eq!(
+                    std::fs::read_to_string(&new).expect("destination"),
+                    "somebody else's file\n"
+                );
+            } else {
+                assert!(!new.exists(), "a refused move created its destination");
+            }
+        }
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_relocation_preserves_the_source_mode_at_the_destination() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let dir = tempfile::Builder::new()
+            .tempdir_in(crate::fixture::fixture_root())
+            .expect("tempdir");
+        let old = dir.path().join("OLD.md");
+        let new = dir.path().join("NEW.md");
+        std::fs::write(&old, "old\n").expect("old");
+        std::fs::set_permissions(&old, std::fs::Permissions::from_mode(0o600)).expect("mode");
+
+        replace_all_relocating(
+            &[],
+            &Relocation {
+                from: old,
+                to: new.clone(),
+                expected: "old\n".into(),
+                updated: "new\n".into(),
+            },
+        )
+        .expect("relocate");
+        assert_eq!(
+            std::fs::metadata(new)
+                .expect("metadata")
+                .permissions()
+                .mode()
+                & 0o777,
+            0o600
+        );
+    }
+
+    #[test]
+    fn relocation_rollback_restores_replaced_created_and_source_files() {
+        let dir = tempfile::Builder::new()
+            .tempdir_in(crate::fixture::fixture_root())
+            .expect("tempdir");
+        let from = dir.path().join("OLD.md");
+        let to = dir.path().join("NEW.md");
+        let source_backup = dir.path().join(".OLD.md.backup");
+        let replaced = dir.path().join("cut.md");
+        let replaced_backup = dir.path().join(".cut.md.backup");
+        let created = dir.path().join("created.md");
+        std::fs::write(&to, "id: NEW\n").expect("published destination");
+        std::fs::write(&source_backup, "id: OLD\n").expect("source backup");
+        std::fs::write(&replaced, "new cut\n").expect("published replacement");
+        std::fs::write(&replaced_backup, "old cut\n").expect("replacement backup");
+        std::fs::write(&created, "new file\n").expect("published creation");
+
+        rollback_relocation(
+            &[
+                (replaced.clone(), Some(replaced_backup)),
+                (created.clone(), None),
+            ],
+            &from,
+            &to,
+            &source_backup,
+        );
+
+        assert_eq!(std::fs::read_to_string(from).expect("source"), "id: OLD\n");
+        assert_eq!(
+            std::fs::read_to_string(replaced).expect("replacement"),
+            "old cut\n"
+        );
+        assert!(!to.exists(), "the published destination survived rollback");
+        assert!(
+            !created.exists(),
+            "a newly-created sibling survived rollback"
+        );
+    }
+
+    /// Proof for behaviour `rekey.relocation_late_failure_cleans_staging`: the
+    /// current sibling stays under the staging guard until its backup exists.
+    #[test]
+    fn a_late_relocation_failure_restores_every_file_and_removes_staging() {
+        let dir = tempfile::Builder::new()
+            .tempdir_in(crate::fixture::fixture_root())
+            .expect("tempdir");
+        let from = dir.path().join("OLD.md");
+        let to = dir.path().join("NEW.md");
+        let sibling = dir.path().join("cut.md");
+        let created = dir.path().join("created.md");
+        std::fs::write(&from, "id: OLD\n").expect("source");
+        std::fs::write(&sibling, "blocked_by: [OLD]\n").expect("sibling");
+        let staged_sibling = stage(&sibling, "blocked_by: [NEW]\n").expect("staged sibling");
+        let staged_created = stage(&created, "new sibling\n").expect("staged creation");
+        let staged_move = stage_with_mode(&to, "id: NEW\n", Some(&from)).expect("staged move");
+        let pending = Staged {
+            // Publication pops from the end: commit the creation first, then
+            // fail while making the existing sibling recoverable.
+            files: vec![
+                (sibling.clone(), staged_sibling.clone()),
+                (created.clone(), staged_created.clone()),
+            ],
+        };
+        let mut backup_calls = 0;
+
+        let result = publish_with_backup(
+            pending,
+            Some((from.clone(), to.clone(), staged_move)),
+            Some(&(from.clone(), to.clone())),
+            false,
+            |path| {
+                backup_calls += 1;
+                if backup_calls == 2 {
+                    Err(SaveError::Io {
+                        path: path.to_path_buf(),
+                        source: std::io::Error::other("forced sibling backup failure"),
+                    })
+                } else {
+                    move_to_backup(path)
+                }
+            },
+        );
+
+        assert!(matches!(result, Err(SaveError::Io { path, .. }) if path == sibling));
+        assert_eq!(std::fs::read_to_string(&from).expect("source"), "id: OLD\n");
+        assert_eq!(
+            std::fs::read_to_string(&sibling).expect("sibling"),
+            "blocked_by: [OLD]\n"
+        );
+        assert!(!to.exists(), "the published destination survived rollback");
+        assert!(!created.exists(), "a published creation survived rollback");
+        assert!(
+            !staged_created.exists(),
+            "the creation's staging path survived publication"
+        );
+        assert!(
+            !staged_sibling.exists(),
+            "the failing sibling's staging file survived the error"
+        );
+        assert_eq!(
+            std::fs::read_dir(dir.path())
+                .expect("directory")
+                .filter_map(Result::ok)
+                .filter(|entry| entry.file_name().to_string_lossy().starts_with('.'))
+                .count(),
+            0,
+            "a hidden staging or backup file survived rollback"
+        );
+    }
+
+    #[test]
+    fn guarded_batch_late_failure_rolls_back_replacements_and_creations() {
+        let dir = tempfile::Builder::new()
+            .tempdir_in(crate::fixture::fixture_root())
+            .expect("tempdir");
+        let capture = dir.path().join("capture.yml");
+        let task = dir.path().join("task.md");
+        let cut = dir.path().join("cut.md");
+        std::fs::write(&capture, "state: open\n").expect("capture");
+        std::fs::write(&cut, "blocked_by: [A1-000]\n").expect("cut");
+        let staged_capture = stage(&capture, "state: promoted\n").expect("staged capture");
+        let staged_task = stage(&task, "id: A1-001\n").expect("staged task");
+        let staged_cut = stage(&cut, "blocked_by: [A1-000, A1-001]\n").expect("staged cut");
+        let pending = Staged {
+            // Publication pops from the end: replace the cut, create the task,
+            // then fail before replacing the capture that would link to it.
+            files: vec![
+                (capture.clone(), staged_capture.clone()),
+                (task.clone(), staged_task.clone()),
+                (cut.clone(), staged_cut.clone()),
+            ],
+        };
+
+        let mut backup_calls = 0;
+        let result = publish_with_backup(pending, None, None, true, |path| {
+            backup_calls += 1;
+            if backup_calls == 2 {
+                Err(SaveError::Io {
+                    path: path.to_path_buf(),
+                    source: std::io::Error::other("injected between guarded replacements"),
+                })
+            } else {
+                move_to_backup(path)
+            }
+        });
+
+        assert!(
+            matches!(&result, Err(SaveError::Io { path, .. }) if path == &capture),
+            "{result:?}"
+        );
+        assert_eq!(
+            std::fs::read_to_string(&capture).expect("restored capture"),
+            "state: open\n"
+        );
+        assert_eq!(
+            std::fs::read_to_string(&cut).expect("restored cut"),
+            "blocked_by: [A1-000]\n"
+        );
+        assert!(!task.exists(), "the task creation survived rollback");
+        assert!(
+            !staged_capture.exists(),
+            "capture staging survived rollback"
+        );
+        assert!(!staged_task.exists(), "task staging survived rollback");
+        assert!(!staged_cut.exists(), "cut staging survived rollback");
+    }
+
+    #[test]
+    fn guarded_batch_rename_failure_restores_the_current_replacement() {
+        let dir = tempfile::Builder::new()
+            .tempdir_in(crate::fixture::fixture_root())
+            .expect("tempdir");
+        let capture = dir.path().join("capture.yml");
+        std::fs::write(&capture, "state: open\n").expect("capture");
+        let missing_stage = dir.path().join("missing-stage");
+        let pending = Staged {
+            files: vec![(capture.clone(), missing_stage)],
+        };
+
+        let result = publish_with_backup(pending, None, None, true, move_to_backup);
+
+        assert!(
+            matches!(&result, Err(SaveError::Io { path, .. }) if path == &capture),
+            "{result:?}"
+        );
+        assert_eq!(
+            std::fs::read_to_string(&capture).expect("restored capture"),
+            "state: open\n"
+        );
+        assert_eq!(
+            std::fs::read_dir(dir.path())
+                .expect("directory")
+                .filter_map(Result::ok)
+                .filter(|entry| entry.file_name().to_string_lossy().starts_with('.'))
+                .count(),
+            0,
+            "a backup survived rollback"
+        );
+    }
+
+    #[test]
+    fn a_relocation_refuses_a_batch_that_also_names_either_identity() {
+        let dir = tempfile::Builder::new()
+            .tempdir_in(crate::fixture::fixture_root())
+            .expect("tempdir");
+        let old = dir.path().join("OLD.md");
+        let new = dir.path().join("NEW.md");
+        std::fs::write(&old, "id: OLD\n").expect("old");
+
+        let result = replace_all_relocating(
+            &[Replacement {
+                path: new.clone(),
+                expected: String::new(),
+                updated: "competing answer\n".into(),
+            }],
+            &Relocation {
+                from: old.clone(),
+                to: new.clone(),
+                expected: "id: OLD\n".into(),
+                updated: "id: NEW\n".into(),
+            },
+        );
+
+        assert!(matches!(result, Err(SaveError::Conflict { path }) if path == new));
+        assert_eq!(std::fs::read_to_string(old).expect("old"), "id: OLD\n");
+        assert!(
+            !new.exists(),
+            "a conflicted transaction wrote its destination"
+        );
+    }
+
+    /// **A stale member refuses the complete batch before publication.**
     ///
     /// One file having moved under the caller must leave every other file
     /// untouched, or `mv` is back to the half-applied move this exists to end
     /// (`A1-234`).
     #[test]
-    fn a_batch_writes_every_file_or_none_of_them() {
+    fn a_stale_batch_member_is_refused_before_any_file_is_written() {
         let dir = tempfile::Builder::new()
             .tempdir_in(crate::fixture::fixture_root())
             .expect("tempdir");
@@ -636,6 +1424,10 @@ mod tests {
 
         let err =
             replace_all(&[entry("ONE\n"), entry("OTHER\n")]).expect_err("two answers for one file");
+        let message = err.to_string();
+        assert!(message.contains(&a.display().to_string()), "{message}");
+        assert!(message.contains("two different replacements"), "{message}");
+        assert!(message.contains("Nothing was written"), "{message}");
         assert!(matches!(err, SaveError::Conflict { .. }), "{err:?}");
         assert_eq!(
             std::fs::read_to_string(&a).expect("a"),
@@ -1179,6 +1971,9 @@ mod tests {
         ])
         .expect_err("the id is taken");
 
+        let message = err.to_string();
+        assert!(message.contains(&taken.display().to_string()), "{message}");
+        assert!(message.contains("already exists"), "{message}");
         assert!(matches!(err, SaveError::Exists { .. }), "{err:?}");
         assert_eq!(
             std::fs::read_to_string(&taken).expect("read"),

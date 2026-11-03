@@ -1,0 +1,36 @@
+# A small dependency graph showing minted local references, not a required delivery methodology.
+schema: aplan/blueprint/v1
+name: feature-graph
+title: Feature graph
+description: Create design, implementation and proof tasks for {{feature}}.
+parameters:
+  - name: feature
+    description: Feature name repeated in the task titles and bodies.
+tasks:
+  - key: design
+    title: Decide {{feature}} semantics
+    effort: 1
+    tags: [design]
+    paths: ["docs/adr/**"]
+    body: |
+      ## Why
+
+      Decide the contract and exclusions for {{feature}}.
+  - key: implement
+    title: Implement {{feature}}
+    effort: 3
+    paths: ["src/**"]
+    blocked_by: [local:design]
+    body: |
+      ## Why
+
+      Implement {{feature}} against the recorded contract.
+  - key: prove
+    title: Prove and document {{feature}}
+    effort: 1
+    paths: ["tests/**", README.md, CHANGELOG.md]
+    blocked_by: [local:implement]
+    body: |
+      ## Why
+
+      Prove {{feature}} fails when reverted and document its use.

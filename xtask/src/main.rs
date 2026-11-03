@@ -1,8 +1,9 @@
 //! Build tasks for aplan.
 //!
-//! - `gen-schema`: the committed `schemas/v1/task.json` is *derived* from the
-//!   Rust types, and `--check` fails when the two disagree. That is the only
-//!   reason the schema can be trusted as documentation.
+//! - `gen-schema`: the committed files under `schemas/v1/`, including task and
+//!   capture records, are *derived* from Rust types, and `--check` fails when
+//!   they disagree. That is the only reason the schemas can be trusted as
+//!   documentation.
 //! - `gen-roadmap`: the committed `ROADMAP.status.md` is *generated* from the plan
 //!   by `aplan roadmap --format markdown`, and `--check` fails on drift (ADR-0009).
 //!   The plan is the source of truth; that file is a generated view of it.
@@ -20,10 +21,16 @@
 //!   trojan-source vector), so the repo stays plain-ASCII. Functional Unicode is
 //!   deliberately untouched: the arrow used in cycle output, the section sign in
 //!   doc cross-references, and the non-ASCII letters in the slug tests are fine.
+//! - `validation`: derive the lightweight runtime gate table and selector policy
+//!   from `ci/validation.yml`, then audit that local preflight and Actions drive them.
+//! - `validation-select`: compatibility launcher for the compiler-free production
+//!   selector. Preflight invokes that script directly and pays no `xtask` build.
+//! - `tui-reference`: derive the committed key/action and explicit-boundary
+//!   reference from the same executable catalogues as TUI help and dispatch.
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::path::{Path, PathBuf};
-use std::process::Command;
+use std::process::{Command, Stdio};
 
 use anyhow::{Context, Result, bail};
 
@@ -33,6 +40,22 @@ type SchemaFn = fn() -> serde_json::Value;
 /// The committed schemas, each derived from a Rust type. Adding a schema-derived
 /// type is one row here.
 const SCHEMAS: &[(&str, SchemaFn)] = &[
+    (
+        "schemas/v1/test-evidence-receipt.json",
+        aplan_attest::receipt::derived_schema,
+    ),
+    (
+        "schemas/v1/test-evidence-import-set.json",
+        aplan_attest::receipt::derived_import_set_schema,
+    ),
+    (
+        "schemas/v1/blueprint.json",
+        aplan_interop::blueprint::derived_schema,
+    ),
+    (
+        "schemas/v1/capture.json",
+        aplan_core::capture::derived_schema,
+    ),
     ("schemas/v1/task.json", aplan_core::load::derived_schema),
     ("schemas/v1/config.json", aplan_config::derived_schema),
     // The per-user file is a second schema because it is a second *type*, not a
@@ -46,7 +69,10 @@ const SCHEMAS: &[(&str, SchemaFn)] = &[
 ];
 
 mod cli_surface;
+mod dependency_audit;
 mod msrv;
+mod tui_eval_launcher;
+mod validation;
 
 fn main() -> Result<()> {
     let mut args = std::env::args().skip(1);
@@ -58,25 +84,76 @@ fn main() -> Result<()> {
     match cmd.as_deref() {
         Some("gen-schema") => gen_schema(check),
         Some("gen-roadmap") => gen_roadmap(check),
+        Some("tui-reference") => tui_reference(check),
         Some("lint") => lint(),
         Some("check-docs") => check_docs(),
         Some("cli-surface") => cli_surface_gate(check),
         Some("coverage") => coverage(check, allow_regression),
         Some("msrv") => msrv::gate(&workspace_root()?),
+        Some("dependency-audit") => dependency_audit::gate(&workspace_root()?),
+        Some("validation") => validation::command(&rest, &workspace_root()?),
+        Some("validation-select") => validation::selector_command(&rest, &workspace_root()?),
+        Some("tui-eval") => tui_eval_launcher::command(&rest, &workspace_root()?),
         Some(other) => bail!(
-            "unknown xtask `{other}` (expected: gen-schema [--check], gen-roadmap [--check], lint, check-docs, msrv, coverage [--check | --allow-regression])"
+            "unknown xtask `{other}` (expected: gen-schema [--check], gen-roadmap [--check], tui-reference [--check], lint, check-docs, msrv, dependency-audit, validation [--check], validation-select [arguments], coverage [--check | --allow-regression], tui-eval <probe|canary|review-self-test|review|review-export|review-audit> [arguments])"
         ),
         None => {
             eprintln!(
-                "usage: cargo xtask <gen-schema [--check] | gen-roadmap [--check] | lint | check-docs | msrv | coverage [--check | --allow-regression]>"
+                "usage: cargo xtask <gen-schema [--check] | gen-roadmap [--check] | tui-reference [--check] | lint | check-docs | msrv | dependency-audit | validation [--check] | validation-select [arguments] | coverage [--check | --allow-regression] | tui-eval <probe|canary|review-self-test|review|review-export|review-audit> [arguments]>"
             );
             Ok(())
         }
     }
 }
 
+fn tui_reference(check: bool) -> Result<()> {
+    let root = workspace_root()?;
+    let rendered = aplan_tui::generated_action_reference_markdown();
+    write_or_check(
+        &root,
+        "docs/tui-reference.md",
+        &rendered,
+        check,
+        "tui-reference",
+    )
+}
+
 /// The committed per-crate line-coverage floors.
 const COVERAGE_FLOORS: &str = "coverage.json";
+
+/// The dedicated directory cargo-llvm-cov uses for instrumented objects.
+///
+/// Isolation may be anchored only at a path with this final component. The
+/// command creates a private parent beside it and recursively removes only a
+/// same-named child it created there. That keeps an empty, malformed or overly
+/// broad environment override from positioning cleanup at an ordinary Cargo
+/// target, a workspace, or a shared cache (`A1-457`).
+const LLVM_COV_TARGET: &str = "llvm-cov-target";
+
+/// Bound libtest fan-out inside the instrumented coverage process (`A1-603`).
+///
+/// Coverage makes every test and child process materially more expensive. The
+/// ordinary host-sized libtest schedule repeatedly starved process-sensitive
+/// fixtures after they had published an idle screen or before they could
+/// publish readiness. Four retains useful parallelism without oversubscribing
+/// the four-vCPU public runner we will use after publication.
+const COVERAGE_TEST_THREADS: &str = "4";
+
+/// Ownership record inside each private coverage allocation (`A1-633`).
+///
+/// The basename's PID is useful to an operator, but is not an ownership proof:
+/// the PID can be reused, and a killed parent can leave Cargo or a test alive.
+/// This record binds the PID to its Linux boot/start identity and gives the
+/// complete child tree an inherited lease. A later run removes the directory
+/// only when every recorded signal says that tree is gone.
+const COVERAGE_OWNER: &str = ".aplan-coverage-owner-v1.json";
+const COVERAGE_LEASE_ENV: &str = "APLAN_COVERAGE_LEASE";
+const MAX_COVERAGE_OWNER_BYTES: u64 = 16 * 1024;
+
+static COVERAGE_LEASE_SEQUENCE: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+
+#[cfg(unix)]
+static COVERAGE_INTERRUPTED_BY: std::sync::atomic::AtomicI32 = std::sync::atomic::AtomicI32::new(0);
 
 /// How far a crate may rise above its floor before the floor is called stale.
 ///
@@ -98,7 +175,10 @@ const RATCHET_SLACK: f64 = 2.0;
 /// green number as the floor it is, never as evidence the tests are thorough.
 fn coverage(check: bool, allow_regression: bool) -> Result<()> {
     let root = workspace_root()?;
-    let measured = measure_coverage(&root)?;
+    let measured = measure_coverage(&root);
+    #[cfg(unix)]
+    resume_coverage_signal();
+    let measured = measured?;
     let measured_pct: std::collections::BTreeMap<String, f64> = measured
         .iter()
         .map(|(k, v)| (k.clone(), as_f64(&pct(*v))))
@@ -240,14 +320,1087 @@ fn compare_floors(
 /// anything meaningful, and averaging would let a large regression hide behind a
 /// crate's many small, fully-covered modules.
 fn measure_coverage(root: &Path) -> Result<std::collections::BTreeMap<String, (u64, u64)>> {
+    let configured_dirs = coverage_artifact_dirs(root)?;
+    // Install before allocation rather than only around the Cargo child. A
+    // catchable signal in the create/cleanup windows must still flow through
+    // ordinary cleanup; hard kills remain the next-run recovery case.
+    #[cfg(unix)]
+    let signal_owner = CoverageSignalOwner::install()
+        .context("installing coverage termination handlers before allocating artifacts")?;
+    let measured = with_isolated_coverage_artifacts(&configured_dirs, |artifact_dirs| {
+        run_coverage(
+            root,
+            artifact_dirs,
+            #[cfg(unix)]
+            &signal_owner,
+        )
+    });
+    #[cfg(unix)]
+    drop(signal_owner);
+    measured
+}
+
+/// Resolve the directories cargo-llvm-cov would use, through the same Cargo
+/// metadata and environment precedence it uses.
+///
+/// `CARGO_TARGET_DIR` may point outside the checkout, and Cargo configuration
+/// may give build artifacts a separate directory. Guessing from the workspace
+/// path therefore either misses the stale objects or deletes the wrong tree.
+fn coverage_artifact_dirs(root: &Path) -> Result<Vec<PathBuf>> {
     let out = Command::new("cargo")
-        .args(["llvm-cov", "--workspace", "--json", "--summary-only"])
+        .args(["metadata", "--format-version", "1", "--no-deps", "--locked"])
         .current_dir(root)
         .output()
-        .context(
-            "running `cargo llvm-cov` (install it with `cargo install cargo-llvm-cov` and \
-             `rustup component add llvm-tools-preview`)",
+        .context("identifying cargo-llvm-cov's artifact directories with `cargo metadata`")?;
+    if !out.status.success() {
+        bail!(
+            "cannot identify cargo-llvm-cov's artifact directories, so coverage was not run:\n{}",
+            String::from_utf8_lossy(&out.stderr)
+        );
+    }
+    let metadata: serde_json::Value = serde_json::from_slice(&out.stdout)
+        .context("parsing `cargo metadata` while identifying coverage artifacts")?;
+    let llvm_target = cargo_llvm_cov_env("CARGO_LLVM_COV_TARGET_DIR")?;
+    let llvm_build = cargo_llvm_cov_env("CARGO_LLVM_COV_BUILD_DIR")?;
+    coverage_artifact_dirs_from_metadata(
+        root,
+        &metadata,
+        llvm_target.as_deref(),
+        llvm_build.as_deref(),
+    )
+}
+
+/// Read an override with cargo-llvm-cov's own empty/unicode semantics.
+fn cargo_llvm_cov_env(key: &str) -> Result<Option<String>> {
+    match std::env::var(key) {
+        Ok(value) if value.is_empty() => Ok(None),
+        Ok(value) => Ok(Some(value)),
+        Err(std::env::VarError::NotPresent) => Ok(None),
+        Err(error) => {
+            Err(error).with_context(|| format!("reading cargo-llvm-cov override `{key}`"))
+        }
+    }
+}
+
+/// Pure half of [`coverage_artifact_dirs`], kept separate so unsafe path shapes
+/// and external Cargo targets can be exercised without deleting real builds.
+fn coverage_artifact_dirs_from_metadata(
+    root: &Path,
+    metadata: &serde_json::Value,
+    llvm_target: Option<&str>,
+    llvm_build: Option<&str>,
+) -> Result<Vec<PathBuf>> {
+    let mut dirs = Vec::new();
+    if let Some(raw_target) = llvm_target {
+        let target =
+            dedicated_coverage_dir(root, Path::new(raw_target), "CARGO_LLVM_COV_TARGET_DIR")?;
+        let build = if let Some(raw_build) = llvm_build {
+            dedicated_coverage_dir(root, Path::new(raw_build), "CARGO_LLVM_COV_BUILD_DIR")?
+        } else {
+            target.clone()
+        };
+        dirs.push(target);
+        if !dirs.contains(&build) {
+            dirs.push(build);
+        }
+        return Ok(dirs);
+    }
+
+    // cargo-llvm-cov ignores CARGO_LLVM_COV_BUILD_DIR unless its target-dir
+    // override is also present. Mirror that rather than cleaning a directory
+    // the ensuing command will not use.
+    let target = metadata_directory(metadata, "target_directory")?;
+    let build = if metadata.get("build_directory").is_some() {
+        metadata_directory(metadata, "build_directory")?
+    } else {
+        target.clone()
+    };
+    let target = dedicated_coverage_dir(
+        root,
+        &target.join(LLVM_COV_TARGET),
+        "cargo metadata target_directory",
+    )?;
+    let build = dedicated_coverage_dir(
+        root,
+        &build.join(LLVM_COV_TARGET),
+        "cargo metadata build_directory",
+    )?;
+    dirs.push(target);
+    if !dirs.contains(&build) {
+        dirs.push(build);
+    }
+    Ok(dirs)
+}
+
+fn metadata_directory(metadata: &serde_json::Value, key: &str) -> Result<PathBuf> {
+    let raw = metadata
+        .get(key)
+        .and_then(serde_json::Value::as_str)
+        .with_context(|| format!("`cargo metadata` returned no `{key}` directory"))?;
+    let path = PathBuf::from(raw);
+    if !path.is_absolute() || raw.is_empty() {
+        bail!("`cargo metadata` returned unsafe `{key}` directory `{raw}`");
+    }
+    Ok(path)
+}
+
+/// Resolve and bound the location beside which an isolated run is allocated.
+fn dedicated_coverage_dir(root: &Path, raw: &Path, source: &str) -> Result<PathBuf> {
+    if raw.as_os_str().is_empty() {
+        bail!("{source} is empty; refusing to guess what coverage artifacts to remove");
+    }
+    let path = if raw.is_absolute() {
+        raw.to_path_buf()
+    } else {
+        root.join(raw)
+    };
+    if !path.is_absolute()
+        || path.components().any(|component| {
+            matches!(
+                component,
+                std::path::Component::ParentDir | std::path::Component::CurDir
+            )
+        })
+        || path.file_name() != Some(std::ffi::OsStr::new(LLVM_COV_TARGET))
+    {
+        bail!(
+            "{source} resolves to `{}`, which is not a dedicated `{LLVM_COV_TARGET}` directory; \
+             refusing recursive cleanup. Point it at a path ending in `{LLVM_COV_TARGET}` or \
+             unset the override",
+            path.display()
+        );
+    }
+    Ok(path)
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(deny_unknown_fields)]
+struct CoverageProcessIdentity {
+    pid: u32,
+    boot_id: String,
+    start_ticks: u64,
+    uid: u32,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "snake_case")]
+enum CoverageOwnerPhase {
+    Prepared,
+    Running,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(deny_unknown_fields)]
+struct CoverageOwnerRecord {
+    version: u8,
+    phase: CoverageOwnerPhase,
+    owner: CoverageProcessIdentity,
+    child: Option<CoverageProcessIdentity>,
+    process_group: Option<u32>,
+    lease: String,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum CoverageProcessState {
+    Gone,
+    Matches,
+    Reused,
+    Unverifiable,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum CoverageTreeState {
+    Gone,
+    Live,
+    Unverifiable,
+}
+
+fn new_coverage_owner_record() -> Result<CoverageOwnerRecord> {
+    let owner = current_coverage_process_identity()?;
+    let sequence = COVERAGE_LEASE_SEQUENCE.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+    let lease = format!(
+        "aplan-coverage-v1-{}-{}-{sequence}",
+        owner.pid, owner.start_ticks
+    );
+    Ok(CoverageOwnerRecord {
+        version: 1,
+        phase: CoverageOwnerPhase::Prepared,
+        owner,
+        child: None,
+        process_group: None,
+        lease,
+    })
+}
+
+#[cfg(target_os = "linux")]
+fn linux_boot_id() -> Result<String> {
+    let id = std::fs::read_to_string("/proc/sys/kernel/random/boot_id")
+        .context("reading the Linux boot identity for coverage ownership")?;
+    let id = id.trim();
+    if !valid_coverage_boot_id(id) {
+        bail!("the Linux boot identity is empty or malformed");
+    }
+    Ok(id.to_string())
+}
+
+#[cfg(target_os = "linux")]
+fn proc_uid(status: &str) -> Result<u32> {
+    let line = status
+        .lines()
+        .find(|line| line.starts_with("Uid:"))
+        .context("/proc status has no Uid field")?;
+    line.split_whitespace()
+        .nth(1)
+        .context("/proc status has an empty Uid field")?
+        .parse()
+        .context("parsing the real UID from /proc status")
+}
+
+#[cfg(target_os = "linux")]
+fn proc_start_and_group(stat: &str) -> Result<(u64, u32)> {
+    // `comm` is parenthesized and may itself contain spaces or `)`, so split at
+    // the final delimiter. The remainder starts at field 3 (`state`); process
+    // group is field 5/index 2 and starttime is field 22/index 19.
+    let (_, fields) = stat
+        .rsplit_once(") ")
+        .context("/proc stat has no final command delimiter")?;
+    let fields: Vec<_> = fields.split_whitespace().collect();
+    let process_group = fields
+        .get(2)
+        .context("/proc stat has no process-group field")?
+        .parse()
+        .context("parsing the process group from /proc stat")?;
+    let start_ticks = fields
+        .get(19)
+        .context("/proc stat has no starttime field")?
+        .parse()
+        .context("parsing the starttime from /proc stat")?;
+    Ok((start_ticks, process_group))
+}
+
+#[cfg(target_os = "linux")]
+fn proc_entry_is_gone(error: &std::io::Error) -> bool {
+    // procfs may report ESRCH when a process disappears after directory
+    // enumeration but before a file read. Linux fixes ESRCH at errno 3; it is
+    // not mapped to ErrorKind::NotFound by every Rust/libc combination.
+    const LINUX_ESRCH: i32 = 3;
+    error.kind() == std::io::ErrorKind::NotFound || error.raw_os_error() == Some(LINUX_ESRCH)
+}
+
+#[cfg(target_os = "linux")]
+fn linux_process_details(
+    pid: u32,
+    boot_id: &str,
+) -> Result<Option<(CoverageProcessIdentity, u32)>> {
+    let directory = PathBuf::from(format!("/proc/{pid}"));
+    let stat = match std::fs::read_to_string(directory.join("stat")) {
+        Ok(stat) => stat,
+        Err(error) if proc_entry_is_gone(&error) => return Ok(None),
+        Err(error) => return Err(error).with_context(|| format!("reading /proc/{pid}/stat")),
+    };
+    let status = match std::fs::read_to_string(directory.join("status")) {
+        Ok(status) => status,
+        Err(error) if proc_entry_is_gone(&error) => return Ok(None),
+        Err(error) => return Err(error).with_context(|| format!("reading /proc/{pid}/status")),
+    };
+    let (start_ticks, process_group) = proc_start_and_group(&stat)?;
+    Ok(Some((
+        CoverageProcessIdentity {
+            pid,
+            boot_id: boot_id.to_string(),
+            start_ticks,
+            uid: proc_uid(&status)?,
+        },
+        process_group,
+    )))
+}
+
+#[cfg(target_os = "linux")]
+fn current_coverage_process_identity() -> Result<CoverageProcessIdentity> {
+    let boot_id = linux_boot_id()?;
+    linux_process_details(std::process::id(), &boot_id)?
+        .map(|(identity, _)| identity)
+        .context("the current process disappeared while recording coverage ownership")
+}
+
+#[cfg(not(target_os = "linux"))]
+fn current_coverage_process_identity() -> Result<CoverageProcessIdentity> {
+    // Other platforms still get private allocations and ordinary cleanup. A
+    // later process cannot prove a stale tree from portable Rust APIs, so its
+    // sweep retains the record instead of treating an unknown PID as dead.
+    Ok(CoverageProcessIdentity {
+        pid: std::process::id(),
+        boot_id: "unavailable".to_string(),
+        start_ticks: 0,
+        uid: 0,
+    })
+}
+
+#[cfg(target_os = "linux")]
+fn coverage_process_state(expected: &CoverageProcessIdentity) -> CoverageProcessState {
+    let Ok(boot_id) = linux_boot_id() else {
+        return CoverageProcessState::Unverifiable;
+    };
+    if boot_id != expected.boot_id {
+        return CoverageProcessState::Gone;
+    }
+    match linux_process_details(expected.pid, &boot_id) {
+        Ok(None) => CoverageProcessState::Gone,
+        Ok(Some((actual, _))) if actual == *expected => CoverageProcessState::Matches,
+        Ok(Some(_)) => CoverageProcessState::Reused,
+        Err(_) => CoverageProcessState::Unverifiable,
+    }
+}
+
+#[cfg(not(target_os = "linux"))]
+fn coverage_process_state(_expected: &CoverageProcessIdentity) -> CoverageProcessState {
+    CoverageProcessState::Unverifiable
+}
+
+#[cfg(target_os = "linux")]
+fn coverage_descendants_state(record: &CoverageOwnerRecord) -> CoverageTreeState {
+    let Ok(boot_id) = linux_boot_id() else {
+        return CoverageTreeState::Unverifiable;
+    };
+    if boot_id != record.owner.boot_id {
+        return CoverageTreeState::Gone;
+    }
+
+    let lease = format!("{COVERAGE_LEASE_ENV}={}", record.lease).into_bytes();
+    let mut uncertain = false;
+    let Ok(entries) = std::fs::read_dir("/proc") else {
+        return CoverageTreeState::Unverifiable;
+    };
+    for entry in entries {
+        let entry = match entry {
+            Ok(entry) => entry,
+            Err(error) if proc_entry_is_gone(&error) => continue,
+            Err(_) => {
+                uncertain = true;
+                continue;
+            }
+        };
+        let Some(pid) = entry
+            .file_name()
+            .to_str()
+            .and_then(|name| name.parse::<u32>().ok())
+        else {
+            continue;
+        };
+        let details = match linux_process_details(pid, &boot_id) {
+            Ok(Some(details)) => details,
+            Ok(None) => continue,
+            Err(_) => {
+                uncertain = true;
+                continue;
+            }
+        };
+        let (identity, process_group) = details;
+        if identity.uid != record.owner.uid {
+            continue;
+        }
+        if record.process_group == Some(process_group) {
+            return CoverageTreeState::Live;
+        }
+        // Linux may deny `environ` for an unrelated same-UID process under
+        // ptrace policy. That says nothing about this allocation. The recorded
+        // child identity and complete process-group scan remain authoritative;
+        // an inherited readable lease additionally catches descendants that
+        // deliberately moved groups.
+        if let Ok(environment) = std::fs::read(entry.path().join("environ"))
+            && environment
+                .split(|byte| *byte == 0)
+                .any(|value| value == lease)
+        {
+            return CoverageTreeState::Live;
+        }
+    }
+    if uncertain {
+        CoverageTreeState::Unverifiable
+    } else {
+        CoverageTreeState::Gone
+    }
+}
+
+#[cfg(not(target_os = "linux"))]
+fn coverage_descendants_state(_record: &CoverageOwnerRecord) -> CoverageTreeState {
+    CoverageTreeState::Unverifiable
+}
+
+fn coverage_tree_state(record: &CoverageOwnerRecord) -> CoverageTreeState {
+    match coverage_process_state(&record.owner) {
+        CoverageProcessState::Matches => return CoverageTreeState::Live,
+        CoverageProcessState::Reused | CoverageProcessState::Unverifiable => {
+            return CoverageTreeState::Unverifiable;
+        }
+        CoverageProcessState::Gone => {}
+    }
+    if let Some(child) = &record.child {
+        match coverage_process_state(child) {
+            CoverageProcessState::Matches => return CoverageTreeState::Live,
+            CoverageProcessState::Reused | CoverageProcessState::Unverifiable => {
+                return CoverageTreeState::Unverifiable;
+            }
+            CoverageProcessState::Gone => {}
+        }
+    }
+    coverage_descendants_state(record)
+}
+
+fn valid_coverage_lease(lease: &str) -> bool {
+    !lease.is_empty()
+        && lease.len() <= 256
+        && lease
+            .bytes()
+            .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'-' | b'_' | b'.'))
+}
+
+#[cfg(target_os = "linux")]
+fn valid_coverage_boot_id(boot_id: &str) -> bool {
+    boot_id.len() == 36
+        && boot_id.bytes().enumerate().all(|(index, byte)| {
+            if matches!(index, 8 | 13 | 18 | 23) {
+                byte == b'-'
+            } else {
+                byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte)
+            }
+        })
+}
+
+#[cfg(not(target_os = "linux"))]
+fn valid_coverage_boot_id(boot_id: &str) -> bool {
+    boot_id == "unavailable"
+}
+
+#[cfg(target_os = "linux")]
+fn valid_coverage_identity(identity: &CoverageProcessIdentity) -> bool {
+    identity.pid != 0 && identity.start_ticks != 0 && valid_coverage_boot_id(&identity.boot_id)
+}
+
+#[cfg(not(target_os = "linux"))]
+fn valid_coverage_identity(identity: &CoverageProcessIdentity) -> bool {
+    identity.pid != 0
+        && identity.start_ticks == 0
+        && identity.uid == 0
+        && valid_coverage_boot_id(&identity.boot_id)
+}
+
+fn consistent_coverage_owner(record: &CoverageOwnerRecord) -> bool {
+    if record.version != 1
+        || !valid_coverage_lease(&record.lease)
+        || !valid_coverage_identity(&record.owner)
+    {
+        return false;
+    }
+    match record.phase {
+        CoverageOwnerPhase::Prepared => record.child.is_none() && record.process_group.is_none(),
+        CoverageOwnerPhase::Running => record.child.as_ref().is_some_and(|child| {
+            valid_coverage_identity(child)
+                && child.boot_id == record.owner.boot_id
+                && child.uid == record.owner.uid
+                && record.process_group == Some(child.pid)
+        }),
+    }
+}
+
+fn read_coverage_owner(run_dir: &Path) -> Result<CoverageOwnerRecord> {
+    use std::io::Read as _;
+
+    let path = run_dir.join(COVERAGE_OWNER);
+    let metadata = std::fs::symlink_metadata(&path)
+        .with_context(|| format!("inspecting coverage owner record `{}`", path.display()))?;
+    if metadata.file_type().is_symlink()
+        || !metadata.is_file()
+        || metadata.len() > MAX_COVERAGE_OWNER_BYTES
+    {
+        bail!(
+            "coverage owner record `{}` is not a bounded real file",
+            path.display()
+        );
+    }
+    let file = std::fs::File::open(&path)
+        .with_context(|| format!("opening coverage owner record `{}`", path.display()))?;
+    let opened = file
+        .metadata()
+        .with_context(|| format!("identifying coverage owner record `{}`", path.display()))?;
+    if !same_file_identity(&metadata, &opened) {
+        bail!(
+            "coverage owner record `{}` changed while it was opened",
+            path.display()
+        );
+    }
+    if opened.len() > MAX_COVERAGE_OWNER_BYTES {
+        bail!(
+            "coverage owner record `{}` is not a bounded real file",
+            path.display()
+        );
+    }
+    let capacity = usize::try_from(opened.len()).context("coverage owner record is too large")?;
+    let mut bytes = Vec::with_capacity(capacity);
+    file.take(MAX_COVERAGE_OWNER_BYTES + 1)
+        .read_to_end(&mut bytes)
+        .with_context(|| format!("reading coverage owner record `{}`", path.display()))?;
+    if u64::try_from(bytes.len()).unwrap_or(u64::MAX) > MAX_COVERAGE_OWNER_BYTES {
+        bail!(
+            "coverage owner record `{}` grew beyond its size bound while being read",
+            path.display()
+        );
+    }
+    let record: CoverageOwnerRecord = serde_json::from_slice(&bytes)
+        .with_context(|| format!("parsing coverage owner record `{}`", path.display()))?;
+    if !consistent_coverage_owner(&record) {
+        bail!("coverage owner record `{}` is inconsistent", path.display());
+    }
+    Ok(record)
+}
+
+fn write_coverage_owner(run_dir: &Path, record: &CoverageOwnerRecord) -> Result<()> {
+    use std::io::Write as _;
+
+    let sequence = COVERAGE_LEASE_SEQUENCE.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+    let temporary = run_dir.join(format!(
+        ".{COVERAGE_OWNER}.{}.{}.tmp",
+        std::process::id(),
+        sequence
+    ));
+    let destination = run_dir.join(COVERAGE_OWNER);
+    let result = (|| -> Result<()> {
+        let mut file = std::fs::OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .open(&temporary)
+            .with_context(|| format!("creating coverage owner record `{}`", temporary.display()))?;
+        let mut bytes = serde_json::to_vec_pretty(record)?;
+        bytes.push(b'\n');
+        file.write_all(&bytes)
+            .with_context(|| format!("writing coverage owner record `{}`", temporary.display()))?;
+        file.sync_all()
+            .with_context(|| format!("syncing coverage owner record `{}`", temporary.display()))?;
+        drop(file);
+        std::fs::rename(&temporary, &destination).with_context(|| {
+            format!(
+                "publishing coverage owner record `{}`",
+                destination.display()
+            )
+        })?;
+        Ok(())
+    })();
+    if result.is_err() {
+        let _ = std::fs::remove_file(&temporary);
+    }
+    result
+}
+
+fn coverage_candidate_pid(name: &str) -> Option<u32> {
+    let rest = name.strip_prefix(".aplan-coverage-")?;
+    let (pid, attempt) = rest.split_once('-')?;
+    if pid.starts_with('0')
+        || pid.is_empty()
+        || !pid.bytes().all(|byte| byte.is_ascii_digit())
+        || attempt.is_empty()
+        || (attempt.len() > 1 && attempt.starts_with('0'))
+        || !attempt.bytes().all(|byte| byte.is_ascii_digit())
+    {
+        return None;
+    }
+    let pid = pid.parse().ok()?;
+    (pid != 0).then_some(pid)
+}
+
+fn same_file_identity(before: &std::fs::Metadata, after: &std::fs::Metadata) -> bool {
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::MetadataExt as _;
+        before.dev() == after.dev() && before.ino() == after.ino()
+    }
+    #[cfg(not(unix))]
+    {
+        before.is_dir() == after.is_dir() && before.len() == after.len()
+    }
+}
+
+fn sweep_stale_coverage_runs(parent: &Path) -> Result<usize> {
+    let mut removed = 0;
+    for entry in std::fs::read_dir(parent)
+        .with_context(|| format!("scanning coverage allocations in `{}`", parent.display()))?
+    {
+        let entry = entry
+            .with_context(|| format!("reading a coverage allocation in `{}`", parent.display()))?;
+        let Some(name) = entry.file_name().to_str().map(str::to_string) else {
+            continue;
+        };
+        let Some(pid) = coverage_candidate_pid(&name) else {
+            continue;
+        };
+        let path = entry.path();
+        let Ok(before) = std::fs::symlink_metadata(&path) else {
+            continue;
+        };
+        if !before.is_dir() || before.file_type().is_symlink() {
+            continue;
+        }
+        let Ok(record) = read_coverage_owner(&path) else {
+            // Missing, partial, hostile and future-version records are all
+            // unverifiable. Retention is the safe answer.
+            continue;
+        };
+        if record.owner.pid != pid || coverage_tree_state(&record) != CoverageTreeState::Gone {
+            continue;
+        }
+        let Ok(after) = std::fs::symlink_metadata(&path) else {
+            continue;
+        };
+        if !after.is_dir() || after.file_type().is_symlink() {
+            continue;
+        }
+        if !same_file_identity(&before, &after) {
+            continue;
+        }
+        match std::fs::remove_dir_all(&path) {
+            Ok(()) => {
+                eprintln!("coverage: removed stale allocation `{}`", path.display());
+                removed += 1;
+            }
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+            Err(error) => {
+                return Err(error).with_context(|| {
+                    format!("removing stale coverage allocation `{}`", path.display())
+                });
+            }
+        }
+    }
+    Ok(removed)
+}
+
+/// Give one measurement artifact directories no earlier or concurrent run can
+/// share, and remove only those run-owned directories afterwards.
+///
+/// Cleaning a shared directory and then starting Cargo is not an isolation
+/// boundary: another invocation can recreate it between those operations. Each
+/// run therefore atomically creates a private parent beside the configured
+/// `llvm-cov-target`, puts one identically named child inside it, and overrides
+/// cargo-llvm-cov to use that child. Recursive removal is still restricted to a
+/// final component we created; the private parent is removed non-recursively.
+fn with_isolated_coverage_artifacts<T>(
+    configured_dirs: &[PathBuf],
+    measure: impl FnOnce(&[PathBuf]) -> Result<T>,
+) -> Result<T> {
+    let artifact_dirs = create_isolated_coverage_artifacts(configured_dirs)?;
+    let measured = measure(&artifact_dirs);
+    let cleaned = remove_isolated_coverage_artifacts(&artifact_dirs);
+    match (measured, cleaned) {
+        (Ok(value), Ok(())) => Ok(value),
+        (Err(error), Ok(())) | (Ok(_), Err(error)) => Err(error),
+        (Err(measure_error), Err(cleanup_error)) => Err(anyhow::anyhow!(
+            "{measure_error:#}\nadditionally, coverage artifact cleanup failed: {cleanup_error:#}"
+        )),
+    }
+}
+
+fn create_isolated_coverage_artifacts(configured_dirs: &[PathBuf]) -> Result<Vec<PathBuf>> {
+    if configured_dirs.is_empty() {
+        bail!("coverage isolation was given no configured artifact directory");
+    }
+    let owner = new_coverage_owner_record()?;
+    let mut artifacts = Vec::new();
+    let mut swept = std::collections::BTreeSet::new();
+    for configured in configured_dirs {
+        if configured.file_name() != Some(std::ffi::OsStr::new(LLVM_COV_TARGET)) {
+            let _ = remove_isolated_coverage_artifacts(&artifacts);
+            bail!(
+                "coverage artifact path `{}` is not a dedicated `{LLVM_COV_TARGET}` directory",
+                configured.display()
+            );
+        }
+        let parent = configured.parent().with_context(|| {
+            format!(
+                "coverage artifact path `{}` has no parent for an isolated run",
+                configured.display()
+            )
+        })?;
+        if let Err(error) = std::fs::create_dir_all(parent) {
+            let _ = remove_isolated_coverage_artifacts(&artifacts);
+            return Err(error).with_context(|| {
+                format!(
+                    "creating the parent of isolated coverage artifacts at `{}`",
+                    parent.display()
+                )
+            });
+        }
+        if swept.insert(parent.to_path_buf())
+            && let Err(error) = sweep_stale_coverage_runs(parent)
+        {
+            let _ = remove_isolated_coverage_artifacts(&artifacts);
+            return Err(error);
+        }
+
+        let mut created = None;
+        for attempt in 0..1_000_u16 {
+            let run_dir = parent.join(format!(".aplan-coverage-{}-{attempt}", std::process::id()));
+            match std::fs::create_dir(&run_dir) {
+                Ok(()) => {
+                    if let Err(error) = write_coverage_owner(&run_dir, &owner) {
+                        let _ = std::fs::remove_dir(&run_dir);
+                        let _ = remove_isolated_coverage_artifacts(&artifacts);
+                        return Err(error);
+                    }
+                    let artifact = run_dir.join(LLVM_COV_TARGET);
+                    // Cargo must create the target itself. When handed an
+                    // existing empty directory it does not install its
+                    // `CACHEDIR.TAG`, and cargo-llvm-cov's own final `cargo
+                    // clean` then refuses the directory as potentially
+                    // unrelated. The exclusive parent is the allocation; the
+                    // child is the path reserved for Cargo inside it.
+                    created = Some(artifact);
+                    break;
+                }
+                Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => {}
+                Err(error) => {
+                    let _ = remove_isolated_coverage_artifacts(&artifacts);
+                    return Err(error).with_context(|| {
+                        format!(
+                            "creating an isolated coverage run beside `{}`",
+                            configured.display()
+                        )
+                    });
+                }
+            }
+        }
+        let Some(created) = created else {
+            let _ = remove_isolated_coverage_artifacts(&artifacts);
+            bail!(
+                "could not allocate an isolated coverage run beside `{}` after 1000 attempts",
+                configured.display()
+            );
+        };
+        artifacts.push(created);
+    }
+    Ok(artifacts)
+}
+
+fn remove_isolated_coverage_artifacts(artifact_dirs: &[PathBuf]) -> Result<()> {
+    let mut problems = Vec::new();
+    for artifact in artifact_dirs.iter().rev() {
+        let metadata = match std::fs::symlink_metadata(artifact) {
+            Ok(metadata) => metadata,
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+                let Some(run_dir) = artifact.parent() else {
+                    problems.push(format!("`{}` has no run directory", artifact.display()));
+                    continue;
+                };
+                if let Err(error) = remove_current_coverage_owner(run_dir) {
+                    problems.push(error.to_string());
+                    continue;
+                }
+                if let Err(error) = std::fs::remove_dir(run_dir) {
+                    problems.push(format!(
+                        "removing unused coverage run `{}` non-recursively: {error}",
+                        run_dir.display()
+                    ));
+                }
+                continue;
+            }
+            Err(error) => {
+                problems.push(format!("inspecting `{}`: {error}", artifact.display()));
+                continue;
+            }
+        };
+        if metadata.file_type().is_symlink() || !metadata.is_dir() {
+            problems.push(format!(
+                "`{}` is not the real directory this run created; refusing recursive cleanup",
+                artifact.display()
+            ));
+            continue;
+        }
+        if let Err(error) = std::fs::remove_dir_all(artifact) {
+            problems.push(format!("removing `{}`: {error}", artifact.display()));
+            continue;
+        }
+        let Some(run_dir) = artifact.parent() else {
+            problems.push(format!("`{}` has no run directory", artifact.display()));
+            continue;
+        };
+        if let Err(error) = remove_current_coverage_owner(run_dir) {
+            problems.push(error.to_string());
+            continue;
+        }
+        if let Err(error) = std::fs::remove_dir(run_dir) {
+            problems.push(format!(
+                "removing exclusive coverage run `{}` non-recursively: {error}",
+                run_dir.display()
+            ));
+        }
+    }
+    if problems.is_empty() {
+        Ok(())
+    } else {
+        bail!(
+            "coverage artifacts could not be cleaned; no result was accepted:\n  {}",
+            problems.join("\n  ")
+        )
+    }
+}
+
+fn remove_current_coverage_owner(run_dir: &Path) -> Result<()> {
+    let owner = run_dir.join(COVERAGE_OWNER);
+    match std::fs::symlink_metadata(&owner) {
+        Ok(metadata) if metadata.is_file() && !metadata.file_type().is_symlink() => {
+            std::fs::remove_file(&owner)
+                .with_context(|| format!("removing `{}`", owner.display()))?;
+            Ok(())
+        }
+        Ok(_) => bail!(
+            "`{}` is not the real ownership file this run created; refusing cleanup",
+            owner.display()
+        ),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+            bail!("coverage owner record `{}` is missing", owner.display())
+        }
+        Err(error) => Err(error).with_context(|| format!("inspecting `{}`", owner.display())),
+    }
+}
+
+#[cfg(target_os = "linux")]
+fn coverage_process_identity(pid: u32) -> Result<CoverageProcessIdentity> {
+    let boot_id = linux_boot_id()?;
+    linux_process_details(pid, &boot_id)?
+        .map(|(identity, _)| identity)
+        .with_context(|| format!("coverage child {pid} exited before its identity was recorded"))
+}
+
+#[cfg(not(target_os = "linux"))]
+fn coverage_process_identity(pid: u32) -> Result<CoverageProcessIdentity> {
+    Ok(CoverageProcessIdentity {
+        pid,
+        boot_id: "unavailable".to_string(),
+        start_ticks: 0,
+        uid: 0,
+    })
+}
+
+#[cfg(unix)]
+#[derive(Debug)]
+struct CoverageSignalOwner {
+    handle: signal_hook::iterator::Handle,
+    thread: Option<std::thread::JoinHandle<()>>,
+    child_pid: std::sync::Arc<std::sync::atomic::AtomicU32>,
+    finished: std::sync::Arc<std::sync::atomic::AtomicBool>,
+}
+
+#[cfg(unix)]
+impl CoverageSignalOwner {
+    fn install() -> std::io::Result<Self> {
+        use signal_hook::consts::signal::{SIGHUP, SIGINT, SIGQUIT, SIGTERM};
+
+        COVERAGE_INTERRUPTED_BY.store(0, std::sync::atomic::Ordering::SeqCst);
+        let mut signals = signal_hook::iterator::Signals::new([SIGHUP, SIGINT, SIGQUIT, SIGTERM])?;
+        let handle = signals.handle();
+        let child_pid = std::sync::Arc::new(std::sync::atomic::AtomicU32::new(0));
+        let finished = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let thread_child = std::sync::Arc::clone(&child_pid);
+        let thread_finished = std::sync::Arc::clone(&finished);
+        let thread = std::thread::Builder::new()
+            .name("coverage-termination".to_string())
+            .spawn(move || {
+                let Some(signal) = signals.forever().next() else {
+                    return;
+                };
+                COVERAGE_INTERRUPTED_BY.store(signal, std::sync::atomic::Ordering::SeqCst);
+                loop {
+                    let pid = thread_child.load(std::sync::atomic::Ordering::SeqCst);
+                    if pid != 0 {
+                        kill_coverage_process_group(pid);
+                        return;
+                    }
+                    if thread_finished.load(std::sync::atomic::Ordering::SeqCst) {
+                        return;
+                    }
+                    std::thread::yield_now();
+                }
+            })?;
+        Ok(Self {
+            handle,
+            thread: Some(thread),
+            child_pid,
+            finished,
+        })
+    }
+
+    fn publish_child(&self, pid: u32) {
+        self.child_pid
+            .store(pid, std::sync::atomic::Ordering::SeqCst);
+    }
+
+    fn clear_child(&self) {
+        self.child_pid.store(0, std::sync::atomic::Ordering::SeqCst);
+    }
+}
+
+#[cfg(unix)]
+impl Drop for CoverageSignalOwner {
+    fn drop(&mut self) {
+        self.finished
+            .store(true, std::sync::atomic::Ordering::SeqCst);
+        self.handle.close();
+        if let Some(thread) = self.thread.take() {
+            let _ = thread.join();
+        }
+    }
+}
+
+#[cfg(unix)]
+fn kill_coverage_process_group(process_group: u32) {
+    let _ = Command::new("/bin/sh")
+        .args([
+            "-c",
+            "kill -KILL \"-$1\" 2>/dev/null; kill -KILL \"$1\" 2>/dev/null; true",
+            "aplan-coverage",
+            &process_group.to_string(),
+        ])
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .status();
+}
+
+fn kill_coverage_child(child: &mut std::process::Child) {
+    #[cfg(unix)]
+    kill_coverage_process_group(child.id());
+    let _ = child.kill();
+}
+
+#[cfg(unix)]
+fn resume_coverage_signal() {
+    let signal = COVERAGE_INTERRUPTED_BY.swap(0, std::sync::atomic::Ordering::SeqCst);
+    if signal == 0 {
+        return;
+    }
+    // Cleanup has returned before this handoff. Preserve the caller-visible
+    // reason instead of translating Ctrl-C/SIGTERM into a generic exit 1.
+    let _ = signal_hook::low_level::emulate_default_handler(signal);
+    signal_hook::low_level::exit(128_i32.saturating_add(signal));
+}
+
+/// Invoke cargo-llvm-cov inside this run's isolated artifact directories.
+fn run_coverage(
+    root: &Path,
+    artifact_dirs: &[PathBuf],
+    #[cfg(unix)] signal_owner: &CoverageSignalOwner,
+) -> Result<std::collections::BTreeMap<String, (u64, u64)>> {
+    let command = coverage_command();
+    run_coverage_command_with_owner(
+        root,
+        artifact_dirs,
+        command,
+        #[cfg(unix)]
+        signal_owner,
+    )
+}
+
+fn coverage_command() -> Command {
+    let mut command = Command::new("cargo");
+    command
+        .args(["llvm-cov", "--workspace", "--json", "--summary-only"])
+        .env("RUST_TEST_THREADS", COVERAGE_TEST_THREADS);
+    command
+}
+
+#[cfg(test)]
+fn run_coverage_command(
+    root: &Path,
+    artifact_dirs: &[PathBuf],
+    command: Command,
+) -> Result<std::collections::BTreeMap<String, (u64, u64)>> {
+    #[cfg(unix)]
+    let signal_owner = CoverageSignalOwner::install()
+        .context("installing coverage termination handlers before starting the test command")?;
+    let measured = run_coverage_command_with_owner(
+        root,
+        artifact_dirs,
+        command,
+        #[cfg(unix)]
+        &signal_owner,
+    );
+    #[cfg(unix)]
+    drop(signal_owner);
+    measured
+}
+
+fn run_coverage_command_with_owner(
+    root: &Path,
+    artifact_dirs: &[PathBuf],
+    mut command: Command,
+    #[cfg(unix)] signal_owner: &CoverageSignalOwner,
+) -> Result<std::collections::BTreeMap<String, (u64, u64)>> {
+    let target = artifact_dirs
+        .first()
+        .context("coverage isolation produced no target directory")?;
+    let build = artifact_dirs.get(1).unwrap_or(target);
+    let mut owner = read_coverage_owner(
+        target
+            .parent()
+            .context("isolated coverage target has no private parent")?,
+    )?;
+    for artifact in artifact_dirs.iter().skip(1) {
+        let sibling = read_coverage_owner(
+            artifact
+                .parent()
+                .context("isolated coverage build directory has no private parent")?,
         )?;
+        if sibling != owner {
+            bail!("isolated coverage directories disagree about their owner");
+        }
+    }
+
+    command
+        .env("CARGO_LLVM_COV_TARGET_DIR", target)
+        .env("CARGO_LLVM_COV_BUILD_DIR", build)
+        .env(COVERAGE_LEASE_ENV, &owner.lease)
+        .current_dir(root)
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped());
+    #[cfg(unix)]
+    {
+        use std::os::unix::process::CommandExt as _;
+        command.process_group(0);
+    }
+    let mut child = command.spawn().context(
+        "running `cargo llvm-cov` (install it with `cargo install cargo-llvm-cov` and \
+         `rustup component add llvm-tools-preview`)",
+    )?;
+    #[cfg(unix)]
+    signal_owner.publish_child(child.id());
+
+    let child_identity = match coverage_process_identity(child.id()) {
+        Ok(identity) => identity,
+        Err(error) => {
+            kill_coverage_child(&mut child);
+            let _ = child.wait();
+            #[cfg(unix)]
+            signal_owner.clear_child();
+            return Err(error).context("recording cargo-llvm-cov's process identity");
+        }
+    };
+    owner.phase = CoverageOwnerPhase::Running;
+    owner.process_group = Some(child.id());
+    owner.child = Some(child_identity);
+    for artifact in artifact_dirs {
+        let run_dir = artifact
+            .parent()
+            .context("isolated coverage directory has no private parent")?;
+        if let Err(error) = write_coverage_owner(run_dir, &owner) {
+            kill_coverage_child(&mut child);
+            let _ = child.wait();
+            #[cfg(unix)]
+            signal_owner.clear_child();
+            return Err(error).context("publishing cargo-llvm-cov ownership");
+        }
+    }
+
+    let output = child.wait_with_output();
+    #[cfg(unix)]
+    signal_owner.clear_child();
+    let out = output.context("waiting for cargo-llvm-cov")?;
     if !out.status.success() {
         bail!(
             "cargo llvm-cov failed:\n{}",
@@ -300,14 +1453,12 @@ fn total_per_crate(
             .and_then(|l| l.get("covered"))
             .and_then(serde_json::Value::as_u64);
         if let (Some(count), Some(covered)) = (count, covered) {
-            // **A file cannot have more coverable lines than lines** (`A1-352`,
-            // audit). `cargo llvm-cov` keeps its objects in `llvm-cov-target`,
-            // and where that directory is shared across commits -- this
-            // repository's CI mounts one `CARGO_TARGET_DIR` for every job --
-            // builds of the same crate from several commits sit there together.
-            // Each carries its own coverage mapping for the same source file,
-            // and llvm-cov merges them into one entry per filename and adds the
-            // counts.
+            // **A file cannot have more coverable lines than lines** (`A1-457`,
+            // audit). Per-run isolation above is the invariant; this remains a
+            // defense-in-depth refusal for a corrupted or externally modified
+            // run. It is not sufficient by itself: two merged mappings can
+            // still total fewer coverable lines than the source file has
+            // physical lines.
             //
             // It is a *wrong* number rather than a missing one, which is the
             // failure this repository refuses everywhere else, and it is
@@ -322,10 +1473,11 @@ fn total_per_crate(
             {
                 bail!(
                     "`cargo llvm-cov` reports {count} coverable lines in `{name}`, which \
-                     has {lines}. That happens when its target directory holds builds of \
-                     the same crate from more than one commit: the mappings are merged \
-                     and the counts added, so every percentage measured here is wrong \
-                     rather than missing. Remove `llvm-cov-target` and measure again"
+                     has {lines}. Its mappings were merged or otherwise corrupted even \
+                     though this measurement used an isolated `llvm-cov-target`, so every \
+                     percentage is wrong rather than missing. No result was accepted and \
+                     the run-owned artifacts are removed automatically; rerun after any \
+                     external coverage process has stopped"
                 );
             }
             let e = per_crate.entry(krate).or_default();
@@ -653,8 +1805,8 @@ fn style_exemptions(root: &std::path::Path) -> Result<Vec<String>> {
     let Ok(text) = std::fs::read_to_string(&path) else {
         return Ok(Vec::new());
     };
-    let value: serde_yaml_ng::Value =
-        serde_yaml_ng::from_str(&text).with_context(|| format!("parsing {}", path.display()))?;
+    let value: yaml_compat::Value =
+        yaml_compat::from_str(&text).with_context(|| format!("parsing {}", path.display()))?;
     let Some(list) = value.get("exempt").and_then(|e| e.as_sequence()) else {
         return Ok(Vec::new());
     };
@@ -824,50 +1976,42 @@ const ID_PATTERN_HELP: &str = "a word carrying a prefix the plan's own ids use";
 /// JSON narrative, this is the piece that lifts into `aplan-core` as a rule.
 /// Deciding a cut's *membership declaration* cannot lift: it needs to know what a
 /// cut section is, and every project shapes that differently.
-/// Every document whose task references the plan must be able to vouch for.
+/// The documents this repository declared once in `.aplan.yml`.
 ///
-/// `ROADMAP.md` (passed in, already read), then `docs/upgrading.md`, then each
-/// pre-public adoption evidence in sorted order so the report is stable. All three make the
-/// same promise to a reader, that "tracked as `A1-nnn`" names real work, and all
-/// three rot the same way when a task is renamed or dropped.
-fn doc_sources(root: &Path, roadmap: &str) -> Result<Vec<(String, String)>> {
-    let mut sources = vec![("ROADMAP.md".to_string(), roadmap.to_string())];
-    let changelog = root.join("CHANGELOG.md");
-    if changelog.is_file() {
-        sources.push((
-            "CHANGELOG.md".to_string(),
-            std::fs::read_to_string(&changelog)?,
-        ));
+/// This used to encode `ROADMAP.md`, `CHANGELOG.md`,
+/// `docs/upgrading.md` and pre-public adoption evidence here. That was the exact
+/// second list `A1-203` exists to remove: adding a document could leave the
+/// gate green unless somebody remembered a Rust edit. The shipped command and
+/// this repository-specific companion now expand the same declaration through
+/// `aplan-config`.
+fn declared_doc_sources(root: &Path) -> Result<Vec<(String, String)>> {
+    let (config, config_dir) =
+        aplan_config::load_config_located(root).context("loading document declarations")?;
+    let docs = config
+        .docs
+        .as_ref()
+        .context("no `docs.paths` or `docs.membership` declaration in .aplan.yml")?;
+    let base = config_dir.as_deref().unwrap_or(root);
+    let paths = docs
+        .document_paths(base)
+        .context("resolving declared documents")?;
+    if paths.is_empty() {
+        bail!("the `docs` declaration names no documents");
     }
-    let upgrading = root.join("docs/upgrading.md");
-    if upgrading.is_file() {
-        sources.push((
-            "docs/upgrading.md".to_string(),
-            std::fs::read_to_string(&upgrading)?,
-        ));
-    }
-    let pilots = root.join("docs/pilots");
-    if pilots.is_dir() {
-        let mut paths: Vec<PathBuf> = std::fs::read_dir(&pilots)
-            .context("reading docs/pilots")?
-            .filter_map(std::result::Result::ok)
-            .map(|e| e.path())
-            .filter(|p| p.extension().is_some_and(|x| x == "md"))
-            .collect();
-        paths.sort();
-        for path in paths {
+
+    paths
+        .into_iter()
+        .map(|path| {
             let name = path
-                .file_name()
-                .unwrap_or_default()
-                .to_string_lossy()
+                .strip_prefix(base)
+                .unwrap_or(&path)
+                .display()
                 .to_string();
-            sources.push((
-                format!("docs/pilots/{name}"),
-                std::fs::read_to_string(&path)?,
-            ));
-        }
-    }
-    Ok(sources)
+            let body = std::fs::read_to_string(&path)
+                .with_context(|| format!("reading declared document {}", path.display()))?;
+            Ok((name, body))
+        })
+        .collect()
 }
 
 /// Why this gate cannot run, if it cannot (`A1-148`, its audit).
@@ -1404,7 +2548,7 @@ fn check_docs() -> Result<()> {
     // 1. Every id named in the narrative or a pilot log resolves to a real task.
     //    A log's dispositions are its whole point (pre-public adoption evidence): an item
     //    reading "tracked as A1-nnn" with no such task looks handled and is not.
-    let sources = doc_sources(&root, &text)?;
+    let sources = declared_doc_sources(&root)?;
     for (name, body) in &sources {
         for id in undefined_ids(body, &known) {
             problems.push(format!(
@@ -1430,10 +2574,10 @@ fn check_docs() -> Result<()> {
     //    today, and the distinction the task worried about resolves itself: a rule
     //    added and removed before a release leaves `Rule::ALL`, so nothing asks
     //    for it.
-    if let Some((_, changelog)) = sources.iter().find(|(n, _)| n == "CHANGELOG.md") {
-        problems.extend(unannounced_rules(changelog));
-        problems.extend(unannounced_config_keys(changelog));
-    }
+    let changelog =
+        std::fs::read_to_string(root.join("CHANGELOG.md")).context("reading CHANGELOG.md")?;
+    problems.extend(unannounced_rules(&changelog));
+    problems.extend(unannounced_config_keys(&changelog));
 
     // 3 and 4. Every cut section declares its membership, and it matches.
     //
@@ -1826,8 +2970,62 @@ fn workspace_root() -> Result<PathBuf> {
 mod tests {
     use super::*;
 
+    #[test]
+    fn coverage_runner_bounds_instrumented_test_threads() {
+        let command = coverage_command();
+        let threads = command
+            .get_envs()
+            .find_map(|(key, value)| (key == "RUST_TEST_THREADS").then_some(value))
+            .flatten();
+        assert_eq!(threads, Some(std::ffi::OsStr::new(COVERAGE_TEST_THREADS)));
+        assert_eq!(COVERAGE_TEST_THREADS, "4");
+        assert_eq!(
+            command.get_args().collect::<Vec<_>>(),
+            ["llvm-cov", "--workspace", "--json", "--summary-only"].map(std::ffi::OsStr::new)
+        );
+    }
+
     fn floors(pairs: &[(&str, f64)]) -> std::collections::BTreeMap<String, f64> {
         pairs.iter().map(|(k, v)| ((*k).to_string(), *v)).collect()
+    }
+
+    #[cfg(target_os = "linux")]
+    fn wait_for_path_state(path: &Path, exists: bool) {
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+        while path.exists() != exists && std::time::Instant::now() < deadline {
+            std::thread::sleep(std::time::Duration::from_millis(10));
+        }
+        assert_eq!(
+            path.exists(),
+            exists,
+            "timed out waiting for {}",
+            path.display()
+        );
+    }
+
+    #[cfg(target_os = "linux")]
+    fn wait_for_live_pid(path: &Path) -> u32 {
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+        let mut observed = "the file does not exist".to_string();
+        loop {
+            match std::fs::read_to_string(path) {
+                Ok(contents) => match contents.trim().parse::<u32>() {
+                    Ok(pid) if Path::new(&format!("/proc/{pid}")).is_dir() => return pid,
+                    Ok(pid) => observed = format!("PID {pid} is not live"),
+                    Err(error) => {
+                        observed = format!("contents {contents:?} are not a PID: {error}");
+                    }
+                },
+                Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+                Err(error) => observed = format!("the file cannot be read: {error}"),
+            }
+            assert!(
+                std::time::Instant::now() < deadline,
+                "timed out waiting for {} to publish a live PID; last observation: {observed}",
+                path.display()
+            );
+            std::thread::sleep(std::time::Duration::from_millis(10));
+        }
     }
 
     /// The disposition gate, in every shape the corpus actually writes
@@ -2126,7 +3324,7 @@ mod tests {
         );
     }
 
-    /// A file measured twice is refused rather than summed (`A1-352`, audit).
+    /// A file measured twice is refused rather than summed (`A1-457`, audit).
     ///
     /// The CI runner mounts one `CARGO_TARGET_DIR` for every job, so
     /// `llvm-cov-target` carries profiles from earlier commits. A file whose
@@ -2165,6 +3363,895 @@ mod tests {
         assert!(said.contains("llvm-cov-target"), "and the remedy: {said}");
     }
 
+    /// Cargo's resolved target and build directories, not the checkout, decide
+    /// where the dedicated instrumented trees live (`A1-457`).
+    #[test]
+    fn coverage_isolation_follows_external_cargo_directories_and_touches_only_its_children() {
+        let root = tempfile::Builder::new()
+            .tempdir_in(aplan_core::fixture::fixture_root())
+            .expect("workspace");
+        let external = tempfile::Builder::new()
+            .tempdir_in(aplan_core::fixture::fixture_root())
+            .expect("external cargo cache");
+        let cargo_target = external.path().join("cargo-target");
+        let cargo_build = external.path().join("cargo-build");
+        let metadata = serde_json::json!({
+            "target_directory": cargo_target,
+            "build_directory": cargo_build,
+        });
+        let dirs = coverage_artifact_dirs_from_metadata(root.path(), &metadata, None, None)
+            .expect("external directories resolve");
+        assert_eq!(
+            dirs,
+            vec![
+                cargo_target.join(LLVM_COV_TARGET),
+                cargo_build.join(LLVM_COV_TARGET),
+            ]
+        );
+
+        for configured in &dirs {
+            std::fs::create_dir_all(configured).expect("old shared coverage directory");
+            std::fs::write(configured.join("stale-object"), "old build").expect("stale object");
+        }
+        std::fs::write(external.path().join("keep"), "ordinary cache").expect("neighbour");
+        let mut isolated = Vec::new();
+        let answer = with_isolated_coverage_artifacts(&dirs, |run_dirs| {
+            isolated = run_dirs.to_vec();
+            for (configured, run_dir) in dirs.iter().zip(run_dirs) {
+                assert_ne!(
+                    run_dir, configured,
+                    "the stale shared directory is not reused"
+                );
+                assert_eq!(run_dir.file_name(), configured.file_name());
+                assert_eq!(
+                    run_dir.parent().and_then(Path::parent),
+                    configured.parent(),
+                    "the private run stays on the configured filesystem"
+                );
+                assert!(configured.join("stale-object").is_file());
+                assert!(!run_dir.join("stale-object").exists());
+                std::fs::create_dir(run_dir)?;
+                std::fs::write(run_dir.join("new-object"), "this build")?;
+            }
+            Ok(7_u8)
+        })
+        .expect("isolated measurement");
+        assert_eq!(answer, 7, "the measurement runs inside fresh directories");
+        assert!(
+            isolated.iter().all(|dir| !dir.exists()),
+            "both private directories were removed: {isolated:?}"
+        );
+        assert!(
+            dirs.iter().all(|dir| dir.join("stale-object").is_file()),
+            "pre-existing shared artifacts were neither used nor deleted"
+        );
+        assert!(
+            external.path().join("keep").is_file(),
+            "nothing beside the exact targets was removed"
+        );
+    }
+
+    /// The command-facing half reads the live Cargo configuration and returns
+    /// bounded bases for private runs without touching them (`A1-457`).
+    #[test]
+    fn coverage_identification_follows_live_cargo_metadata_without_cleaning() {
+        let root = workspace_root().expect("workspace");
+        let dirs = coverage_artifact_dirs(&root).expect("resolved Cargo artifact directories");
+        assert!(!dirs.is_empty(), "Cargo always has a target directory");
+        assert!(
+            dirs.len() <= 2,
+            "only target and build directories: {dirs:?}"
+        );
+        for dir in dirs {
+            assert!(
+                dir.is_absolute(),
+                "Cargo resolved an absolute path: {dir:?}"
+            );
+            assert_eq!(
+                dir.file_name(),
+                Some(std::ffi::OsStr::new(LLVM_COV_TARGET)),
+                "isolation remains anchored at cargo-llvm-cov's generated directory"
+            );
+        }
+    }
+
+    /// An override can move the artifacts, but cannot anchor isolation at a
+    /// broad directory (`A1-457`).
+    #[test]
+    fn coverage_isolation_refuses_an_override_that_is_not_a_dedicated_directory() {
+        let root = tempfile::Builder::new()
+            .tempdir_in(aplan_core::fixture::fixture_root())
+            .expect("workspace");
+        let err = coverage_artifact_dirs_from_metadata(
+            root.path(),
+            &serde_json::json!({}),
+            Some("/tmp"),
+            None,
+        )
+        .expect_err("a broad override must be refused");
+        let said = err.to_string();
+        assert!(said.contains("CARGO_LLVM_COV_TARGET_DIR"), "{said}");
+        assert!(said.contains(LLVM_COV_TARGET), "{said}");
+        assert!(said.contains("refusing recursive cleanup"), "{said}");
+    }
+
+    /// Relative overrides have the same workspace-root base cargo-llvm-cov
+    /// gives them, while a separate build override remains a second exact
+    /// isolation base (`A1-457`).
+    #[test]
+    fn coverage_isolation_mirrors_relative_override_precedence() {
+        let root = tempfile::Builder::new()
+            .tempdir_in(aplan_core::fixture::fixture_root())
+            .expect("workspace");
+        let dirs = coverage_artifact_dirs_from_metadata(
+            root.path(),
+            &serde_json::json!({}),
+            Some("target/llvm-cov-target"),
+            Some("build/llvm-cov-target"),
+        )
+        .expect("relative dedicated overrides");
+        assert_eq!(
+            dirs,
+            vec![
+                root.path().join("target/llvm-cov-target"),
+                root.path().join("build/llvm-cov-target"),
+            ]
+        );
+
+        let metadata_target = root.path().join("metadata-target");
+        let dirs = coverage_artifact_dirs_from_metadata(
+            root.path(),
+            &serde_json::json!({"target_directory": metadata_target}),
+            None,
+            Some("ignored/llvm-cov-target"),
+        )
+        .expect("a build-only override is ignored");
+        assert_eq!(
+            dirs,
+            vec![metadata_target.join(LLVM_COV_TARGET)],
+            "cargo-llvm-cov ignores its build override unless its target override is set"
+        );
+    }
+
+    /// Cargo metadata should resolve both artifact roots absolutely. Refuse a
+    /// malformed new `build_directory` field rather than broadening isolation
+    /// through an assumed base (`A1-457`).
+    #[test]
+    fn coverage_isolation_refuses_an_unresolved_metadata_build_directory() {
+        let root = tempfile::Builder::new()
+            .tempdir_in(aplan_core::fixture::fixture_root())
+            .expect("workspace");
+        let err = coverage_artifact_dirs_from_metadata(
+            root.path(),
+            &serde_json::json!({
+                "target_directory": root.path().join("target"),
+                "build_directory": "relative-build",
+            }),
+            None,
+            None,
+        )
+        .expect_err("an unresolved metadata directory must be refused");
+        let said = err.to_string();
+        assert!(said.contains("build_directory"), "{said}");
+        assert!(said.contains("unsafe"), "{said}");
+    }
+
+    /// Missing or unresolved inputs are refusals, while a configured directory
+    /// that does not exist yet gets a private clean run (`A1-457`).
+    #[test]
+    fn coverage_isolation_distinguishes_bad_identification_from_a_new_target() {
+        let root = tempfile::Builder::new()
+            .tempdir_in(aplan_core::fixture::fixture_root())
+            .expect("workspace");
+        let err =
+            coverage_artifact_dirs_from_metadata(root.path(), &serde_json::json!({}), None, None)
+                .expect_err("missing Cargo metadata must stop the measurement");
+        assert!(err.to_string().contains("target_directory"), "{err}");
+
+        let err = coverage_artifact_dirs_from_metadata(
+            root.path(),
+            &serde_json::json!({}),
+            Some(""),
+            None,
+        )
+        .expect_err("an unresolved override must not become the workspace");
+        assert!(err.to_string().contains("is empty"), "{err}");
+
+        let absent = root.path().join("not-created").join(LLVM_COV_TARGET);
+        let measured = with_isolated_coverage_artifacts(&[absent], |dirs| {
+            assert!(
+                !dirs[0].exists(),
+                "Cargo, not the isolator, creates the artifact child"
+            );
+            Ok("measured")
+        })
+        .expect("an absent configured directory accepts an isolated run");
+        assert_eq!(measured, "measured");
+    }
+
+    /// A target whose private parent cannot be allocated prevents measurement,
+    /// and a configured symlink is never recursively removed (`A1-457`).
+    #[test]
+    fn a_coverage_allocation_failure_stops_before_measurement() {
+        let root = tempfile::Builder::new()
+            .tempdir_in(aplan_core::fixture::fixture_root())
+            .expect("workspace");
+        let blocked_parent = root.path().join("not-a-directory");
+        std::fs::write(&blocked_parent, "blocking file").expect("blocking file");
+        let target = blocked_parent.join(LLVM_COV_TARGET);
+        let measured = std::cell::Cell::new(false);
+        let err = with_isolated_coverage_artifacts(std::slice::from_ref(&target), |_| {
+            measured.set(true);
+            Ok(())
+        })
+        .expect_err("allocation must stop the measurement");
+        assert!(!measured.get(), "the measurement callback was reached");
+        let said = err.to_string();
+        assert!(
+            said.contains(&blocked_parent.display().to_string()),
+            "{said}"
+        );
+        assert!(said.contains("parent"), "{said}");
+
+        #[cfg(unix)]
+        {
+            let destination = root.path().join("symlink-destination");
+            std::fs::create_dir(&destination).expect("destination");
+            std::fs::write(destination.join("keep"), "not ours").expect("destination marker");
+            let symlink = root.path().join(LLVM_COV_TARGET);
+            std::os::unix::fs::symlink(&destination, &symlink).expect("configured symlink");
+            with_isolated_coverage_artifacts(&[symlink], |_| Ok(()))
+                .expect("the run uses a private sibling, not the configured symlink");
+            assert!(
+                destination.join("keep").is_file(),
+                "the configured symlink and its destination were untouched"
+            );
+        }
+    }
+
+    /// Cleanup failure invalidates an otherwise successful measurement. The
+    /// private parent is removed non-recursively, so an unexpected neighbour is
+    /// reported rather than erased (`A1-457`, audit).
+    #[test]
+    fn a_coverage_cleanup_failure_rejects_the_measurement() {
+        let root = tempfile::Builder::new()
+            .tempdir_in(aplan_core::fixture::fixture_root())
+            .expect("workspace");
+        let configured = root.path().join(LLVM_COV_TARGET);
+        let err = with_isolated_coverage_artifacts(&[configured], |dirs| {
+            let run_dir = dirs[0].parent().expect("private run");
+            std::fs::write(run_dir.join("unexpected-neighbour"), "do not delete")?;
+            Ok("a result that cleanup must invalidate")
+        })
+        .expect_err("cleanup failure must reject the result");
+        let said = err.to_string();
+        assert!(said.contains("no result was accepted"), "{said}");
+        assert!(said.contains("non-recursively"), "{said}");
+    }
+
+    /// `A1-633`: only an exact allocation with a complete, dead ownership
+    /// record is reclaimed. A live owner, PID reuse, a missing record and a
+    /// symlink all retain the candidate.
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn stale_coverage_sweep_refuses_every_unverifiable_neighbour() {
+        use std::os::unix::fs::symlink;
+
+        let root = tempfile::Builder::new()
+            .tempdir_in(aplan_core::fixture::fixture_root())
+            .expect("coverage sweep fixture");
+        let parent = root.path();
+        let current = current_coverage_process_identity().expect("current identity");
+
+        let stale = parent.join(".aplan-coverage-4294967295-0");
+        std::fs::create_dir(&stale).expect("stale allocation");
+        std::fs::write(stale.join("artifact"), "stale").expect("stale artifact");
+        let mut stale_owner = CoverageOwnerRecord {
+            version: 1,
+            phase: CoverageOwnerPhase::Prepared,
+            owner: current.clone(),
+            child: None,
+            process_group: None,
+            lease: "aplan-coverage-v1-stale-fixture".to_string(),
+        };
+        stale_owner.owner.pid = u32::MAX;
+        write_coverage_owner(&stale, &stale_owner).expect("stale owner record");
+
+        let live = parent.join(format!(".aplan-coverage-{}-0", current.pid));
+        std::fs::create_dir(&live).expect("live allocation");
+        let live_owner = CoverageOwnerRecord {
+            lease: "aplan-coverage-v1-live-fixture".to_string(),
+            ..stale_owner.clone()
+        };
+        let live_owner = CoverageOwnerRecord {
+            owner: current.clone(),
+            ..live_owner
+        };
+        write_coverage_owner(&live, &live_owner).expect("live owner record");
+
+        let reused = parent.join(format!(".aplan-coverage-{}-1", current.pid));
+        std::fs::create_dir(&reused).expect("reused allocation");
+        let mut reused_owner = live_owner.clone();
+        reused_owner.owner.start_ticks = reused_owner.owner.start_ticks.saturating_add(1);
+        reused_owner.lease = "aplan-coverage-v1-reused-fixture".to_string();
+        write_coverage_owner(&reused, &reused_owner).expect("reused owner record");
+
+        let missing = parent.join(".aplan-coverage-4294967294-0");
+        std::fs::create_dir(&missing).expect("unrecorded allocation");
+        let malformed = parent.join(".aplan-coverage-not-a-pid-0");
+        std::fs::create_dir(&malformed).expect("malformed neighbour");
+        let outside = parent.join("outside");
+        std::fs::create_dir(&outside).expect("symlink destination");
+        std::fs::write(outside.join("keep"), "outside").expect("outside marker");
+        let link = parent.join(".aplan-coverage-4294967293-0");
+        symlink(&outside, &link).expect("coverage-shaped symlink");
+
+        assert_eq!(sweep_stale_coverage_runs(parent).expect("sweep"), 1);
+        assert!(!stale.exists(), "the proved-stale allocation was retained");
+        assert!(live.is_dir(), "the live owner was removed");
+        assert!(reused.is_dir(), "a reused PID was treated as the old owner");
+        assert!(missing.is_dir(), "a missing ownership record was trusted");
+        assert!(malformed.is_dir(), "a malformed name was treated as owned");
+        assert!(link.is_symlink(), "a coverage-shaped symlink was removed");
+        assert!(
+            outside.join("keep").is_file(),
+            "a symlink target was touched"
+        );
+    }
+
+    /// `A1-633`: the ownership grammar distinguishes an exact process from a
+    /// reused PID and refuses malformed proc/name/lease inputs one boundary at
+    /// a time.
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn proc_disappearance_is_distinct_from_an_unverifiable_error() {
+        assert!(proc_entry_is_gone(&std::io::Error::from(
+            std::io::ErrorKind::NotFound
+        )));
+        assert!(proc_entry_is_gone(&std::io::Error::from_raw_os_error(3)));
+        assert!(!proc_entry_is_gone(&std::io::Error::from(
+            std::io::ErrorKind::PermissionDenied
+        )));
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn coverage_ownership_identity_and_name_predicates_are_strict() {
+        assert_eq!(
+            proc_uid("Name:\tx\nUid:\t1000\t1000\t1000\t1000\n").unwrap(),
+            1000
+        );
+        assert!(
+            proc_uid("Name:\tx\n")
+                .unwrap_err()
+                .to_string()
+                .contains("Uid")
+        );
+        assert!(
+            proc_uid("Uid:\n")
+                .unwrap_err()
+                .to_string()
+                .contains("empty")
+        );
+        assert!(proc_uid("Uid:\tnot-a-number\n").is_err());
+
+        let mut fields = vec!["0"; 20];
+        fields[0] = "S";
+        fields[2] = "17";
+        fields[19] = "12345";
+        let stat = format!("9 (a tricky ) process) {}", fields.join(" "));
+        assert_eq!(proc_start_and_group(&stat).unwrap(), (12_345, 17));
+        assert!(proc_start_and_group("no delimiter").is_err());
+        assert!(proc_start_and_group("1 (x) S").is_err());
+        fields[2] = "bad";
+        assert!(proc_start_and_group(&format!("1 (x) {}", fields.join(" "))).is_err());
+        fields[2] = "17";
+        fields[19] = "bad";
+        assert!(proc_start_and_group(&format!("1 (x) {}", fields.join(" "))).is_err());
+
+        for (name, expected) in [
+            (".aplan-coverage-1-0", Some(1)),
+            (".aplan-coverage-42-9", Some(42)),
+            (".aplan-coverage-0-0", None),
+            (".aplan-coverage-01-0", None),
+            (".aplan-coverage-1-00", None),
+            (".aplan-coverage-1-x", None),
+            (".aplan-coverage-1-0-extra", None),
+            (".aplan-coverage-4294967296-0", None),
+            ("aplan-coverage-1-0", None),
+        ] {
+            assert_eq!(coverage_candidate_pid(name), expected, "candidate {name}");
+        }
+        for lease in ["x", "aplan-coverage-v1-1_2.3"] {
+            assert!(valid_coverage_lease(lease), "valid lease {lease}");
+        }
+        let overlong = "x".repeat(257);
+        for lease in ["", "has space", "has/slash", overlong.as_str()] {
+            assert!(!valid_coverage_lease(lease), "invalid lease {lease}");
+        }
+
+        let current = current_coverage_process_identity().expect("current identity");
+        assert_eq!(
+            coverage_process_state(&current),
+            CoverageProcessState::Matches
+        );
+        let mut reused = current.clone();
+        reused.start_ticks = reused.start_ticks.saturating_add(1);
+        assert_eq!(
+            coverage_process_state(&reused),
+            CoverageProcessState::Reused
+        );
+        let mut old_boot = current.clone();
+        old_boot.boot_id = "00000000-0000-0000-0000-000000000000".to_string();
+        assert_eq!(
+            coverage_process_state(&old_boot),
+            CoverageProcessState::Gone
+        );
+        let mut absent = current.clone();
+        absent.pid = u32::MAX;
+        assert_eq!(coverage_process_state(&absent), CoverageProcessState::Gone);
+
+        let record = CoverageOwnerRecord {
+            version: 1,
+            phase: CoverageOwnerPhase::Running,
+            owner: absent.clone(),
+            child: Some(current.clone()),
+            process_group: Some(current.pid),
+            lease: "aplan-coverage-v1-current-child".to_string(),
+        };
+        assert_eq!(coverage_tree_state(&record), CoverageTreeState::Live);
+        let record = CoverageOwnerRecord {
+            child: Some(reused),
+            ..record
+        };
+        assert_eq!(
+            coverage_tree_state(&record),
+            CoverageTreeState::Unverifiable
+        );
+        let record = CoverageOwnerRecord {
+            phase: CoverageOwnerPhase::Prepared,
+            owner: old_boot,
+            child: None,
+            process_group: None,
+            lease: "aplan-coverage-v1-old-boot".to_string(),
+            version: 1,
+        };
+        assert_eq!(coverage_tree_state(&record), CoverageTreeState::Gone);
+    }
+
+    /// `A1-633`: a syntactically valid record is still rejected when its
+    /// process identities or process-group relationship could not have been
+    /// produced by the coverage lifecycle.
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn coverage_owner_record_requires_consistent_process_identities() {
+        let current = current_coverage_process_identity().expect("current identity");
+        assert!(valid_coverage_identity(&current));
+        let mut malformed_identity = current.clone();
+        malformed_identity.boot_id = "not-a-linux-boot-id".to_string();
+        assert!(!valid_coverage_identity(&malformed_identity));
+        malformed_identity = current.clone();
+        malformed_identity.start_ticks = 0;
+        assert!(!valid_coverage_identity(&malformed_identity));
+
+        let record = CoverageOwnerRecord {
+            version: 1,
+            phase: CoverageOwnerPhase::Running,
+            owner: current.clone(),
+            child: Some(current.clone()),
+            process_group: Some(current.pid),
+            lease: "aplan-coverage-v1-consistent-record".to_string(),
+        };
+        assert!(consistent_coverage_owner(&record));
+        let mut inconsistent = record.clone();
+        inconsistent.process_group = Some(current.pid.saturating_add(1));
+        assert!(!consistent_coverage_owner(&inconsistent));
+        inconsistent = record;
+        inconsistent.child.as_mut().expect("child").uid = current.uid.saturating_add(1);
+        assert!(!consistent_coverage_owner(&inconsistent));
+    }
+
+    /// `A1-633`: an ownership record is trusted only as one bounded real file
+    /// with the exact v1 shape and a phase consistent with its child fields.
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn coverage_owner_record_refuses_missing_hostile_and_inconsistent_files() {
+        use std::os::unix::fs::symlink;
+
+        let fixture = tempfile::Builder::new()
+            .tempdir_in(aplan_core::fixture::fixture_root())
+            .expect("owner-record fixture");
+        let valid = new_coverage_owner_record().expect("valid owner");
+
+        let absent = fixture.path().join("absent");
+        std::fs::create_dir(&absent).expect("absent-record allocation");
+        assert!(read_coverage_owner(&absent).is_err());
+
+        let real = fixture.path().join("real");
+        std::fs::create_dir(&real).expect("real allocation");
+        write_coverage_owner(&real, &valid).expect("write valid record");
+        assert_eq!(read_coverage_owner(&real).unwrap(), valid);
+
+        let inconsistent = fixture.path().join("inconsistent");
+        std::fs::create_dir(&inconsistent).expect("inconsistent allocation");
+        let mut bad = valid.clone();
+        bad.version = 2;
+        write_coverage_owner(&inconsistent, &bad).expect("write future record");
+        assert!(
+            read_coverage_owner(&inconsistent)
+                .unwrap_err()
+                .to_string()
+                .contains("inconsistent")
+        );
+
+        let malformed = fixture.path().join("malformed");
+        std::fs::create_dir(&malformed).expect("malformed allocation");
+        std::fs::write(malformed.join(COVERAGE_OWNER), "not json").expect("malformed record");
+        assert!(
+            read_coverage_owner(&malformed)
+                .unwrap_err()
+                .to_string()
+                .contains("parsing")
+        );
+
+        let oversized = fixture.path().join("oversized");
+        std::fs::create_dir(&oversized).expect("oversized allocation");
+        std::fs::write(oversized.join(COVERAGE_OWNER), vec![b'x'; 16 * 1024 + 1])
+            .expect("oversized record");
+        assert!(
+            read_coverage_owner(&oversized)
+                .unwrap_err()
+                .to_string()
+                .contains("bounded real file")
+        );
+
+        let linked = fixture.path().join("linked");
+        std::fs::create_dir(&linked).expect("linked allocation");
+        symlink(real.join(COVERAGE_OWNER), linked.join(COVERAGE_OWNER))
+            .expect("linked owner record");
+        assert!(
+            read_coverage_owner(&linked)
+                .unwrap_err()
+                .to_string()
+                .contains("bounded real file")
+        );
+
+        let directory = fixture.path().join("directory");
+        std::fs::create_dir_all(directory.join(COVERAGE_OWNER)).expect("directory-shaped record");
+        assert!(read_coverage_owner(&directory).is_err());
+    }
+
+    /// `A1-633`: current-run cleanup does not silently accept a removed or
+    /// replaced owner record merely because the instrumented child is absent.
+    #[test]
+    fn coverage_cleanup_requires_the_real_owner_record_it_created() {
+        let fixture = tempfile::Builder::new()
+            .tempdir_in(aplan_core::fixture::fixture_root())
+            .expect("cleanup owner fixture");
+        let configured = fixture.path().join(LLVM_COV_TARGET);
+        let err = with_isolated_coverage_artifacts(std::slice::from_ref(&configured), |dirs| {
+            let owner = dirs[0]
+                .parent()
+                .expect("run directory")
+                .join(COVERAGE_OWNER);
+            std::fs::remove_file(owner)?;
+            Ok(())
+        })
+        .expect_err("missing owner must invalidate cleanup");
+        assert!(err.to_string().contains("owner record"), "{err:#}");
+
+        let configured = fixture.path().join("second").join(LLVM_COV_TARGET);
+        let err = with_isolated_coverage_artifacts(std::slice::from_ref(&configured), |dirs| {
+            let owner = dirs[0]
+                .parent()
+                .expect("run directory")
+                .join(COVERAGE_OWNER);
+            std::fs::remove_file(&owner)?;
+            std::fs::create_dir(&owner)?;
+            Ok(())
+        })
+        .expect_err("directory-shaped owner must invalidate cleanup");
+        assert!(
+            err.to_string().contains("not the real ownership file"),
+            "{err:#}"
+        );
+
+        let configured = fixture.path().join("third").join(LLVM_COV_TARGET);
+        let err = with_isolated_coverage_artifacts(
+            std::slice::from_ref(&configured),
+            |dirs| -> Result<()> {
+                let owner = dirs[0]
+                    .parent()
+                    .expect("run directory")
+                    .join(COVERAGE_OWNER);
+                std::fs::remove_file(owner)?;
+                Err(anyhow::anyhow!("measurement also failed"))
+            },
+        )
+        .expect_err("both failures must be preserved");
+        let said = format!("{err:#}");
+        assert!(said.contains("measurement also failed"), "{said}");
+        assert!(said.contains("cleanup failed"), "{said}");
+        assert!(said.contains("owner record"), "{said}");
+    }
+
+    /// `A1-633`: installing and dropping the signal owner without a signal is
+    /// inert, including after a child identity has been published.
+    #[cfg(unix)]
+    #[test]
+    fn coverage_signal_owner_is_inert_on_normal_completion() {
+        let owner = CoverageSignalOwner::install().expect("install signal owner");
+        owner.publish_child(u32::MAX);
+        owner.clear_child();
+        assert_eq!(owner.child_pid.load(std::sync::atomic::Ordering::SeqCst), 0);
+        drop(owner);
+        assert_eq!(
+            COVERAGE_INTERRUPTED_BY.load(std::sync::atomic::Ordering::SeqCst),
+            0
+        );
+        resume_coverage_signal();
+    }
+
+    /// `A1-633`: the real command lifecycle publishes its child identity and
+    /// still returns a parsed report through the isolated-allocation cleanup.
+    /// A fake producer keeps this focused on ownership rather than recursively
+    /// invoking an instrumented Cargo build from the unit-test process.
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn coverage_command_runs_inside_and_cleans_its_owned_allocation() {
+        let fixture = tempfile::Builder::new()
+            .tempdir_in(aplan_core::fixture::fixture_root())
+            .expect("coverage command fixture");
+        let source = fixture.path().join("xtask/src/main.rs");
+        std::fs::create_dir_all(source.parent().expect("source parent")).expect("source tree");
+        std::fs::write(&source, "covered line\n").expect("source");
+        let report = serde_json::json!({
+            "data": [{
+                "files": [{
+                    "filename": source,
+                    "summary": {"lines": {"covered": 1, "count": 1}}
+                }]
+            }]
+        })
+        .to_string();
+        let configured = fixture.path().join("target/llvm-cov-target");
+        let mut allocated = None;
+
+        let measured =
+            with_isolated_coverage_artifacts(std::slice::from_ref(&configured), |artifact_dirs| {
+                allocated = artifact_dirs
+                    .first()
+                    .and_then(|path| path.parent())
+                    .map(Path::to_path_buf);
+                let mut command = Command::new("/bin/sh");
+                command.args([
+                    "-c",
+                    "/bin/sleep 0.1; printf '%s' \"$1\"",
+                    "coverage-fixture",
+                    &report,
+                ]);
+                run_coverage_command(fixture.path(), artifact_dirs, command)
+            })
+            .expect("measure fake report");
+
+        assert_eq!(measured.get("xtask"), Some(&(1, 1)));
+        assert!(
+            !allocated.expect("private allocation").exists(),
+            "the successful command left its private allocation behind"
+        );
+    }
+
+    /// `A1-633`: a child failure is still an ordinary return through the
+    /// isolation wrapper, so its stderr is reported only after the owned
+    /// allocation has been removed.
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn a_failed_coverage_command_cleans_its_owned_allocation() {
+        let fixture = tempfile::Builder::new()
+            .tempdir_in(aplan_core::fixture::fixture_root())
+            .expect("coverage failure fixture");
+        let configured = fixture.path().join("target/llvm-cov-target");
+        let mut allocated = None;
+
+        let error =
+            with_isolated_coverage_artifacts(std::slice::from_ref(&configured), |artifact_dirs| {
+                allocated = artifact_dirs
+                    .first()
+                    .and_then(|path| path.parent())
+                    .map(Path::to_path_buf);
+                let mut command = Command::new("/bin/sh");
+                command.args(["-c", "printf 'measured failure' >&2; exit 7"]);
+                run_coverage_command(fixture.path(), artifact_dirs, command)
+            })
+            .expect_err("the failed producer must be reported");
+
+        assert!(error.to_string().contains("measured failure"), "{error:#}");
+        assert!(
+            !allocated.expect("private allocation").exists(),
+            "the failed command left its private allocation behind"
+        );
+    }
+
+    /// `A1-633`: killing the recorded parent cannot make its inherited lease
+    /// look stale while an uncooperative child remains. Once the complete group
+    /// is gone, the next sweep reclaims the allocation.
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn stale_coverage_sweep_waits_for_a_killed_owners_live_child() {
+        use std::os::unix::process::CommandExt as _;
+
+        let root = tempfile::Builder::new()
+            .tempdir_in(aplan_core::fixture::fixture_root())
+            .expect("coverage process fixture");
+        let descendant_pid_file = root.path().join("descendant.pid");
+        let lease = "aplan-coverage-v1-live-child-fixture";
+        let mut owner = Command::new("/bin/sleep")
+            .arg("60")
+            .spawn()
+            .expect("coverage owner process");
+        let mut command = Command::new("/bin/sh");
+        command
+            .arg("-c")
+            .arg("sleep 60 & echo $! > \"$1\"; wait")
+            .arg("coverage-child")
+            .arg(&descendant_pid_file)
+            .env(COVERAGE_LEASE_ENV, lease)
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .process_group(0);
+        let mut child = command.spawn().expect("coverage child process");
+        let process_group = child.id();
+        let descendant_pid = wait_for_live_pid(&descendant_pid_file);
+        let owner_identity = coverage_process_identity(owner.id()).expect("owner identity");
+        let child_identity = coverage_process_identity(child.id()).expect("child identity");
+        let allocation = root
+            .path()
+            .join(format!(".aplan-coverage-{}-0", owner.id()));
+        std::fs::create_dir(&allocation).expect("coverage allocation");
+        std::fs::write(allocation.join("artifact"), "live").expect("coverage artifact");
+        write_coverage_owner(
+            &allocation,
+            &CoverageOwnerRecord {
+                version: 1,
+                phase: CoverageOwnerPhase::Running,
+                owner: owner_identity,
+                child: Some(child_identity),
+                process_group: Some(process_group),
+                lease: lease.to_string(),
+            },
+        )
+        .expect("running owner record");
+
+        owner.kill().expect("kill owning parent");
+        owner.wait().expect("reap owning parent");
+        assert_eq!(
+            sweep_stale_coverage_runs(root.path()).expect("live sweep"),
+            0
+        );
+        assert!(
+            allocation.is_dir(),
+            "a live descendant's allocation was removed"
+        );
+
+        child.kill().expect("kill recorded child");
+        child.wait().expect("reap recorded child");
+        assert_eq!(
+            sweep_stale_coverage_runs(root.path()).expect("group sweep"),
+            0
+        );
+        assert!(
+            allocation.is_dir(),
+            "a live process-group descendant's allocation was removed"
+        );
+
+        kill_coverage_process_group(process_group);
+        let descendant_proc = PathBuf::from(format!("/proc/{descendant_pid}"));
+        wait_for_path_state(&descendant_proc, false);
+        // A same-boot sweep deliberately retains the allocation if any `/proc`
+        // entry disappears while the full process table is being inspected.
+        // Parallel tests create that harmless uncertainty frequently, and a
+        // later scan is the production recovery path. Prove the dead tree is
+        // eventually reclaimed without weakening that fail-closed policy.
+        let mut removed = 0;
+        for _ in 0..100 {
+            removed += sweep_stale_coverage_runs(root.path()).expect("stale sweep");
+            if removed == 1 {
+                break;
+            }
+        }
+        assert_eq!(
+            removed, 1,
+            "the proved-dead allocation survived 100 conservative scans"
+        );
+        assert!(!allocation.exists(), "the dead process tree was retained");
+    }
+
+    /// Two overlapping measurements against one configured target get distinct
+    /// directories, and ending either run cannot remove the other's objects
+    /// (`A1-457`, audit).
+    #[test]
+    fn overlapping_coverage_measurements_are_isolated() {
+        let root = tempfile::Builder::new()
+            .tempdir_in(aplan_core::fixture::fixture_root())
+            .expect("workspace");
+        let configured = root.path().join(LLVM_COV_TARGET);
+        let mut outer_path = None;
+        with_isolated_coverage_artifacts(std::slice::from_ref(&configured), |outer| {
+            outer_path = Some(outer[0].clone());
+            std::fs::create_dir(&outer[0])?;
+            std::fs::write(outer[0].join("outer-object"), "outer")?;
+            let mut inner_path = None;
+            with_isolated_coverage_artifacts(std::slice::from_ref(&configured), |inner| {
+                inner_path = Some(inner[0].clone());
+                assert_ne!(inner[0], outer[0]);
+                assert!(outer[0].join("outer-object").is_file());
+                std::fs::create_dir(&inner[0])?;
+                std::fs::write(inner[0].join("inner-object"), "inner")?;
+                Ok(())
+            })?;
+            assert!(outer[0].join("outer-object").is_file());
+            assert!(!inner_path.expect("inner path").exists());
+            Ok(())
+        })
+        .expect("overlapping isolated runs");
+        assert!(!outer_path.expect("outer path").exists());
+    }
+
+    /// The false negative that filed `A1-457`: two mappings can be merged while
+    /// their sum remains below the source file's physical line count.
+    #[test]
+    fn a_mixed_mapping_below_the_physical_line_count_cannot_reach_floor_comparison() {
+        let root = tempfile::Builder::new()
+            .tempdir_in(aplan_core::fixture::fixture_root())
+            .expect("workspace");
+        let source = root.path().join("xtask/src/main.rs");
+        std::fs::create_dir_all(source.parent().expect("source parent")).expect("source tree");
+        std::fs::write(&source, "line\n".repeat(100)).expect("source");
+        let entry = |covered: u64, count: u64| {
+            serde_json::json!({
+                "filename": source,
+                "summary": {"lines": {"covered": covered, "count": count}},
+            })
+        };
+
+        let mixed = total_per_crate(&[entry(15, 30)], root.path())
+            .expect("the old physical-line heuristic accepts 30 below 100");
+        let mixed_pct = mixed
+            .iter()
+            .map(|(name, value)| (name.clone(), as_f64(&pct(*value))))
+            .collect();
+        let floor = floors(&[("xtask", 90.0)]);
+        assert!(
+            !compare_floors(&mixed_pct, &floor).is_empty(),
+            "the accepted mixed mapping would have reached and failed the floor"
+        );
+
+        let configured = root.path().join(LLVM_COV_TARGET);
+        std::fs::create_dir_all(&configured).expect("old shared coverage target");
+        let stale = configured.join("mixed-mapping");
+        std::fs::write(&stale, serde_json::to_vec(&entry(15, 30)).unwrap()).expect("stale mapping");
+        let stale_reached_measurement = std::cell::Cell::new(false);
+        let measured: BTreeMap<String, (u64, u64)> =
+            with_isolated_coverage_artifacts(&[configured], |run_dirs| {
+                stale_reached_measurement.set(run_dirs[0].join("mixed-mapping").exists());
+                assert!(stale.exists(), "the old shared mapping was not consulted");
+                Ok([("xtask".to_string(), (9, 10))].into_iter().collect())
+            })
+            .expect("isolated measurement");
+        assert!(
+            !stale_reached_measurement.get(),
+            "the mixed mapping survived into measurement"
+        );
+        let measured_pct = measured
+            .iter()
+            .map(|(name, value)| (name.clone(), as_f64(&pct(*value))))
+            .collect();
+        assert!(
+            compare_floors(&measured_pct, &floor).is_empty(),
+            "only the one-build measurement reaches floor comparison"
+        );
+    }
+
     /// Files outside the workspace are skipped, not counted as a crate.
     #[test]
     fn coverage_counts_only_files_inside_the_workspace() {
@@ -2183,6 +4270,9 @@ mod tests {
             total_per_crate(&files, root).expect("the workspace file counts"),
             [("xtask".to_string(), (5, 10))].into_iter().collect()
         );
+        let error = total_per_crate(&files[..1], root)
+            .expect_err("a report containing no workspace file must be refused");
+        assert!(error.to_string().contains("no files inside the workspace"));
     }
 
     #[test]
@@ -2306,44 +4396,49 @@ mod tests {
     }
 
     #[test]
-    fn doc_sources_collects_every_doc_that_cites_a_task_id() {
-        // The gate is only as wide as this list: a doc missing from it can name a
-        // task that does not exist and still read as handled.
+    fn declared_doc_sources_follow_config_instead_of_a_built_in_list() {
         let dir = tempfile::Builder::new()
             .tempdir_in(aplan_core::fixture::fixture_root())
             .expect("tempdir");
-        let pilots = dir.path().join("docs/pilots");
-        std::fs::create_dir_all(&pilots).expect("dirs");
-        std::fs::write(dir.path().join("docs/upgrading.md"), "cites `A1-068`").expect("guide");
-        std::fs::write(pilots.join("b.md"), "b").expect("b");
-        std::fs::write(pilots.join("a.md"), "a").expect("a");
-        std::fs::write(pilots.join("notes.txt"), "not markdown").expect("txt");
+        std::fs::create_dir_all(dir.path().join("notes")).expect("dirs");
+        std::fs::write(dir.path().join("CUSTOM.md"), "custom").expect("custom");
+        std::fs::write(dir.path().join("notes/b.md"), "b").expect("b");
+        std::fs::write(dir.path().join("notes/a.md"), "a").expect("a");
+        // These are names the removed implementation knew by heart. Their
+        // presence must not put them in the set unless config says so.
+        std::fs::write(dir.path().join("ROADMAP.md"), "not declared").expect("roadmap");
+        std::fs::write(dir.path().join("CHANGELOG.md"), "not declared").expect("changelog");
+        std::fs::write(
+            dir.path().join(".aplan.yml"),
+            "docs:\n  paths: [CUSTOM.md, 'notes/*.md']\n",
+        )
+        .expect("config");
 
-        let got = doc_sources(dir.path(), "roadmap body").expect("collecting");
+        let got = declared_doc_sources(dir.path()).expect("collecting");
         let names: Vec<&str> = got.iter().map(|(n, _)| n.as_str()).collect();
         assert_eq!(
             names,
-            vec![
-                "ROADMAP.md",
-                "docs/upgrading.md",
-                "docs/pilots/a.md",
-                "docs/pilots/b.md"
-            ],
-            "sorted, and only markdown"
+            vec!["CUSTOM.md", "notes/a.md", "notes/b.md"],
+            "sorted, globbed, and only what config declares"
         );
-        assert_eq!(got[1].1, "cites `A1-068`", "the guide's body must be read");
+        assert_eq!(got[0].1, "custom", "the declared body must be read");
     }
 
     #[test]
-    fn doc_sources_skips_documents_a_repository_does_not_have() {
-        // A consumer repository has no `docs/upgrading.md` and no pilot logs, and
-        // the gate must still run rather than failing on a missing file.
+    fn a_declared_source_that_matches_nothing_is_a_refusal() {
         let dir = tempfile::Builder::new()
             .tempdir_in(aplan_core::fixture::fixture_root())
             .expect("tempdir");
-        let got = doc_sources(dir.path(), "roadmap body").expect("collecting");
-        assert_eq!(got.len(), 1);
-        assert_eq!(got[0].0, "ROADMAP.md");
+        std::fs::write(
+            dir.path().join(".aplan.yml"),
+            "docs:\n  paths: ['missing/*.md']\n",
+        )
+        .expect("config");
+        let error = format!(
+            "{:#}",
+            declared_doc_sources(dir.path()).expect_err("a declaration over nothing must not pass")
+        );
+        assert!(error.contains("matched no files"), "{error}");
     }
 
     /// The plan this repository's own prose is checked against, in miniature.

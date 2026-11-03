@@ -1,0 +1,13 @@
++> aplan <------------------------------------+
+|TERMINAL TOO SMALL                           |
+|Current: 47x13. Required: 48x14.             |
+|Resize to retry automatically. Press Esc, q  |
+|or Ctrl-C to quit.                           |
+|                                             |
+|                                             |
+|                                             |
+|                                             |
+|                                             |
+|                                             |
+|                                             |
++---------------------------------------------+

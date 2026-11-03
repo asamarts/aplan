@@ -12,7 +12,7 @@
 
 use std::path::Path;
 
-mod common;
+use crate::common;
 use common::{aplan, run};
 
 /// The policy this repository runs on itself, which is the one that traps.

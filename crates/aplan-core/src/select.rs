@@ -29,23 +29,23 @@ use crate::task::{Status, Task};
 ///
 /// Empty means the whole plan, so a command can always build one and apply it
 /// without asking whether the user selected anything.
-#[derive(Debug, Clone, Default, PartialEq, Eq)]
+#[derive(Debug, Clone, Default, PartialEq, Eq, serde::Serialize)]
 pub struct Selector {
     /// Cut labels or milestone ids. A task matches if it is in any of them.
     pub cuts: Vec<String>,
+    /// Numeric phases. A task matches if it carries any of them.
+    pub phases: Vec<u32>,
     /// Tags. A task matches if it carries any of them.
     pub tags: Vec<String>,
     /// Owners. A task matches if any is its owner.
     pub owners: Vec<String>,
     /// Statuses. A task matches if it is in any of them.
     pub statuses: Vec<Status>,
-    /// Only tasks nobody holds (`A1-359`).
+    /// Only tasks with no observed ephemeral claim (`A1-531`).
     ///
-    /// The complement of `owners`, and a separate field rather than a magic
-    /// owner value, because "unassigned" is the *absence* of a name and a
-    /// sentinel string would be a name somebody could claim. Combining it with
-    /// `owners` selects nothing, which is the honest answer to a contradictory
-    /// question and is said rather than silently widened.
+    /// This is a separate dimension from durable `owners`: a task can be the
+    /// responsibility of team `x` while nobody is actively working on it.
+    /// Callers evaluating this dimension must use [`Self::matches_claimed`].
     pub unclaimed: bool,
 }
 
@@ -54,6 +54,7 @@ impl Selector {
     #[must_use]
     pub fn is_empty(&self) -> bool {
         self.cuts.is_empty()
+            && self.phases.is_empty()
             && self.tags.is_empty()
             && self.owners.is_empty()
             && self.statuses.is_empty()
@@ -69,21 +70,91 @@ impl Selector {
     /// other tool with these flags uses.
     #[must_use]
     pub fn matches(&self, task: &Task, cut: Option<&str>, milestone: Option<&str>) -> bool {
+        self.matches_fields(
+            task.phase,
+            task.status,
+            task.owner.as_deref(),
+            &task.tags,
+            cut,
+            milestone,
+        )
+    }
+
+    /// Whether a task matches when its ephemeral claim state is known.
+    ///
+    /// `owner` remains durable plan responsibility. `claimed` is deliberately
+    /// separate: collapsing the two is the worktree-coordination defect
+    /// `A1-531` removes. `None` means the local coordination scope was not
+    /// observable and therefore never satisfies `unclaimed`.
+    #[must_use]
+    pub fn matches_claimed(
+        &self,
+        task: &Task,
+        cut: Option<&str>,
+        milestone: Option<&str>,
+        claimed: Option<bool>,
+    ) -> bool {
+        self.matches_fields_claimed(
+            task.phase,
+            task.status,
+            task.owner.as_deref(),
+            &task.tags,
+            cut,
+            milestone,
+            claimed,
+        )
+    }
+
+    /// Whether resolved task fields are in the subset.
+    ///
+    /// Views whose rows already came from [`crate::Graph`] use this form so
+    /// they do not need to recover a second [`Task`] model merely to apply the
+    /// selector. It is deliberately the implementation behind [`Self::matches`]:
+    /// interactive and command-line consumers cannot acquire subtly different
+    /// readings of a selector dimension.
+    #[must_use]
+    pub fn matches_fields(
+        &self,
+        phase: u32,
+        status: Status,
+        owner: Option<&str>,
+        tags: &[String],
+        cut: Option<&str>,
+        milestone: Option<&str>,
+    ) -> bool {
         let in_cut = self.cuts.is_empty()
             || self
                 .cuts
                 .iter()
                 .any(|want| Some(want.as_str()) == cut || Some(want.as_str()) == milestone);
-        let has_tag = self.tags.is_empty() || task.tags.iter().any(|t| self.tags.contains(t));
-        let owned =
-            self.owners.is_empty() || task.owner.as_ref().is_some_and(|o| self.owners.contains(o));
-        let is_status = self.statuses.is_empty() || self.statuses.contains(&task.status);
-        // `--unclaimed` alongside `--owner x` asks for a task that is both held
-        // by `x` and held by nobody, and selects nothing. Narrowing across
-        // dimensions is the documented reading, and quietly turning a
-        // contradiction into a union would answer a question nobody asked.
-        let held_by_nobody = !self.unclaimed || task.owner.is_none();
-        in_cut && has_tag && owned && is_status && held_by_nobody
+        let has_tag = self.tags.is_empty() || tags.iter().any(|tag| self.tags.contains(tag));
+        let is_phase = self.phases.is_empty() || self.phases.contains(&phase);
+        let has_requested_owner = self.owners.is_empty()
+            || owner.is_some_and(|candidate| self.owners.iter().any(|want| want == candidate));
+        let is_status = self.statuses.is_empty() || self.statuses.contains(&status);
+        // No claim observation was supplied to this compatibility entry point.
+        // Fail closed for `unclaimed`; absence of an observation is not an
+        // observation that the task is free.
+        in_cut && is_phase && has_tag && has_requested_owner && is_status && !self.unclaimed
+    }
+
+    /// Apply the selector with an independently observed ephemeral claim.
+    #[must_use]
+    #[allow(clippy::too_many_arguments)]
+    pub fn matches_fields_claimed(
+        &self,
+        phase: u32,
+        status: Status,
+        owner: Option<&str>,
+        tags: &[String],
+        cut: Option<&str>,
+        milestone: Option<&str>,
+        claimed: Option<bool>,
+    ) -> bool {
+        let mut durable = self.clone();
+        durable.unclaimed = false;
+        durable.matches_fields(phase, status, owner, tags, cut, milestone)
+            && (!self.unclaimed || claimed == Some(false))
     }
 
     /// How a view says what it was narrowed to.
@@ -99,6 +170,10 @@ impl Selector {
                 }
             };
             say("cut", self.cuts.clone());
+            say(
+                "phase",
+                self.phases.iter().map(ToString::to_string).collect(),
+            );
             say("tag", self.tags.clone());
             say("owner", self.owners.clone());
             say(
@@ -107,9 +182,10 @@ impl Selector {
             );
         }
         // Not a value in a dimension, so it is said rather than listed: there
-        // is no name to print, and "owner `nobody`" would read as a name.
+        // is no name to print. Say activity rather than ownership because a
+        // durable owner may still match the same selector (`A1-531`).
         if self.unclaimed {
-            out.push("held by nobody".to_string());
+            out.push("not actively claimed".to_string());
         }
         out
     }
@@ -135,6 +211,7 @@ mod tests {
             paths: Vec::new(),
             traces: Vec::new(),
             trace_fingerprints: std::collections::BTreeMap::new(),
+            evidence_fingerprints: std::collections::BTreeMap::new(),
             tags: tags.iter().map(|s| (*s).to_string()).collect(),
             revisit_at: None,
             version_impact: None,
@@ -160,6 +237,20 @@ mod tests {
         assert!(s.matches(&task("A", None, &["a"], Status::Todo), None, None));
         assert!(s.matches(&task("B", None, &["b"], Status::Todo), None, None));
         assert!(!s.matches(&task("C", None, &["c"], Status::Todo), None, None));
+    }
+
+    #[test]
+    fn phase_values_are_a_real_selector_dimension() {
+        let s = Selector {
+            phases: vec![2, 4],
+            ..Selector::default()
+        };
+        let mut in_phase = task("A", None, &[], Status::Todo);
+        in_phase.phase = 4;
+        let mut outside = task("B", None, &[], Status::Todo);
+        outside.phase = 3;
+        assert!(s.matches(&in_phase, None, None));
+        assert!(!s.matches(&outside, None, None));
     }
 
     /// Across dimensions, all: two dimensions narrow.
@@ -204,9 +295,26 @@ mod tests {
     }
 
     #[test]
+    fn stable_owner_and_no_ephemeral_claim_are_compatible_dimensions() {
+        let s = Selector {
+            owners: vec!["kim".into()],
+            unclaimed: true,
+            ..Selector::default()
+        };
+        let owned = task("A", Some("kim"), &[], Status::Todo);
+        assert!(s.matches_claimed(&owned, None, None, Some(false)));
+        assert!(!s.matches_claimed(&owned, None, None, Some(true)));
+        assert!(
+            !s.matches(&owned, None, None),
+            "a caller with no claim observation must fail closed"
+        );
+    }
+
+    #[test]
     fn the_description_names_every_dimension_given() {
         let s = Selector {
             cuts: vec!["v0.9".into()],
+            phases: vec![2],
             tags: vec!["cli".into(), "output".into()],
             owners: Vec::new(),
             statuses: vec![Status::Todo],
@@ -214,7 +322,12 @@ mod tests {
         };
         assert_eq!(
             s.describe(),
-            ["cut `v0.9`", "tag `cli`, `output`", "status `todo`"]
+            [
+                "cut `v0.9`",
+                "phase `2`",
+                "tag `cli`, `output`",
+                "status `todo`"
+            ]
         );
         // Said rather than listed, and last, because it names no value
         // (`A1-359`).
@@ -226,9 +339,10 @@ mod tests {
             .describe(),
             [
                 "cut `v0.9`",
+                "phase `2`",
                 "tag `cli`, `output`",
                 "status `todo`",
-                "held by nobody"
+                "not actively claimed"
             ]
         );
         assert!(

@@ -47,6 +47,7 @@ fn capped_checker(max_memory: Option<&str>) -> aplan_config::UrlCheck {
         timeout_seconds: Some(60),
         max_memory: max_memory.map(ToString::to_string),
         max_processes: None,
+        max_output: None,
         wrap: None,
     }
 }
@@ -78,14 +79,18 @@ fn capped(
     max_processes: Option<u32>,
 ) -> VerifyOptions {
     VerifyOptions {
+        detect_drift: false,
         version: None,
         traces_root: None,
         config_file: None,
         execute: true,
         test_runner: Some(TestRunners::One(TestRunner {
+            weight: None,
+            exclusive: None,
             output_lines: None,
             max_memory: max_memory.map(ToString::to_string),
             max_processes,
+            max_output: None,
             wrap: None,
             expect_tests: None,
             skipped: None,
@@ -93,12 +98,15 @@ fn capped(
             timeout_seconds: None,
             covers: None,
             covers_by_test: None,
+            inputs_by_test: None,
             name: None,
             dir: None,
             list: list.iter().map(|s| (*s).to_string()).collect(),
             run: run.iter().map(|s| (*s).to_string()).collect(),
+            batch: None,
         })),
         max_unrelated_files: None,
+        observation_inputs: None,
         url_check: None,
     }
 }
@@ -119,6 +127,7 @@ fn done_task(id: &str, evidence: Vec<Evidence>) -> Task {
         paths: Vec::new(),
         traces: Vec::new(),
         trace_fingerprints: std::collections::BTreeMap::new(),
+        evidence_fingerprints: std::collections::BTreeMap::new(),
         tags: Vec::new(),
         revisit_at: None,
         version_impact: None,
@@ -285,12 +294,14 @@ fn a_url_checker_stopped_at_its_cap_is_a_configuration_fault() {
         &plan_of(task),
         dir.path(),
         &VerifyOptions {
+            detect_drift: false,
             version: None,
             traces_root: None,
             config_file: None,
             execute: false,
             test_runner: None,
             max_unrelated_files: None,
+            observation_inputs: None,
             url_check: Some(capped_checker(Some("64M"))),
         },
     )

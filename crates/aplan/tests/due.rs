@@ -11,7 +11,7 @@
 
 use std::path::Path;
 
-mod common;
+use crate::common;
 use common::aplan;
 
 /// Two parked tasks, one revisit in the past and one ahead of it.

@@ -1,14 +1,14 @@
 //! The wiring: a spawn through `common` reaches the recorder (`A1-207`).
 //!
-//! One test, in a file of its own, because it redirects the recording for the
-//! whole test binary. Everything else about the recorder is unit-tested in
-//! `spawn_helper.rs`; what only an end-to-end run can show is that [`common::run`]
-//! calls it at all -- a recorder that formats a line perfectly and is never
-//! reached is the shape of defect this module exists to remove.
+//! Everything else about the recorder is unit-tested in `spawn_helper.rs`; what
+//! only an end-to-end run can show is that [`common::run`] calls it at all -- a
+//! recorder that formats a line perfectly and is never reached is the shape of
+//! defect this module exists to remove. The override is scoped to this test
+//! thread so the merged integration harness can run it concurrently (`A1-630`).
 
 use std::path::PathBuf;
 
-mod common;
+use crate::common;
 
 #[test]
 fn a_spawn_through_the_helper_reaches_the_recorder() {
@@ -30,7 +30,7 @@ fn a_spawn_through_the_helper_reaches_the_recorder() {
         "a run wrote a recording before one was asked for"
     );
 
-    common::record_into(log.clone());
+    let _recording = common::record_into(log.clone());
 
     common::run(dir.path(), &["summary"]);
     common::output(dir.path(), &["check", "--format", "json"]);

@@ -8,6 +8,27 @@ works on `A1-042`, `WH2-06`, `K0-3` and `M-phase-2` without this tool owning an
 id format. `M-v0.N`, which is how prose writes "a milestone", is not a reference
 to `M-v0`: a reference ends at a word boundary as well as starting at one.
 
+The plan also teaches whether a numeric family continues through hyphenated
+suffixes. The P00024-shaped ids below therefore resolve as complete references,
+including across backticks and ordinary punctuation.
+
+```
+$ aplan check-docs MULTI.md
+ok: 1 document(s), 0 reference(s) naming no task
+
+```
+
+An unknown member of that family is likewise reported whole. Truncating this to
+`M-p0` would send the reader looking for a task the document never named.
+
+```
+$ aplan check-docs MULTI-DANGLING.md
+? 1
+MULTI-DANGLING.md:3: `M-p0-review` is not a task in this plan
+failed: 1 document(s), 1 reference(s) naming no task
+
+```
+
 ```
 $ aplan check-docs NOTES.md
 ? 1
@@ -165,6 +186,6 @@ gate that cannot fire says so instead: reporting `ok` here would be the same
 ```
 $ aplan --root wordy check-docs wordy/NOTES.md
 ? 2
-aplan: this plan's ids teach no prefix (an id ending in digits, like `T-042`, teaches `T-`), so nothing in a document can be told from an ordinary word; `check-docs` checked nothing
+aplan: this plan's ids teach no prefix (an id with a numeric core, like `T-042` or `M-p0-design`, teaches its family), so nothing in a document can be told from an ordinary word; `check-docs` checked nothing
 
 ```

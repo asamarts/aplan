@@ -9,7 +9,7 @@
 //! Driven through the binary because the number an adopter reads is the summary
 //! line, and that is produced by the CLI rather than by either library it calls.
 
-mod common;
+use crate::common;
 use common::aplan;
 
 /// `broken` files carrying the pilot's exact defect, and `dependents` tasks each

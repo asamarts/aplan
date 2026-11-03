@@ -6,24 +6,24 @@
 //! precedence between scopes, and that the whole-plan setting still applies
 //! where no scope matches.
 //!
-//! The subset is named with the four dimensions the command line takes
+//! The subset is named with the five dimensions the command line takes
 //! (`A1-214`, ADR-0026), so what a subset *is* has one definition and two
 //! renderings.
 
-mod common;
+use crate::common;
 
 fn plan(dir: &std::path::Path, config: &str) {
     let tasks = dir.join("aplan/tasks");
     std::fs::create_dir_all(&tasks).expect("tasks dir");
     std::fs::write(dir.join(".aplan.yml"), config).expect("config");
-    for (id, tag) in [("T-1", "cross-cutting"), ("T-2", "spike")] {
+    for (id, phase, tag) in [("T-1", 0, "cross-cutting"), ("T-2", 1, "spike")] {
         std::fs::write(
             tasks.join(format!("{id}.md")),
             format!(
                 "---\n\
                  id: {id}\n\
                  title: closed on a commit\n\
-                 phase: 0\n\
+                 phase: {phase}\n\
                  status: done\n\
                  owner: t\n\
                  effort_days: 1\n\
@@ -37,6 +37,36 @@ fn plan(dir: &std::path::Path, config: &str) {
         )
         .expect("task");
     }
+}
+
+/// A numeric phase is the fifth shared policy dimension. This and the CLI
+/// matrix are the executable proof for `selection.phase_coordinate`.
+#[test]
+fn a_scope_can_select_a_phase() {
+    let dir = tempfile::Builder::new()
+        .tempdir_in(aplan_core::fixture::fixture_root())
+        .expect("tempdir");
+    plan(
+        dir.path(),
+        "evidence:\n  require_min_strength: [test]\n\
+         policy:\n  - when: { phase: [1] }\n    evidence:\n      require_min_strength: []\n",
+    );
+    let out = common::run(dir.path(), &["check"]);
+    let all = format!("{}{}", out.stdout, out.stderr);
+    assert!(
+        all.contains("T-1"),
+        "the phase-0 task lost the whole-plan requirement:\n{all}"
+    );
+    assert!(
+        !all.contains("T-2"),
+        "the phase-1 task was not selected by the scope:\n{all}"
+    );
+
+    let contract = common::run(dir.path(), &["export-agents-md"]).stdout;
+    assert!(
+        contract.contains("In phase `1`, no evidence strength is required"),
+        "the generated contract hid the phase scope:\n{contract}"
+    );
 }
 
 /// **A subset can carry its own evidence policy, and the rest of the plan keeps

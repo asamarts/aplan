@@ -14,7 +14,7 @@
 
 use std::path::Path;
 
-mod common;
+use crate::common;
 
 /// Two cuts, one holding two tasks so moving one out does not empty it -- an
 /// empty cut is refused before any write, which would test the refusal rather

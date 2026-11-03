@@ -12,7 +12,7 @@
 use std::path::Path;
 use std::process::Command;
 
-mod common;
+use crate::common;
 use common::aplan;
 
 fn write_task(root: &Path, id: &str, title: &str, extra: &str) {

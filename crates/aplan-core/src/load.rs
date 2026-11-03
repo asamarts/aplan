@@ -182,7 +182,7 @@ fn criteria_in(body: &str, first_line: usize) -> Criteria {
 /// no fields to point at, but the parser knows the line it stopped on, and that
 /// is strictly better than the file header a reader would otherwise get
 /// (`A1-202`).
-fn parser_location(e: &serde_yaml_ng::Error) -> Option<crate::diagnostic::Location> {
+fn parser_location(e: &yaml_compat::Error) -> Option<crate::diagnostic::Location> {
     let mark = e.location()?;
     Some(crate::diagnostic::Location {
         // The parser counts from the start of the frontmatter it was handed; a
@@ -244,7 +244,7 @@ pub fn field_lines(frontmatter: &str, first_line: usize) -> FieldLines {
 }
 
 /// Everything a validation run needs.
-#[derive(Debug, Default)]
+#[derive(Debug, Clone, Default)]
 pub struct Plan {
     pub tasks: Vec<LoadedTask>,
     /// Diagnostics raised during loading (schema, parse).
@@ -257,6 +257,62 @@ pub struct Plan {
     /// proportional to how well connected the plan is, which is how one unquoted
     /// colon produced fifty-two phantom errors in the fourth pilot (`A1-072`).
     pub unloadable: BTreeMap<String, PathBuf>,
+}
+
+/// One filesystem candidate considered by a plan load, with the exact input
+/// that load observed.
+///
+/// This includes readable Markdown that is not presently a task. Such a file
+/// can become a task after one edit, so omitting it would make an input identity
+/// blind to a change in plan membership. An unreadable candidate carries the
+/// stable error kind rather than pretending no input existed.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PlanFileInput {
+    pub path: PathBuf,
+    pub content: PlanFileContent,
+}
+
+/// The bytes or read failure observed for one plan candidate.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum PlanFileContent {
+    Bytes(Vec<u8>),
+    /// An exact content identity retained without retaining source bytes.
+    Sha256(String),
+    ReadError {
+        kind: std::io::ErrorKind,
+        message: String,
+    },
+}
+
+/// A parsed plan paired with the exact filesystem inputs from which it was
+/// derived.
+///
+/// This is an identified load, not a filesystem-wide atomic snapshot: files
+/// are still read in deterministic walk order. Every parsed task and load
+/// diagnostic does, however, come from the bytes recorded beside the plan.
+#[derive(Debug, Clone)]
+pub struct IdentifiedPlan {
+    /// The plan root selected for this load, made absolute without resolving
+    /// symlinks after the read.
+    pub root: PathBuf,
+    pub plan: Plan,
+    pub inputs: Vec<PlanFileInput>,
+}
+
+/// Deterministic work performed by one working-tree load.
+///
+/// These counters are a regression contract, not a profiler: unlike elapsed
+/// time they do not change when a shared runner is busy. Bytes count successful
+/// reads, while candidates also include a Markdown path whose read failed.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct LoadStats {
+    pub candidate_files: usize,
+    pub readable_files: usize,
+    pub bytes_read: u64,
+    pub frontmatter_candidates: usize,
+    pub task_files_parsed: usize,
+    pub retained_files: usize,
+    pub retained_bytes: u64,
 }
 
 /// What `check` left unopened: the citations only `verify` resolves (`A1-173`).
@@ -341,7 +397,12 @@ pub fn unresolved_by_check(plan: &Plan) -> Unresolved {
             .task
             .evidence
             .iter()
-            .filter(|ev| ev.kind != crate::task::EvidenceKind::Note)
+            .filter(|ev| {
+                !matches!(
+                    ev.kind.capabilities().resolution,
+                    crate::task::EvidenceResolution::None
+                )
+            })
             .count();
         if n > 0 {
             out.tasks += 1;
@@ -418,7 +479,7 @@ pub fn id_and_status(source: &str) -> Option<(String, crate::task::Status)> {
     // Unknown keys are ignored on purpose, which is the opposite of the loader's
     // contract and right here: this reads a file written by an older build, and
     // a field that build had is not this one's business to refuse.
-    let front: Front = serde_yaml_ng::from_str(frontmatter).ok()?;
+    let front: Front = yaml_compat::from_str(frontmatter).ok()?;
     Some((front.id, front.status))
 }
 
@@ -535,7 +596,7 @@ fn source_literal(
         if rest.is_empty() {
             continue;
         }
-        let Ok(parsed) = serde_yaml_ng::from_str::<serde_json::Value>(rest) else {
+        let Ok(parsed) = yaml_compat::from_str::<serde_json::Value>(rest) else {
             continue;
         };
         if &parsed != instance {
@@ -614,7 +675,7 @@ fn file_stem_id(path: &Path) -> Option<String> {
 /// a title that names a file and then says what it does. The raw message reports
 /// a line and column inside the value and never mentions quoting, which is the
 /// entire fix (`A1-072`).
-fn yaml_error_message(err: &serde_yaml_ng::Error, frontmatter: &str) -> (String, String) {
+fn yaml_error_message(err: &yaml_compat::Error, frontmatter: &str) -> (String, String) {
     let raw = err.to_string();
     if !raw.contains("mapping values are not allowed") {
         return (
@@ -646,22 +707,15 @@ fn yaml_error_message(err: &serde_yaml_ng::Error, frontmatter: &str) -> (String,
     )
 }
 
-/// Load and schema-check a single task file.
-fn load_one(path: &Path, validator: &jsonschema::Validator) -> Result<LoadedTask, LoadFailure> {
-    let source = match std::fs::read_to_string(path) {
-        Ok(s) => s,
-        Err(e) => {
-            return Err(LoadFailure::from(vec![
-                Diagnostic::error(code::SCHEMA, format!("cannot read: {e}"))
-                    .with_file(path)
-                    .with_agent_instruction(
-                        "Make the file readable, or remove it from the plan directory.".to_string(),
-                    ),
-            ]));
-        }
-    };
-
-    let Some((frontmatter, body)) = split_frontmatter(&source) else {
+/// Load one task from bytes supplied by a repository snapshot rather than the
+/// filesystem. Both entry points meet here so a historical report accepts and
+/// rejects exactly the same frontmatter as an ordinary checkout (`A1-194`).
+fn load_one_source(
+    path: &Path,
+    source: &str,
+    validator: &jsonschema::Validator,
+) -> Result<LoadedTask, LoadFailure> {
+    let Some((frontmatter, body)) = split_frontmatter(source) else {
         // The walker only routes files that open with a `---` fence to
         // `load_one`, so a `None` split means the fence was opened but never
         // closed.
@@ -685,7 +739,7 @@ fn load_one(path: &Path, validator: &jsonschema::Validator) -> Result<LoadedTask
     };
 
     // YAML -> JSON so we can schema-check before typed deserialisation.
-    let value: serde_json::Value = match serde_yaml_ng::from_str(frontmatter) {
+    let value: serde_json::Value = match yaml_compat::from_str(frontmatter) {
         Ok(v) => v,
         Err(e) => {
             let (message, instruction) = yaml_error_message(&e, frontmatter);
@@ -731,7 +785,7 @@ fn load_one(path: &Path, validator: &jsonschema::Validator) -> Result<LoadedTask
     // the `serde_json::Value` step silently keeps the last of any duplicate keys,
     // so `id: A` twice would pass unnoticed. Serde rejects a duplicate field, the
     // way `.aplan.yml` loading already does.
-    match serde_yaml_ng::from_str::<Task>(frontmatter) {
+    match yaml_compat::from_str::<Task>(frontmatter) {
         Ok(task) => {
             check_finite_effort(&task, path)?;
             Ok(LoadedTask {
@@ -775,7 +829,7 @@ fn load_one(path: &Path, validator: &jsonschema::Validator) -> Result<LoadedTask
 ///
 /// The two halves of loading disagree here, and the disagreement is the bug. The
 /// schema is checked against a `serde_json::Value` copy of the frontmatter, and
-/// JSON has no infinity or NaN, so `serde_yaml_ng` renders both as `null`, which
+/// JSON has no infinity or NaN, so `yaml_compat` renders both as `null`, which
 /// satisfies `["number", "null"]`. The typed deserialisation below reads the same
 /// YAML and produces `Some(f64::INFINITY)`. So a hand-written `effort_days: .inf`
 /// passed `check` cleanly and then poisoned every rollup that adds it up: the
@@ -827,11 +881,13 @@ fn check_finite_effort(task: &Task, path: &Path) -> Result<(), Vec<Diagnostic>> 
 /// # Errors
 /// The first schema violation, or the YAML error, as the loader would word it.
 pub fn frontmatter_is_loadable(frontmatter: &str) -> Result<(), String> {
-    let schema = derived_schema();
-    let validator = jsonschema::validator_for(&schema)
-        .map_err(|e| format!("internal: derived schema is not a valid JSON Schema: {e}"))?;
-    let value: serde_json::Value =
-        serde_yaml_ng::from_str(frontmatter).map_err(|e| e.to_string())?;
+    let validator = task_validator().map_err(|plan| {
+        plan.load_diagnostics.first().map_or_else(
+            || "internal: task schema is unavailable".to_string(),
+            |d| d.message.clone(),
+        )
+    })?;
+    let value: serde_json::Value = yaml_compat::from_str(frontmatter).map_err(|e| e.to_string())?;
     match validator.iter_errors(&value).next() {
         // With the instance path, because the caller is a writer refusing its
         // own output and "null is not of type array" alone does not say which
@@ -846,112 +902,631 @@ pub fn frontmatter_is_loadable(frontmatter: &str) -> Result<(), String> {
 /// violation) produces a diagnostic; an unreadable file is reported, never
 /// silently dropped.
 pub fn load_plan(root: &Path) -> Plan {
-    let schema = derived_schema();
-    let validator = match jsonschema::validator_for(&schema) {
-        Ok(v) => v,
-        Err(e) => {
-            return Plan {
-                tasks: Vec::new(),
-                unloadable: BTreeMap::new(),
-                load_diagnostics: vec![
-                    Diagnostic::error(
-                        code::SCHEMA,
-                        format!("internal: derived schema is not a valid JSON Schema: {e}"),
-                    )
-                    .with_agent_instruction(
-                        "This is an internal error in aplan; please file a bug.".to_string(),
-                    ),
-                ],
+    load_plan_measured(root).0
+}
+
+/// Load a working-tree plan and report deterministic work counters.
+#[must_use]
+pub fn load_plan_measured(root: &Path) -> (Plan, LoadStats) {
+    let (loaded, stats) = load_plan_worktree(root, false);
+    (loaded.plan, stats)
+}
+
+/// Load a working-tree plan and retain the exact candidate bytes it used.
+///
+/// Each candidate is read once. The former two-read loader first inspected a
+/// fence and then reopened the file for parsing, so a concurrent editor could
+/// make the candidate decision on one version and the parsed task on another.
+/// Keeping the input beside the result also lets an asynchronous caller bind a
+/// result to what was actually parsed instead of re-reading a newer tree.
+#[must_use]
+pub fn load_plan_identified(root: &Path) -> IdentifiedPlan {
+    load_plan_identified_measured(root).0
+}
+
+/// Load an identified working-tree plan and report deterministic work counters.
+#[must_use]
+pub fn load_plan_identified_measured(root: &Path) -> (IdentifiedPlan, LoadStats) {
+    load_plan_worktree(root, true)
+}
+
+struct WorktreeCandidate {
+    content: PlanFileContent,
+    parsed: Option<Result<LoadedTask, LoadFailure>>,
+    read_diagnostic: Option<Diagnostic>,
+}
+
+/// The parsed meaning of one Markdown candidate supplied by a caller.
+///
+/// This is the incremental-loader seam used by the application store. It is
+/// deliberately the ordinary loader's result rather than a second cache model:
+/// callers may retain a successful [`LoadedTask`] or the fact that a file is
+/// not a task, but load failures remain the loader's diagnostics.
+#[derive(Debug, Clone)]
+pub enum ParsedCandidate {
+    /// The bytes do not open with a task frontmatter fence.
+    NotTask,
+    /// The bytes are one valid task.
+    Task(Box<LoadedTask>),
+    /// The bytes look like a task but cannot be loaded.
+    Failed {
+        /// The id recovered from invalid frontmatter, when one was available.
+        id: Option<String>,
+        /// The same diagnostics a full working-tree load would report.
+        diagnostics: Vec<Diagnostic>,
+    },
+}
+
+/// Parse one already-read working-tree candidate with the authoritative task
+/// schema and loader semantics.
+///
+/// The persistent application cache calls this only for bytes whose digest it
+/// has not seen. Keeping fence detection, UTF-8 handling, schema validation and
+/// typed deserialisation here prevents an incremental path from becoming a
+/// second loader that merely resembles this one.
+#[must_use]
+pub fn parse_plan_candidate(path: &Path, bytes: &[u8]) -> ParsedCandidate {
+    let Ok(source) = std::str::from_utf8(bytes) else {
+        return ParsedCandidate::Failed {
+            id: None,
+            diagnostics: vec![
+                Diagnostic::error(
+                    code::SCHEMA,
+                    "cannot read: stream did not contain valid UTF-8",
+                )
+                .with_file(path)
+                .with_agent_instruction(
+                    "Make the file readable, or remove it from the plan directory.".to_string(),
+                ),
+            ],
+        };
+    };
+    let opens_fence = source
+        .trim_start_matches('\u{feff}')
+        .lines()
+        .next()
+        .is_some_and(|line| line.trim_end_matches('\r') == "---");
+    if !opens_fence {
+        return ParsedCandidate::NotTask;
+    }
+    let validator = match task_validator() {
+        Ok(validator) => validator,
+        Err(plan) => {
+            return ParsedCandidate::Failed {
+                id: None,
+                diagnostics: plan.load_diagnostics,
             };
         }
     };
+    match load_one_source(path, source, validator) {
+        Ok(task) => ParsedCandidate::Task(Box::new(task)),
+        Err(failure) => ParsedCandidate::Failed {
+            id: failure.id,
+            diagnostics: failure.diagnostics,
+        },
+    }
+}
 
-    let mut plan = Plan::default();
+/// Enumerate the exact filesystem candidate set the working-tree loader uses.
+///
+/// Returned paths are absolute only when `root` is absolute, and are sorted by
+/// native path order. Traversal errors retain the historical loader behaviour:
+/// an unreadable file that can be enumerated is a candidate and will produce a
+/// read diagnostic; an entry the filesystem cannot enumerate is not invented.
+#[must_use]
+pub fn plan_candidate_paths(root: &Path) -> Vec<PathBuf> {
+    plan_walk(root)
+        .filter_map(Result::ok)
+        .filter_map(|entry| {
+            let path = entry.path();
+            let relative = path.strip_prefix(root).unwrap_or(path);
+            (path.is_file() && is_plan_file_path(relative)).then(|| path.to_path_buf())
+        })
+        .collect()
+}
 
-    // Sort the walk so load order, and therefore the order of any tie-broken
-    // diagnostics, is identical across filesystems and CI runners, not the
-    // OS `readdir` order.
-    for entry in ignore::WalkBuilder::new(root)
+fn plan_walk(root: &Path) -> ignore::Walk {
+    ignore::WalkBuilder::new(root)
         .hidden(false)
         .parents(false)
         .ignore(false)
         .git_ignore(false)
         .git_global(false)
         .git_exclude(false)
-        // Prune VCS metadata (never holds tasks) at any depth, but prune build
-        // output (`target`/`node_modules`) ONLY as an immediate child of the root,
-        // where it is the `--root .`-at-a-repo-root case. A plan subdirectory that
-        // happens to be named `target` (e.g. `plan/tasks/target/x.md`) must still
-        // be walked: silently dropping a task is the exact failure this tool
-        // exists to catch.
         .filter_entry(|e| {
             if e.depth() == 0 {
-                return true; // never prune the root itself
+                return true;
             }
             let name = e.file_name().to_str();
             if matches!(name, Some(".git" | ".jj" | ".hg" | ".svn")) {
                 return false;
             }
-            !(e.depth() == 1 && matches!(name, Some("target" | "node_modules")))
+            !(e.depth() == 1
+                && matches!(
+                    name,
+                    Some("target" | "node_modules" | crate::capture::INBOX_DIR)
+                ))
         })
         .sort_by_file_path(Path::cmp)
         .build()
-        .flatten()
-    {
+}
+
+fn load_worktree_candidate(path: &Path, validator: &jsonschema::Validator) -> WorktreeCandidate {
+    let read = std::fs::read(path);
+    let Ok(bytes) = read else {
+        let error = read.expect_err("the immediately preceding read failed");
+        return WorktreeCandidate {
+            content: PlanFileContent::ReadError {
+                kind: error.kind(),
+                message: error.to_string(),
+            },
+            parsed: None,
+            read_diagnostic: Some(
+                Diagnostic::error(code::SCHEMA, format!("cannot read: {error}"))
+                    .with_file(path)
+                    .with_agent_instruction(
+                        "Make the file readable, or remove it from the plan directory.".to_string(),
+                    ),
+            ),
+        };
+    };
+    let Ok(source) = std::str::from_utf8(&bytes) else {
+        let diagnostic = Diagnostic::error(
+            code::SCHEMA,
+            "cannot read: stream did not contain valid UTF-8",
+        )
+        .with_file(path)
+        .with_agent_instruction(
+            "Make the file readable, or remove it from the plan directory.".to_string(),
+        );
+        return WorktreeCandidate {
+            content: PlanFileContent::Bytes(bytes),
+            parsed: Some(Err(LoadFailure::from(vec![diagnostic]))),
+            read_diagnostic: None,
+        };
+    };
+    let opens_fence = source
+        .trim_start_matches('\u{feff}')
+        .lines()
+        .next()
+        .is_some_and(|line| line.trim_end_matches('\r') == "---");
+    let parsed = opens_fence.then(|| load_one_source(path, source, validator));
+    WorktreeCandidate {
+        content: PlanFileContent::Bytes(bytes),
+        parsed,
+        read_diagnostic: None,
+    }
+}
+
+fn load_plan_worktree(root: &Path, retain_inputs: bool) -> (IdentifiedPlan, LoadStats) {
+    let identified_root = std::path::absolute(root).unwrap_or_else(|_| root.to_path_buf());
+    let mut stats = LoadStats::default();
+    let validator = match task_validator() {
+        Ok(v) => v,
+        Err(plan) => {
+            return (
+                IdentifiedPlan {
+                    root: identified_root,
+                    plan,
+                    inputs: Vec::new(),
+                },
+                stats,
+            );
+        }
+    };
+
+    let mut plan = Plan::default();
+    let mut inputs = Vec::new();
+
+    // Sort the walk so load order, and therefore the order of any tie-broken
+    // diagnostics, is identical across filesystems and CI runners, not the
+    // OS `readdir` order.
+    for entry in plan_walk(root).flatten() {
         let path = entry.path();
         // Case-insensitive: `.MD`/`.Md` (a Windows editor, a careless rename) is
         // still a task file, not something to silently drop.
-        if !path.is_file()
-            || path
-                .extension()
-                .is_none_or(|e| !e.eq_ignore_ascii_case("md"))
-        {
+        let relative = path.strip_prefix(root).unwrap_or(path);
+        if !path.is_file() || !is_plan_file_path(relative) {
             continue;
         }
+        stats.candidate_files += 1;
         // Pre-filter: a task candidate is a file whose first line is a bare
         // `---` fence (after any leading BOMs). A `----` rule or a `---foo`
         // line is not a fence and is skipped silently; an unreadable file is
         // *reported*, not skipped, silently dropping a file is the failure
         // this tool exists to catch.
-        let head = match std::fs::read_to_string(path) {
-            Ok(h) => h,
-            Err(e) => {
-                plan.load_diagnostics.push(
-                    Diagnostic::error(code::SCHEMA, format!("cannot read: {e}"))
-                        .with_file(path)
-                        .with_agent_instruction(
-                            "Make the file readable, or remove it from the plan directory."
-                                .to_string(),
-                        ),
-                );
-                continue;
-            }
-        };
-        let opens_fence = head
-            .trim_start_matches('\u{feff}')
-            .lines()
-            .next()
-            .is_some_and(|l| l.trim_end_matches('\r') == "---");
-        if !opens_fence {
-            continue;
+        let WorktreeCandidate {
+            content,
+            parsed,
+            read_diagnostic,
+        } = load_worktree_candidate(path, validator);
+        if let PlanFileContent::Bytes(bytes) = &content {
+            stats.readable_files += 1;
+            stats.bytes_read = stats
+                .bytes_read
+                .saturating_add(u64::try_from(bytes.len()).unwrap_or(u64::MAX));
         }
-        match load_one(path, &validator) {
-            Ok(t) => plan.tasks.push(t),
-            Err(mut f) => {
-                if let Some(id) = f.id {
-                    plan.unloadable.insert(id, path.to_path_buf());
+        if let Some(diagnostic) = read_diagnostic {
+            plan.load_diagnostics.push(diagnostic);
+        }
+        if let Some(parsed) = parsed {
+            stats.frontmatter_candidates += 1;
+            stats.task_files_parsed += 1;
+            match parsed {
+                Ok(t) => plan.tasks.push(t),
+                Err(mut f) => {
+                    if let Some(id) = f.id {
+                        plan.unloadable.insert(id, path.to_path_buf());
+                    }
+                    plan.load_diagnostics.append(&mut f.diagnostics);
                 }
-                plan.load_diagnostics.append(&mut f.diagnostics);
             }
+        }
+        if retain_inputs {
+            stats.retained_files += 1;
+            if let PlanFileContent::Bytes(bytes) = &content {
+                stats.retained_bytes = stats
+                    .retained_bytes
+                    .saturating_add(u64::try_from(bytes.len()).unwrap_or(u64::MAX));
+            }
+            inputs.push(PlanFileInput {
+                path: path.to_path_buf(),
+                content,
+            });
         }
     }
 
     plan.tasks.sort_by(|a, b| a.task.id.cmp(&b.task.id));
+    (
+        IdentifiedPlan {
+            root: identified_root,
+            plan,
+            inputs,
+        },
+        stats,
+    )
+}
+
+/// Whether a path relative to a plan root can be a task file.
+///
+/// Shared with repository-tree loading so a historical report does not read
+/// every blob under `--root .` into memory and cannot drift from the filesystem
+/// loader's extension and pruning rules (`A1-194`). Frontmatter remains a byte
+/// decision made after the candidate is read.
+#[must_use]
+pub fn is_plan_file_path(relative: &Path) -> bool {
+    relative.parent().is_none_or(is_plan_directory_path)
+        && relative
+            .extension()
+            .is_some_and(|extension| extension.eq_ignore_ascii_case("md"))
+}
+
+/// Whether the filesystem plan walk would enter a directory relative to its
+/// root.
+///
+/// This is separate from [`is_plan_file_path`] because a repository tree has
+/// to decide whether to descend before it can see a candidate file. Keeping the
+/// boundary shared prevents an ignored build directory (including a gitlink)
+/// from making `summary --at HEAD` disagree with an ordinary summary.
+#[must_use]
+pub fn is_plan_directory_path(relative: &Path) -> bool {
+    let components: Vec<_> = relative.components().collect();
+    if components.iter().any(|component| {
+        matches!(
+            component.as_os_str().to_str(),
+            Some(".git" | ".jj" | ".hg" | ".svn")
+        )
+    }) || (!components.is_empty()
+        && matches!(
+            components[0].as_os_str().to_str(),
+            Some("target" | "node_modules" | crate::capture::INBOX_DIR)
+        ))
+    {
+        return false;
+    }
+    true
+}
+
+/// Load a committed plan from its repository-relative file contents.
+///
+/// `files` names paths relative to `root`. It is intentionally bytes rather
+/// than text: an invalid UTF-8 task is a load diagnostic on disk and must remain
+/// one in a historical tree, not disappear before the loader sees it. The same
+/// extension, frontmatter-candidate and directory rules as [`load_plan`] apply.
+///
+/// This is the input seam for revision-addressed reporting (`A1-194`). Git does
+/// not belong in `aplan-core`; the repository facade supplies immutable bytes
+/// and this loader gives them the same task semantics as a checkout.
+pub fn load_plan_files(root: &Path, files: impl IntoIterator<Item = (PathBuf, Vec<u8>)>) -> Plan {
+    let validator = match task_validator() {
+        Ok(v) => v,
+        Err(plan) => return plan,
+    };
+
+    let mut files: Vec<_> = files.into_iter().collect();
+    files.sort_by(|(a, _), (b, _)| a.cmp(b));
+    let mut plan = Plan::default();
+    for (relative, bytes) in files {
+        let path = root.join(&relative);
+        if !is_plan_file_path(&relative) {
+            continue;
+        }
+        let Ok(source) = String::from_utf8(bytes) else {
+            plan.load_diagnostics.push(
+                Diagnostic::error(
+                    code::SCHEMA,
+                    "cannot read: stream did not contain valid UTF-8",
+                )
+                .with_file(&path)
+                .with_agent_instruction(
+                    "Make the file readable, or remove it from the plan directory.".to_string(),
+                ),
+            );
+            continue;
+        };
+        let opens_fence = source
+            .trim_start_matches('\u{feff}')
+            .lines()
+            .next()
+            .is_some_and(|line| line.trim_end_matches('\r') == "---");
+        if !opens_fence {
+            continue;
+        }
+        match load_one_source(&path, &source, validator) {
+            Ok(task) => plan.tasks.push(task),
+            Err(mut failure) => {
+                if let Some(id) = failure.id {
+                    plan.unloadable.insert(id, path.clone());
+                }
+                plan.load_diagnostics.append(&mut failure.diagnostics);
+            }
+        }
+    }
+    plan.tasks.sort_by(|a, b| a.task.id.cmp(&b.task.id));
     plan
+}
+
+/// Compile the one derived task schema used by both filesystem and committed
+/// inputs. A generated schema failure is an internal plan-loading diagnostic;
+/// keeping that construction here avoids two untestable copies of the same
+/// impossible-under-the-type-system branch.
+fn task_validator() -> Result<&'static jsonschema::Validator, Plan> {
+    static VALIDATOR: std::sync::OnceLock<Result<jsonschema::Validator, String>> =
+        std::sync::OnceLock::new();
+    match VALIDATOR.get_or_init(|| {
+        jsonschema::validator_for(&derived_schema()).map_err(|error| error.to_string())
+    }) {
+        Ok(validator) => Ok(validator),
+        Err(error) => Err(Plan {
+            tasks: Vec::new(),
+            unloadable: BTreeMap::new(),
+            load_diagnostics: vec![
+                Diagnostic::error(
+                    code::SCHEMA,
+                    format!("internal: derived schema is not a valid JSON Schema: {error}"),
+                )
+                .with_agent_instruction(
+                    "This is an internal error in aplan; please file a bug.".to_string(),
+                ),
+            ],
+        }),
+    }
 }
 
 #[cfg(test)]
 mod tests {
+    use std::path::PathBuf;
+
+    use super::{
+        ParsedCandidate, PlanFileContent, is_plan_file_path, load_plan_files, load_plan_identified,
+        load_plan_identified_measured, load_plan_measured, parse_plan_candidate,
+        plan_candidate_paths,
+    };
+
+    #[test]
+    fn incremental_candidate_seam_keeps_the_authoritative_loader_boundaries() {
+        let task = b"---\nid: A-1\ntitle: valid\nphase: 1\nstatus: todo\n---\n";
+        let ParsedCandidate::Task(loaded) =
+            parse_plan_candidate(std::path::Path::new("task.md"), task)
+        else {
+            panic!("valid task was not parsed")
+        };
+        assert_eq!(loaded.task.id, "A-1");
+
+        assert!(matches!(
+            parse_plan_candidate(std::path::Path::new("notes.md"), b"ordinary prose\n"),
+            ParsedCandidate::NotTask
+        ));
+        let ParsedCandidate::Failed { id, diagnostics } = parse_plan_candidate(
+            std::path::Path::new("bad.md"),
+            b"---\nid: A-2\ntitle: [\n---\n",
+        ) else {
+            panic!("invalid YAML was not retained as a load failure")
+        };
+        assert_eq!(id.as_deref(), Some("A-2"));
+        assert_eq!(diagnostics[0].code, crate::diagnostic::code::SCHEMA);
+
+        let ParsedCandidate::Failed { id, diagnostics } =
+            parse_plan_candidate(std::path::Path::new("binary.md"), &[0xff])
+        else {
+            panic!("invalid UTF-8 was not retained as a load failure")
+        };
+        assert!(id.is_none());
+        assert!(diagnostics[0].message.contains("valid UTF-8"));
+
+        let dir = tempfile::Builder::new()
+            .tempdir_in(crate::fixture::fixture_root())
+            .expect("tempdir");
+        std::fs::create_dir_all(dir.path().join("tasks/target")).expect("nested target");
+        std::fs::create_dir_all(dir.path().join("target")).expect("root target");
+        std::fs::create_dir_all(dir.path().join(".git")).expect("vcs metadata");
+        std::fs::create_dir_all(dir.path().join(crate::capture::INBOX_DIR)).expect("inbox");
+        for relative in [
+            "task.md",
+            "tasks/target/nested.MD",
+            "target/build.md",
+            ".git/hidden.md",
+            ".inbox/not-a-task.md",
+        ] {
+            let path = dir.path().join(relative);
+            std::fs::write(path, task).expect("candidate fixture");
+        }
+        let candidates = plan_candidate_paths(dir.path());
+        assert_eq!(candidates.len(), 2);
+        assert!(candidates.iter().any(|path| path.ends_with("task.md")));
+        assert!(
+            candidates
+                .iter()
+                .any(|path| path.ends_with("tasks/target/nested.MD"))
+        );
+        assert!(
+            !is_plan_file_path(std::path::Path::new(".inbox/not-a-task.md")),
+            "committed-tree discovery must share the inbox pruning boundary"
+        );
+        assert!(
+            candidates
+                .iter()
+                .all(|path| !path.starts_with(dir.path().join(crate::capture::INBOX_DIR))),
+            "the reserved inbox must be pruned before Markdown discovery"
+        );
+    }
+
+    #[test]
+    fn measured_load_counts_work_and_retains_bytes_only_when_requested() {
+        let dir = tempfile::Builder::new()
+            .tempdir_in(crate::fixture::fixture_root())
+            .expect("tempdir");
+        let task = "---\nid: A-1\ntitle: measured\nphase: 1\nstatus: todo\n---\n";
+        let prose = "ordinary prose\n";
+        std::fs::write(dir.path().join("task.md"), task).expect("task");
+        std::fs::write(dir.path().join("notes.md"), prose).expect("notes");
+        std::fs::write(dir.path().join("ignored.txt"), "not a candidate\n").expect("ignored");
+
+        let (plain, plain_stats) = load_plan_measured(dir.path());
+        assert_eq!(plain.tasks.len(), 1);
+        assert_eq!(plain_stats.candidate_files, 2);
+        assert_eq!(plain_stats.readable_files, 2);
+        assert_eq!(plain_stats.frontmatter_candidates, 1);
+        assert_eq!(plain_stats.task_files_parsed, 1);
+        assert_eq!(
+            plain_stats.bytes_read,
+            u64::try_from(task.len() + prose.len()).expect("fixture length")
+        );
+        assert_eq!(plain_stats.retained_files, 0);
+        assert_eq!(plain_stats.retained_bytes, 0);
+
+        let (identified, identified_stats) = load_plan_identified_measured(dir.path());
+        assert_eq!(identified.inputs.len(), 2);
+        assert_eq!(
+            identified_stats.candidate_files,
+            plain_stats.candidate_files
+        );
+        assert_eq!(identified_stats.bytes_read, plain_stats.bytes_read);
+        assert_eq!(identified_stats.retained_files, 2);
+        assert_eq!(identified_stats.retained_bytes, plain_stats.bytes_read);
+    }
+
+    /// Proof for `application.input_identity_matches_loaded_inputs`.
+    #[test]
+    fn an_identified_load_keeps_every_candidate_and_the_bytes_it_parsed() {
+        let dir = tempfile::Builder::new()
+            .tempdir_in(crate::fixture::fixture_root())
+            .expect("tempdir");
+        let task = dir.path().join("task.md");
+        let notes = dir.path().join("notes.md");
+        let original = "---\nid: A-1\ntitle: before\nphase: 1\nstatus: todo\neffort_days: 1\n---\n";
+        std::fs::write(&task, original).expect("task");
+        std::fs::write(&notes, "ordinary prose\n").expect("notes");
+
+        let loaded = load_plan_identified(dir.path());
+        std::fs::write(&task, original.replace("before", "after")).expect("external edit");
+
+        assert_eq!(loaded.plan.tasks[0].task.title, "before");
+        assert_eq!(
+            loaded.inputs.len(),
+            2,
+            "non-task Markdown is still an input"
+        );
+        let captured = loaded
+            .inputs
+            .iter()
+            .find(|input| input.path == task)
+            .expect("task input");
+        assert_eq!(
+            captured.content,
+            PlanFileContent::Bytes(original.as_bytes().to_vec())
+        );
+        assert!(
+            loaded.inputs.iter().any(|input| input.path == notes),
+            "a later fence can make this file part of the plan"
+        );
+    }
+
+    #[test]
+    fn committed_plan_candidates_share_the_filesystem_walks_boundary() {
+        for path in [
+            "task.md",
+            "TASK.MD",
+            "tasks/target/deep.md",
+            "a/node_modules/deep.md",
+        ] {
+            assert!(super::is_plan_file_path(Path::new(path)), "{path}");
+        }
+        for path in [
+            "notes.txt",
+            "target/generated.md",
+            "node_modules/generated.md",
+            ".inbox/not-a-task.md",
+            "tasks/.git/copied.md",
+            "a/.svn/copied.md",
+        ] {
+            assert!(!super::is_plan_file_path(Path::new(path)), "{path}");
+        }
+        for path in ["", "tasks", "tasks/target", "a/node_modules"] {
+            assert!(super::is_plan_directory_path(Path::new(path)), "{path}");
+        }
+        for path in [
+            "target",
+            "node_modules",
+            ".inbox",
+            ".inbox/nested",
+            "tasks/.git",
+            "a/.svn",
+        ] {
+            assert!(!super::is_plan_directory_path(Path::new(path)), "{path}");
+        }
+    }
+
+    /// A repository tree supplies bytes rather than filesystem entries. The
+    /// alternate seam still has to make the loader's two easy-to-lose
+    /// distinctions: prose markdown is not a task, and invalid UTF-8 in a task
+    /// candidate is a finding rather than an absent task (`A1-194`).
+    #[test]
+    fn committed_bytes_keep_candidate_and_utf8_rules() {
+        let root = PathBuf::from("snapshot");
+        let plan = load_plan_files(
+            &root,
+            [
+                (PathBuf::from("notes.md"), b"prose only\n".to_vec()),
+                (
+                    PathBuf::from("tasks/T-1.md"),
+                    b"---\nid: T-1\ntitle: One\nphase: 1\nstatus: todo\n---\n".to_vec(),
+                ),
+                (
+                    PathBuf::from("tasks/T-2.md"),
+                    vec![b'-', b'-', b'-', b'\n', 0xff],
+                ),
+            ],
+        );
+        assert_eq!(plan.tasks.len(), 1);
+        assert_eq!(plan.tasks[0].task.id, "T-1");
+        assert_eq!(plan.load_diagnostics.len(), 1);
+        assert_eq!(
+            plan.load_diagnostics[0].file.as_deref(),
+            Some(root.join("tasks/T-2.md").as_path())
+        );
+        assert!(plan.load_diagnostics[0].message.contains("valid UTF-8"));
+    }
 
     #[test]
     fn an_id_is_recovered_from_a_file_that_did_not_parse() {
@@ -1044,7 +1619,7 @@ mod tests {
         // and then says what it does. The raw serde message reports a column
         // inside the value and never mentions quoting, which is the whole fix.
         let frontmatter = "id: RD0-08\ntitle: ci/scripts/plan.sh: check, verify\n";
-        let err = serde_yaml_ng::from_str::<serde_json::Value>(frontmatter)
+        let err = yaml_compat::from_str::<serde_json::Value>(frontmatter)
             .expect_err("an unquoted colon must not parse");
         let (message, instruction) = yaml_error_message(&err, frontmatter);
         assert!(message.contains("`title`"), "{message}");
@@ -1056,7 +1631,7 @@ mod tests {
     fn an_unrelated_yaml_error_keeps_its_own_message() {
         // The special case must not swallow every other syntax error.
         let frontmatter = "id: [unclosed\n";
-        let err = serde_yaml_ng::from_str::<serde_json::Value>(frontmatter)
+        let err = yaml_compat::from_str::<serde_json::Value>(frontmatter)
             .expect_err("unclosed bracket must not parse");
         let (message, _) = yaml_error_message(&err, frontmatter);
         assert!(!message.contains("quoted"), "{message}");
@@ -1098,7 +1673,7 @@ mod tests {
         let frontmatter =
             "id: M-a\ntitle: a cut\nphase: 1\nstatus: todo\ntags:\n  - milestone\nblocked_by:";
 
-        let typed: Result<crate::task::Task, _> = serde_yaml_ng::from_str(frontmatter);
+        let typed: Result<crate::task::Task, _> = yaml_compat::from_str(frontmatter);
         assert!(
             typed.is_ok(),
             "serde is supposed to be the weaker of the two here: {typed:?}"

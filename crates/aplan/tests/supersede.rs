@@ -8,7 +8,7 @@
 
 use std::path::Path;
 
-mod common;
+use crate::common;
 use common::aplan;
 
 /// A closed task tracing a document section, in a cut, with drift already
@@ -142,6 +142,115 @@ fn the_successor_inherits_paths_and_traces_and_no_evidence() {
         "{successor}"
     );
     assert!(successor.contains("## Acceptance criteria"), "{successor}");
+}
+
+/// Proves `supersede.controls_inherited_successor_content` for replacement,
+/// deliberate clearing, supplied prose, and parser-level mutual exclusion.
+#[test]
+fn successor_scope_and_body_can_be_replaced_or_cleared_atomically() {
+    let replaced = repo();
+    let (out, code) = aplan(
+        replaced.path(),
+        &[
+            "supersede",
+            "T-1",
+            "Repair a different surface",
+            "--root",
+            "aplan",
+            "--path",
+            "src/new.rs",
+            "--trace",
+            "docs/design.md#the-rail",
+            "--body",
+            "## Why\n\nExact successor body.\n",
+        ],
+    );
+    assert_eq!(code, 0, "{out}");
+    let successor =
+        std::fs::read_to_string(replaced.path().join("aplan/tasks/T-2.md")).expect("successor");
+    assert!(successor.contains("- src/new.rs"), "{successor}");
+    assert!(!successor.contains("- docs/**"), "{successor}");
+    assert!(
+        successor.ends_with("## Why\n\nExact successor body.\n"),
+        "{successor}"
+    );
+    assert!(!successor.contains("## Acceptance criteria"), "{successor}");
+
+    let cleared = repo();
+    let (out, code) = aplan(
+        cleared.path(),
+        &[
+            "supersede",
+            "T-1",
+            "Repair without inherited scope",
+            "--root",
+            "aplan",
+            "--clear-paths",
+            "--clear-traces",
+        ],
+    );
+    assert_eq!(code, 0, "{out}");
+    let successor =
+        std::fs::read_to_string(cleared.path().join("aplan/tasks/T-2.md")).expect("successor");
+    let front = successor.split("\n---\n").next().expect("frontmatter");
+    assert!(!front.contains("paths:"), "{front}");
+    assert!(!front.contains("traces:"), "{front}");
+
+    let refused = repo();
+    let before = plan_bytes(refused.path());
+    let (out, code) = aplan(
+        refused.path(),
+        &[
+            "supersede",
+            "T-1",
+            "Contradictory scope",
+            "--root",
+            "aplan",
+            "--path",
+            "src/new.rs",
+            "--clear-paths",
+        ],
+    );
+    assert_eq!(code, 2, "{out}");
+    assert_eq!(plan_bytes(refused.path()), before);
+
+    let invisible = "\u{200b}";
+    for args in [
+        vec!["supersede", "T-1", invisible, "--root", "aplan"],
+        vec![
+            "supersede",
+            "T-1",
+            "successor",
+            "--root",
+            "aplan",
+            "--path",
+            invisible,
+        ],
+        vec![
+            "supersede",
+            "T-1",
+            "successor",
+            "--root",
+            "aplan",
+            "--trace",
+            invisible,
+        ],
+        vec![
+            "supersede",
+            "T-1",
+            "successor",
+            "--root",
+            "aplan",
+            "--body",
+            invisible,
+        ],
+    ] {
+        let invalid = repo();
+        let before = plan_bytes(invalid.path());
+        let (out, code) = aplan(invalid.path(), &args);
+        assert_eq!(code, 2, "{args:?}: {out}");
+        assert_eq!(plan_bytes(invalid.path()), before, "{args:?} wrote bytes");
+    }
 }
 
 /// Only a `done` task has an outcome that can stop holding, and each refusal

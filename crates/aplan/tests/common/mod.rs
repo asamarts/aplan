@@ -33,10 +33,38 @@ pub mod census;
 pub mod sources;
 
 use std::io::Write as _;
+#[cfg(unix)]
 use std::os::unix::fs::MetadataExt as _;
 use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::sync::OnceLock;
+
+/// Send one signal without relying on `PATH` or an external `kill` executable.
+///
+/// The private runner image provides `kill` as the POSIX shell builtin but may
+/// not provide a standalone binary. Signal and pid are positional parameters,
+/// not interpolated shell source, so the helper cannot turn either into code.
+#[cfg(unix)]
+pub fn send_signal(pid: u32, signal: &str) {
+    let status = Command::new("/bin/sh")
+        .args([
+            "-c",
+            "kill \"-$1\" \"$2\"",
+            "aplan-test-signal",
+            signal,
+            &pid.to_string(),
+        ])
+        .env("PATH", "")
+        .stdin(std::process::Stdio::null())
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
+        .status()
+        .expect("POSIX shell runs");
+    assert!(
+        status.success(),
+        "kill -{signal} {pid} failed through /bin/sh: {status}"
+    );
+}
 
 /// The environment variable naming the file invocations are recorded to.
 ///
@@ -61,6 +89,8 @@ pub struct Run {
 /// execute builds from opposite sides of a concurrent commit (`A1-242`).
 pub struct BinarySnapshot {
     path: PathBuf,
+    #[cfg(not(unix))]
+    _directory: tempfile::TempDir,
 }
 
 /// Old binary snapshots outlive any test process that could still name them.
@@ -77,6 +107,18 @@ impl BinarySnapshot {
     /// clean` remove it; an age sweep bounds ordinary rebuilds (`A1-399`).
     #[must_use]
     pub fn capture(source: &Path) -> Self {
+        #[cfg(unix)]
+        {
+            Self::capture_unix(source)
+        }
+        #[cfg(not(unix))]
+        {
+            Self::capture_portable(source)
+        }
+    }
+
+    #[cfg(unix)]
+    fn capture_unix(source: &Path) -> Self {
         let root = source
             .parent()
             .expect("the binary has a parent directory")
@@ -118,6 +160,34 @@ impl BinarySnapshot {
         Self { path }
     }
 
+    /// Windows does not expose Unix device/inode keys, and an executable may
+    /// not be hard-linked uniformly across its supported filesystems. One
+    /// process-private copy still holds the exact artifact for the lifetime of
+    /// this integration harness; the portability matrix has one consolidated
+    /// harness, so it neither duplicates the binary nor races Cargo replacing
+    /// the source path (`A1-448`).
+    #[cfg(not(unix))]
+    fn capture_portable(source: &Path) -> Self {
+        let root = source
+            .parent()
+            .expect("the binary has a parent directory")
+            .join(".aplan-test-binaries");
+        std::fs::create_dir_all(&root).expect("create the binary snapshot cache");
+        let directory = tempfile::Builder::new()
+            .prefix("aplan-binary-portable-")
+            .tempdir_in(&root)
+            .expect("create the portable binary snapshot directory");
+        let path = directory
+            .path()
+            .join(source.file_name().expect("the binary has a file name"));
+        std::fs::copy(source, &path).expect("copy the binary under test");
+        clear_old_binary_snapshots(&root, directory.path());
+        Self {
+            path,
+            _directory: directory,
+        }
+    }
+
     /// The immutable executable path.
     #[must_use]
     pub fn path(&self) -> &Path {
@@ -150,13 +220,228 @@ fn clear_old_binary_snapshots(root: &Path, current: &Path) {
     }
 }
 
+/// Prefer a runner's relocatable executable path over Cargo's build-time path.
+///
+/// Nextest rewrites both runtime variables when it extracts an archive. The
+/// compile-time value remains the fallback for test harnesses that do not
+/// provide either runtime contract (`A1-616`).
+fn select_binary_source(
+    nextest: Option<&std::ffi::OsStr>,
+    cargo: Option<&std::ffi::OsStr>,
+    compiled: &Path,
+) -> PathBuf {
+    nextest
+        .filter(|path| !path.is_empty())
+        .or(cargo)
+        .filter(|path| !path.is_empty())
+        .map_or_else(|| compiled.to_owned(), PathBuf::from)
+}
+
 /// The binary this integration-test process exercises, resolved once.
 #[must_use]
 pub fn binary() -> &'static Path {
     static BINARY: OnceLock<BinarySnapshot> = OnceLock::new();
     BINARY
-        .get_or_init(|| BinarySnapshot::capture(Path::new(env!("CARGO_BIN_EXE_aplan"))))
+        .get_or_init(|| {
+            let nextest = std::env::var_os("NEXTEST_BIN_EXE_aplan");
+            let cargo = std::env::var_os("CARGO_BIN_EXE_aplan");
+            let source = select_binary_source(
+                nextest.as_deref(),
+                cargo.as_deref(),
+                Path::new(env!("CARGO_BIN_EXE_aplan")),
+            );
+            BinarySnapshot::capture(&source)
+        })
         .path()
+}
+
+#[test]
+fn the_binary_snapshot_prefers_the_runners_relocatable_path() {
+    use std::ffi::OsStr;
+
+    let compiled = Path::new("/build-host/target/debug/aplan");
+    assert_eq!(
+        select_binary_source(
+            Some(OsStr::new("/archive/target/debug/aplan")),
+            Some(OsStr::new("/cargo/target/debug/aplan")),
+            compiled,
+        ),
+        Path::new("/archive/target/debug/aplan")
+    );
+    assert_eq!(
+        select_binary_source(
+            None,
+            Some(OsStr::new("/cargo/target/debug/aplan")),
+            compiled,
+        ),
+        Path::new("/cargo/target/debug/aplan")
+    );
+    assert_eq!(select_binary_source(None, None, compiled), compiled);
+    assert_eq!(
+        select_binary_source(Some(OsStr::new("")), Some(OsStr::new("")), compiled),
+        compiled
+    );
+}
+
+/// A complete copy of this repository's plan outside its Git coordination scope.
+///
+/// A repository-self test wants the plan bytes committed beside it, but not the
+/// mutable claim store shared by every linked worktree. A detached worktree can
+/// otherwise see a claim for a task introduced later and correctly refuse that
+/// orphan, making the test depend on unrelated work happening at the same time.
+/// Copying rather than linking gives the test one source snapshot even if an
+/// editor replaces or rewrites a task while the suite is running.
+pub struct WorkspacePlanFixture {
+    directory: tempfile::TempDir,
+    source_commit: git2::Oid,
+}
+
+impl WorkspacePlanFixture {
+    /// Directory from which the CLI discovers the copied `aplan/` root.
+    #[must_use]
+    pub fn directory(&self) -> &Path {
+        self.directory.path()
+    }
+
+    /// The copied plan root.
+    #[must_use]
+    pub fn plan_root(&self) -> PathBuf {
+        self.directory.path().join("aplan")
+    }
+
+    /// The one immutable tree from which every fixture byte was read.
+    #[must_use]
+    pub fn source_commit(&self) -> git2::Oid {
+        self.source_commit
+    }
+}
+
+fn copy_committed_tree(repository: &git2::Repository, tree: &git2::Tree<'_>, destination: &Path) {
+    std::fs::create_dir_all(destination).expect("create committed plan fixture directory");
+    for entry in tree {
+        let name = std::str::from_utf8(entry.name_bytes()).unwrap_or_else(|_| {
+            panic!(
+                "committed plan tree entry {} has a non-UTF-8 name",
+                entry.id()
+            )
+        });
+        assert!(
+            !name.is_empty()
+                && name != "."
+                && name != ".."
+                && !name.contains('/')
+                && !name.contains('\\'),
+            "committed plan tree entry {} has unsafe name {name:?}",
+            entry.id()
+        );
+        let path = destination.join(name);
+        match (entry.kind(), entry.filemode()) {
+            (Some(git2::ObjectType::Tree), 0o040_000) => {
+                let child = repository.find_tree(entry.id()).unwrap_or_else(|error| {
+                    panic!("read committed plan tree {}: {error}", entry.id())
+                });
+                copy_committed_tree(repository, &child, &path);
+            }
+            (Some(git2::ObjectType::Blob), mode @ (0o100_644 | 0o100_755)) => {
+                let blob = repository.find_blob(entry.id()).unwrap_or_else(|error| {
+                    panic!("read committed plan blob {}: {error}", entry.id())
+                });
+                std::fs::write(&path, blob.content()).unwrap_or_else(|error| {
+                    panic!("write committed plan fixture {}: {error}", path.display())
+                });
+                #[cfg(unix)]
+                {
+                    use std::os::unix::fs::PermissionsExt as _;
+                    let permissions = std::fs::Permissions::from_mode(mode.cast_unsigned() & 0o777);
+                    std::fs::set_permissions(&path, permissions).unwrap_or_else(|error| {
+                        panic!(
+                            "set committed plan fixture mode on {}: {error}",
+                            path.display()
+                        )
+                    });
+                }
+            }
+            (kind, mode) => panic!(
+                "committed plan entry `{}` ({}) has unsupported kind {kind:?} and mode {mode:o}",
+                path.display(),
+                entry.id()
+            ),
+        }
+    }
+}
+
+/// Snapshot one committed plan tree after calling `after_resolve` with its id.
+///
+/// The hook exists for the regression that moves `HEAD` after resolution. The
+/// production helper below supplies a no-op, while both paths continue reading
+/// immutable Git objects from the already-resolved commit.
+#[must_use]
+pub fn committed_plan_fixture_from(
+    repository_root: &Path,
+    after_resolve: impl FnOnce(git2::Oid),
+) -> WorkspacePlanFixture {
+    let repository = git2::Repository::discover(repository_root).unwrap_or_else(|error| {
+        panic!(
+            "discover repository containing committed plan at {}: {error}",
+            repository_root.display()
+        )
+    });
+    let commit = repository
+        .head()
+        .and_then(|head| head.peel_to_commit())
+        .unwrap_or_else(|error| {
+            panic!(
+                "resolve one committed HEAD for plan fixture at {}: {error}",
+                repository_root.display()
+            )
+        });
+    let source_commit = commit.id();
+    let root = commit.tree().unwrap_or_else(|error| {
+        panic!("read tree for plan fixture commit {source_commit}: {error}")
+    });
+    let plan_entry = root
+        .get_name("aplan")
+        .unwrap_or_else(|| panic!("commit {source_commit} has no `aplan/` tree"));
+    assert_eq!(
+        plan_entry.kind(),
+        Some(git2::ObjectType::Tree),
+        "commit {source_commit} contains `aplan` as {:?}, not a tree",
+        plan_entry.kind()
+    );
+    let plan = repository
+        .find_tree(plan_entry.id())
+        .unwrap_or_else(|error| {
+            panic!(
+                "read `aplan/` tree {} from commit {source_commit}: {error}",
+                plan_entry.id()
+            )
+        });
+
+    after_resolve(source_commit);
+
+    let directory = tempfile::Builder::new()
+        .prefix("workspace-plan-")
+        .tempdir_in(aplan_core::fixture::fixture_root())
+        .expect("create committed plan fixture");
+    let destination = directory.path().join("aplan");
+    copy_committed_tree(&repository, &plan, &destination);
+
+    let claims = aplan_app::claims::snapshot(&destination, &aplan_core::Plan::default())
+        .expect("inspect committed plan fixture coordination");
+    assert!(
+        !claims.scope.available,
+        "committed plan fixture must be outside a Git common directory"
+    );
+    WorkspacePlanFixture {
+        directory,
+        source_commit,
+    }
+}
+
+/// Snapshot this repository's committed plan into a standalone fixture.
+#[must_use]
+pub fn workspace_plan_fixture() -> WorkspacePlanFixture {
+    committed_plan_fixture_from(&sources::workspace_root(), |_| {})
 }
 
 impl Run {
@@ -199,6 +484,138 @@ pub fn command(dir: &Path, args: &[&str]) -> Command {
     cmd.args(args).current_dir(dir);
     colour_baseline(&mut cmd);
     cmd
+}
+
+/// Start the binary in a real PTY, through the same immutable and recorded
+/// boundary as every pipe-backed integration test.
+///
+/// The environment is deliberately empty except for the terminal identity
+/// supplied by `termlens`. A PTY journey must pass `--no-config` when it does
+/// not intend to exercise repository configuration, rather than inheriting a
+/// developer's environment and turning it into an undeclared test input.
+// The workspace gate runs every real-terminal journey beside CPU- and process-heavy suites.
+// This bounds transport and teardown under that contention; narrower product deadlines stay local.
+const TUI_TRANSPORT_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(20);
+
+pub fn tui_terminal(
+    dir: &Path,
+    columns: u16,
+    rows: u16,
+    args: &[&str],
+) -> termlens::Result<termlens::Terminal> {
+    tui_terminal_with_environment(dir, columns, rows, args, &[])
+}
+
+/// Start the binary in a real PTY with an explicit portable environment.
+///
+/// This is the common recorded process boundary for journeys that exercise an
+/// editor or provider subprocess. It remains deliberately narrower than an
+/// arbitrary builder: the environment is the only additional input (`A1-448`).
+pub fn tui_terminal_with_environment(
+    dir: &Path,
+    columns: u16,
+    rows: u16,
+    args: &[&str],
+    environment: &[(String, String)],
+) -> termlens::Result<termlens::Terminal> {
+    record(args);
+    termlens::Terminal::builder()
+        .size(columns, rows)
+        .env_clear()
+        .envs(environment.iter().map(|(key, value)| (key, value)))
+        .timeout(TUI_TRANSPORT_TIMEOUT)
+        .args(args)
+        .current_dir(dir)
+        .spawn(binary())
+}
+
+/// Start the TUI with an isolated disposable cache root.
+///
+/// Performance tests need to distinguish a forced cache refresh from a warm
+/// cache hit without reading or mutating the account running the test. The
+/// ordinary PTY helper intentionally clears the environment; this narrower
+/// variant restores only `XDG_CACHE_HOME` (`A1-447`).
+pub fn tui_terminal_with_cache(
+    dir: &Path,
+    cache: &Path,
+    columns: u16,
+    rows: u16,
+    args: &[&str],
+) -> termlens::Result<termlens::Terminal> {
+    record(args);
+    termlens::Terminal::builder()
+        .size(columns, rows)
+        .env_clear()
+        .env("XDG_CACHE_HOME", cache)
+        .timeout(TUI_TRANSPORT_TIMEOUT)
+        .args(args)
+        .current_dir(dir)
+        .spawn(binary())
+}
+
+/// Start the TUI after recording the PTY's exact termios baseline and changing
+/// one otherwise non-default flag. The shell `exec`s aplan, so the pid exposed
+/// by termlens remains the process that receives lifecycle signals.
+#[cfg(unix)]
+pub fn tui_terminal_with_termios_baseline(
+    dir: &Path,
+    columns: u16,
+    rows: u16,
+    args: &[&str],
+    baseline: &Path,
+) -> termlens::Result<termlens::Terminal> {
+    record(args);
+    let mut shell_args = vec![
+        "-c".to_string(),
+        "stty -echoctl; stty -g > \"$1\"; shift; exec \"$@\"".to_string(),
+        "aplan-tui-wrapper".to_string(),
+        baseline.display().to_string(),
+        binary().display().to_string(),
+    ];
+    shell_args.extend(args.iter().map(|arg| (*arg).to_string()));
+    termlens::Terminal::builder()
+        .size(columns, rows)
+        .env_clear()
+        .timeout(TUI_TRANSPORT_TIMEOUT)
+        .args(shell_args)
+        .current_dir(dir)
+        .spawn("/bin/sh")
+}
+
+/// Run one non-interactive command behind util-linux `script`, recording its
+/// exact termios state immediately before and after the binary. The command's
+/// stdin is closed so long-lived stdio servers receive EOF rather than owning
+/// the test PTY indefinitely.
+#[cfg(unix)]
+pub fn on_terminal_with_state(dir: &Path, args: &[&str]) -> std::process::Output {
+    record(args);
+    let mut invocation = shell_word(&binary().display().to_string());
+    for arg in args {
+        invocation.push(' ');
+        invocation.push_str(&shell_word(arg));
+    }
+    let command = format!(
+        "stty -echoctl cols 120 rows 40; \
+         before=$(stty -g 2>/dev/null) || before=STTY_FAILED; \
+         {invocation} </dev/null; code=$?; \
+         after=$(stty -g 2>/dev/null) || after=STTY_FAILED; \
+         printf '\\n__APLAN_TERMIOS__|%s|%s|%s\\n' \"$before\" \"$after\" \"$code\""
+    );
+    Command::new("script")
+        .args(["-qfec", &command, "/dev/null"])
+        .current_dir(dir)
+        .env_remove("NO_COLOR")
+        .env_remove("CLICOLOR")
+        .env_remove("CLICOLOR_FORCE")
+        .env("TERM", "xterm-256color")
+        .env("COLORTERM", "truecolor")
+        .output()
+        .expect("run aplan in a terminal")
+}
+
+#[cfg(unix)]
+fn shell_word(value: &str) -> String {
+    format!("'{}'", value.replace('\'', "'\"'\"'"))
 }
 
 /// Give colour-sensitive fixtures one known parent environment (`A1-346`).
@@ -310,7 +727,7 @@ pub fn aplan(dir: &Path, args: &[&str]) -> (String, i32) {
 /// not a gate: failing a hundred tests because a path was wrong would tell the
 /// reader nothing about the code under test.
 fn record(args: &[&str]) {
-    if let Some(path) = SINK.lock().ok().and_then(|s| s.clone()) {
+    if let Some(path) = SINK.with(|sink| sink.borrow().clone()) {
         record_to(&path, args);
         return;
     }
@@ -320,11 +737,32 @@ fn record(args: &[&str]) {
     record_to(Path::new(&path), args);
 }
 
-/// Where this test binary records, when something other than the environment
-/// decides.
-static SINK: std::sync::Mutex<Option<std::path::PathBuf>> = std::sync::Mutex::new(None);
+thread_local! {
+    /// Where this test thread records, when something other than the environment
+    /// decides. A thread-local scope cannot capture concurrent tests in the merged
+    /// integration harness (`A1-630`).
+    static SINK: std::cell::RefCell<Option<std::path::PathBuf>> = const {
+        std::cell::RefCell::new(None)
+    };
+}
 
-/// Record into `path` for the rest of this test binary.
+/// Restores the calling test thread's prior recording destination on drop.
+#[derive(Debug)]
+#[must_use]
+pub struct RecordingScope {
+    previous: Option<std::path::PathBuf>,
+    _not_send: std::marker::PhantomData<std::rc::Rc<()>>,
+}
+
+impl Drop for RecordingScope {
+    fn drop(&mut self) {
+        SINK.with(|sink| {
+            sink.replace(self.previous.take());
+        });
+    }
+}
+
+/// Record into `path` on this test thread until the returned scope is dropped.
 ///
 /// It exists for one test: the one proving that [`run`] reaches [`record_to`] at
 /// all. Without it the wiring is untested -- `record_to` can be perfect and
@@ -332,10 +770,13 @@ static SINK: std::sync::Mutex<Option<std::path::PathBuf>> = std::sync::Mutex::ne
 /// close. Setting the environment variable instead is not open to a test here,
 /// because `set_var` is `unsafe` and this workspace forbids unsafe code.
 ///
-/// Process-wide, so its one caller lives in a test file of its own.
-pub fn record_into(path: std::path::PathBuf) {
-    if let Ok(mut sink) = SINK.lock() {
-        *sink = Some(path);
+/// Thread-local and scoped so the merged integration harness can run unrelated
+/// tests concurrently without redirecting their invocations (`A1-630`).
+pub fn record_into(path: std::path::PathBuf) -> RecordingScope {
+    let previous = SINK.with(|sink| sink.replace(Some(path)));
+    RecordingScope {
+        previous,
+        _not_send: std::marker::PhantomData,
     }
 }
 
@@ -407,7 +848,7 @@ pub fn argv_of(line: &str) -> Vec<String> {
 /// Returns `None` when `script(1)` is unavailable, so the suite still runs on a
 /// machine without util-linux rather than failing for the wrong reason.
 pub fn on_a_terminal(dir: &Path, cols: usize, args: &[&str]) -> Option<String> {
-    on_a_terminal_raw(dir, cols, &[], args).map(|text| strip(&text))
+    on_a_terminal_raw(dir, cols, &[], args).map(|text| terminal_text(&text))
 }
 
 /// [`on_a_terminal`] with the styling left in, and an environment.
@@ -438,7 +879,7 @@ pub fn on_a_terminal_raw(
 /// stdout against stderr and pass every width test (`A1-291`). Here stderr has
 /// no terminal, so `err_width()` answers "do not fold" and the mistake shows.
 pub fn on_a_terminal_stderr_piped(dir: &Path, cols: usize, args: &[&str]) -> Option<String> {
-    on_a_terminal_full(dir, cols, &[], args, true).map(|text| strip(&text))
+    on_a_terminal_full(dir, cols, &[], args, true).map(|text| terminal_text(&text))
 }
 
 fn on_a_terminal_full(
@@ -488,8 +929,14 @@ fn on_a_terminal_full(
     Some(String::from_utf8_lossy(&out.stdout).replace('\r', ""))
 }
 
-/// Remove the ANSI a terminal consumes, and the carriage returns a pty adds.
-fn strip(text: &str) -> String {
+/// Reduce terminal presentation bytes to the text left on screen.
+///
+/// Most controls in ordinary command output are SGR styling and disappear.
+/// Attended progress additionally owns `CSI 2 K`: merely deleting that escape
+/// would concatenate the transient row with the result that replaced it and
+/// make width/readability tests judge text a person never sees. Apply that one
+/// erase operation to the current output row before returning the plain text.
+pub fn terminal_text(text: &str) -> String {
     let mut out = String::with_capacity(text.len());
     let mut chars = text.chars();
     while let Some(c) = chars.next() {
@@ -497,10 +944,16 @@ fn strip(text: &str) -> String {
             '\r' => {}
             '\u{1b}' => {
                 if chars.next() == Some('[') {
+                    let mut control = String::new();
                     for c in chars.by_ref() {
+                        control.push(c);
                         if ('@'..='~').contains(&c) {
                             break;
                         }
+                    }
+                    if control == "2K" {
+                        let row = out.rfind('\n').map_or(0, |newline| newline + 1);
+                        out.truncate(row);
                     }
                 }
             }

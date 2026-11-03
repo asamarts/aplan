@@ -19,7 +19,7 @@
 
 use std::path::Path;
 
-mod common;
+use crate::common;
 
 /// A repository with one document in two shapes: a prose section, and a register
 /// kept as a table. Both are things real plans trace, and only the second was

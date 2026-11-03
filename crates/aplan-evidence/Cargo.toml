@@ -21,7 +21,13 @@ aplan-config.workspace = true
 aplan-output.workspace = true
 git2 = { version = "0.21", default-features = false }
 globset = "0.4"
+getrandom.workspace = true
+schemars.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+sha2.workspace = true
+tempfile.workspace = true
 thiserror.workspace = true
 
-[dev-dependencies]
-tempfile.workspace = true
+[target.'cfg(unix)'.dependencies]
+libc = "0.2"

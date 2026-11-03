@@ -10,7 +10,7 @@
 
 use std::path::Path;
 
-mod common;
+use crate::common;
 use common::aplan;
 
 const SOURCE: &str = r#"{"format_version":1,
@@ -60,6 +60,34 @@ fn importing_a_copy_outside_the_plan_is_allowed_and_says_what_it_means() {
     let (check, code) = aplan(dir.path(), &["check"]);
     assert_eq!(code, 0, "{check}");
     assert!(check.contains("1 tasks"), "one task, not two: {check}");
+}
+
+#[test]
+fn an_in_plan_import_cannot_shadow_a_cut_label_but_an_external_copy_can() {
+    let dir = tempfile::Builder::new()
+        .tempdir_in(aplan_core::fixture::fixture_root())
+        .expect("tempdir");
+    fixture(dir.path());
+    std::fs::write(
+        dir.path().join("aplan/tasks/A-1.md"),
+        "---\nid: A-1\ntitle: Existing work\nphase: 1\nstatus: todo\neffort_days: 1\n---\n",
+    )
+    .expect("member");
+    std::fs::write(
+        dir.path().join("aplan/tasks/M-one.md"),
+        "---\nid: M-one\ntitle: Existing cut\nphase: 1\nstatus: todo\nblocked_by: [A-1]\n\
+         tags: [milestone, PHASE-01]\n---\n",
+    )
+    .expect("cut");
+
+    let (out, code) = import(dir.path(), &[]);
+    assert_eq!(code, 2, "{out}");
+    assert!(out.contains("label of cut(s) M-one"), "{out}");
+    assert!(!dir.path().join("aplan/tasks/PHASE-01.md").exists());
+
+    let (out, code) = import(dir.path(), &["--out", "comparison"]);
+    assert_eq!(code, 0, "an external copy has its own vocabulary: {out}");
+    assert!(dir.path().join("comparison/PHASE-01.md").exists());
 }
 
 /// `--cut` edits a milestone in the plan to name these tasks, and the plan

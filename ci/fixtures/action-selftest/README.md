@@ -18,9 +18,10 @@ and carries nothing a `v0.2.0` binary cannot parse. What the workflow proves wit
 it is the adoption path itself: install, checksum, the pinned version, both
 commands, an explicit `root`, and a format other than the default.
 
-The repository's own plan is not going unchecked. `ci/scripts/dogfood.sh` runs
-`aplan check` and `aplan verify` over it on every push, with the binary built from
-the commit under test, which is the stronger check and the right place for it.
+The repository's own plan is not going unchecked. `ci/scripts/structural.sh` runs
+`aplan check` on every push, and the separate full-history `ci/scripts/evidence.sh` runs `aplan
+verify` nightly, on dispatch and before release, with the binary built from the commit under test.
+Those are the stronger checks and the right place for them.
 
 Raising the pinned version here is safe at any time. Lowering the plan's demands
 is not: keep it to fields the pinned release knows.

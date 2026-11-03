@@ -1,20 +1,23 @@
 //! The plan as data, for a consumer that wants a rollup this tool does not have.
 //!
-//! `summary` rolls up by phase and by nothing else. The fourth pilot types every
-//! task build/measure/review, because 20 of its 105.5 days do not shrink by
-//! working faster, and no command could answer that: `summary --format json`
-//! emits phases alone and `check --format json` emits counts and diagnostics
-//! with no task data at all. So the effort table in that project's own plan
-//! stayed hand-maintained, a second copy of exactly the fact `aplan` owns, and
-//! it was wrong twice during the pilot's own audit
-//! (pre-public adoption evidence, item 5).
+//! `summary` originally rolled up by phase and nothing else. The fourth pilot
+//! types every task build/measure/review, because 20 of its 105.5 days do not
+//! shrink by working faster, and no command could answer that. A configured
+//! family now covers one deliberate alternate view, while this surface keeps
+//! every task available for any other rollup. Before either existed, the effort
+//! table in that project's own plan stayed hand-maintained, a second copy of
+//! exactly the fact `aplan` owns, and it was wrong twice during the pilot's own
+//! audit (pre-public adoption evidence, item 5).
 //!
 //! The narrow fix was a `--group-by` flag, which answers one question and
 //! invites the next. This emits the tasks instead, after which every rollup
 //! anyone wants is a `jq` line and the class of request stops arriving
 //! (`A1-075`).
 
-use schemars::JsonSchema;
+use std::borrow::Cow;
+use std::marker::PhantomData;
+
+use schemars::{JsonSchema, Schema, SchemaGenerator};
 use serde::{Deserialize, Serialize};
 
 use crate::graph::Graph;
@@ -22,12 +25,55 @@ use crate::roadmap::Roadmap;
 use crate::task::EvidenceKind;
 use crate::task::Status;
 
+/// A schema-only stand-in for an `Option<T>` that is nullable but not optional.
+///
+/// Schemars normally maps `Option<T>` to both a nullable value and an optional
+/// property. Task-data rows serialize every key and use `null` only as the
+/// value, so their schema needs to separate those two meanings (`A1-493`).
+struct RequiredNullable<T>(PhantomData<T>);
+
+impl<T: JsonSchema> JsonSchema for RequiredNullable<T> {
+    fn inline_schema() -> bool {
+        <Option<T>>::inline_schema()
+    }
+
+    fn schema_name() -> Cow<'static, str> {
+        <Option<T>>::schema_name()
+    }
+
+    fn schema_id() -> Cow<'static, str> {
+        <Option<T>>::schema_id()
+    }
+
+    fn json_schema(generator: &mut SchemaGenerator) -> Schema {
+        <Option<T>>::json_schema(generator)
+    }
+}
+
 /// The document `aplan tasks --format json` emits.
 #[derive(Debug, Clone, Serialize, JsonSchema)]
 pub struct TaskExport {
     /// The document's shape, so a consumer can pin it.
     pub schema: String,
+    /// Local coordination boundary for every row's ephemeral claim.
+    pub coordination: crate::ClaimScope,
+    /// Clock at which claim ages can be derived.
+    pub claim_observed_at_epoch_seconds: i64,
     pub tasks: Vec<TaskRow>,
+}
+
+impl TaskExport {
+    /// Attach one coherent ephemeral-claim observation to every task row.
+    #[must_use]
+    pub fn with_claims(mut self, snapshot: &crate::ClaimSnapshot) -> Self {
+        self.schema = "aplan/tasks/v2".to_string();
+        self.coordination = snapshot.scope.clone();
+        self.claim_observed_at_epoch_seconds = snapshot.observed_at_epoch_seconds;
+        for row in &mut self.tasks {
+            row.claim = snapshot.claim(&row.id).cloned();
+        }
+        self
+    }
 }
 
 /// One task, with the facts a rollup needs already resolved.
@@ -44,8 +90,13 @@ pub struct TaskRow {
     /// `null` when the task carries no estimate, which `APLAN009` reports
     /// separately. Distinguished from `0` on purpose: an unestimated task is not
     /// a free one.
+    #[schemars(with = "RequiredNullable<f64>")]
     pub effort_days: Option<f64>,
+    #[schemars(with = "RequiredNullable<String>")]
     pub owner: Option<String>,
+    /// Who is working on it now, distinct from durable `owner` responsibility.
+    #[schemars(with = "RequiredNullable<crate::ClaimRecord>")]
+    pub claim: Option<crate::ClaimRecord>,
     pub tags: Vec<String>,
     /// Declared blockers only. The cut-sequencing edges a task inherits
     /// (ADR-0013) are implied by `cut`, and repeating them here would make a
@@ -59,8 +110,10 @@ pub struct TaskRow {
     /// milestones, and this reports the first in roadmap order: deterministic,
     /// but a rollup by cut on such a plan will under-count, and the plan has not
     /// asked the tool to stop it.
+    #[schemars(with = "RequiredNullable<String>")]
     pub cut: Option<String>,
     /// The id of the milestone that owns it, since two cuts may share a label.
+    #[schemars(with = "RequiredNullable<String>")]
     pub milestone: Option<String>,
     /// Whether every blocker is `done`, including the inherited cut edges. The
     /// same answer `aplan ready` gives, so a consumer cannot derive a different
@@ -78,6 +131,7 @@ pub struct TaskRow {
     /// reimplement the derivation and could get a different answer than the
     /// command. A rank on a task that is not ready would be an order over work
     /// nobody can start, so those are `null` rather than ranked at the end.
+    #[schemars(with = "RequiredNullable<usize>")]
     pub rank: Option<usize>,
 
     // Everything a task *declares* that the derived half above does not cover.
@@ -118,6 +172,9 @@ pub struct TaskRow {
     /// The anchor fingerprints a closed task stamped, which is what `APLAN018`
     /// compares against to find a traced section that moved.
     pub trace_fingerprints: std::collections::BTreeMap<String, String>,
+    /// The mutable evidence referents a closed task stamped, which `APLAN054`
+    /// compares against their committed contents.
+    pub evidence_fingerprints: std::collections::BTreeMap<String, String>,
     /// When a parked task is worth looking at again, as an RFC 3339 instant
     /// (`A1-264`).
     ///
@@ -126,6 +183,7 @@ pub struct TaskRow {
     /// expected a value, which is the rule the whole of this type follows. An
     /// external scheduler filters on it; `aplan due` is the same question asked
     /// with validated timestamp semantics.
+    #[schemars(with = "RequiredNullable<String>")]
     pub revisit_at: Option<String>,
     /// What the task claims it does to the released version, `null` when it
     /// claims nothing (`A1-312`, ADR-0034).
@@ -136,10 +194,12 @@ pub struct TaskRow {
     /// repository's floors, which is why the claim is carried verbatim rather
     /// than resolved here -- the floors live in `.aplan.yml`, which this type
     /// has never read.
+    #[schemars(with = "RequiredNullable<crate::task::VersionImpact>")]
     pub version_impact: Option<crate::task::VersionImpact>,
     /// Why that claim is lower than the level implies, `null` when there is
     /// none. This is the half a reviewer reads, and `APLAN044` is the rule that
     /// asks for it.
+    #[schemars(with = "RequiredNullable<String>")]
     pub version_impact_reason: Option<String>,
     /// The version a **release** produced, written when it closed, `null`
     /// everywhere else (`A1-339`, ADR-0038).
@@ -148,6 +208,7 @@ pub struct TaskRow {
     /// asking what a release contained reads this instead of re-deriving from a
     /// plan that has since moved, which is the whole argument for the field
     /// existing. `APLAN050` is the rule that keeps it on a release and readable.
+    #[schemars(with = "RequiredNullable<String>")]
     pub version: Option<String>,
 }
 
@@ -168,8 +229,10 @@ pub struct EvidenceRow {
     /// the note text itself.
     #[serde(rename = "ref")]
     pub reference: String,
-    /// ISO-8601 date the evidence was captured, `null` where there is none.
-    /// Required for `note`, because an undated note is a rumour.
+    /// ISO-8601 date the inline assertion was made. Required for `note`, because
+    /// an undated note is a rumour, and rejected on every machine-resolved kind:
+    /// an author-entered date is not freshness proof (`APLAN055`).
+    #[schemars(with = "RequiredNullable<String>")]
     pub captured: Option<String>,
 }
 
@@ -207,6 +270,7 @@ impl Graph<'_> {
                     status: t.status,
                     effort_days: t.effort_days,
                     owner: t.owner.clone(),
+                    claim: None,
                     tags: t.tags.clone(),
                     blocked_by: t.blocked_by.clone(),
                     cut,
@@ -221,6 +285,7 @@ impl Graph<'_> {
                     ratified_by: t.ratified_by.clone(),
                     contains: t.contains.clone(),
                     trace_fingerprints: t.trace_fingerprints.clone(),
+                    evidence_fingerprints: t.evidence_fingerprints.clone(),
                     revisit_at: t.revisit_at.clone(),
                     version_impact: t.version_impact,
                     version_impact_reason: t.version_impact_reason.clone(),
@@ -230,7 +295,9 @@ impl Graph<'_> {
             .collect();
 
         TaskExport {
-            schema: "aplan/tasks/v1".to_string(),
+            schema: "aplan/tasks/v2".to_string(),
+            coordination: crate::ClaimScope::unavailable("no local claim snapshot was supplied"),
+            claim_observed_at_epoch_seconds: 0,
             tasks,
         }
     }
@@ -283,6 +350,14 @@ mod tests {
         assert!(jsonschema::validator_for(&schema).is_ok());
     }
 
+    #[test]
+    fn required_nullable_preserves_the_option_schema_identity() {
+        assert_eq!(
+            <RequiredNullable<String> as JsonSchema>::schema_name(),
+            <Option<String> as JsonSchema>::schema_name()
+        );
+    }
+
     use super::*;
     use crate::task::Task;
 
@@ -302,6 +377,7 @@ mod tests {
             paths: Vec::new(),
             traces: Vec::new(),
             trace_fingerprints: std::collections::BTreeMap::new(),
+            evidence_fingerprints: std::collections::BTreeMap::new(),
             tags: tags.iter().map(|s| (*s).to_string()).collect(),
             revisit_at: None,
             version_impact: None,
@@ -406,7 +482,7 @@ mod tests {
     fn the_schema_string_is_what_a_consumer_pins() {
         let tasks: [Task; 0] = [];
         let g = Graph::new(tasks.iter());
-        assert_eq!(g.task_rows().schema, "aplan/tasks/v1");
+        assert_eq!(g.task_rows().schema, "aplan/tasks/v2");
     }
 
     #[test]

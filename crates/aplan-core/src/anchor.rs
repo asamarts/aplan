@@ -278,6 +278,104 @@ fn table_rows(text: &str) -> Vec<Row> {
     out
 }
 
+/// One parsed Markdown trace document, reused throughout one validation run.
+///
+/// The source text remains owned beside its heading and row indexes. Resolving
+/// or fingerprinting another anchor therefore walks the small index, not the
+/// complete document syntax again. This is crate-private because it is an
+/// execution detail of trace validation; the public helpers below preserve the
+/// established one-shot API used by closure and evidence code.
+pub(crate) struct MarkdownDocument {
+    text: String,
+    lines: Vec<std::ops::Range<usize>>,
+    headings: Vec<Heading>,
+    rows: Vec<Row>,
+}
+
+impl MarkdownDocument {
+    pub(crate) fn parse(text: String) -> Self {
+        let text = if text.starts_with('\u{feff}') {
+            text.trim_start_matches('\u{feff}').to_string()
+        } else {
+            text
+        };
+        let base = text.as_ptr() as usize;
+        let lines = text
+            .lines()
+            .map(|line| {
+                let start = line.as_ptr() as usize - base;
+                start..start + line.len()
+            })
+            .collect();
+        let headings = headings(&text);
+        let rows = table_rows(&text);
+        Self {
+            text,
+            lines,
+            headings,
+            rows,
+        }
+    }
+
+    pub(crate) fn resolves(&self, anchor: &str) -> bool {
+        let anchor = anchor.to_lowercase();
+        self.headings.iter().any(|h| h.anchor == anchor)
+            || self.rows.iter().any(|r| r.anchor == anchor)
+    }
+
+    pub(crate) fn fingerprint(&self, anchor: &str) -> Option<String> {
+        let anchor = anchor.to_lowercase();
+        let Some(idx) = self.headings.iter().position(|h| h.anchor == anchor) else {
+            let row = self.rows.iter().find(|r| r.anchor == anchor)?;
+            return Some(fnv1a_hex(self.line(row.line)?.trim_end()));
+        };
+        let heading = &self.headings[idx];
+        let end = self.headings[idx + 1..]
+            .iter()
+            .find(|next| next.level <= heading.level)
+            .map_or(self.lines.len(), |next| next.line);
+        Some(fnv1a_hex(&section_text(
+            &self.section_lines(heading.line, end),
+        )))
+    }
+
+    /// `None` means the anchor itself does not resolve; `Some` answers whether
+    /// the stored current or legacy fingerprint still describes it.
+    pub(crate) fn holds(&self, anchor: &str, stored: &str) -> Option<bool> {
+        let current = self.fingerprint(anchor)?;
+        if current == stored {
+            return Some(true);
+        }
+        let anchor = anchor.to_lowercase();
+        let Some(idx) = self.headings.iter().position(|h| h.anchor == anchor) else {
+            return Some(false);
+        };
+        let heading = &self.headings[idx];
+        let end = self.headings[idx + 1..]
+            .iter()
+            .find(|next| next.level <= heading.level)
+            .map_or(self.lines.len(), |next| next.line);
+        let legacy = self
+            .section_lines(heading.line, end)
+            .iter()
+            .map(|line| line.trim_end())
+            .collect::<Vec<_>>()
+            .join("\n");
+        Some(fnv1a_hex(&legacy) == stored)
+    }
+
+    fn line(&self, index: usize) -> Option<&str> {
+        self.lines.get(index).map(|range| &self.text[range.clone()])
+    }
+
+    fn section_lines(&self, start: usize, end: usize) -> Vec<&str> {
+        self.lines[start..end]
+            .iter()
+            .map(|range| &self.text[range.clone()])
+            .collect()
+    }
+}
+
 /// The first cell of a table row, or `None` for anything that is not one.
 ///
 /// A row is a line starting with `|` and holding a second `|`. The separator
@@ -315,26 +413,34 @@ fn is_delimiter_row(line: &str) -> bool {
 /// resistance is not a concern.
 pub fn anchor_fingerprint(text: &str, anchor: &str) -> Option<String> {
     let text = text.trim_start_matches('\u{feff}');
+    fingerprint_indexed(text, &headings(text), &table_rows(text), anchor)
+}
+
+fn fingerprint_indexed(
+    text: &str,
+    headings: &[Heading],
+    rows: &[Row],
+    anchor: &str,
+) -> Option<String> {
     // GitHub anchors are lowercase; fold the caller's fragment to match, so a
     // stamp and its later check agree however the `traces` entry was cased.
     let anchor = anchor.to_lowercase();
-    let hs = headings(text);
-    let Some(idx) = hs.iter().position(|h| h.anchor == anchor) else {
+    let Some(idx) = headings.iter().position(|h| h.anchor == anchor) else {
         // Not a heading: a table row addressed by its first cell, hashed alone so
         // an edit to a sibling row is not this task's drift (`A1-095`).
         //
         // Headings are tried first, so a document with both a `## Decision` and a
         // `| Decision |` row means the heading by `#decision`, which keeps every
         // existing plan's fingerprint exactly as it was.
-        let row = table_rows(text).into_iter().find(|r| r.anchor == anchor)?;
+        let row = rows.iter().find(|r| r.anchor == anchor)?;
         let line = text.lines().nth(row.line)?;
         return Some(fnv1a_hex(line.trim_end()));
     };
-    let level = hs[idx].level;
-    let start = hs[idx].line;
+    let level = headings[idx].level;
+    let start = headings[idx].line;
     let lines: Vec<&str> = text.lines().collect();
     // The section ends at the next heading that is not deeper than this one.
-    let end = hs[idx + 1..]
+    let end = headings[idx + 1..]
         .iter()
         .find(|h| h.level <= level)
         .map_or(lines.len(), |h| h.line);
@@ -363,13 +469,16 @@ pub fn fingerprint_holds(text: &str, anchor: &str, stored: &str) -> bool {
 /// its trailing blank lines left in.
 fn legacy_fingerprint(text: &str, anchor: &str) -> Option<String> {
     let text = text.trim_start_matches('\u{feff}');
+    legacy_fingerprint_indexed(text, &headings(text), anchor)
+}
+
+fn legacy_fingerprint_indexed(text: &str, headings: &[Heading], anchor: &str) -> Option<String> {
     let anchor = anchor.to_lowercase();
-    let hs = headings(text);
-    let idx = hs.iter().position(|h| h.anchor == anchor)?;
-    let level = hs[idx].level;
-    let start = hs[idx].line;
+    let idx = headings.iter().position(|h| h.anchor == anchor)?;
+    let level = headings[idx].level;
+    let start = headings[idx].line;
     let lines: Vec<&str> = text.lines().collect();
-    let end = hs[idx + 1..]
+    let end = headings[idx + 1..]
         .iter()
         .find(|h| h.level <= level)
         .map_or(lines.len(), |h| h.line);
@@ -401,15 +510,26 @@ fn section_text(lines: &[&str]) -> String {
         .join("\n")
 }
 
-/// A stable 16-hex-digit FNV-1a hash of `s`. Deterministic across platforms and
-/// toolchains (unlike `std`'s `DefaultHasher`), which a stored fingerprint needs.
-pub(crate) fn fnv1a_hex(s: &str) -> String {
+/// A stable 16-hex-digit FNV-1a hash of arbitrary content. Deterministic across
+/// platforms and toolchains (unlike `std`'s `DefaultHasher`), which a stored
+/// fingerprint needs.
+///
+/// Trace sections call this through their text normalisation. Evidence files
+/// also use it directly so a binary artefact can be stamped without inventing a
+/// second hash implementation. This is drift detection rather than
+/// authentication, so collision resistance is not the property being claimed.
+#[must_use]
+pub fn content_fingerprint(bytes: &[u8]) -> String {
     let mut h: u64 = 0xcbf2_9ce4_8422_2325;
-    for b in s.bytes() {
+    for &b in bytes {
         h ^= u64::from(b);
         h = h.wrapping_mul(0x0000_0100_0000_01b3);
     }
     format!("{h:016x}")
+}
+
+pub(crate) fn fnv1a_hex(s: &str) -> String {
+    content_fingerprint(s.as_bytes())
 }
 
 /// Mint the next free anchor for `title`, mirroring github-slugger's stateful
@@ -662,7 +782,7 @@ mod tests {
     /// anchor it), so it mints no anchor.
     #[test]
     fn a_heading_inside_a_code_fence_is_not_an_anchor() {
-        let anchors = heading_anchors("# Real\n\n```\n# Fake In Fence\n```\n");
+        let anchors = heading_anchors("# Real\n\n```not-a-fence`\n```\n# Fake In Fence\n```\n");
         assert!(anchors.contains("real"));
         assert!(
             !anchors.contains("fake-in-fence"),
@@ -688,6 +808,39 @@ nested content
 
 other content
 ";
+
+    #[test]
+    fn parsed_markdown_reuses_one_index_without_changing_anchor_answers() {
+        let text = format!("{DOC}\n| Item | State |\n|---|---|\n| Seven | live |\n");
+        let document = MarkdownDocument::parse(text.clone());
+        let anchors = resolvable_anchors(&text);
+        for anchor in ["top", "section-a", "sub-a1", "seven", "missing"] {
+            assert_eq!(
+                document.resolves(anchor),
+                anchors.contains(anchor),
+                "resolution changed for {anchor}"
+            );
+            assert_eq!(
+                document.fingerprint(anchor),
+                anchor_fingerprint(&text, anchor),
+                "fingerprint changed for {anchor}"
+            );
+        }
+
+        let current = anchor_fingerprint(&text, "section-a").expect("current stamp");
+        assert_eq!(document.holds("section-a", &current), Some(true));
+        assert_eq!(document.holds("section-a", "0000000000000000"), Some(false));
+        assert_eq!(document.holds("missing", &current), None);
+
+        let grown = "# Doc\n\n## Item\n\nThe text.\n\n## Later\n\nAdded afterwards.\n";
+        let legacy = super::fnv1a_hex("## Item\n\nThe text.\n");
+        let document = MarkdownDocument::parse(grown.to_string());
+        assert_eq!(
+            document.holds("item", &legacy),
+            Some(true),
+            "the cached path must retain the legacy-stamp compatibility"
+        );
+    }
 
     #[test]
     fn fingerprint_covers_a_section_and_its_subsections() {
@@ -753,6 +906,7 @@ other content
         let doc = "\u{feff}# Overview\n\nbody\n";
         assert!(heading_anchors(doc).contains("overview"));
         assert!(anchor_fingerprint(doc, "overview").is_some());
+        assert!(MarkdownDocument::parse(doc.to_string()).resolves("overview"));
     }
 
     /// An info string on a *closing* fence does not close the block, so a heading
@@ -911,7 +1065,7 @@ mod row_anchors {
 
     #[test]
     fn a_table_inside_a_code_fence_is_not_a_table() {
-        let doc = "# Doc\n\n```\n| Invariant 7 | shown, not kept |\n```\n";
+        let doc = "# Doc\n\n```\n~~~\n| Invariant 7 | shown, not kept |\n```\n";
         assert!(!resolvable_anchors(doc).contains("invariant-7"));
     }
 }

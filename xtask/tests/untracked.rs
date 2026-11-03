@@ -30,7 +30,7 @@ fn repo_root() -> PathBuf {
 }
 
 fn xtask(root: &Path, args: &[&str]) -> String {
-    let out = Command::new(env!("CARGO_BIN_EXE_xtask"))
+    let out = Command::new(crate::common::xtask())
         .args(args)
         .current_dir(root)
         .output()

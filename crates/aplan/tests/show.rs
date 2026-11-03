@@ -8,7 +8,7 @@
 use std::path::Path;
 use std::process::Command;
 
-mod common;
+use crate::common;
 
 fn aplan(dir: &Path, args: &[&str]) -> (String, String, i32) {
     let out = common::output(dir, args);
@@ -150,6 +150,8 @@ fn a_task_whose_evidence_stopped_resolving_looks_different() {
     let (out, _, code) = aplan(dir.path(), &["show", "A-1"]);
     assert_eq!(code, 0, "showing a task is not a verdict: {out}");
     assert!(out.contains("findings:"), "{out}");
+    assert!(out.contains("evidence state: current"), "{out}");
+    assert!(out.contains("[evidence: current, failed]"), "{out}");
     assert!(out.contains("APLAN011"), "{out}");
     assert!(out.contains("fix: "), "the remedy travels with it: {out}");
     assert!(
@@ -170,6 +172,14 @@ fn a_task_whose_evidence_stopped_resolving_looks_different() {
         skipped.contains("the evidence was not resolved"),
         "silence must not read as a pass: {skipped}"
     );
+    assert!(
+        skipped.contains("evidence state: not observed"),
+        "{skipped}"
+    );
+    assert!(
+        skipped.contains("[evidence: not observed, unavailable]"),
+        "{skipped}"
+    );
 }
 
 /// `--format json` carries the same content, so a consumer reading one task is
@@ -181,18 +191,140 @@ fn the_json_carries_what_the_human_form_carries() {
     assert_eq!(code, 0, "{out}");
     let v: serde_json::Value = serde_json::from_str(&out).expect("json");
 
-    assert_eq!(v["schema"], "aplan/show/v1");
+    assert_eq!(v["schema"], "aplan/show/v3");
     assert_eq!(v["id"], "A-1");
     assert_eq!(v["status"], "done");
     assert_eq!(v["paths"][0], "src/**");
     assert_eq!(v["traces"][0], "DOC.md#the-cause");
     assert_eq!(v["evidence"][0]["kind"], "commit");
     assert_eq!(v["evidence"][0]["reference"], sha);
+    assert_eq!(v["evidence"][0]["observation"]["state"], "current");
+    assert_eq!(v["evidence"][0]["observation"]["outcome"], "resolved");
+    assert_eq!(v["evidence_observation"]["state"], "current");
     assert_eq!(v["releases"][0]["id"], "A-2");
     assert_eq!(v["releases"][0]["status"], "todo");
     assert_eq!(v["resolved"], true);
     assert!(v["body"].as_str().unwrap_or_default().contains("Body."));
     assert_eq!(v["findings"].as_array().map(Vec::len), Some(0));
+}
+
+/// Proof for `evidence.stale_premise_uses_configured_roots`: APLAN045 must make
+/// an absolute configured plan path repository-relative and read historical
+/// document bytes from `traces_root`, not silently look beside the
+/// configuration for a file that is not there.
+#[test]
+fn verify_and_show_resolve_stale_premises_through_configured_roots() {
+    let dir = tempfile::Builder::new()
+        .tempdir_in(aplan_core::fixture::fixture_root())
+        .expect("repository");
+    let root = dir.path();
+    std::fs::create_dir(root.join("aplan")).expect("plan");
+    std::fs::create_dir(root.join("docs")).expect("documents");
+    std::fs::write(root.join(".aplan.yml"), "root: aplan\ntraces_root: docs\n").expect("config");
+    std::fs::write(
+        root.join("aplan/A-1.md"),
+        "---\nid: A-1\ntitle: Waiting on a moving premise\nphase: 1\nstatus: todo\n\
+         effort_days: 1\npaths: [src/**]\ntraces: [DESIGN.md#fact]\n---\n",
+    )
+    .expect("task");
+    std::fs::write(root.join("docs/DESIGN.md"), "# Fact\n\noriginal\n").expect("document");
+    git(root, &["init", "-q", "."]);
+    git(root, &["config", "user.email", "t@example.com"]);
+    git(root, &["config", "user.name", "t"]);
+    git(root, &["add", "-A"]);
+    git(root, &["commit", "-q", "-m", "initial"]);
+    std::fs::write(root.join("docs/DESIGN.md"), "# Fact\n\nchanged\n").expect("changed");
+    git(root, &["add", "docs/DESIGN.md"]);
+    git(root, &["commit", "-q", "-m", "move premise"]);
+
+    let (verified, err, code) = aplan(root, &["verify", "--format", "json"]);
+    assert_eq!(code, 0, "{verified}{err}");
+    let verified: serde_json::Value = serde_json::from_str(&verified).expect("verify JSON");
+    assert!(
+        verified["diagnostics"]
+            .as_array()
+            .is_some_and(|findings| findings.iter().any(|finding| finding["code"] == "APLAN045")),
+        "verify silently missed the moved configured trace: {verified:#}"
+    );
+
+    let (out, err, code) = aplan(root, &["show", "A-1", "--format", "json"]);
+    assert_eq!(code, 0, "{out}{err}");
+    let shown: serde_json::Value = serde_json::from_str(&out).expect("show JSON");
+    assert!(
+        shown["findings"]
+            .as_array()
+            .is_some_and(|findings| findings.iter().any(|finding| finding["code"] == "APLAN045")),
+        "show silently missed the moved configured trace: {shown:#}"
+    );
+}
+
+/// Proof for `show.carries_complete_task_projection`: the typed
+/// projection really is complete before the TUI consumes it; JSON exposes the
+/// persisted relationships, fingerprints and version claims as fields.
+#[test]
+fn the_typed_show_projection_carries_every_persisted_task_field() {
+    let (dir, _) = repo();
+    let path = dir.path().join("aplan/tasks/A-1.md");
+    let source = std::fs::read_to_string(&path).expect("task");
+    let source = source
+        .replace(
+            "effort_days: 1\n",
+            "effort_days: 1\nprefer_after: [MISSING]\nratified_by: [A-2]\ncontains: [A-2]\n\
+             version_impact: breaking\nversion_impact_reason: public contract changed\n\
+             version: 1.2.3\n",
+        )
+        .replace(
+            "- DOC.md#the-cause\n",
+            "- DOC.md#the-cause\ntrace_fingerprints:\n  DOC.md#the-cause: trace-stamp\n",
+        )
+        .replace(
+            "---\n\n## Why",
+            "evidence_fingerprints:\n  'file:old-proof.md': evidence-stamp\n---\n\n## Why",
+        );
+    std::fs::write(path, source).expect("rich task");
+
+    let (out, _, code) = aplan(
+        dir.path(),
+        &["show", "A-1", "--format", "json", "--no-resolve", "--body"],
+    );
+    assert_eq!(code, 0, "{out}");
+    let show: serde_json::Value = serde_json::from_str(&out).expect("show json");
+    assert_eq!(
+        show["trace_fingerprints"]["DOC.md#the-cause"],
+        "trace-stamp"
+    );
+    assert_eq!(
+        show["evidence_fingerprints"]["file:old-proof.md"],
+        "evidence-stamp"
+    );
+    assert_eq!(show["prefer_after"][0]["id"], "MISSING");
+    assert_eq!(show["prefer_after"][0]["availability"], "missing");
+    assert_eq!(show["ratified_by"][0]["id"], "A-2");
+    assert_eq!(show["ratified_by"][0]["availability"], "loaded");
+    assert_eq!(show["contains"][0]["id"], "A-2");
+    assert_eq!(show["version_impact"], "breaking");
+    assert_eq!(show["version_impact_reason"], "public contract changed");
+    assert_eq!(show["version"], "1.2.3");
+    assert!(
+        show["body"]
+            .as_str()
+            .is_some_and(|body| body.contains("Body."))
+    );
+
+    let (human, _, code) = aplan(dir.path(), &["show", "A-1", "--no-resolve"]);
+    assert_eq!(code, 0, "{human}");
+    for fact in [
+        "version impact breaking",
+        "version impact reason: public contract changed",
+        "fingerprint trace-stamp",
+        "orphaned fingerprint evidence-stamp",
+        "prefers after:",
+        "MISSING  missing",
+        "ratified by:",
+        "contains:",
+    ] {
+        assert!(human.contains(fact), "missing `{fact}`:\n{human}");
+    }
 }
 
 /// A flag that takes a value and ignores it is worse than one that refuses it
@@ -313,7 +445,7 @@ fn showing_one_task_does_not_resolve_another_tasks_citations() {
 
     // And the runner is still run when the task being shown is the one citing a
     // test, or the scoping would have turned into a silence.
-    let (out, _, code) = aplan(root, &["show", "A-2"]);
+    let (out, _, code) = aplan(root, &["show", "A-2", "--refresh-evidence"]);
     assert_eq!(code, 0, "{out}");
     assert!(marker.exists(), "`A-2`'s own citation was not resolved");
 }

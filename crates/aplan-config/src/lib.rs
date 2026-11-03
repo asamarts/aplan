@@ -26,11 +26,21 @@ use std::collections::{BTreeMap, BTreeSet};
 use std::path::{Path, PathBuf};
 
 use aplan_core::EvidenceKind;
+use aplan_core::capture::{CapturePolicy, CaptureProfile};
 use schemars::JsonSchema;
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 
 /// The whole-element token replaced by the test name in a `run` template.
 pub const PLACEHOLDER: &str = "{test}";
+
+/// The whole-element token replaced by an aplan-owned batch manifest path.
+pub const BATCH_MANIFEST_PLACEHOLDER: &str = "{manifest}";
+
+/// The whole-element token replaced by an initially absent batch-result path.
+pub const BATCH_RESULT_PLACEHOLDER: &str = "{result}";
+
+/// The batch interchange major version this build accepts.
+pub const TEST_BATCH_PROTOCOL: u32 = 1;
 
 /// The whole-element token replaced by the citation in a `url.check` template.
 pub const URL_PLACEHOLDER: &str = "{url}";
@@ -58,6 +68,10 @@ pub enum Error {
     /// reader to the wrong half of their config.
     #[error("invalid `url.check` in `.aplan.yml`: {0}")]
     BadUrlCheck(String),
+    /// A reusable-provider input declaration the observation store cannot
+    /// identify exactly.
+    #[error("invalid `evidence.observation_inputs` in `.aplan.yml`: {0}")]
+    BadObservationInputs(String),
     /// An `advisory` entry that names no rule.
     #[error("invalid `advisory` in `.aplan.yml`: {0}")]
     BadAdvisory(String),
@@ -75,10 +89,25 @@ pub enum Error {
     /// variant for the reason [`BadUrlCheck`](Self::BadUrlCheck) has one.
     #[error("invalid `docs.membership` in `.aplan.yml`: {0}")]
     BadDocs(String),
+    /// A `docs.paths` declaration the document gate could not act on.
+    #[error("invalid `docs.paths` in `.aplan.yml`: {0}")]
+    BadDocPaths(String),
+    /// A view grouping by a tag family the repository did not declare.
+    #[error("invalid grouping in `.aplan.yml`: {0}")]
+    BadGrouping(String),
+    /// A `tag_families` vocabulary the tool cannot act on.
+    #[error("invalid `tag_families` in `.aplan.yml`: {0}")]
+    BadTagFamilies(String),
+    /// An `owners` vocabulary the tool cannot act on.
+    #[error("invalid `owners` in `.aplan.yml`: {0}")]
+    BadOwners(String),
     /// A `version` block the tool cannot act on (`A1-313`). Its own variant for
     /// the reason [`BadUrlCheck`](Self::BadUrlCheck) has one.
     #[error("invalid `version` in `.aplan.yml`: {0}")]
     BadVersion(String),
+    /// Capture kinds or profiles the portable repository policy cannot apply.
+    #[error("invalid `capture` in `.aplan.yml`: {0}")]
+    BadCapture(String),
     #[error("could not read `.aplan.yml`: {0}")]
     Io(String),
     #[error("could not parse `.aplan.yml`: {0}")]
@@ -147,9 +176,17 @@ impl std::fmt::Display for UnknownKeys {
 /// The parsed `.aplan.yml`. Every field is optional: an absent key means "use
 /// the built-in default", and a CLI flag overrides whatever is here (the CLI
 /// owns precedence). Unknown keys are rejected, not ignored.
-#[derive(Debug, Clone, Default, Deserialize, JsonSchema)]
+#[derive(Debug, Clone, Default, Deserialize, Serialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
 pub struct Config {
+    /// Portable capture kinds and named creation/promotion profiles.
+    ///
+    /// This is repository policy, never per-user configuration: the same
+    /// capture request must persist the same effective values for every actor.
+    /// Profiles contain only inert defaults and cannot set task status,
+    /// dependencies, evidence, traces or commands.
+    #[serde(default)]
+    pub capture: Option<CaptureConfig>,
     /// What a task is expected to say about the released version (`A1-312`,
     /// ADR-0034). Absent by default, and a plan that never declares it is
     /// unaffected.
@@ -215,8 +252,8 @@ pub struct Config {
     /// evidence on a release cut than on ordinary work, or none on spikes, can
     /// only say it by exemption today, which is all or nothing.
     ///
-    /// The subset is named with the same four dimensions `--cut`, `--tag`,
-    /// `--owner` and `--status` take on the command line, with the same reading:
+    /// The subset is named with the same five dimensions `--cut`, `--phase`,
+    /// `--tag`, `--owner` and `--status` take on the command line, with the same reading:
     /// within a dimension any, across dimensions all (ADR-0026's selector,
     /// `A1-214`). One model of what a subset is, two renderings of it.
     #[serde(default)]
@@ -236,9 +273,9 @@ pub struct Config {
     /// read like one that had nothing to say.
     #[serde(default)]
     pub advisory: Option<Vec<String>>,
-    /// Turn on stale-`done` drift detection (`APLAN018`): `aplan close` stamps a
-    /// content fingerprint of each traced section, and `check` warns when a closed
-    /// task's traced section changes afterward. Off unless set.
+    /// Turn on stale-`done` drift detection (`APLAN018`, `APLAN054`): `aplan
+    /// close` stamps traced sections and mutable file evidence, then `check` and
+    /// `verify` report changes under the same references. Off unless set.
     #[serde(default)]
     pub detect_drift: Option<bool>,
     /// Require every non-milestone task to be a member of exactly one cut
@@ -251,11 +288,11 @@ pub struct Config {
     /// Tag vocabularies this plan uses, as family name to its members
     /// (`APLAN026`).
     ///
-    /// A second grouping level always ends up in tags, because tags are what
-    /// exists: a pilot put 22 epics there and a build/measure/review taxonomy
-    /// beside them, and nothing noticed a typo in either. Declaring the
-    /// vocabulary makes a claim the repository already believes checkable,
-    /// without making tags into a model and so without pre-empting `A1-032`.
+    /// A second task-membership dimension ends up in tags, because tags are
+    /// what exists: a pilot put 22 epics there and a build/measure/review
+    /// taxonomy beside them, and nothing noticed a typo in either. Declaring
+    /// the vocabulary makes a claim the repository already believes checkable,
+    /// without making tags into a containment model.
     ///
     /// ```yaml
     /// tag_families:
@@ -267,6 +304,16 @@ pub struct Config {
     /// and silent, or the feature would be a migration.
     #[serde(default)]
     pub tag_families: Option<BTreeMap<String, TagFamily>>,
+    /// Canonical values for the task model's free-text `owner` field.
+    ///
+    /// Absent leaves every owner legal, exactly as before. When declared,
+    /// `APLAN056` reports a task whose owner is not a member and suggests a
+    /// declared spelling when it is one edit away. This is deliberately a
+    /// field-specific vocabulary rather than a generic mapping: `owner` is the
+    /// only free-text categorical scalar in the task model today, and a generic
+    /// mechanism with one member would expose field names as a second schema.
+    #[serde(default)]
+    pub owners: Option<Vec<String>>,
     /// How long a live task may sit unchanged before `aplan stale` names it,
     /// in days (`A1-020`). Default 30; `--older-than` overrides it.
     ///
@@ -292,6 +339,9 @@ pub struct Config {
     /// How `aplan roadmap` renders (`A1-078`).
     #[serde(default)]
     pub roadmap: Option<RoadmapConfig>,
+    /// How `aplan summary` rolls work up (`A1-186`).
+    #[serde(default)]
+    pub summary: Option<SummaryConfig>,
     /// How `aplan add` mints an id when the caller does not pass `--id`
     /// (`A1-047`). Default: `sequential`, the derivation every existing plan
     /// already gets.
@@ -308,8 +358,8 @@ pub struct Config {
     /// `<repo>/plan` wherever the command runs. The `--root` flag overrides it.
     #[serde(default)]
     pub root: Option<String>,
-    /// Where this repository's prose declares a cut's membership, so
-    /// `aplan check-docs` can read it against the milestones (`A1-165`).
+    /// Which prose `aplan check-docs` checks, and where that prose declares a
+    /// cut's membership (`A1-165`, `A1-203`).
     #[serde(default)]
     pub docs: Option<DocsConfig>,
     /// Treat any warning as a finding that fails the command, so `check` and
@@ -326,13 +376,57 @@ pub struct Config {
     pub deny_warnings: Option<bool>,
 }
 
+/// Repository-owned capture organization and portable defaults.
+#[derive(Debug, Clone, Default, Deserialize, Serialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct CaptureConfig {
+    /// Additional lower-case ASCII kebab-case kinds. `task`, `idea` and `note`
+    /// are always present and must not be repeated here.
+    #[serde(default)]
+    pub kinds: Vec<String>,
+    /// Explicitly selected profiles; there is no implicit personal default.
+    #[serde(default)]
+    pub profiles: BTreeMap<String, CaptureProfile>,
+}
+
+impl Config {
+    /// Resolve the selected repository capture policy, or the built-ins when
+    /// the key is absent (including `--no-config`).
+    ///
+    /// The loader has already validated this shape, so failure here indicates
+    /// a programmatically constructed `Config` that skipped [`Config::validate_capture`].
+    #[must_use]
+    pub fn capture_policy(&self) -> CapturePolicy {
+        self.capture
+            .as_ref()
+            .map_or_else(CapturePolicy::default, |config| {
+                CapturePolicy::try_new(&config.kinds, &config.profiles)
+                    .expect("loaded capture policy is valid")
+            })
+    }
+
+    /// Reject capture policy that is ambiguous, vacuous or non-portable.
+    ///
+    /// # Errors
+    /// When a configured kind, profile or one of its admitted defaults is not
+    /// a value the capture loader can interpret deterministically.
+    pub fn validate_capture(&self) -> Result<(), Error> {
+        let Some(config) = &self.capture else {
+            return Ok(());
+        };
+        CapturePolicy::try_new(&config.kinds, &config.profiles)
+            .map(|_| ())
+            .map_err(Error::BadCapture)
+    }
+}
+
 /// A declared tag vocabulary: its members, and optionally how many of them a
 /// task must carry.
 ///
 /// Untagged so the list shorthand keeps working unchanged. `epic: [epic-a]` and
 /// `epic: {members: [epic-a]}` are the same declaration, and a repository that
 /// never wanted cardinality never learns the longer form exists (`A1-133`).
-#[derive(Debug, Clone, JsonSchema)]
+#[derive(Debug, Clone, Serialize, JsonSchema)]
 #[serde(untagged)]
 pub enum TagFamily {
     /// `epic: [epic-a, epic-b]`, the shape every existing config uses.
@@ -414,7 +508,7 @@ impl TagFamily {
 }
 
 /// The long form of a [`TagFamily`].
-#[derive(Debug, Clone, Deserialize, JsonSchema)]
+#[derive(Debug, Clone, Deserialize, Serialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
 pub struct TagFamilySpec {
     /// The tags this family contains, as whole tags.
@@ -432,7 +526,7 @@ pub struct TagFamilySpec {
 }
 
 /// How many members of a family a task in scope must carry (`APLAN030`).
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize, JsonSchema)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize, Serialize, JsonSchema)]
 #[serde(rename_all = "kebab-case")]
 pub enum Cardinality {
     /// Any number, including none. What a bare list declares, and the default.
@@ -450,7 +544,7 @@ pub enum Cardinality {
 /// Two separate keys rather than a list of predicates, so a contradiction cannot
 /// be written: `[live, done]` would be a rule that can never fire, which is the
 /// vacuity this project keeps finding in other people's gates.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize, JsonSchema)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize, Serialize, JsonSchema)]
 #[serde(rename_all = "kebab-case")]
 pub enum StatusScope {
     /// Every status, the default.
@@ -466,7 +560,7 @@ pub enum StatusScope {
 }
 
 /// Whether milestone tasks are subject to a cardinality.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize, JsonSchema)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize, Serialize, JsonSchema)]
 #[serde(rename_all = "kebab-case")]
 pub enum MilestoneScope {
     /// Milestones are judged like any other task, the default.
@@ -484,7 +578,7 @@ pub enum MilestoneScope {
 /// reading of "more specific"; the whole-plan settings are the scope that names
 /// none, so they lose to any scope that matches. Reading down the list is how a
 /// reader resolves a tie, which is a rule that needs no merge.
-#[derive(Debug, Clone, Deserialize, JsonSchema)]
+#[derive(Debug, Clone, Deserialize, Serialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
 pub struct ScopedPolicy {
     /// The subset this applies to. An empty scope is refused rather than read as
@@ -497,14 +591,17 @@ pub struct ScopedPolicy {
     pub evidence: Option<ScopedEvidence>,
 }
 
-/// The subset a [`ScopedPolicy`] applies to: the four dimensions `--cut`,
-/// `--tag`, `--owner` and `--status` name on the command line (`A1-214`).
-#[derive(Debug, Clone, Default, Deserialize, JsonSchema)]
+/// The subset a [`ScopedPolicy`] applies to: the five dimensions `--cut`,
+/// `--phase`, `--tag`, `--owner` and `--status` name on the command line (`A1-214`).
+#[derive(Debug, Clone, Default, Deserialize, Serialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
 pub struct Scope {
     /// Cut labels or milestone ids. A task matches if it is in any of them.
     #[serde(default)]
     pub cut: Vec<String>,
+    /// Numeric phases. A task matches if it carries any of them.
+    #[serde(default)]
+    pub phase: Vec<u32>,
     /// Tags. A task matches if it carries any of them.
     #[serde(default)]
     pub tag: Vec<String>,
@@ -548,6 +645,7 @@ impl Scope {
         }
         Ok(aplan_core::select::Selector {
             cuts: self.cut.clone(),
+            phases: self.phase.clone(),
             tags: self.tag.clone(),
             owners: self.owner.clone(),
             statuses,
@@ -563,6 +661,7 @@ impl Scope {
     #[must_use]
     pub fn named_dimensions(&self) -> usize {
         usize::from(!self.cut.is_empty())
+            + usize::from(!self.phase.is_empty())
             + usize::from(!self.tag.is_empty())
             + usize::from(!self.owner.is_empty())
             + usize::from(!self.status.is_empty())
@@ -574,7 +673,7 @@ impl Scope {
 /// Only the two that `evidence.exempt_tags` already scopes between them, because
 /// the first scoped dial should be the one whose degenerate case is already in
 /// the file rather than a new idea (`A1-183`).
-#[derive(Debug, Clone, Deserialize, JsonSchema)]
+#[derive(Debug, Clone, Deserialize, Serialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
 pub struct ScopedEvidence {
     /// Evidence kinds strong enough to close a task in this subset. An empty
@@ -588,7 +687,7 @@ pub struct ScopedEvidence {
 
 /// How strong a `done` task's evidence must be (`APLAN017`), and which tasks are
 /// exempt because nothing stronger exists.
-#[derive(Debug, Clone, Deserialize, JsonSchema)]
+#[derive(Debug, Clone, Deserialize, Serialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
 pub struct EvidenceConfig {
     /// Evidence kinds strong enough to close a task. A `done` task must carry at
@@ -612,6 +711,18 @@ pub struct EvidenceConfig {
     /// `APLAN012`'s overlap test pass by accident.
     #[serde(default)]
     pub max_unrelated_files: Option<usize>,
+    /// Exhaustive repository-relative material inputs to configured evidence
+    /// discovery, as glob patterns.
+    ///
+    /// This is a trust claim, not a performance hint. A persisted test
+    /// catalogue is reusable only while every matched input, the provider
+    /// configuration, inherited environment and configured executable
+    /// identity are unchanged. Absent means provider observations are
+    /// deliberately non-cacheable. Keep generated outputs out of this set: a
+    /// provider changing its own declared input while it runs cannot publish a
+    /// current observation.
+    #[serde(default)]
+    pub observation_inputs: Option<Vec<String>>,
 }
 
 /// One runner, or several.
@@ -627,7 +738,7 @@ pub struct EvidenceConfig {
 /// hit the same wall: one `list` command cannot see the whole corpus, so most
 /// tasks cannot cite `test` evidence at all and fall back to weaker kinds
 /// (`A1-054`).
-#[derive(Debug, Clone, JsonSchema)]
+#[derive(Debug, Clone, Serialize, JsonSchema)]
 #[serde(untagged)]
 // One of these exists per process, built once from `.aplan.yml` and read for the
 // rest of the run, so the variants differing by a couple of hundred bytes costs
@@ -640,6 +751,36 @@ pub enum TestRunners {
     One(TestRunner),
     /// One runner per component, language, or test kind.
     Many(Vec<TestRunner>),
+    /// Explicit scheduling policy and the runners it governs. The legacy
+    /// mapping and sequence forms remain serial; concurrency is opt-in.
+    Scheduled(TestRunnerGroup),
+}
+
+/// One aggregate scheduling budget over every configured test-provider stage.
+#[derive(Debug, Clone, Copy, Deserialize, Serialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct TestSchedule {
+    /// Weighted capacity available to provider work. Every runner consumes its
+    /// declared `weight` (one by default) for the lifetime of one command.
+    #[schemars(range(min = 1))]
+    pub capacity: u32,
+}
+
+impl Default for TestSchedule {
+    fn default() -> Self {
+        Self { capacity: 1 }
+    }
+}
+
+/// The opt-in scheduled form of `test` configuration.
+#[derive(Debug, Clone, Deserialize, Serialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct TestRunnerGroup {
+    /// Aggregate weighted provider budget.
+    pub schedule: TestSchedule,
+    /// Configured runners in deterministic evidence-identity order.
+    #[schemars(length(min = 1))]
+    pub runners: Vec<TestRunner>,
 }
 
 impl<'de> Deserialize<'de> for TestRunners {
@@ -655,10 +796,17 @@ impl<'de> Deserialize<'de> for TestRunners {
         D: serde::Deserializer<'de>,
     {
         use serde::de::Error as _;
-        let value = serde_yaml_ng::Value::deserialize(deserializer)?;
+        let value = yaml_compat::Value::deserialize(deserializer)?;
         if value.is_sequence() {
             Vec::<TestRunner>::deserialize(value)
                 .map(TestRunners::Many)
+                .map_err(D::Error::custom)
+        } else if value.as_mapping().is_some_and(|mapping| {
+            mapping.contains_key(yaml_compat::Value::String("runners".into()))
+                || mapping.contains_key(yaml_compat::Value::String("schedule".into()))
+        }) {
+            TestRunnerGroup::deserialize(value)
+                .map(TestRunners::Scheduled)
                 .map_err(D::Error::custom)
         } else {
             TestRunner::deserialize(value)
@@ -675,7 +823,24 @@ impl TestRunners {
         match self {
             TestRunners::One(r) => std::slice::from_ref(r),
             TestRunners::Many(rs) => rs,
+            TestRunners::Scheduled(group) => &group.runners,
         }
+    }
+
+    /// The one aggregate budget governing provider work. Existing mapping and
+    /// sequence forms deliberately remain serial for compatibility.
+    #[must_use]
+    pub fn schedule(&self) -> TestSchedule {
+        match self {
+            Self::One(_) | Self::Many(_) => TestSchedule::default(),
+            Self::Scheduled(group) => group.schedule,
+        }
+    }
+
+    /// Whether the repository opted into overlapping provider stages.
+    #[must_use]
+    pub fn has_explicit_schedule(&self) -> bool {
+        matches!(self, Self::Scheduled(_))
     }
 
     /// Reject any runner that could not receive a test name safely, and a
@@ -694,18 +859,135 @@ impl TestRunners {
                 "`test` is an empty list; remove the key, or give it a runner".into(),
             ));
         }
+        if !self.has_explicit_schedule()
+            && self
+                .all()
+                .iter()
+                .any(|runner| runner.weight.is_some() || runner.exclusive.is_some())
+        {
+            return Err(Error::BadRunner(
+                "`test.weight` and `test.exclusive` require the explicit `test.schedule` / `test.runners` form"
+                    .into(),
+            ));
+        }
         for r in self.all() {
             r.validate()?;
+            if r.weight() > self.schedule().capacity {
+                return Err(Error::BadRunner(format!(
+                    "`test` runner weight {} exceeds `test.schedule.capacity` {}",
+                    r.weight(),
+                    self.schedule().capacity
+                )));
+            }
         }
         Ok(())
     }
 }
 
-/// How to list and run tests, for `aplan verify`. Both are argv vectors, spawned
-/// without a shell (HLD §5.5).
-#[derive(Debug, Clone, Deserialize, JsonSchema)]
+/// One complete adapter invocation for every exact test this runner must execute.
+///
+/// The adapter consumes an aplan-owned JSON manifest and publishes the
+/// versioned JSON result. Test names never enter the command line. Framework
+/// selection and native report parsing stay in the adapter; aplan validates the
+/// complete requested/result set before accepting any outcome.
+#[derive(Debug, Clone, Deserialize, Serialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct TestBatch {
+    /// Protocol major. Only [`TEST_BATCH_PROTOCOL`] is accepted by this build.
+    #[schemars(range(min = 1, max = 1))]
+    pub protocol: u32,
+    /// Adapter argv. Each path placeholder occurs exactly once as a whole
+    /// non-command argument.
+    #[schemars(length(min = 1))]
+    pub run: Vec<String>,
+}
+
+impl TestBatch {
+    fn validate(&self) -> Result<(), Error> {
+        if self.protocol != TEST_BATCH_PROTOCOL {
+            return Err(Error::BadRunner(format!(
+                "`test.batch.protocol` must be {TEST_BATCH_PROTOCOL} (found {})",
+                self.protocol
+            )));
+        }
+        if self.run.is_empty() {
+            return Err(Error::BadRunner(
+                "`test.batch.run` is an empty command".into(),
+            ));
+        }
+        if self.run.iter().any(|argument| argument.trim().is_empty()) {
+            return Err(Error::BadRunner(
+                "`test.batch.run` contains a blank argument".into(),
+            ));
+        }
+        for placeholder in [BATCH_MANIFEST_PLACEHOLDER, BATCH_RESULT_PLACEHOLDER] {
+            let count = self
+                .run
+                .iter()
+                .filter(|argument| argument.as_str() == placeholder)
+                .count();
+            if count != 1 {
+                return Err(Error::BadRunner(format!(
+                    "`test.batch.run` must contain `{placeholder}` exactly once, as a whole argument (found {count})"
+                )));
+            }
+            if self.run.first().map(String::as_str) == Some(placeholder) {
+                return Err(Error::BadRunner(format!(
+                    "`{placeholder}` may not be the command (the first element) of `test.batch.run`"
+                )));
+            }
+            if self
+                .run
+                .iter()
+                .any(|argument| argument.as_str() != placeholder && argument.contains(placeholder))
+            {
+                return Err(Error::BadRunner(format!(
+                    "`test.batch.run` may use `{placeholder}` only as a whole argument, never spliced inside another one"
+                )));
+            }
+        }
+        if self
+            .run
+            .iter()
+            .any(|argument| argument.contains(PLACEHOLDER))
+        {
+            return Err(Error::BadRunner(format!(
+                "`test.batch.run` may not contain `{PLACEHOLDER}`; exact names belong only in the manifest"
+            )));
+        }
+        Ok(())
+    }
+
+    /// Substitute only the two standalone aplan-owned path arguments.
+    #[must_use]
+    pub fn run_argv(&self, manifest: &str, result: &str) -> Vec<String> {
+        self.run
+            .iter()
+            .map(|argument| match argument.as_str() {
+                BATCH_MANIFEST_PLACEHOLDER => manifest.to_string(),
+                BATCH_RESULT_PLACEHOLDER => result.to_string(),
+                _ => argument.clone(),
+            })
+            .collect()
+    }
+}
+
+/// How to list and run tests, for `aplan verify`. Commands are argv vectors,
+/// spawned without a shell (HLD section 5.5).
+#[derive(Debug, Clone, Deserialize, Serialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
 pub struct TestRunner {
+    /// Aggregate scheduler capacity consumed while one of this runner's
+    /// provider commands is active. Default: 1. Raise it for harnesses that
+    /// fan out internally so top-level concurrency accounts for their cost.
+    #[serde(default)]
+    #[schemars(range(min = 1))]
+    pub weight: Option<u32>,
+    /// Named capacity-one resources this runner must hold exclusively. The
+    /// scheduler acquires the complete sorted set atomically, so two runners
+    /// cannot overlap on a fixed port, database, compiler lock or fixture.
+    #[serde(default)]
+    pub exclusive: Option<Vec<String>>,
     /// What to call this runner in a diagnostic. Optional, and only useful when
     /// there is more than one: an ambiguous test name has to be able to say
     /// which runners reported it.
@@ -746,6 +1028,15 @@ pub struct TestRunner {
     /// `covers`, then `dir`.
     #[serde(default)]
     pub covers_by_test: Option<Vec<TestCoverage>>,
+    /// Exhaustive repository inputs for subsets of this runner's tests.
+    ///
+    /// This is deliberately separate from `covers_by_test`: coverage says what
+    /// a passing test proves, while an input dependency says what can change
+    /// that test's result. Incremental evidence refresh may reuse an earlier
+    /// outcome only when every currently listed test matches exactly one entry.
+    /// A missing or overlapping match widens to the complete runner.
+    #[serde(default)]
+    pub inputs_by_test: Option<Vec<TestInputDependency>>,
     /// argv that prints the tests this runner **will not run**, one per line, in
     /// the names `list` uses (`A1-300`).
     ///
@@ -795,6 +1086,23 @@ pub struct TestRunner {
     /// upgrade guidance says so in those words.
     #[serde(default)]
     pub output_lines: Option<usize>,
+    /// The most output from each of stdout and stderr that aplan retains in its
+    /// own process, as a size (`1M`, `256K`). Default: `1M` (`A1-366`).
+    ///
+    /// This is not [`max_memory`](Self::max_memory): that bounds the child where
+    /// cgroups are available, while this bounds the parent on every platform.
+    /// Nor is it [`output_lines`](Self::output_lines), which bounds only the
+    /// sanitized excerpt written to a finding after capture. The pipe is always
+    /// drained so a command cannot deadlock; bytes past this limit are discarded
+    /// while the first and last halves are retained, and a failure excerpt says
+    /// how many bytes were dropped.
+    ///
+    /// The limit is per stream rather than shared between them. That keeps the
+    /// result deterministic -- a scheduling race between the stdout and stderr
+    /// reader threads cannot decide which stream receives the budget -- and
+    /// bounds retained command output at twice this value in total.
+    #[serde(default)]
+    pub max_output: Option<String>,
     /// Whether this runner is expected to list any tests at all. Default: `true`.
     ///
     /// A runner that lists nothing is usually a mistake -- a `dir` that moved, a
@@ -908,6 +1216,10 @@ pub struct TestRunner {
     /// `--execute` cannot tell a pass from a miss for this runner, and the
     /// citations it resolves are worth their L1 claim rather than their L3 one.
     pub run: Vec<String>,
+    /// Optional one-process adapter for every distinct cited test this runner
+    /// owns. Legacy `run` remains required and is the compatible fallback.
+    #[serde(default)]
+    pub batch: Option<TestBatch>,
     /// How long `list` may take before this runner is reported as one that could
     /// not be asked, in seconds. Default: 600. `0` means no limit (`A1-121`).
     ///
@@ -929,7 +1241,7 @@ pub struct TestRunner {
 ///
 /// An argv vector, spawned without a shell (HLD section 5.5), exactly one
 /// element of which is [`URL_PLACEHOLDER`]. Exit zero means reachable.
-#[derive(Debug, Clone, Deserialize, JsonSchema)]
+#[derive(Debug, Clone, Deserialize, Serialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
 pub struct UrlCheck {
     /// argv that exits zero when the cited url is reachable, e.g.
@@ -962,6 +1274,14 @@ pub struct UrlCheck {
     /// (`A1-310`, ADR-0033).
     #[serde(default)]
     pub max_processes: Option<u32>,
+    /// The most output from each stream that aplan retains in its own process,
+    /// as a size. Default: `1M` (`A1-366`).
+    ///
+    /// Independent of `max_memory`, which applies to the checker process only.
+    /// Output past this bound is still drained so the checker cannot block on a
+    /// full pipe.
+    #[serde(default)]
+    pub max_output: Option<String>,
     /// argv prepended to the checker's command (`A1-310`, ADR-0033).
     ///
     /// Top-level config only, like the command itself: a task file names a url,
@@ -978,7 +1298,7 @@ pub struct UrlCheck {
 /// impacts at all still judges clean. The only thing an author writes by hand is
 /// what a floor cannot supply -- a `breaking` change inside one task, or a `none`
 /// with the reason it is none.
-#[derive(Debug, Clone, Default, Deserialize, JsonSchema)]
+#[derive(Debug, Clone, Default, Deserialize, Serialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
 pub struct VersionPolicy {
     /// Whether a task claiming less than its level implies must say why
@@ -1046,12 +1366,12 @@ pub struct VersionPolicy {
 /// release. What each *means* is documented on the key that takes it; what they
 /// share -- how it is spawned and what it may spend -- is documented here.
 ///
-/// It carries the same four limit keys `test` and `url` carry, because ADR-0033
+/// It carries the same five limit keys `test` and `url` carry, because ADR-0033
 /// covers *every* spawned command: the machine does not care which one ate it.
 /// A third implementation of the configured-checker idea is what `A1-185` is
 /// about, and adding a fourth here rather than a second would have been that
 /// task's subject arriving twice in one cut.
-#[derive(Debug, Clone, Deserialize, JsonSchema)]
+#[derive(Debug, Clone, Deserialize, Serialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
 pub struct DeclaredCommand {
     /// argv, e.g. `["ci/scripts/version.sh"]`.
@@ -1075,9 +1395,47 @@ pub struct DeclaredCommand {
     /// The most processes it may have alive at once (`A1-310`, ADR-0033).
     #[serde(default)]
     pub max_processes: Option<u32>,
+    /// The most output from each stream that aplan retains in its own process,
+    /// as a size. Default: `1M` (`A1-366`).
+    ///
+    /// Independent of `max_memory`, which applies to the declared command only.
+    /// Output past this bound is still drained so the command cannot block on a
+    /// full pipe.
+    #[serde(default)]
+    pub max_output: Option<String>,
     /// argv prepended to it (`A1-310`, ADR-0033).
     #[serde(default)]
     pub wrap: Option<Vec<String>>,
+}
+
+/// The policy shared by every command a repository asks `aplan` to spawn.
+///
+/// The declaring shapes stay separate: a test runner has `list` and `run`, a
+/// url checker has `check`, and a version command has `command`. What happens
+/// around those argv vectors is one contract, though: timeout, resource and
+/// capture limits, and an optional wrapper. This borrowed view makes that
+/// contract one input to validation and execution without changing any YAML
+/// shape (`A1-185`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct CommandPolicy<'a> {
+    /// A per-command timeout override, in seconds. Zero means no timeout.
+    pub timeout_seconds: Option<u64>,
+    /// The configured memory cap, before parsing into bytes.
+    pub max_memory: Option<&'a str>,
+    /// The configured process cap.
+    pub max_processes: Option<u32>,
+    /// The configured retained-output cap, before parsing into bytes.
+    pub max_output: Option<&'a str>,
+    /// The argv prefix placed outside the declared command.
+    pub wrap: Option<&'a [String]>,
+}
+
+impl CommandPolicy<'_> {
+    /// Apply the command kind's documented timeout default.
+    #[must_use]
+    pub fn timeout_or(self, default_seconds: u64) -> u64 {
+        self.timeout_seconds.unwrap_or(default_seconds)
+    }
 }
 
 /// The floor each level of the plan carries (`A1-312`, ADR-0034).
@@ -1091,7 +1449,7 @@ pub struct DeclaredCommand {
 /// default does not fit the plan that ships it: this repository has eight done
 /// cuts against two tags, so a cut here is a planning bucket rather than a
 /// delivery. A map nobody can change is a map that fits one project.
-#[derive(Debug, Clone, Default, Deserialize, JsonSchema)]
+#[derive(Debug, Clone, Default, Deserialize, Serialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
 pub struct LevelFloors {
     /// A unit of work. Default: `fix`.
@@ -1147,16 +1505,34 @@ impl Config {
         let Some(docs) = &self.docs else {
             return Ok(());
         };
-        let Some(membership) = &docs.membership else {
-            return Ok(());
-        };
-        if membership.is_empty() {
-            return Err(Error::BadDocs(
-                "`docs.membership` is an empty list; remove the key, or name a document".into(),
-            ));
+        if let Some(paths) = &docs.paths {
+            if paths.is_empty() {
+                return Err(Error::BadDocPaths(
+                    "it is an empty list; remove the key, or name a document".into(),
+                ));
+            }
+            for pattern in paths {
+                if aplan_core::task::is_vacuous_ref(pattern) {
+                    return Err(Error::BadDocPaths(
+                        "it contains a blank pattern, which names no document".into(),
+                    ));
+                }
+                if let Err(error) = aplan_core::glob::compile(pattern) {
+                    return Err(Error::BadDocPaths(format!(
+                        "pattern `{pattern}` is not a usable glob: {error}"
+                    )));
+                }
+            }
         }
-        for entry in membership {
-            entry.validate()?;
+        if let Some(membership) = &docs.membership {
+            if membership.is_empty() {
+                return Err(Error::BadDocs(
+                    "`docs.membership` is an empty list; remove the key, or name a document".into(),
+                ));
+            }
+            for entry in membership {
+                entry.validate()?;
+            }
         }
         Ok(())
     }
@@ -1191,7 +1567,8 @@ impl ScopedPolicy {
             return Err(Error::BadPolicy(
                 "`when` names no subset. An empty scope is not \"the whole plan\": the top-level \
                  keys already say that, and a scope that silently became global is the last thing \
-                 a reader would expect. Name a `cut`, `tag`, `owner` or `status`, or delete the \
+                 a reader would expect. Name a `cut`, `phase`, `tag`, `owner` or `status`, or \
+                 delete the \
                  entry"
                     .into(),
             ));
@@ -1241,19 +1618,25 @@ impl VersionPolicy {
 }
 
 impl DeclaredCommand {
+    /// The spawning policy this command shares with test and url checkers.
+    #[must_use]
+    pub fn command_policy(&self) -> CommandPolicy<'_> {
+        CommandPolicy {
+            timeout_seconds: self.timeout_seconds,
+            max_memory: self.max_memory.as_deref(),
+            max_processes: self.max_processes,
+            max_output: self.max_output.as_deref(),
+            wrap: self.wrap.as_deref(),
+        }
+    }
+
     /// Reject a declared command that could not be acted on, naming the key that
     /// declared it.
     ///
     /// # Errors
     /// [`Error::BadVersion`] naming `key` and what about it cannot be acted on.
     pub fn validate(&self, key: &str) -> Result<(), Error> {
-        validate_limits(
-            key,
-            self.max_memory.as_deref(),
-            self.max_processes,
-            self.wrap.as_deref(),
-        )
-        .map_err(Error::BadVersion)?;
+        validate_limits(key, self.command_policy()).map_err(Error::BadVersion)?;
         if self.command.is_empty() {
             return Err(Error::BadVersion(format!(
                 "`{key}.command` is empty; remove the key, or give it a command to run"
@@ -1274,15 +1657,21 @@ impl DeclaredCommand {
 }
 
 impl UrlCheck {
+    /// The spawning policy this checker shares with test and version commands.
+    #[must_use]
+    pub fn command_policy(&self) -> CommandPolicy<'_> {
+        CommandPolicy {
+            timeout_seconds: self.timeout_seconds,
+            max_memory: self.max_memory.as_deref(),
+            max_processes: self.max_processes,
+            max_output: self.max_output.as_deref(),
+            wrap: self.wrap.as_deref(),
+        }
+    }
+
     /// Reject a command that could not receive a url safely.
     pub fn validate(&self) -> Result<(), Error> {
-        validate_limits(
-            "url",
-            self.max_memory.as_deref(),
-            self.max_processes,
-            self.wrap.as_deref(),
-        )
-        .map_err(Error::BadUrlCheck)?;
+        validate_limits("url", self.command_policy()).map_err(Error::BadUrlCheck)?;
         if self.check.is_empty() {
             return Err(Error::BadUrlCheck(
                 "it is empty; remove the key, or give it a command".into(),
@@ -1314,10 +1703,25 @@ impl UrlCheck {
     }
 }
 
-/// What `aplan check-docs` may check beyond references resolving.
-#[derive(Debug, Clone, Deserialize, JsonSchema)]
+/// What `aplan check-docs` reads by default and how it interprets cut
+/// membership declarations.
+#[derive(Debug, Clone, Deserialize, Serialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
 pub struct DocsConfig {
+    /// Documents whose task references `aplan check-docs` checks when no
+    /// paths are passed on the command line.
+    ///
+    /// Each value may be a literal path or a glob. Relative values resolve from
+    /// the configuration file's directory. A single `*` stays within one path
+    /// segment; crossing directories needs `**`. Every declared pattern must
+    /// match at least one file when the command runs, so a misspelled or
+    /// outgrown declaration cannot turn the gate into a vacuous pass.
+    ///
+    /// Command-line paths override this list for a one-off check. Documents in
+    /// `membership` join the implicit set automatically and need not be
+    /// repeated here.
+    #[serde(default)]
+    pub paths: Option<Vec<String>>,
     /// Documents that declare a cut's membership, and where in them it is
     /// declared.
     ///
@@ -1342,12 +1746,13 @@ pub struct DocsConfig {
 ///       declared_by: line
 ///       marker: "**Tasks:**"
 /// ```
-#[derive(Debug, Clone, Deserialize, JsonSchema)]
+#[derive(Debug, Clone, Deserialize, Serialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
 pub struct MembershipDoc {
-    /// The document, relative to the repository root. It is only read when
-    /// `check-docs` is given that path, so a run over one file does not report
-    /// every cut in a document nobody asked about.
+    /// The document. A relative value resolves from the configuration file. It
+    /// joins the default no-argument document set automatically. Explicit
+    /// command-line paths still select only the documents named there, so a
+    /// one-file run does not report every cut in a document nobody asked about.
     pub doc: String,
     /// Which shape the declaration takes.
     pub declared_by: DeclaredBy,
@@ -1357,7 +1762,7 @@ pub struct MembershipDoc {
 }
 
 /// The two shapes a cut's membership is declared in.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize, JsonSchema)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize, Serialize, JsonSchema)]
 #[serde(rename_all = "lowercase")]
 pub enum DeclaredBy {
     /// A line beginning with `marker`, whose ids are the members.
@@ -1374,7 +1779,7 @@ impl MembershipDoc {
     /// config key the tool silently drops is a claim the repository believes and
     /// nothing honours, which is the failure this whole tool argues against.
     pub fn validate(&self) -> Result<(), Error> {
-        if self.doc.trim().is_empty() {
+        if aplan_core::task::is_vacuous_ref(&self.doc) {
             return Err(Error::BadDocs(
                 "an entry with no `doc` names no document, and would be read on no run".into(),
             ));
@@ -1385,10 +1790,12 @@ impl MembershipDoc {
                  begin with something (`marker: \"**Tasks:**\"`)",
                 self.doc
             ))),
-            (DeclaredBy::Line, Some(m)) if m.trim().is_empty() => Err(Error::BadDocs(format!(
-                "`{}` has an empty `marker`, which every line begins with",
-                self.doc
-            ))),
+            (DeclaredBy::Line, Some(m)) if aplan_core::task::is_vacuous_ref(m) => {
+                Err(Error::BadDocs(format!(
+                    "`{}` has an empty `marker`, which every line begins with",
+                    self.doc
+                )))
+            }
             (DeclaredBy::Table, Some(_)) => Err(Error::BadDocs(format!(
                 "`{}` says `declared_by: table` and also gives a `marker`, which a table \
                  declaration does not use; remove one",
@@ -1399,8 +1806,205 @@ impl MembershipDoc {
     }
 }
 
+impl DocsConfig {
+    /// Resolve the documents this configuration declares.
+    ///
+    /// Literal and glob paths are resolved from `base`, which is the directory
+    /// containing the selected or discovered configuration. Membership
+    /// documents are literal declarations and join `paths` without requiring a
+    /// second spelling. Overlapping declarations are canonicalised, deduplicated
+    /// and returned in a stable order.
+    ///
+    /// # Errors
+    ///
+    /// A literal that is not a file, a glob that matches no files, an unreadable
+    /// directory, or a glob that was not validated first.
+    pub fn document_paths(&self, base: &Path) -> Result<Vec<PathBuf>, Error> {
+        let mut documents = BTreeMap::new();
+        for pattern in self.paths.iter().flatten() {
+            let matches = expand_document_pattern(base, pattern)?;
+            if matches.is_empty() {
+                return Err(Error::BadDocPaths(format!(
+                    "pattern `{pattern}` matched no files relative to `{}`",
+                    base.display()
+                )));
+            }
+            for path in matches {
+                insert_document(&mut documents, path, "a declared pattern", true)?;
+            }
+        }
+        for membership in self.membership.iter().flatten() {
+            let path = if Path::new(&membership.doc).is_absolute() {
+                PathBuf::from(&membership.doc)
+            } else {
+                base.join(&membership.doc)
+            };
+            insert_document(&mut documents, path, "`docs.membership[].doc`", false)?;
+        }
+        let mut paths: Vec<PathBuf> = documents.into_values().collect();
+        paths.sort();
+        Ok(paths)
+    }
+}
+
+fn insert_document(
+    documents: &mut BTreeMap<PathBuf, PathBuf>,
+    path: PathBuf,
+    source: &str,
+    from_paths: bool,
+) -> Result<(), Error> {
+    let invalid = |message| {
+        if from_paths {
+            Error::BadDocPaths(message)
+        } else {
+            Error::BadDocs(message)
+        }
+    };
+    if !path.is_file() {
+        return Err(invalid(format!(
+            "{source} names `{}`, which is not a file",
+            path.display()
+        )));
+    }
+    let identity = std::fs::canonicalize(&path).map_err(|error| {
+        invalid(format!(
+            "could not resolve declared document `{}`: {error}",
+            path.display()
+        ))
+    })?;
+    documents
+        .entry(identity)
+        .and_modify(|existing| {
+            if path < *existing {
+                existing.clone_from(&path);
+            }
+        })
+        .or_insert(path);
+    Ok(())
+}
+
+fn expand_document_pattern(base: &Path, pattern: &str) -> Result<Vec<PathBuf>, Error> {
+    let spelling = aplan_core::glob::spelling(pattern);
+    let compiled = aplan_core::glob::compile(&spelling)
+        .map_err(|error| Error::BadDocPaths(format!("`{pattern}`: {error}")))?
+        .compile_matcher();
+    let pattern_path = Path::new(&spelling);
+    let mut prefix = PathBuf::new();
+    for component in pattern_path.components() {
+        let text = component.as_os_str().to_string_lossy();
+        if text
+            .chars()
+            .any(|character| matches!(character, '*' | '?' | '[' | '{'))
+        {
+            break;
+        }
+        prefix.push(component.as_os_str());
+    }
+
+    // A literal needs no tree walk and gets the sharper `not a file` error
+    // from `insert_document`. It is still returned here so the caller has one
+    // deduplication path for both shapes.
+    if prefix == pattern_path {
+        let path = if pattern_path.is_absolute() {
+            pattern_path.to_path_buf()
+        } else {
+            base.join(pattern_path)
+        };
+        return Ok(vec![path]);
+    }
+
+    let walk_root = if prefix.is_absolute() {
+        prefix.clone()
+    } else {
+        base.join(&prefix)
+    };
+    // A single `*` cannot cross a separator, so `*.md` has no reason to read
+    // `.git`, `target`, or any other subtree. Only `**` makes the walk
+    // unbounded. Besides being faster, this means an inaccessible directory
+    // outside a pattern's possible depth cannot make an otherwise usable
+    // declaration fail.
+    let remaining_depth = if spelling.contains("**") {
+        None
+    } else {
+        Some(
+            pattern_path
+                .components()
+                .count()
+                .saturating_sub(prefix.components().count()),
+        )
+    };
+    let mut selected = Vec::new();
+    let matches_pattern = |path: &Path| compiled.is_match(path);
+    walk_matching_files(
+        &walk_root,
+        &prefix,
+        remaining_depth,
+        true,
+        &matches_pattern,
+        &mut selected,
+    )
+    .map_err(|error| {
+        Error::BadDocPaths(format!(
+            "could not expand pattern `{pattern}` from `{}`: {error}",
+            base.display()
+        ))
+    })?;
+    selected.sort();
+    Ok(selected)
+}
+
+fn walk_matching_files(
+    actual: &Path,
+    candidate: &Path,
+    remaining_depth: Option<usize>,
+    root: bool,
+    matcher: &impl Fn(&Path) -> bool,
+    selected: &mut Vec<PathBuf>,
+) -> std::io::Result<()> {
+    // Follow a symlink in the fixed prefix (`linked-docs/*.md`), as ordinary
+    // path lookup does, but never follow one discovered while recursing: that
+    // makes symlink cycles impossible without denying a useful top-level
+    // declaration.
+    let metadata = match if root {
+        std::fs::metadata(actual)
+    } else {
+        std::fs::symlink_metadata(actual)
+    } {
+        Ok(metadata) => metadata,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(()),
+        Err(error) => return Err(error),
+    };
+    let kind = metadata.file_type();
+    if kind.is_file() || (kind.is_symlink() && actual.is_file()) {
+        if matcher(candidate) {
+            selected.push(actual.to_path_buf());
+        }
+        return Ok(());
+    }
+    if !kind.is_dir() {
+        return Ok(());
+    }
+    if remaining_depth == Some(0) {
+        return Ok(());
+    }
+
+    let mut entries = std::fs::read_dir(actual)?.collect::<Result<Vec<_>, _>>()?;
+    entries.sort_by_key(std::fs::DirEntry::file_name);
+    for entry in entries {
+        walk_matching_files(
+            &entry.path(),
+            &candidate.join(entry.file_name()),
+            remaining_depth.map(|depth| depth.saturating_sub(1)),
+            false,
+            matcher,
+            selected,
+        )?;
+    }
+    Ok(())
+}
+
 /// Roadmap rendering options.
-#[derive(Debug, Clone, Deserialize, JsonSchema)]
+#[derive(Debug, Clone, Deserialize, Serialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
 pub struct RoadmapConfig {
     /// The tag family whose members group a cut's tasks in the roadmap view.
@@ -1412,8 +2016,21 @@ pub struct RoadmapConfig {
     pub group_by: Option<String>,
 }
 
+/// Summary rollup options.
+#[derive(Debug, Clone, Deserialize, Serialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct SummaryConfig {
+    /// The tag family whose members replace phases as the summary's rows.
+    ///
+    /// Must name a family declared in [`Config::tag_families`]. Tasks carrying
+    /// more than one member appear in every matching row, while the total still
+    /// counts each task once (`A1-186`).
+    #[serde(default)]
+    pub group_by: Option<String>,
+}
+
 /// Paths a named subset of a runner's tests covers.
-#[derive(Debug, Clone, Deserialize, JsonSchema)]
+#[derive(Debug, Clone, Deserialize, Serialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
 pub struct TestCoverage {
     /// Test-name patterns, where `*` matches any run of characters
@@ -1439,6 +2056,70 @@ impl TestCoverage {
                     "`test.covers_by_test.{field}` contains a blank entry"
                 )));
             }
+        }
+        Ok(())
+    }
+}
+
+/// Repository inputs whose change can affect a named subset of tests.
+///
+/// Unlike [`TestCoverage`], this is execution-selection policy. It is an
+/// exhaustive trust claim and therefore has its own type and configuration
+/// key; proof locality must never be mistaken for invalidation locality.
+#[derive(Debug, Clone, Deserialize, Serialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct TestInputDependency {
+    /// Test-name glob patterns, matched against the complete current catalogue.
+    pub tests: Vec<String>,
+    /// Repository-relative path globs that can affect those tests.
+    pub paths: Vec<String>,
+}
+
+impl TestInputDependency {
+    fn validate(&self) -> Result<(), Error> {
+        for (field, values) in [("tests", &self.tests), ("paths", &self.paths)] {
+            if values.is_empty() {
+                return Err(Error::BadRunner(format!(
+                    "`test.inputs_by_test.{field}` is an empty list; every entry must name both tests and their inputs"
+                )));
+            }
+            if values
+                .iter()
+                .any(|value| aplan_core::task::is_vacuous_ref(value))
+            {
+                return Err(Error::BadRunner(format!(
+                    "`test.inputs_by_test.{field}` contains a blank entry"
+                )));
+            }
+        }
+        for pattern in &self.tests {
+            globset::Glob::new(pattern).map_err(|error| {
+                Error::BadRunner(format!(
+                    "invalid `test.inputs_by_test.tests` pattern `{pattern}`: {error}"
+                ))
+            })?;
+        }
+        for pattern in &self.paths {
+            let path = Path::new(pattern);
+            if path.is_absolute()
+                || path.components().any(|component| {
+                    matches!(
+                        component,
+                        std::path::Component::ParentDir
+                            | std::path::Component::RootDir
+                            | std::path::Component::Prefix(_)
+                    )
+                })
+            {
+                return Err(Error::BadRunner(format!(
+                    "`test.inputs_by_test.paths` entry `{pattern}` must stay below the repository root"
+                )));
+            }
+            globset::Glob::new(pattern).map_err(|error| {
+                Error::BadRunner(format!(
+                    "invalid `test.inputs_by_test.paths` pattern `{pattern}`: {error}"
+                ))
+            })?;
         }
         Ok(())
     }
@@ -1471,30 +2152,29 @@ pub fn parse_size(text: &str) -> Result<u64, String> {
         .ok_or_else(|| format!("`{text}` is not a size this tool can act on"))
 }
 
-/// Check the three limit keys a spawning command may declare (`A1-310`).
+/// Check the four limit keys a spawning command may declare (`A1-310`,
+/// `A1-366`).
 ///
-/// Shared by `test` and `url`, which declare the same three and must refuse the
+/// Shared by `test`, `url` and version commands, which must refuse the
 /// same values: two copies of this drifted the moment one of them grew a case.
 /// `key` names the block for the message, so a reader is told which one to fix.
-fn validate_limits(
-    key: &str,
-    max_memory: Option<&str>,
-    max_processes: Option<u32>,
-    wrap: Option<&[String]>,
-) -> Result<(), String> {
+fn validate_limits(key: &str, limits: CommandPolicy<'_>) -> Result<(), String> {
     // A limit that cannot be parsed is refused here rather than at the moment
     // a command would have run under it: the value is the adopter's, and this
     // is the same load-time strictness an unknown key gets (`A1-310`).
-    if let Some(size) = max_memory {
+    if let Some(size) = limits.max_memory {
         parse_size(size).map_err(|why| format!("`{key}.max_memory` is {why}"))?;
     }
-    if max_processes == Some(0) {
+    if let Some(size) = limits.max_output {
+        parse_size(size).map_err(|why| format!("`{key}.max_output` is {why}"))?;
+    }
+    if limits.max_processes == Some(0) {
         return Err(format!(
             "`{key}.max_processes` is 0, which no command can satisfy; remove the key, or \
              give it the most processes this may have alive at once"
         ));
     }
-    match wrap {
+    match limits.wrap {
         Some([]) => Err(format!(
             "`{key}.wrap` is an empty list; remove the key, or name the command to run \
              the command under"
@@ -1507,15 +2187,92 @@ fn validate_limits(
 }
 
 impl TestRunner {
+    /// Weighted aggregate capacity this runner consumes while active.
+    #[must_use]
+    pub fn weight(&self) -> u32 {
+        self.weight.unwrap_or(1)
+    }
+
+    /// Named capacity-one resources, in deterministic acquisition order.
+    #[must_use]
+    pub fn exclusive_resources(&self) -> BTreeSet<String> {
+        self.exclusive
+            .as_ref()
+            .into_iter()
+            .flatten()
+            .cloned()
+            .collect()
+    }
+
+    /// The spawning policy every command of this runner shares with url and
+    /// version checkers.
+    #[must_use]
+    pub fn command_policy(&self) -> CommandPolicy<'_> {
+        CommandPolicy {
+            timeout_seconds: self.timeout_seconds,
+            max_memory: self.max_memory.as_deref(),
+            max_processes: self.max_processes,
+            max_output: self.max_output.as_deref(),
+            wrap: self.wrap.as_deref(),
+        }
+    }
+
+    fn validate_scheduler_reservation(&self) -> Result<(), Error> {
+        if self.weight == Some(0) {
+            return Err(Error::BadRunner(
+                "`test` runner weight is 0, which no provider command can consume".into(),
+            ));
+        }
+        let Some(resources) = &self.exclusive else {
+            return Ok(());
+        };
+        if resources.is_empty() {
+            return Err(Error::BadRunner(
+                "`test` runner exclusive resource list is empty; remove it, or name a resource"
+                    .into(),
+            ));
+        }
+        let mut unique = BTreeSet::new();
+        for resource in resources {
+            if resource.trim().is_empty() || resource != resource.trim() {
+                return Err(Error::BadRunner(
+                    "`test` runner exclusive resources must be non-blank and have no surrounding whitespace"
+                        .into(),
+                ));
+            }
+            if resource.chars().any(|character| {
+                character.is_control()
+                    || matches!(
+                        character,
+                        '\u{200B}'
+                            | '\u{200C}'
+                            | '\u{200D}'
+                            | '\u{2060}'
+                            | '\u{FEFF}'
+                            | '\u{00AD}'
+                            | '\u{200E}'
+                            | '\u{200F}'
+                            | '\u{061C}'
+                    )
+            }) {
+                return Err(Error::BadRunner(
+                    "`test` runner exclusive resources may not contain control or invisible formatting characters"
+                        .into(),
+                ));
+            }
+            if !unique.insert(resource) {
+                return Err(Error::BadRunner(format!(
+                    "`test` runner repeats exclusive resource `{resource}`"
+                )));
+            }
+        }
+        Ok(())
+    }
+
     /// Reject a runner that could not receive a test name safely.
     pub fn validate(&self) -> Result<(), Error> {
-        validate_limits(
-            "test",
-            self.max_memory.as_deref(),
-            self.max_processes,
-            self.wrap.as_deref(),
-        )
-        .map_err(Error::BadRunner)?;
+        validate_limits("test", self.command_policy()).map_err(Error::BadRunner)?;
+        self.validate_scheduler_reservation()?;
         // Config the tool cannot act on is an error, never a silent no-op: an
         // empty `covers` reads as a locality claim and makes none.
         match &self.covers {
@@ -1538,6 +2295,17 @@ impl TestRunner {
                 return Err(Error::BadRunner(
                     "`test.covers_by_test` is an empty list; remove the key, or name the tests \
                      that cover something else"
+                        .into(),
+                ));
+            }
+            for entry in by_test {
+                entry.validate()?;
+            }
+        }
+        if let Some(by_test) = &self.inputs_by_test {
+            if by_test.is_empty() {
+                return Err(Error::BadRunner(
+                    "`test.inputs_by_test` is an empty list; remove the key to refresh the complete runner, or declare every test's inputs"
                         .into(),
                 ));
             }
@@ -1583,6 +2351,9 @@ impl TestRunner {
                 "`test.run` may use `{PLACEHOLDER}` only as a whole argument, never spliced \
                  inside another one"
             )));
+        }
+        if let Some(batch) = &self.batch {
+            batch.validate()?;
         }
         Ok(())
     }
@@ -1660,7 +2431,7 @@ pub fn load_from(source: &ConfigSource, start: &Path) -> Result<(Config, Option<
 }
 
 pub fn load_config_located(start: &Path) -> Result<(Config, Option<PathBuf>), Error> {
-    let Some(path) = find_config(start) else {
+    let Some(path) = discovered_config(start) else {
         return Ok((Config::default(), None));
     };
     read_config(&path)
@@ -1671,14 +2442,44 @@ pub fn load_config_located(start: &Path) -> Result<(Config, Option<PathBuf>), Er
 /// Split out so discovery and an explicit `--config` cannot diverge in what they
 /// accept: one parser, one validation, one set of messages (`A1-155`).
 fn read_config(path: &Path) -> Result<(Config, Option<PathBuf>), Error> {
+    let bytes = std::fs::read(path).map_err(|e| Error::Io(format!("{}: {e}", path.display())))?;
+    let config = parse_config_bytes(&bytes, path)?;
+    let dir = path.parent().map(Path::to_path_buf);
+    Ok((config, dir))
+}
+
+/// Decode, parse and validate configuration bytes associated with `path`.
+///
+/// Kept public for a repository reader: committed content is bytes, and an
+/// invalid UTF-8 config must fail the same way a filesystem read does rather
+/// than silently look absent (`A1-194`).
+///
+/// # Errors
+///
+/// [`Error::Io`] for invalid UTF-8, then the errors from [`parse_config`].
+pub fn parse_config_bytes(bytes: &[u8], path: &Path) -> Result<Config, Error> {
     let text =
-        std::fs::read_to_string(path).map_err(|e| Error::Io(format!("{}: {e}", path.display())))?;
-    let config: Config = serde_yaml_ng::from_str(&text).map_err(|e| {
+        std::str::from_utf8(bytes).map_err(|e| Error::Io(format!("{}: {e}", path.display())))?;
+    parse_config(text, path)
+}
+
+/// Parse and validate configuration text associated with `path`.
+///
+/// The ordinary loader and revision-addressed reporting meet here, so a
+/// committed `.aplan.yml` is judged by the same unknown-key inventory,
+/// semantic checks, and path-bearing messages as the working copy (`A1-194`).
+/// `path` names the source for diagnostics; this function does not read it.
+///
+/// # Errors
+///
+/// The same parse, unknown-key and semantic errors as [`load_from`].
+pub fn parse_config(text: &str, path: &Path) -> Result<Config, Error> {
+    let config: Config = yaml_compat::from_str(text).map_err(|e| {
         // Ask the schema which keys this build accepts rather than parsing
         // serde's sentence back out: the inventory is derived from the same type
         // the parser uses, so it cannot drift, and it can name *every* offending
         // key instead of the first one serde happened to reach.
-        let (unknown, remaining) = scan_unknown(&text);
+        let (unknown, remaining) = scan_unknown(text);
         if unknown.is_empty() {
             Error::Parse(format!("{}: {e}", path.display()))
         } else {
@@ -1690,8 +2491,7 @@ fn read_config(path: &Path) -> Result<(Config, Option<PathBuf>), Error> {
         }
     })?;
     validate_all(&config)?;
-    let dir = path.parent().map(Path::to_path_buf);
-    Ok((config, dir))
+    Ok(config)
 }
 
 /// Every semantic check a parsed config must pass.
@@ -1702,6 +2502,7 @@ fn read_config(path: &Path) -> Result<(Config, Option<PathBuf>), Error> {
 /// then the runner on the next run, which is the half-an-answer-twice this task
 /// exists to stop (`A1-068`).
 fn validate_all(config: &Config) -> Result<(), Error> {
+    config.validate_capture()?;
     if let Some(runner) = &config.test {
         runner.validate()?;
     }
@@ -1710,6 +2511,9 @@ fn validate_all(config: &Config) -> Result<(), Error> {
     }
     if let Some(version) = &config.version {
         version.validate()?;
+    }
+    if let Some(evidence) = &config.evidence {
+        evidence.validate_observation_inputs()?;
     }
     // A scope that names no subset, or sets no policy for the one it names, is an
     // entry that reads as a decision and makes none (`A1-183`).
@@ -1720,9 +2524,68 @@ fn validate_all(config: &Config) -> Result<(), Error> {
     // A declared vocabulary the tool cannot act on is an error, never a silent
     // no-op, exactly as an empty runner list is (`A1-076`).
     config.validate_tag_families()?;
+    config.validate_owners()?;
     config.validate_throughput()?;
     config.validate_docs()?;
-    config.validate_roadmap()
+    config.validate_grouping()
+}
+
+impl EvidenceConfig {
+    fn validate_observation_inputs(&self) -> Result<(), Error> {
+        let Some(inputs) = &self.observation_inputs else {
+            return Ok(());
+        };
+        if inputs.is_empty() {
+            return Err(Error::BadObservationInputs(
+                "the list is empty; remove it to disable reusable provider observations, or name every material input"
+                    .into(),
+            ));
+        }
+        for pattern in inputs {
+            if aplan_core::task::is_vacuous_ref(pattern) {
+                return Err(Error::BadObservationInputs(
+                    "the list contains a blank path glob".into(),
+                ));
+            }
+            let path = Path::new(pattern);
+            if path.is_absolute()
+                || pattern
+                    .split('/')
+                    .any(|component| matches!(component, "." | ".."))
+                || path
+                    .components()
+                    .any(|component| !matches!(component, std::path::Component::Normal(_)))
+            {
+                return Err(Error::BadObservationInputs(format!(
+                    "entry `{pattern}` must be repository-relative and may not contain `.` or `..`"
+                )));
+            }
+            let first = path
+                .components()
+                .next()
+                .and_then(|component| match component {
+                    std::path::Component::Normal(value) => value.to_str(),
+                    _ => None,
+                })
+                .unwrap_or_default();
+            if first.chars().any(|character| "*?[]{}!".contains(character)) {
+                return Err(Error::BadObservationInputs(format!(
+                    "entry `{pattern}` must begin with a literal file or directory so ordinary inspection can enumerate only its declared roots"
+                )));
+            }
+            if matches!(first, ".git" | "target") {
+                return Err(Error::BadObservationInputs(format!(
+                    "entry `{pattern}` names provider metadata or generated output rather than a stable material input"
+                )));
+            }
+            globset::Glob::new(pattern).map_err(|error| {
+                Error::BadObservationInputs(format!(
+                    "entry `{pattern}` is not a valid glob: {error}"
+                ))
+            })?;
+        }
+        Ok(())
+    }
 }
 
 /// The nearest `.aplan.yml` at or above `start`, or `None` if there is none up to
@@ -1733,19 +2596,331 @@ fn validate_all(config: &Config) -> Result<(), Error> {
 /// reading it, which is how `APLAN041` tells the tree's own policy from a
 /// trusted one named with `--config` (`A1-273`). Comparing directories was the
 /// first attempt and was wrong: a file inside the repository is not thereby the
-/// file the repository declares.
+/// file the repository declares. Revision reporting also uses the location to
+/// refuse an implicitly discovered file outside the selected repository: that
+/// file has no state at the named commit (`A1-194`).
 #[must_use]
 pub fn discovered_config(start: &Path) -> Option<PathBuf> {
     find_config(start)
 }
 
+/// Every path configuration discovery examines, nearest first.
+///
+/// This is the same walk [`discovered_config`] uses, exposed so an interactive
+/// repair screen can say exactly what was searched without reproducing the
+/// discovery algorithm. An unresolvable start yields no candidates, just as
+/// discovery itself yields no selected file.
+#[must_use]
+pub fn config_search_paths(start: &Path) -> Vec<PathBuf> {
+    // Absolute, so `ancestors()` reaches the real root rather than stopping at
+    // a relative path with no parent (`.` has none).
+    std::fs::canonicalize(start).map_or_else(
+        |_| Vec::new(),
+        |start| start.ancestors().map(|dir| dir.join(CONFIG_FILE)).collect(),
+    )
+}
+
+/// Rewrite only `policy[].when.cut` entries equal to `old`.
+///
+/// The configuration file is reviewed prose as well as data, so this is a
+/// surgical edit: comments, key order, list form, spacing and line endings are
+/// retained. The result is parsed as generic YAML and compared with the exact
+/// semantic edit before it is returned. `Ok(None)` means no policy named the
+/// id. The caller still decides whether the name is an id or an unchanged cut
+/// label; this function deliberately knows only the configuration document.
+///
+/// # Errors
+///
+/// When the input is not valid YAML, or a supported semantic edit cannot be
+/// represented without changing anything else in the document.
+pub fn rekey_policy_cuts(file: &str, old: &str, new: &str) -> Result<Option<String>, String> {
+    let original: yaml_compat::Value =
+        yaml_compat::from_str(file).map_err(|e| format!("invalid configuration: {e}"))?;
+    let mut expected = original.clone();
+    let wanted = replace_policy_values(&mut expected, old, new);
+    if wanted == 0 {
+        return Ok(None);
+    }
+
+    let mut out = String::with_capacity(file.len() + wanted * new.len().saturating_sub(old.len()));
+    let mut in_policy = false;
+    let mut cut_indent: Option<usize> = None;
+    let mut changed = 0usize;
+    for line in file.split_inclusive('\n') {
+        let content = line.trim_end_matches(['\r', '\n']);
+        let eol = &line[content.len()..];
+        let indent = content.len() - content.trim_start_matches(' ').len();
+        let trimmed = &content[indent..];
+
+        if indent == 0 && !trimmed.is_empty() && !trimmed.starts_with('#') {
+            in_policy = mapping_value(trimmed, "policy").is_some();
+            cut_indent = None;
+        }
+        if !in_policy {
+            out.push_str(line);
+            continue;
+        }
+
+        if let Some(active) = cut_indent
+            && indent <= active
+            && !trimmed.is_empty()
+            && !trimmed.starts_with('#')
+        {
+            cut_indent = None;
+        }
+
+        if let Some(after) = mapping_value(trimmed, "cut") {
+            let leading = &content[..indent];
+            let key_len = trimmed.len() - after.len();
+            let key = &trimmed[..key_len];
+            let value = after.trim_start_matches([' ', '\t']);
+            let spacing = &after[..after.len() - value.len()];
+            if value.is_empty() || value.starts_with('#') {
+                cut_indent = Some(indent);
+                out.push_str(line);
+            } else if value.starts_with('[') {
+                let (rewritten, n) = rewrite_flow_sequence(value, old, new)?;
+                out.push_str(leading);
+                out.push_str(key);
+                out.push_str(spacing);
+                out.push_str(&rewritten);
+                out.push_str(eol);
+                changed += n;
+            } else {
+                out.push_str(line);
+            }
+            continue;
+        }
+
+        if cut_indent.is_some() {
+            let (rewritten, did_change) = rewrite_block_item(content, old, new)?;
+            out.push_str(&rewritten);
+            out.push_str(eol);
+            changed += usize::from(did_change);
+        } else {
+            out.push_str(line);
+        }
+    }
+
+    if changed != wanted {
+        return Err(format!(
+            "could identify {wanted} policy cut reference(s) in the parsed configuration but could safely rewrite only {changed}; nothing was written"
+        ));
+    }
+    let produced: yaml_compat::Value = yaml_compat::from_str(&out)
+        .map_err(|e| format!("the policy rewrite did not parse ({e}); nothing was written"))?;
+    if produced != expected {
+        return Err(
+            "the policy rewrite changed more than the selected cut ids; nothing was written"
+                .to_string(),
+        );
+    }
+    Ok(Some(out))
+}
+
+fn mapping_value<'a>(line: &'a str, key: &str) -> Option<&'a str> {
+    let after = line.strip_prefix(key)?;
+    let after = after.trim_start_matches([' ', '\t']);
+    after.strip_prefix(':')
+}
+
+fn replace_policy_values(value: &mut yaml_compat::Value, old: &str, new: &str) -> usize {
+    let Some(root) = value.as_mapping_mut() else {
+        return 0;
+    };
+    let key = yaml_compat::Value::String("policy".into());
+    let Some(entries) = root
+        .get_mut(&key)
+        .and_then(yaml_compat::Value::as_sequence_mut)
+    else {
+        return 0;
+    };
+    let mut changed = 0;
+    for entry in entries {
+        let Some(entry) = entry.as_mapping_mut() else {
+            continue;
+        };
+        let when_key = yaml_compat::Value::String("when".into());
+        let Some(when) = entry
+            .get_mut(&when_key)
+            .and_then(yaml_compat::Value::as_mapping_mut)
+        else {
+            continue;
+        };
+        let cut_key = yaml_compat::Value::String("cut".into());
+        let Some(cuts) = when
+            .get_mut(&cut_key)
+            .and_then(yaml_compat::Value::as_sequence_mut)
+        else {
+            continue;
+        };
+        for cut in cuts {
+            if cut.as_str() == Some(old) {
+                *cut = yaml_compat::Value::String(new.into());
+                changed += 1;
+            }
+        }
+    }
+    changed
+}
+
+fn rewrite_flow_sequence(value: &str, old: &str, new: &str) -> Result<(String, usize), String> {
+    let mut quote = FlowQuote::None;
+    let mut escaped = false;
+    let mut close = None;
+    let mut chars = value.char_indices().peekable();
+    while let Some((index, ch)) = chars.next() {
+        match quote {
+            FlowQuote::Double if escaped => escaped = false,
+            FlowQuote::Double if ch == '\\' => escaped = true,
+            FlowQuote::Double if ch == '"' => quote = FlowQuote::None,
+            FlowQuote::Single if ch == '\'' => {
+                if chars.peek().is_some_and(|(_, next)| *next == '\'') {
+                    let _ = chars.next();
+                } else {
+                    quote = FlowQuote::None;
+                }
+            }
+            FlowQuote::None if ch == '\'' => quote = FlowQuote::Single,
+            FlowQuote::None if ch == '"' => quote = FlowQuote::Double,
+            FlowQuote::None if ch == ']' => {
+                close = Some(index);
+                break;
+            }
+            _ => {}
+        }
+    }
+    let close = close.ok_or_else(|| {
+        "a `policy[].when.cut` flow list spans lines or has no closing bracket; nothing was written"
+            .to_string()
+    })?;
+    let inside = &value[1..close];
+    let mut out = String::from("[");
+    let mut start = 0;
+    let mut quote = FlowQuote::None;
+    let mut escaped = false;
+    let mut changed = 0;
+    let mut chars = inside.char_indices().peekable();
+    while let Some((index, ch)) = chars.next() {
+        match quote {
+            FlowQuote::Double if escaped => escaped = false,
+            FlowQuote::Double if ch == '\\' => escaped = true,
+            FlowQuote::Double if ch == '"' => quote = FlowQuote::None,
+            FlowQuote::Single if ch == '\'' => {
+                if chars.peek().is_some_and(|(_, next)| *next == '\'') {
+                    let _ = chars.next();
+                } else {
+                    quote = FlowQuote::None;
+                }
+            }
+            FlowQuote::None if ch == '\'' => quote = FlowQuote::Single,
+            FlowQuote::None if ch == '"' => quote = FlowQuote::Double,
+            FlowQuote::None if ch == ',' => {
+                let (item, did_change) = rewrite_scalar_slice(&inside[start..index], old, new)?;
+                out.push_str(&item);
+                out.push(',');
+                changed += usize::from(did_change);
+                start = index + ch.len_utf8();
+            }
+            _ => {}
+        }
+    }
+    let (item, did_change) = rewrite_scalar_slice(&inside[start..], old, new)?;
+    out.push_str(&item);
+    changed += usize::from(did_change);
+    out.push_str(&value[close..]);
+    Ok((out, changed))
+}
+
+fn rewrite_block_item(line: &str, old: &str, new: &str) -> Result<(String, bool), String> {
+    let Some(dash) = line.find('-') else {
+        return Ok((line.to_string(), false));
+    };
+    if !line[..dash].trim().is_empty() {
+        return Ok((line.to_string(), false));
+    }
+    let after_dash = &line[dash + 1..];
+    if !after_dash.is_empty() && !after_dash.starts_with([' ', '\t']) {
+        return Ok((line.to_string(), false));
+    }
+    let (rewritten, changed) = rewrite_scalar_slice(after_dash, old, new)?;
+    Ok((format!("{}-{rewritten}", &line[..dash]), changed))
+}
+
+fn rewrite_scalar_slice(slice: &str, old: &str, new: &str) -> Result<(String, bool), String> {
+    let lead = slice.len() - slice.trim_start_matches([' ', '\t']).len();
+    let mut quote = FlowQuote::None;
+    let mut escaped = false;
+    let mut comment = None;
+    let mut previous_whitespace = false;
+    let mut chars = slice.char_indices().peekable();
+    while let Some((index, ch)) = chars.next() {
+        match quote {
+            FlowQuote::Double if escaped => escaped = false,
+            FlowQuote::Double if ch == '\\' => escaped = true,
+            FlowQuote::Double if ch == '"' => quote = FlowQuote::None,
+            FlowQuote::Single if ch == '\'' => {
+                if chars.peek().is_some_and(|(_, next)| *next == '\'') {
+                    let _ = chars.next();
+                } else {
+                    quote = FlowQuote::None;
+                }
+            }
+            FlowQuote::None if ch == '\'' => quote = FlowQuote::Single,
+            FlowQuote::None if ch == '"' => quote = FlowQuote::Double,
+            FlowQuote::None if ch == '#' && previous_whitespace => {
+                comment = Some(index);
+                break;
+            }
+            _ => {}
+        }
+        previous_whitespace = ch.is_whitespace();
+    }
+    let before_comment = &slice[..comment.unwrap_or(slice.len())];
+    let end = before_comment.trim_end_matches([' ', '\t']).len();
+    if end <= lead {
+        return Ok((slice.to_string(), false));
+    }
+    let token = &slice[lead..end];
+    let parsed: String = yaml_compat::from_str(token).map_err(|e| {
+        format!("could not read a `policy[].when.cut` item `{token}` ({e}); nothing was written")
+    })?;
+    if parsed != old {
+        return Ok((slice.to_string(), false));
+    }
+    let replacement = scalar_like(token, new);
+    Ok((
+        format!("{}{}{}", &slice[..lead], replacement, &slice[end..]),
+        true,
+    ))
+}
+
+#[derive(Clone, Copy)]
+enum FlowQuote {
+    None,
+    Single,
+    Double,
+}
+
+fn scalar_like(old: &str, new: &str) -> String {
+    if old.starts_with('"') {
+        return serde_json::to_string(new).unwrap_or_else(|_| format!("{new:?}"));
+    }
+    if old.starts_with('\'') {
+        return format!("'{}'", new.replace('\'', "''"));
+    }
+    let rendered = yaml_compat::to_string(new).unwrap_or_else(|_| new.to_string());
+    let rendered = rendered.trim_end_matches('\n');
+    if rendered.contains('\n') {
+        serde_json::to_string(new).unwrap_or_else(|_| format!("{new:?}"))
+    } else {
+        rendered.to_string()
+    }
+}
+
 fn find_config(start: &Path) -> Option<PathBuf> {
-    // Absolute, so `ancestors()` reaches the real root rather than stopping at a
-    // relative path with no parent (`.` has none).
-    let start = std::fs::canonicalize(start).ok()?;
-    start
-        .ancestors()
-        .map(|dir| dir.join(CONFIG_FILE))
+    config_search_paths(start)
+        .into_iter()
         // Stop at the first `.aplan.yml` that *exists as anything*, not just a
         // regular file: a `.aplan.yml` that is a directory (or a broken symlink)
         // must become a clear read error, not be skipped so the tool silently
@@ -1782,6 +2957,22 @@ pub const SCAFFOLD: &str = r#"# .aplan.yml, this repository's `aplan` policy.
 # this file's directory. The --root flag overrides it.
 # root: aplan
 
+# Durable intake lives as one versioned YAML file per capture below
+# `<root>/.inbox/`. `task`, `idea` and `note` are always valid kinds. Repository
+# config may append portable kinds and named profiles; there is deliberately no
+# per-user capture policy or implicit default profile.
+# capture:
+#   kinds: [question]
+#   profiles:
+#     triage:
+#       kind: idea
+#       labels: [inbox]
+#       body: '## Context'
+#       promotion:
+#         phase: 2
+#         effort_days: 1
+#         tags: [feature]
+
 # Warn when an active task has no `effort_days` estimate (APLAN009).
 # require_effort: true
 
@@ -1812,26 +3003,31 @@ pub const SCAFFOLD: &str = r#"# .aplan.yml, this repository's `aplan` policy.
 # strongest rung now leaves every task uncloseable until code arrives. Narrow to
 # [test] once a runner exists to point at; aplan's own plan runs that, and
 # reached it after configuring a runner per crate.
+# `observation_inputs` is an exhaustive trust claim about repository inputs to
+# configured test discovery. Omit it unless every material input is known;
+# omission disables cross-process catalogue reuse without disabling verification.
 # evidence:
 #   require_min_strength: [commit, test, file]
 #   exempt_tags: [external]
+#   observation_inputs: [Cargo.toml, Cargo.lock, 'src/**', 'tests/**']
 
 # The same evidence dials, scoped to part of the plan. Each entry names a subset
-# with the four dimensions the command line takes (within a dimension any, across
+# with the five dimensions the command line takes (within a dimension any, across
 # dimensions all) and sets the dials for it. The narrowest matching scope wins per
 # dial, and among equals the first entry here; the whole-plan settings above are
 # the scope that names nothing, so any match beats them. An empty
 # `require_min_strength: []` means nothing is required in that scope.
 # policy:
 #   - when:
+#       phase: [1]
 #       tag: [spike]
 #     evidence:
 #       require_min_strength: []
 
-# Stale-`done` drift detection (APLAN018). When on, `aplan close` stamps a content
-# fingerprint of each traced section, and `check` warns (advisory) when a closed
-# task's traced section has changed since. Clear a warning by re-reviewing and
-# `aplan close --restamp <id>`.
+# Stale-`done` drift detection (APLAN018, APLAN054). When on, `aplan close`
+# fingerprints traced sections and mutable file evidence. `check` reports changed
+# traces; `verify` reports changed evidence. Both compare committed content. Clear
+# either warning by re-reviewing and `aplan close --restamp <id>`.
 # detect_drift: false
 
 # Treat a warning as a finding, so `check` and `verify` exit 1 rather than 0 when
@@ -1875,31 +3071,50 @@ pub const SCAFFOLD: &str = r#"# .aplan.yml, this repository's `aplan` policy.
 
 # How `aplan roadmap` renders. `group_by` names a tag family (declared below)
 # whose members become headings within each cut, which is how a project with a
-# second grouping level gets its own view back; aplan models one grouping level
-# on purpose. It must name a declared family, or a typo would invent a heading.
+# second task-membership dimension gets its view; aplan models one membership
+# level on purpose. It must name a declared family, or a typo would invent a
+# heading.
 # roadmap:
 #   group_by: epic
 
-# Where a document of yours declares a cut's membership, for `aplan check-docs`.
-# A narrative listing a cut's tasks beside its `M-<cut>` milestone holds two
-# copies of one fact, and this is what lets the second one be checked against the
-# first. `declared_by` is `line` (a marked line, named by `marker`) or `table`
+# How `aplan summary` rolls up work. With no block it groups by phase, exactly
+# as before. `group_by` names a declared tag family; a task carrying more than
+# one member appears in every matching row, while totals still count it once.
+# summary:
+#   group_by: kind
+
+# Which documents `aplan check-docs` checks when no paths are passed. Values
+# are relative to this file and may be literals or globs. A single `*` stays
+# within one directory; use `**` to cross directories. Explicit command-line
+# paths override this list for a one-off check.
+#
+# `membership` adds its own `doc` to this set automatically, so a
+# membership document need not be repeated under `paths`. It says where a
+# narrative declares a cut's tasks beside its `M-<cut>` milestone.
+# `declared_by` is `line` (a marked line, named by `marker`) or `table`
 # (a task table's first cell). Fenced code is never a declaration, so a document
 # may show its own format.
 # docs:
+#   paths: [README.md, 'docs/*.md']
 #   membership:
 #     - doc: ROADMAP.md
 #       declared_by: line
 #       marker: "**Tasks:**"
 
-# Tag vocabularies this plan uses (APLAN026). A second grouping level always ends
-# up in tags, because tags are what exists, and then nothing notices a typo.
+# Tag vocabularies this plan uses (APLAN026). A second task-membership dimension
+# ends up in tags, because tags are what exists, and then nothing notices a typo.
 # Declaring the vocabulary makes that checkable: a tag carrying a family's prefix
 # that the family does not list, or one edit away from a member, is reported.
 # Tags outside every declared family stay legal and silent.
 # tag_families:
 #   epic: [epic-a, epic-b]
 #   kind: [kind-b, kind-m, kind-r]
+
+# Canonical values for task `owner` fields (APLAN056). With no list, owner stays
+# free text. Once declared, an unfamiliar owner is reported and a one-edit typo
+# gets a correction; an unassigned task stays valid. Owner selectors in
+# `policy[].when` use the same vocabulary.
+# owners: [ada, grace]
 
 # A family may also say how many of it a task carries (APLAN030). The list above
 # is the short form of `{members: [...]}` with no requirement, so nothing changes
@@ -1933,6 +3148,7 @@ pub const SCAFFOLD: &str = r#"# .aplan.yml, this repository's `aplan` policy.
 #   check: [curl, -sfI, --max-time, 10, '{url}']
 #   max_memory: 256M
 #   max_processes: 16
+#   max_output: 1M
 #   wrap: [nice, -n, '10', --]
 
 # The test runner for `aplan verify --execute` (rung L3). `list` prints the
@@ -1942,6 +3158,9 @@ pub const SCAFFOLD: &str = r#"# .aplan.yml, this repository's `aplan` policy.
 # test:
 #   list: [cargo, test, --, --list]
 #   run: [cargo, test, --, --exact, '{test}']
+#   batch:                       # optional; `run` remains the fallback
+#     protocol: 1
+#     run: [ci/aplan-test-batch, '{manifest}', '{result}']
 #
 # `skipped` prints the tests this runner will *not* run, one per line, in the
 # names `list` prints. A runner that skips the cited test still exits 0, and a
@@ -1981,7 +3200,7 @@ pub const SCAFFOLD: &str = r#"# .aplan.yml, this repository's `aplan` policy.
 #
 # It prints the version on stdout and exits zero. The first non-empty line is
 # taken, trimmed, with one leading `v` removed, because `git describe` prints one
-# and `cargo pkgid` does not. It takes the same four limit keys every other
+# and `cargo pkgid` does not. It takes the same five limit keys every other
 # declared command does.
 #
 # Without it, `aplan version <ID>` still answers what a node owes, which needs
@@ -1995,6 +3214,7 @@ pub const SCAFFOLD: &str = r#"# .aplan.yml, this repository's `aplan` policy.
 #   current:
 #     command: [ci/scripts/version.sh]
 #     timeout_seconds: 30
+#     max_output: 1M
 #   release_tag: 'v*'
 #
 # Whether the artifact agrees with what the plan claims about compatibility
@@ -2019,6 +3239,7 @@ pub const SCAFFOLD: &str = r#"# .aplan.yml, this repository's `aplan` policy.
 #     command: [cargo, semver-checks, check-release]
 #     timeout_seconds: 900
 #     max_memory: 8G
+#     max_output: 1M
 #
 # What a runner may spend, if this platform can hold it to that (APLAN014 when a
 # cited test's own command is stopped, APLAN013 when it was `list` or `skipped`). `max_memory` becomes a cgroup's `memory.max` *and*
@@ -2026,7 +3247,10 @@ pub const SCAFFOLD: &str = r#"# .aplan.yml, this repository's `aplan` policy.
 # `max_processes` becomes `pids.max`. On a platform with no cgroup v2, or in a
 # container that was not given a cgroup subtree of its own, the run says so once
 # and proceeds unprotected -- the limit is a promise this tool keeps where it can
-# and names where it cannot.
+# and names where it cannot. `max_output` is different: it bounds bytes aplan
+# retains from each of stdout and stderr in its own process, defaults to 1M, and
+# works on every platform. Pipes are still drained, with their first and last
+# halves retained, so the bound cannot deadlock or silently cut a failure tail.
 #
 # `wrap` is the escape hatch beside them: a prefix every command of this runner
 # runs under, for `nice`, `taskset`, a container runner, or a cgroup property
@@ -2036,11 +3260,14 @@ pub const SCAFFOLD: &str = r#"# .aplan.yml, this repository's `aplan` policy.
 #   run: [cargo, test, --, --exact, '{test}']
 #   max_memory: 4G
 #   max_processes: 64
+#   max_output: 1M
 #   wrap: [nice, -n, '10', --]
 #
-# What a runner spends is the harness's, not this tool's: `aplan` spawns one
-# command at a time, and the fan-out past that is the harness's own. Measured on
-# one machine: `cargo test -q -p <crate>` warm peaks at 4 processes and 156MB,
+# What a runner spends is the harness's, not this tool's. The legacy shapes
+# below start one configured provider at a time. An explicit schedule may admit
+# several runners, so give a nested harness a conservative `weight`; the fan-out
+# past each top-level command is still the harness's own. Measured on one
+# machine, `cargo test -q -p <crate>` warm peaks at 4 processes and 156MB,
 # `go test ./...` at 34 and 1.2GB, and `npm test` (vitest) at 160 and 25.6GB.
 #
 # The environment is passed through, so a harness's own dials already work with
@@ -2065,6 +3292,27 @@ pub const SCAFFOLD: &str = r#"# .aplan.yml, this repository's `aplan` policy.
 #     dir: web
 #     list: [pnpm, test, --list]
 #     run: [pnpm, test, '{test}']
+#
+# Concurrency is an explicit third shape; the mapping and sequence above stay
+# serial. `capacity` is one aggregate weighted budget. A runner consumes one
+# unit unless it declares `weight`, which accounts for nested fan-out.
+# `exclusive` names capacity-one resources shared inside this aplan invocation;
+# every name and the full weight are reserved together, so acquisition cannot
+# deadlock. The names are not machine-wide or distributed locks.
+# test:
+#   schedule: {capacity: 4}
+#   runners:
+#     - name: libs
+#       weight: 2
+#       exclusive: [compiler-cache]
+#       list: [cargo, test, --manifest-path, libs/Cargo.toml, --, --list]
+#       run: [cargo, test, --manifest-path, libs/Cargo.toml, --, --exact, '{test}']
+#     - name: web
+#       weight: 1
+#       exclusive: [browser-port]
+#       dir: web
+#       list: [pnpm, test, --list]
+#       run: [pnpm, test, '{test}']
 #
 # When one runner holds tests that cover different things, name the exception
 # rather than widening the claim. A repository-wide invariant usually lives in a
@@ -2108,7 +3356,7 @@ pub fn unknown_keys(text: &str) -> Vec<(String, Option<String>)> {
 /// different problem, and it is exactly what the adopter would have met next.
 #[must_use]
 fn scan_unknown(text: &str) -> (Vec<(String, Option<String>)>, Option<String>) {
-    let Ok(mut doc) = serde_yaml_ng::from_str::<serde_yaml_ng::Value>(text) else {
+    let Ok(mut doc) = yaml_compat::from_str::<yaml_compat::Value>(text) else {
         return (Vec::new(), None);
     };
     let accepted = accepted_keys();
@@ -2122,8 +3370,8 @@ fn scan_unknown(text: &str) -> (Vec<(String, Option<String>)>, Option<String>) {
     // would invent errors the real fix never produces, since dropping a
     // misspelled `test.lst` leaves a runner with no `list` and reports a missing
     // field the adopter is about to supply by correcting the spelling.
-    let remaining = serde_yaml_ng::to_string(&doc).ok().and_then(|cleaned| {
-        match serde_yaml_ng::from_str::<Config>(&cleaned) {
+    let remaining = yaml_compat::to_string(&doc).ok().and_then(|cleaned| {
+        match yaml_compat::from_str::<Config>(&cleaned) {
             Err(e) => Some(strip_position(&e.to_string())),
             // Parsing is only half of loading: the semantic checks are where a
             // runner with no `{test}` placeholder or an unknown `advisory` code
@@ -2137,7 +3385,7 @@ fn scan_unknown(text: &str) -> (Vec<(String, Option<String>)>, Option<String>) {
 
 /// One node of [`scan_unknown`]'s walk, removing what it reports.
 fn walk_unknown(
-    node: &mut serde_yaml_ng::Value,
+    node: &mut yaml_compat::Value,
     prefix: &str,
     accepted: &[String],
     out: &mut Vec<(String, Option<String>)>,
@@ -2153,8 +3401,8 @@ fn walk_unknown(
     let Some(map) = node.as_mapping_mut() else {
         return;
     };
-    let mut drop_these: Vec<(serde_yaml_ng::Value, Option<String>)> = Vec::new();
-    let mut keep = serde_yaml_ng::Mapping::new();
+    let mut drop_these: Vec<(yaml_compat::Value, Option<String>)> = Vec::new();
+    let mut keep = yaml_compat::Mapping::new();
     for (k, v) in map.iter_mut() {
         let Some(name) = k.as_str() else { continue };
         let path = if prefix.is_empty() {
@@ -2191,7 +3439,7 @@ fn walk_unknown(
         // only where the corrected name is free: overwriting a key the file
         // already has would answer a question nobody asked.
         if let Some(name) = rename_to {
-            let key = serde_yaml_ng::Value::String(name);
+            let key = yaml_compat::Value::String(name);
             if !map.contains_key(&key)
                 && let Some(v) = keep.remove(&k)
             {
@@ -2295,10 +3543,48 @@ fn collect_keys(
 }
 
 impl Config {
-    /// Reject a roadmap grouping the tool cannot act on.
+    /// Reject a view grouping the tool cannot act on.
     ///
     /// # Errors
-    /// When `group_by` names a family `tag_families` does not declare.
+    /// When either `group_by` names a family `tag_families` does not declare.
+    pub fn validate_grouping(&self) -> Result<(), Error> {
+        if let Some(family) = self.roadmap.as_ref().and_then(|r| r.group_by.as_ref()) {
+            self.validate_group_by("roadmap.group_by", family)?;
+        }
+        if let Some(family) = self.summary.as_ref().and_then(|r| r.group_by.as_ref()) {
+            self.validate_group_by("summary.group_by", family)?;
+        }
+        Ok(())
+    }
+
+    /// Backwards-compatible entry point for callers validating the roadmap
+    /// block on its own.
+    ///
+    /// # Errors
+    /// When `roadmap.group_by` names an undeclared tag family.
+    pub fn validate_roadmap(&self) -> Result<(), Error> {
+        let Some(family) = self.roadmap.as_ref().and_then(|r| r.group_by.as_ref()) else {
+            return Ok(());
+        };
+        self.validate_group_by("roadmap.group_by", family)
+    }
+
+    fn validate_group_by(&self, key: &str, family: &str) -> Result<(), Error> {
+        // Grouping by a vocabulary nothing validates would render a heading a
+        // typo invented, which is the defect `APLAN026` exists to prevent.
+        if !self
+            .tag_families
+            .as_ref()
+            .is_some_and(|families| families.contains_key(family))
+        {
+            return Err(Error::BadGrouping(format!(
+                "`{key}` names `{family}`, which `tag_families` does not declare; declare it, \
+                 or drop the key"
+            )));
+        }
+        Ok(())
+    }
+
     /// Reject a throughput nothing can be divided by (`A1-147`).
     ///
     /// Zero, negative and non-finite are all mistakes, and the alternative to
@@ -2318,25 +3604,6 @@ impl Config {
         }
     }
 
-    pub fn validate_roadmap(&self) -> Result<(), Error> {
-        let Some(family) = self.roadmap.as_ref().and_then(|r| r.group_by.as_ref()) else {
-            return Ok(());
-        };
-        // Grouping by a vocabulary nothing validates would render a heading a
-        // typo invented, which is the defect `APLAN026` exists to prevent.
-        if !self
-            .tag_families
-            .as_ref()
-            .is_some_and(|f| f.contains_key(family))
-        {
-            return Err(Error::BadRunner(format!(
-                "`roadmap.group_by` names `{family}`, which `tag_families` does not declare; \
-                 declare it, or drop the key"
-            )));
-        }
-        Ok(())
-    }
-
     /// Reject a tag vocabulary the tool cannot act on.
     ///
     /// # Errors
@@ -2347,18 +3614,18 @@ impl Config {
         };
         for (name, family) in families {
             if name.trim().is_empty() {
-                return Err(Error::BadRunner(
+                return Err(Error::BadTagFamilies(
                     "`tag_families` has a family with a blank name".into(),
                 ));
             }
             let members = family.members();
             if members.is_empty() {
-                return Err(Error::BadRunner(format!(
+                return Err(Error::BadTagFamilies(format!(
                     "`tag_families.{name}` is empty; remove it, or list the tags it contains"
                 )));
             }
             if members.iter().any(|m| m.trim().is_empty()) {
-                return Err(Error::BadRunner(format!(
+                return Err(Error::BadTagFamilies(format!(
                     "`tag_families.{name}` contains a blank tag"
                 )));
             }
@@ -2367,8 +3634,55 @@ impl Config {
             // declaration reads as though two different tags were meant.
             let mut seen = BTreeSet::new();
             if let Some(dup) = members.iter().find(|m| !seen.insert(m.as_str())) {
-                return Err(Error::BadRunner(format!(
+                return Err(Error::BadTagFamilies(format!(
                     "`tag_families.{name}` lists `{dup}` twice"
+                )));
+            }
+        }
+        Ok(())
+    }
+
+    /// Reject an owner vocabulary the validator could not apply exactly.
+    ///
+    /// An empty list or a blank member declares a policy while naming no usable
+    /// value. Duplicates make the list read as though two identities exist where
+    /// matching sees one. Owner-scoped policy entries use the same vocabulary:
+    /// accepting a spelling here that the same declaration calls non-canonical
+    /// would make the repository state two incompatible policies.
+    pub fn validate_owners(&self) -> Result<(), Error> {
+        let Some(owners) = &self.owners else {
+            return Ok(());
+        };
+        if owners.is_empty() {
+            return Err(Error::BadOwners(
+                "it is an empty list; remove the key, or name an owner".into(),
+            ));
+        }
+        if owners
+            .iter()
+            .any(|owner| aplan_core::task::is_vacuous_ref(owner))
+        {
+            return Err(Error::BadOwners(
+                "it contains a blank owner, which names no identity".into(),
+            ));
+        }
+        let mut seen = BTreeSet::new();
+        if let Some(duplicate) = owners.iter().find(|owner| !seen.insert(owner.as_str())) {
+            return Err(Error::BadOwners(format!("it lists `{duplicate}` twice")));
+        }
+        for owner in self
+            .policy
+            .iter()
+            .flatten()
+            .flat_map(|policy| &policy.when.owner)
+        {
+            if !seen.contains(owner.as_str()) {
+                let suggestion = owners
+                    .iter()
+                    .find(|known| aplan_core::validate::is_one_edit_apart(known, owner))
+                    .map_or_else(String::new, |known| format!("; did you mean `{known}`?"));
+                return Err(Error::BadOwners(format!(
+                    "`policy[].when.owner` names undeclared owner `{owner}`{suggestion}"
                 )));
             }
         }
@@ -2415,10 +3729,121 @@ pub fn init(dir: &Path) -> Result<PathBuf, InitError> {
 mod tests {
     use super::*;
 
+    /// Proof for behaviour `rekey.policy_cut_block_comments`: comment-only
+    /// suffixes on the key are YAML trivia, not a scalar value.
+    #[test]
+    fn policy_cut_rekey_is_surgical_and_confined_to_when_cut() {
+        let input = "root: aplan\r\n# old id stays in prose: M-old\r\npolicy:\r\n  - when:\r\n      cut: [M-old, \"release\\\"]label\"] # keep\r\n    evidence:\r\n      require_min_strength: [test]\r\n  - when:\r\n      cut: # scoped by milestone id\r\n        - 'M-old' # exact id\r\n        - label\r\nversion:\r\n  levels:\r\n    cut: fix\r\n";
+        let updated = rekey_policy_cuts(input, "M-old", "M-new")
+            .expect("rewrite")
+            .expect("two references");
+
+        assert_eq!(
+            updated,
+            "root: aplan\r\n# old id stays in prose: M-old\r\npolicy:\r\n  - when:\r\n      cut: [M-new, \"release\\\"]label\"] # keep\r\n    evidence:\r\n      require_min_strength: [test]\r\n  - when:\r\n      cut: # scoped by milestone id\r\n        - 'M-new' # exact id\r\n        - label\r\nversion:\r\n  levels:\r\n    cut: fix\r\n"
+        );
+        assert_eq!(
+            rekey_policy_cuts(input, "absent", "new").expect("no edit"),
+            None
+        );
+    }
+
+    #[test]
+    fn policy_cut_rekey_handles_scalar_neighbours_and_single_quoted_flow_items() {
+        for input in [
+            "plain scalar\n",
+            "policy: {not: a-sequence}\n",
+            "policy:\n  - scalar\n  - evidence: {}\n  - when: scalar\n  - when:\n      cut: scalar\n",
+        ] {
+            assert_eq!(
+                rekey_policy_cuts(input, "M-old", "M-new").expect("irrelevant shapes are safe"),
+                None
+            );
+        }
+
+        let input =
+            "policy:\n  - when:\n      cut: ['comma, stays', 'it''s ] safe', 'M-old'] # keep\n";
+        assert_eq!(
+            rekey_policy_cuts(input, "M-old", "M-new")
+                .expect("rewrite")
+                .expect("reference"),
+            "policy:\n  - when:\n      cut: ['comma, stays', 'it''s ] safe', 'M-new'] # keep\n"
+        );
+    }
+
+    #[test]
+    fn policy_cut_rekey_refuses_unsupported_or_ambiguous_edits() {
+        let invalid = rekey_policy_cuts("policy: [\n", "M-old", "M-new")
+            .expect_err("invalid YAML must be refused");
+        assert!(invalid.contains("invalid configuration"), "{invalid}");
+
+        let tagged = "policy:\n  - when:\n      cut: !!seq [M-old]\n";
+        let unsupported = rekey_policy_cuts(tagged, "M-old", "M-new")
+            .expect_err("a representation the surgical writer cannot preserve must be refused");
+        assert!(
+            unsupported.contains("safely rewrite only 0"),
+            "{unsupported}"
+        );
+
+        let ambiguous = "policy:\n  - when:\n      cut: !!seq [M-old]\n    cut: [M-old]\n";
+        let mismatch = rekey_policy_cuts(ambiguous, "M-old", "M-new")
+            .expect_err("rewriting the wrong equal-looking field must be refused");
+        assert!(
+            mismatch.contains("changed more than the selected cut ids"),
+            "{mismatch}"
+        );
+    }
+
+    #[test]
+    fn policy_cut_scalar_rewriter_covers_empty_invalid_and_quoted_items() {
+        let missing_close = rewrite_flow_sequence("[M-old", "M-old", "M-new")
+            .expect_err("a multiline flow list is not a safe line edit");
+        assert!(
+            missing_close.contains("no closing bracket"),
+            "{missing_close}"
+        );
+
+        assert_eq!(
+            rewrite_block_item("      no item", "M-old", "M-new").expect("plain line"),
+            ("      no item".into(), false)
+        );
+        assert_eq!(
+            rewrite_block_item("key - M-old", "M-old", "M-new").expect("not an item"),
+            ("key - M-old".into(), false)
+        );
+        assert_eq!(
+            rewrite_block_item("      -M-old", "M-old", "M-new").expect("missing spacing"),
+            ("      -M-old".into(), false)
+        );
+
+        assert_eq!(
+            rewrite_scalar_slice("   # comment", "M-old", "M-new").expect("empty token"),
+            ("   # comment".into(), false)
+        );
+        assert_eq!(
+            rewrite_scalar_slice(" other # keep", "M-old", "M-new").expect("near miss"),
+            (" other # keep".into(), false)
+        );
+        let invalid =
+            rewrite_scalar_slice(" [unterminated", "M-old", "M-new").expect_err("invalid scalar");
+        assert!(invalid.contains("could not read"), "{invalid}");
+
+        assert_eq!(scalar_like("\"old\"", "M-new"), "\"M-new\"");
+        assert_eq!(scalar_like("'old'", "M'new"), "'M''new'");
+        let multiline = scalar_like("old", "M-new\nline");
+        assert_eq!(
+            yaml_compat::from_str::<String>(&multiline).expect("valid YAML scalar"),
+            "M-new\nline"
+        );
+    }
+
     fn runner(run: &[&str]) -> TestRunner {
         TestRunner {
+            weight: None,
+            exclusive: None,
             max_memory: None,
             max_processes: None,
+            max_output: None,
             wrap: None,
             output_lines: None,
             expect_tests: None,
@@ -2427,11 +3852,26 @@ mod tests {
             timeout_seconds: None,
             covers: None,
             covers_by_test: None,
+            inputs_by_test: None,
             name: None,
             dir: None,
             list: vec!["true".into()],
             run: run.iter().map(|s| (*s).to_string()).collect(),
+            batch: None,
         }
+    }
+
+    fn batch(run: &[&str]) -> TestBatch {
+        TestBatch {
+            protocol: TEST_BATCH_PROTOCOL,
+            run: run.iter().map(|argument| (*argument).to_string()).collect(),
+        }
+    }
+
+    fn runner_with_batch(run: &[&str]) -> TestRunner {
+        let mut runner = runner(&["true", PLACEHOLDER]);
+        runner.batch = Some(batch(run));
+        runner
     }
 
     #[test]
@@ -2475,6 +3915,171 @@ mod tests {
         );
     }
 
+    #[test]
+    fn batch_paths_stay_whole_unmodified_argv_elements() {
+        let batch = batch(&[
+            "adapter",
+            "--input",
+            BATCH_MANIFEST_PLACEHOLDER,
+            "--output",
+            BATCH_RESULT_PLACEHOLDER,
+        ]);
+        assert_eq!(
+            batch.run_argv("manifest ; rm", "result $(touch bad)"),
+            [
+                "adapter",
+                "--input",
+                "manifest ; rm",
+                "--output",
+                "result $(touch bad)",
+            ]
+        );
+    }
+
+    #[test]
+    fn batch_requires_the_supported_protocol_and_two_exact_path_placeholders() {
+        let valid = [
+            "adapter",
+            BATCH_MANIFEST_PLACEHOLDER,
+            BATCH_RESULT_PLACEHOLDER,
+        ];
+        assert!(runner_with_batch(&valid).validate().is_ok());
+
+        let mut wrong_protocol = runner_with_batch(&valid);
+        wrong_protocol.batch.as_mut().unwrap().protocol = TEST_BATCH_PROTOCOL + 1;
+        assert!(wrong_protocol.validate().is_err());
+
+        for invalid in [
+            vec!["adapter", BATCH_RESULT_PLACEHOLDER],
+            vec!["adapter", BATCH_MANIFEST_PLACEHOLDER],
+            vec![
+                "adapter",
+                BATCH_MANIFEST_PLACEHOLDER,
+                BATCH_MANIFEST_PLACEHOLDER,
+                BATCH_RESULT_PLACEHOLDER,
+            ],
+            vec![
+                "adapter",
+                BATCH_MANIFEST_PLACEHOLDER,
+                BATCH_RESULT_PLACEHOLDER,
+                BATCH_RESULT_PLACEHOLDER,
+            ],
+            vec!["adapter", "--input={manifest}", BATCH_RESULT_PLACEHOLDER],
+            vec!["adapter", BATCH_MANIFEST_PLACEHOLDER, "--output={result}"],
+            vec![
+                "adapter",
+                BATCH_MANIFEST_PLACEHOLDER,
+                BATCH_RESULT_PLACEHOLDER,
+                " ",
+            ],
+        ] {
+            assert!(
+                runner_with_batch(&invalid).validate().is_err(),
+                "accepted {invalid:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn batch_never_turns_a_path_or_test_name_into_the_program() {
+        for invalid in [
+            vec![
+                BATCH_MANIFEST_PLACEHOLDER,
+                "adapter",
+                BATCH_RESULT_PLACEHOLDER,
+            ],
+            vec![
+                BATCH_RESULT_PLACEHOLDER,
+                "adapter",
+                BATCH_MANIFEST_PLACEHOLDER,
+            ],
+            vec![
+                "adapter",
+                BATCH_MANIFEST_PLACEHOLDER,
+                BATCH_RESULT_PLACEHOLDER,
+                PLACEHOLDER,
+            ],
+        ] {
+            assert!(
+                runner_with_batch(&invalid).validate().is_err(),
+                "accepted {invalid:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn batch_rejects_unknown_fields_instead_of_guessing_a_protocol() {
+        let error = yaml_compat::from_str::<TestBatch>(
+            "protocol: 1\nrun: [adapter, '{manifest}', '{result}']\ncomplete: true\n",
+        )
+        .expect_err("an unknown protocol field must be refused")
+        .to_string();
+        assert!(error.contains("unknown field `complete`"), "{error}");
+    }
+
+    #[test]
+    fn reusable_provider_inputs_are_explicit_safe_repository_globs() {
+        let valid = parse_config(
+            "evidence:\n  observation_inputs: [Cargo.toml, 'src/**', 'tests/*.rs']\n",
+            Path::new(".aplan.yml"),
+        )
+        .expect("literal repository roots with valid globs are identifiable");
+        assert_eq!(
+            valid
+                .evidence
+                .expect("evidence")
+                .observation_inputs
+                .expect("inputs"),
+            ["Cargo.toml", "src/**", "tests/*.rs"]
+        );
+
+        for (yaml, wanted) in [
+            ("evidence:\n  observation_inputs: []\n", "list is empty"),
+            (
+                "evidence:\n  observation_inputs: ['  ']\n",
+                "blank path glob",
+            ),
+            (
+                "evidence:\n  observation_inputs: [\"\\u200b\"]\n",
+                "blank path glob",
+            ),
+            (
+                "evidence:\n  observation_inputs: ['/src/**']\n",
+                "repository-relative",
+            ),
+            (
+                "evidence:\n  observation_inputs: ['*/src/**']\n",
+                "literal file or directory",
+            ),
+            (
+                "evidence:\n  observation_inputs: ['src/../Cargo.toml']\n",
+                "may not contain `.` or `..`",
+            ),
+            (
+                "evidence:\n  observation_inputs: ['src/./lib.rs']\n",
+                "may not contain `.` or `..`",
+            ),
+            (
+                "evidence:\n  observation_inputs: ['.git/**']\n",
+                "metadata or generated output",
+            ),
+            (
+                "evidence:\n  observation_inputs: ['target/**']\n",
+                "metadata or generated output",
+            ),
+            (
+                "evidence:\n  observation_inputs: ['src/[']\n",
+                "not a valid glob",
+            ),
+        ] {
+            let error = parse_config(yaml, Path::new(".aplan.yml"))
+                .expect_err("an unidentifiable provider-input declaration must be refused")
+                .to_string();
+            assert!(error.contains("evidence.observation_inputs"), "{error}");
+            assert!(error.contains(wanted), "expected {wanted:?} in {error:?}");
+        }
+    }
+
     /// Every key `facts` advertises, in one document the parser must accept.
     ///
     /// `deny_unknown_fields` is on, so this fails if the list ever advertises a
@@ -2482,10 +4087,16 @@ mod tests {
     /// new key is added without being represented here.
     const EVERY_ACCEPTED_KEY: &str = "\
 root: aplan
+capture:
+  kinds: [question]
+  profiles:
+    triage:
+      kind: question
 require_effort: true
 policy:
   - when:
       cut: [M-v0.9]
+      phase: [2]
       tag: [spike]
       owner: [kim]
       status: [done]
@@ -2494,7 +4105,10 @@ policy:
       exempt_tags: [untestable]
 tag_families:
   epic: [epic-a]
+owners: [kim]
 roadmap:
+  group_by: epic
+summary:
   group_by: epic
 traces_root: .
 no_traces: false
@@ -2506,23 +4120,35 @@ evidence:
   require_min_strength: [commit, test, file]
   exempt_tags: [external]
   max_unrelated_files: 50
+  observation_inputs: [Cargo.toml, Cargo.lock, 'src/**', 'tests/**']
 test:
-  name: libs
-  dir: libs
-  expect_tests: true
-  run_selects: true
-  output_lines: 8
-  skipped: [cargo, test, '--', --list, --ignored]
-  max_memory: 4G
-  max_processes: 64
-  wrap: [nice, -n, '10', --]
-  covers: [libs/**]
-  covers_by_test:
-    - tests: [invariants::*]
-      paths: ['**']
-  list: [cargo, test]
-  run: [cargo, test, '{test}']
-  timeout_seconds: 600
+  schedule: {capacity: 4}
+  runners:
+    - name: libs
+      weight: 2
+      exclusive: [compiler]
+      dir: libs
+      expect_tests: true
+      run_selects: true
+      output_lines: 8
+      skipped: [cargo, test, '--', --list, --ignored]
+      max_memory: 4G
+      max_processes: 64
+      max_output: 1M
+      wrap: [nice, -n, '10', --]
+      covers: [libs/**]
+      covers_by_test:
+        - tests: [invariants::*]
+          paths: ['**']
+      inputs_by_test:
+        - tests: [invariants::*]
+          paths: ['libs/**']
+      list: [cargo, test]
+      run: [cargo, test, '{test}']
+      batch:
+        protocol: 1
+        run: [ci/aplan-test-batch, '{manifest}', '{result}']
+      timeout_seconds: 600
 version:
   require_impact: true
   release_tag: 'v*'
@@ -2531,12 +4157,14 @@ version:
     timeout_seconds: 30
     max_memory: 256M
     max_processes: 16
+    max_output: 1M
     wrap: [nice, -n, '10', --]
   check:
     command: [cargo, semver-checks, check-release]
     timeout_seconds: 600
     max_memory: 8G
     max_processes: 64
+    max_output: 1M
     wrap: [nice, -n, '10', --]
   levels:
     task: fix
@@ -2547,8 +4175,10 @@ url:
   timeout_seconds: 30
   max_memory: 256M
   max_processes: 16
+  max_output: 1M
   wrap: [nice, -n, '10', --]
 docs:
+  paths: [README.md, 'docs/*.md']
   membership:
     - doc: ROADMAP.md
       declared_by: line
@@ -2568,6 +4198,7 @@ stale_after_days: 30
         let check = |args: &[&str]| UrlCheck {
             max_memory: None,
             max_processes: None,
+            max_output: None,
             wrap: None,
             timeout_seconds: None,
             check: args.iter().map(|a| (*a).to_string()).collect(),
@@ -2650,10 +4281,12 @@ stale_after_days: 30
             Scope {
                 tag: vec!["a".into()],
                 owner: vec!["kim".into()],
+                phase: vec![2, 3],
                 ..Scope::default()
             }
             .named_dimensions(),
-            2
+            3,
+            "several phase values still name one dimension"
         );
     }
 
@@ -2665,6 +4298,7 @@ stale_after_days: 30
         let err = UrlCheck {
             max_memory: None,
             max_processes: None,
+            max_output: None,
             wrap: None,
             timeout_seconds: None,
             check: vec!["curl".into()],
@@ -2697,6 +4331,8 @@ stale_after_days: 30
     #[test]
     fn a_runner_with_an_unreadable_limit_does_not_load() {
         let bad_size = TestRunner {
+            weight: None,
+            exclusive: None,
             max_memory: Some("4GB".into()),
             ..runner(&["true"])
         };
@@ -2704,6 +4340,8 @@ stale_after_days: 30
         assert!(format!("{err}").contains("max_memory"), "{err}");
 
         let zero = TestRunner {
+            weight: None,
+            exclusive: None,
             max_processes: Some(0),
             ..runner(&["true"])
         };
@@ -2712,11 +4350,24 @@ stale_after_days: 30
             .expect_err("no command runs in zero processes");
         assert!(format!("{err}").contains("max_processes"), "{err}");
 
+        let bad_output = TestRunner {
+            weight: None,
+            exclusive: None,
+            max_output: Some("all-of-it".into()),
+            ..runner(&["true"])
+        };
+        let err = bad_output
+            .validate()
+            .expect_err("an output bound must be a size");
+        assert!(format!("{err}").contains("test.max_output"), "{err}");
+
         // A wrapper is a command, and a command with no name is not one. Both
         // shapes YAML makes easy to write by accident are refused by name, so
         // the reader is told which key to fix rather than watching every
         // command run bare.
         let empty = TestRunner {
+            weight: None,
+            exclusive: None,
             wrap: Some(Vec::new()),
             ..runner(&["true"])
         };
@@ -2724,45 +4375,61 @@ stale_after_days: 30
         assert!(format!("{err}").contains("empty list"), "{err}");
 
         let blank = TestRunner {
+            weight: None,
+            exclusive: None,
             wrap: Some(vec!["nice".into(), "  ".into()]),
             ..runner(&["true"])
         };
         let err = blank.validate().expect_err("a blank argument is not one");
         assert!(format!("{err}").contains("blank argument"), "{err}");
 
-        // The same three keys on `url`, refused by the same code: two copies
+        // The same four keys on `url`, refused by the same code: two copies
         // of this check drifted the moment one of them grew a case, which is
         // why `validate_limits` is shared and why this asserts through the
         // other caller (`A1-310`, audit).
         let checker = |max_memory: Option<&str>,
                        max_processes: Option<u32>,
+                       max_output: Option<&str>,
                        wrap: Option<Vec<String>>| UrlCheck {
             check: vec!["curl".into(), URL_PLACEHOLDER.into()],
             timeout_seconds: None,
             max_memory: max_memory.map(ToString::to_string),
             max_processes,
+            max_output: max_output.map(ToString::to_string),
             wrap,
         };
-        let err = checker(Some("4GB"), None, None)
+        let err = checker(Some("4GB"), None, None, None)
             .validate()
             .expect_err("`4GB` is not a size");
         assert!(format!("{err}").contains("`url.max_memory`"), "{err}");
-        let err = checker(None, Some(0), None)
+        let err = checker(None, Some(0), None, None)
             .validate()
             .expect_err("no command runs in zero processes");
         assert!(format!("{err}").contains("`url.max_processes`"), "{err}");
-        let err = checker(None, None, Some(Vec::new()))
+        let err = checker(None, None, Some("lots"), None)
+            .validate()
+            .expect_err("an output bound must be a size");
+        assert!(format!("{err}").contains("`url.max_output`"), "{err}");
+        let err = checker(None, None, None, Some(Vec::new()))
             .validate()
             .expect_err("an empty prefix wraps nothing");
         assert!(format!("{err}").contains("`url.wrap`"), "{err}");
-        checker(Some("256M"), Some(16), Some(vec!["nice".into()]))
-            .validate()
-            .expect("every limit is readable");
+        checker(
+            Some("256M"),
+            Some(16),
+            Some("1M"),
+            Some(vec!["nice".into()]),
+        )
+        .validate()
+        .expect("every limit is readable");
 
-        // And a runner that declares all three well loads.
+        // And a runner that declares all four well loads.
         let good = TestRunner {
+            weight: None,
+            exclusive: None,
             max_memory: Some("4G".into()),
             max_processes: Some(64),
+            max_output: Some("1M".into()),
             wrap: Some(vec!["nice".into(), "-n".into(), "10".into()]),
             ..runner(&["true", PLACEHOLDER])
         };
@@ -2774,7 +4441,7 @@ stale_after_days: 30
         // The claim `config_keys` makes to a consumer is "this build accepts
         // these". `deny_unknown_fields` means an advertised key the parser does
         // not know fails here rather than in their image build.
-        let c: Config = serde_yaml_ng::from_str(EVERY_ACCEPTED_KEY)
+        let c: Config = yaml_compat::from_str(EVERY_ACCEPTED_KEY)
             .expect("a document of every advertised key must parse");
         assert!(c.test.expect("a runner").validate().is_ok());
 
@@ -2786,7 +4453,7 @@ stale_after_days: 30
         let keys = accepted_keys();
         assert_eq!(
             keys.len(),
-            75,
+            124,
             "config keys changed; teach the fixture above, then update this count: {keys:?}"
         );
         for key in keys {
@@ -2856,7 +4523,7 @@ stale_after_days: 30
             examples.len()
         );
         for example in &examples {
-            let parsed = serde_yaml_ng::from_str::<Config>(example);
+            let parsed = yaml_compat::from_str::<Config>(example);
             assert!(
                 parsed.is_ok(),
                 "the scaffold shows an example this build refuses:\n{example}\n{:?}",
@@ -2956,7 +4623,7 @@ stale_after_days: 30
     fn a_key_facts_does_not_advertise_is_refused() {
         // The other half of the promise: the list is exhaustive, so a key absent
         // from it must not quietly work.
-        let err = serde_yaml_ng::from_str::<Config>("requre_effort: true\n")
+        let err = yaml_compat::from_str::<Config>("requre_effort: true\n")
             .expect_err("an unknown key must be refused");
         assert!(err.to_string().contains("requre_effort"), "{err}");
         assert!(
@@ -2976,10 +4643,46 @@ stale_after_days: 30
             "test:\n  covers_by_test:\n    - tests: ['  ']\n      paths: ['**']\n  \
              list: [cargo, test]\n  run: [cargo, test, '{test}']\n",
         ] {
-            let c: Config = serde_yaml_ng::from_str(yaml).expect("it parses");
+            let c: Config = yaml_compat::from_str(yaml).expect("it parses");
             let err = c.test.expect("a runner").validate().unwrap_err();
             assert!(err.to_string().contains("covers_by_test"), "{err}");
         }
+    }
+
+    #[test]
+    fn incremental_input_dependencies_are_distinct_validated_config() {
+        let valid: Config = yaml_compat::from_str(
+            "test:\n  list: [cargo, test, '--', --list]\n  run: [cargo, test, '{test}']\n  inputs_by_test:\n    - tests: ['unit::*']\n      paths: ['src/**', 'fixtures/unit/**']\n",
+        )
+        .expect("valid input dependencies");
+        let runner = valid.test.expect("runner");
+        runner.all()[0].validate().expect("valid runner");
+        assert_eq!(
+            runner.all()[0]
+                .inputs_by_test
+                .as_ref()
+                .expect("input dependencies")[0]
+                .paths,
+            vec!["src/**", "fixtures/unit/**"]
+        );
+        for source in [
+            "test:\n  list: [cargo, test]\n  run: [cargo, test, '{test}']\n  inputs_by_test: []\n",
+            "test:\n  list: [cargo, test]\n  run: [cargo, test, '{test}']\n  inputs_by_test:\n    - tests: []\n      paths: ['src/**']\n",
+            "test:\n  list: [cargo, test]\n  run: [cargo, test, '{test}']\n  inputs_by_test:\n    - tests: ['unit::*']\n      paths: []\n",
+            "test:\n  list: [cargo, test]\n  run: [cargo, test, '{test}']\n  inputs_by_test:\n    - tests: ['unit::[']\n      paths: ['src/**']\n",
+            "test:\n  list: [cargo, test]\n  run: [cargo, test, '{test}']\n  inputs_by_test:\n    - tests: ['unit::*']\n      paths: ['../src/**']\n",
+        ] {
+            let config: Config = yaml_compat::from_str(source).expect("shape parses");
+            let error = config.test.expect("runner").all()[0]
+                .validate()
+                .expect_err("invalid dependency declaration");
+            assert!(error.to_string().contains("inputs_by_test"), "{error}");
+        }
+        assert!(
+            accepted_keys()
+                .iter()
+                .any(|key| key == "test.inputs_by_test.paths")
+        );
     }
 
     #[test]
@@ -2992,6 +4695,7 @@ stale_after_days: 30
             "deny_warnings",
             "evidence.require_min_strength",
             "evidence.max_unrelated_files",
+            "evidence.observation_inputs",
             "test",
             "test.covers",
             "test.dir",
@@ -3030,34 +4734,128 @@ stale_after_days: 30
     fn grouping_by_an_undeclared_family_is_an_error() {
         // Grouping by a vocabulary nothing validates would render a heading a
         // typo invented, which is the defect `APLAN026` exists to prevent.
-        let c: Config = serde_yaml_ng::from_str("roadmap:\n  group_by: epic\n").expect("parses");
+        let c: Config = yaml_compat::from_str("roadmap:\n  group_by: epic\n").expect("parses");
         let err = c.validate_roadmap().unwrap_err();
         assert!(err.to_string().contains("tag_families"), "{err}");
+        let err = c.validate_grouping().unwrap_err();
+        assert!(err.to_string().contains("roadmap.group_by"), "{err}");
 
-        let ok: Config = serde_yaml_ng::from_str(
-            "tag_families:\n  epic: [epic-a]\nroadmap:\n  group_by: epic\n",
-        )
-        .expect("parses");
+        let ok: Config =
+            yaml_compat::from_str("tag_families:\n  epic: [epic-a]\nroadmap:\n  group_by: epic\n")
+                .expect("parses");
         assert!(ok.validate_roadmap().is_ok());
+
+        let absent: Config = yaml_compat::from_str("root: aplan\n").expect("parses");
+        assert!(absent.validate_roadmap().is_ok());
+        assert!(absent.validate_grouping().is_ok());
+    }
+
+    #[test]
+    fn summary_grouping_names_a_declared_family_or_is_refused() {
+        let c: Config = yaml_compat::from_str("summary:\n  group_by: epic\n").expect("parses");
+        let err = c.validate_grouping().unwrap_err();
+        assert!(err.to_string().contains("summary.group_by"), "{err}");
+        assert!(err.to_string().contains("tag_families"), "{err}");
+        assert!(!err.to_string().contains("test runner"), "{err}");
+
+        let ok: Config =
+            yaml_compat::from_str("tag_families:\n  epic: [epic-a]\nsummary:\n  group_by: epic\n")
+                .expect("parses");
+        assert!(ok.validate_grouping().is_ok());
     }
 
     #[test]
     fn a_tag_family_the_tool_cannot_act_on_is_an_error() {
-        for yaml in [
-            "tag_families:\n  epic: []\n",
-            "tag_families:\n  epic: ['  ']\n",
+        for (yaml, named) in [
+            ("tag_families:\n  epic: []\n", "is empty"),
+            ("tag_families:\n  epic: ['  ']\n", "blank tag"),
+            (
+                "tag_families:\n  epic: [epic-a, epic-a]\n",
+                "`epic-a` twice",
+            ),
         ] {
-            let c: Config = serde_yaml_ng::from_str(yaml).expect("it parses");
+            let c: Config = yaml_compat::from_str(yaml).expect("it parses");
             let err = c.validate_tag_families().unwrap_err();
             assert!(err.to_string().contains("epic"), "{err}");
+            assert!(err.to_string().contains(named), "{err}");
+            assert!(
+                err.to_string()
+                    .starts_with("invalid `tag_families` in `.aplan.yml`"),
+                "{err}"
+            );
+            assert!(!err.to_string().contains("test runner"), "{err}");
         }
+
+        let blank: Config =
+            yaml_compat::from_str("tag_families:\n  '  ': [epic-a]\n").expect("it parses");
+        let err = blank.validate_tag_families().unwrap_err();
+        assert!(err.to_string().contains("blank name"), "{err}");
+        assert!(!err.to_string().contains("test runner"), "{err}");
     }
 
     #[test]
     fn declaring_no_tag_families_is_valid_and_the_default() {
-        let c: Config = serde_yaml_ng::from_str("require_effort: true\n").expect("parses");
+        let c: Config = yaml_compat::from_str("require_effort: true\n").expect("parses");
         assert!(c.tag_families.is_none());
         assert!(c.validate_tag_families().is_ok());
+    }
+
+    #[test]
+    fn an_owner_vocabulary_is_nonempty_substantive_and_unique() {
+        for (yaml, wanted) in [
+            ("owners: []\n", "empty list"),
+            ("owners: ['  ']\n", "blank owner"),
+            ("owners: [\"\\u200b\"]\n", "blank owner"),
+            ("owners: [ada, ada]\n", "lists `ada` twice"),
+        ] {
+            let config: Config = yaml_compat::from_str(yaml).expect("configuration parses");
+            let error = config
+                .validate_owners()
+                .expect_err("an unusable vocabulary must be refused")
+                .to_string();
+            assert!(error.contains(wanted), "expected {wanted:?} in {error:?}");
+        }
+
+        let absent: Config = yaml_compat::from_str("{}").expect("configuration parses");
+        absent
+            .validate_owners()
+            .expect("an absent vocabulary preserves free-text owners");
+        let declared: Config =
+            yaml_compat::from_str("owners: [ada, grace]\n").expect("configuration parses");
+        declared
+            .validate_owners()
+            .expect("distinct substantive owners form a vocabulary");
+    }
+
+    #[test]
+    fn owner_scopes_use_the_declared_vocabulary_when_one_exists() {
+        let yaml = "owners: [kaminsod]\npolicy:\n  - when:\n      owner: [kaminsdo]\n    evidence:\n      require_min_strength: [test]\n";
+        let typo: Config = yaml_compat::from_str(yaml).expect("configuration parses");
+        let error = typo
+            .validate_owners()
+            .expect_err("a policy scope no legal task can match must be refused")
+            .to_string();
+        assert!(error.contains("`kaminsdo`"), "{error}");
+        assert!(error.contains("did you mean `kaminsod`?"), "{error}");
+        let loaded = parse_config(yaml, Path::new(".aplan.yml"))
+            .expect_err("the ordinary loader must run owner validation")
+            .to_string();
+        assert!(loaded.contains("invalid `owners`"), "{loaded}");
+
+        let exact: Config = yaml_compat::from_str(
+            "owners: [kaminsod]\npolicy:\n  - when:\n      owner: [kaminsod]\n    evidence:\n      require_min_strength: [test]\n",
+        )
+        .expect("configuration parses");
+        exact
+            .validate_owners()
+            .expect("a declared owner remains a usable policy selector");
+
+        let open: Config = yaml_compat::from_str(
+            "policy:\n  - when:\n      owner: [anyone]\n    evidence:\n      require_min_strength: [test]\n",
+        )
+        .expect("configuration parses");
+        open.validate_owners()
+            .expect("without a vocabulary owner strings remain open");
     }
 
     #[test]
@@ -3068,7 +4866,7 @@ stale_after_days: 30
             "test:\n  covers: []\n  list: [cargo, test]\n  run: [cargo, test, '{test}']\n",
             "test:\n  covers: ['  ']\n  list: [cargo, test]\n  run: [cargo, test, '{test}']\n",
         ] {
-            let c: Config = serde_yaml_ng::from_str(yaml).expect("it parses");
+            let c: Config = yaml_compat::from_str(yaml).expect("it parses");
             let err = c.test.expect("a runner").validate().unwrap_err();
             assert!(err.to_string().contains("covers"), "{err}");
         }
@@ -3078,7 +4876,7 @@ stale_after_days: 30
     fn a_runner_can_declare_covers_without_a_dir() {
         // The shape `A1-065` exists for: locality declared by a runner that
         // still runs at the repository root.
-        let c: Config = serde_yaml_ng::from_str(
+        let c: Config = yaml_compat::from_str(
             "test:\n  - name: server\n    covers: [server/**]\n    list: [cargo, test]\n\
              \n    run: [cargo, test, '{test}']\n",
         )
@@ -3102,7 +4900,7 @@ test:
   list: [cargo, test, --, --list]
   run: [cargo, test, --exact, '{test}']
 ";
-        let cfg: Config = serde_yaml_ng::from_str(yml).unwrap();
+        let cfg: Config = yaml_compat::from_str(yml).unwrap();
         assert_eq!(cfg.require_effort, Some(false));
         assert_eq!(cfg.traces_root.as_deref(), Some("docs"));
         let runners = cfg.test.expect("runner present");
@@ -3115,8 +4913,40 @@ test:
     }
 
     #[test]
+    fn capture_configuration_is_portable_strict_and_reaches_effective_policy() {
+        let config = parse_config(
+            "capture:\n  kinds: [question]\n  profiles:\n    triage:\n      kind: question\n      labels: [inbox]\n      body: context\n      promotion:\n        phase: 2\n        effort_days: 1\n        tags: [feature]\n",
+            Path::new(".aplan.yml"),
+        )
+        .expect("capture config");
+        let policy = config.capture_policy();
+        assert!(policy.kinds().contains("task"));
+        assert!(policy.kinds().contains("question"));
+        assert!(policy.profiles().contains_key("triage"));
+
+        for (input, expected) in [
+            ("capture:\n  kinds: ['']\n", "blank or invisible"),
+            ("capture:\n  kinds: [Task]\n", "lower-case ASCII"),
+            ("capture:\n  kinds: [task]\n", "more than once"),
+            (
+                "capture:\n  profiles:\n    triage:\n      evidence: []\n",
+                "unknown field",
+            ),
+            (
+                "capture:\n  profiles:\n    triage:\n      promotion:\n        effort_days: 0\n",
+                "positive finite",
+            ),
+        ] {
+            let error = parse_config(input, Path::new(".aplan.yml"))
+                .expect_err("invalid capture config")
+                .to_string();
+            assert!(error.contains(expected), "{input:?}: {error}");
+        }
+    }
+
+    #[test]
     fn an_empty_config_is_all_defaults() {
-        let cfg: Config = serde_yaml_ng::from_str("{}").unwrap();
+        let cfg: Config = yaml_compat::from_str("{}").unwrap();
         assert_eq!(cfg.require_effort, None);
         assert!(cfg.traces_root.is_none());
         assert!(cfg.test.is_none());
@@ -3125,13 +4955,13 @@ test:
 
     #[test]
     fn detect_drift_parses() {
-        let cfg: Config = serde_yaml_ng::from_str("detect_drift: true\n").unwrap();
+        let cfg: Config = yaml_compat::from_str("detect_drift: true\n").unwrap();
         assert_eq!(cfg.detect_drift, Some(true));
     }
 
     #[test]
     fn root_key_parses() {
-        let cfg: Config = serde_yaml_ng::from_str("root: myplan\n").unwrap();
+        let cfg: Config = yaml_compat::from_str("root: myplan\n").unwrap();
         assert_eq!(cfg.root.as_deref(), Some("myplan"));
     }
 
@@ -3139,7 +4969,7 @@ test:
     fn the_evidence_strength_block_parses_typed_kinds() {
         let yml =
             "evidence:\n  require_min_strength: [commit, test, file]\n  exempt_tags: [phone]\n";
-        let cfg: Config = serde_yaml_ng::from_str(yml).unwrap();
+        let cfg: Config = yaml_compat::from_str(yml).unwrap();
         let ev = cfg.evidence.expect("evidence block");
         assert_eq!(
             ev.require_min_strength.unwrap(),
@@ -3148,7 +4978,7 @@ test:
         assert_eq!(ev.exempt_tags.unwrap(), vec!["phone".to_string()]);
         // An unknown evidence kind is a typed parse error, not silently accepted.
         assert!(
-            serde_yaml_ng::from_str::<Config>("evidence:\n  require_min_strength: [bogus]\n")
+            yaml_compat::from_str::<Config>("evidence:\n  require_min_strength: [bogus]\n")
                 .is_err()
         );
     }
@@ -3156,7 +4986,7 @@ test:
     #[test]
     fn an_unknown_key_is_rejected_not_ignored() {
         // The ethos: a config key the tool does not understand is drift.
-        let err = serde_yaml_ng::from_str::<Config>("polciy: strict\n").unwrap_err();
+        let err = yaml_compat::from_str::<Config>("polciy: strict\n").unwrap_err();
         assert!(err.to_string().contains("polciy") || err.to_string().contains("unknown"));
     }
 
@@ -3473,12 +5303,14 @@ test:
     fn a_single_runner_mapping_still_parses_exactly_as_written() {
         // Every existing adopter has this form. A change that made them all edit
         // their config to keep working would be a poor trade.
-        let c: Config = serde_yaml_ng::from_str(
+        let c: Config = yaml_compat::from_str(
             "test:\n  list: [cargo, test, --, --list]\n  run: [cargo, test, --, --exact, '{test}']\n",
         )
         .expect("the single-runner form must keep parsing");
         let runners = c.test.expect("a runner");
         assert_eq!(runners.all().len(), 1);
+        assert!(!runners.has_explicit_schedule());
+        assert_eq!(runners.schedule().capacity, 1);
         assert!(runners.validate().is_ok());
         assert_eq!(
             runners.all()[0].dir,
@@ -3489,13 +5321,15 @@ test:
 
     #[test]
     fn a_sequence_of_runners_parses_with_name_and_dir() {
-        let c: Config = serde_yaml_ng::from_str(
+        let c: Config = yaml_compat::from_str(
             "test:\n  - name: libs\n    list: [cargo, test]\n    run: [cargo, test, '{test}']\n\
              \n  - name: web\n    dir: web\n    list: [pnpm, test]\n    run: [pnpm, test, '{test}']\n",
         )
         .expect("a sequence of runners must parse");
         let runners = c.test.expect("runners");
         assert_eq!(runners.all().len(), 2);
+        assert!(!runners.has_explicit_schedule());
+        assert_eq!(runners.schedule().capacity, 1);
         assert_eq!(runners.all()[1].name.as_deref(), Some("web"));
         assert_eq!(
             runners.all()[1].dir.as_deref(),
@@ -3506,9 +5340,82 @@ test:
     }
 
     #[test]
+    fn scheduled_runners_are_explicit_weighted_and_exclusive() {
+        let c: Config = yaml_compat::from_str(
+            "test:\n  schedule:\n    capacity: 4\n  runners:\n    - name: rust\n      weight: 3\n      exclusive: [compiler, database]\n      list: [cargo, test]\n      run: [cargo, test, '{test}']\n    - name: docs\n      list: [mdtest, --list]\n      run: [mdtest, '{test}']\n",
+        )
+        .expect("the scheduled form parses");
+        let runners = c.test.expect("runners");
+        assert_eq!(runners.schedule().capacity, 4);
+        assert_eq!(runners.all().len(), 2);
+        assert_eq!(runners.all()[0].weight(), 3);
+        assert_eq!(runners.all()[1].weight(), 1);
+        assert_eq!(
+            runners.all()[0].exclusive_resources(),
+            ["compiler".to_string(), "database".to_string()]
+                .into_iter()
+                .collect()
+        );
+        runners.validate().expect("a usable weighted schedule");
+    }
+
+    #[test]
+    fn unusable_provider_schedules_are_refused_at_load() {
+        for (yaml, wanted) in [
+            (
+                "test:\n  schedule: {capacity: 0}\n  runners:\n    - list: ['true']\n      run: ['true', '{test}']\n",
+                "capacity",
+            ),
+            (
+                "test:\n  schedule: {capacity: 1}\n  runners:\n    - weight: 2\n      list: ['true']\n      run: ['true', '{test}']\n",
+                "weight 2 exceeds",
+            ),
+            (
+                "test:\n  schedule: {capacity: 2}\n  runners:\n    - weight: 0\n      list: ['true']\n      run: ['true', '{test}']\n",
+                "weight is 0",
+            ),
+            (
+                "test:\n  schedule: {capacity: 2}\n  runners:\n    - exclusive: []\n      list: ['true']\n      run: ['true', '{test}']\n",
+                "exclusive resource list is empty",
+            ),
+            (
+                "test:\n  schedule: {capacity: 2}\n  runners:\n    - exclusive: [' port ']\n      list: ['true']\n      run: ['true', '{test}']\n",
+                "no surrounding whitespace",
+            ),
+            (
+                "test:\n  schedule: {capacity: 2}\n  runners:\n    - exclusive: [\"port\\u200b\"]\n      list: ['true']\n      run: ['true', '{test}']\n",
+                "invisible formatting",
+            ),
+            (
+                "test:\n  schedule: {capacity: 2}\n  runners:\n    - exclusive: [port, port]\n      list: ['true']\n      run: ['true', '{test}']\n",
+                "repeats exclusive resource",
+            ),
+            (
+                "test:\n  schedule: {capacity: 2}\n  runners: []\n",
+                "empty list",
+            ),
+        ] {
+            let error = parse_config(yaml, Path::new(".aplan.yml"))
+                .expect_err("an unusable schedule must be refused")
+                .to_string();
+            assert!(error.contains(wanted), "expected {wanted:?} in {error:?}");
+        }
+
+        for yaml in [
+            "test:\n  weight: 1\n  list: ['true']\n  run: ['true', '{test}']\n",
+            "test:\n  - exclusive: [port]\n    list: ['true']\n    run: ['true', '{test}']\n",
+        ] {
+            let error = parse_config(yaml, Path::new(".aplan.yml"))
+                .expect_err("scheduler controls outside a schedule must be refused")
+                .to_string();
+            assert!(error.contains("require the explicit"), "{error}");
+        }
+    }
+
+    #[test]
     fn every_runner_in_a_sequence_is_validated_not_just_the_first() {
         // The trust boundary is per runner: one unsafe template is enough.
-        let c: Config = serde_yaml_ng::from_str(
+        let c: Config = yaml_compat::from_str(
             "test:\n  - list: ['true']\n    run: [cargo, '{test}']\n\
              \n  - list: ['true']\n    run: ['{test}']\n",
         )
@@ -3524,7 +5431,7 @@ test:
     fn an_empty_runner_list_is_a_config_error_not_a_silent_no_op() {
         // `test: []` parses, and would then reject every `test` citation with a
         // message implying a runner exists.
-        let c: Config = serde_yaml_ng::from_str("test: []\n").expect("parses");
+        let c: Config = yaml_compat::from_str("test: []\n").expect("parses");
         let err = c.test.unwrap().validate().unwrap_err();
         assert!(err.to_string().contains("empty list"), "{err}");
     }
@@ -3537,7 +5444,7 @@ test:
             "test:\n  list: ['true']\n  run: ['true', '{test}']\n  typo: x\n",
             "test:\n  - list: ['true']\n    run: ['true', '{test}']\n    typo: x\n",
         ] {
-            let err = serde_yaml_ng::from_str::<Config>(yaml)
+            let err = yaml_compat::from_str::<Config>(yaml)
                 .unwrap_err()
                 .to_string();
             assert!(err.contains("unknown field `typo`"), "{err}");
@@ -3550,15 +5457,15 @@ test:
 
     /// **The version is read by a command, never parsed** (ADR-0040).
     ///
-    /// The key carries the same four limits every other spawning block does,
+    /// The key carries the same five limits every other spawning block does,
     /// because ADR-0033 covers *every* spawned command: `url.check` was declared
     /// with `max_memory` and never applied it, and this is the block that would
     /// have repeated it.
     #[test]
     fn the_current_version_is_a_declared_command_with_the_usual_limits() {
-        let c: Config = serde_yaml_ng::from_str(
+        let c: Config = yaml_compat::from_str(
             "version:\n  current:\n    command: [ci/version.sh]\n    timeout_seconds: 5\n    \
-             max_memory: 256M\n    max_processes: 8\n    wrap: [nice, '--']\n  \
+             max_memory: 256M\n    max_processes: 8\n    max_output: 1M\n    wrap: [nice, '--']\n  \
              release_tag: 'release-*'\n",
         )
         .expect("it parses");
@@ -3568,15 +5475,63 @@ test:
         assert_eq!(current.timeout_seconds, Some(5));
         assert_eq!(current.max_memory.as_deref(), Some("256M"));
         assert_eq!(current.max_processes, Some(8));
+        assert_eq!(current.max_output.as_deref(), Some("1M"));
         assert_eq!(v.release_tag(), "release-*");
         v.validate().expect("it is usable");
         // And the default, which is what every plan measured so far tags with.
         let bare: Config =
-            serde_yaml_ng::from_str("version:\n  require_impact: true\n").expect("it parses");
+            yaml_compat::from_str("version:\n  require_impact: true\n").expect("it parses");
         assert_eq!(
             bare.version.as_ref().expect("the block").release_tag(),
             DEFAULT_RELEASE_TAG
         );
+    }
+
+    /// The three public declarations stay shaped for their own questions, but
+    /// the policy around every spawned command is one typed contract
+    /// (`A1-185`). If a shared limit is added to only one view, this stops
+    /// compiling or comparing equal before execution can drift.
+    #[test]
+    fn test_url_and_version_expose_one_command_policy_contract() {
+        let c: Config = yaml_compat::from_str(
+            r"test:
+  list: [tests, list]
+  run: [tests, run, '{test}']
+  timeout_seconds: 17
+  max_memory: 256M
+  max_processes: 8
+  max_output: 2M
+  wrap: [cage]
+url:
+  check: [links, '{url}']
+  timeout_seconds: 17
+  max_memory: 256M
+  max_processes: 8
+  max_output: 2M
+  wrap: [cage]
+version:
+  current:
+    command: [version]
+    timeout_seconds: 17
+    max_memory: 256M
+    max_processes: 8
+    max_output: 2M
+    wrap: [cage]
+",
+        )
+        .expect("all three declaration shapes parse");
+        let test = c.test.as_ref().expect("test").all()[0].command_policy();
+        let url = c.url.as_ref().expect("url").command_policy();
+        let version = c
+            .version
+            .as_ref()
+            .and_then(|version| version.current.as_ref())
+            .expect("version.current")
+            .command_policy();
+
+        assert_eq!(test, url);
+        assert_eq!(url, version);
+        assert_eq!(test.timeout_or(600), 17);
     }
 
     /// A `version` block that could not be acted on is refused at load, and the
@@ -3605,6 +5560,10 @@ test:
                 "max_memory",
             ),
             (
+                "version:\n  current:\n    command: [x]\n    max_output: lots\n",
+                "max_output",
+            ),
+            (
                 "version:\n  current:\n    command: [x]\n    max_processes: 0\n",
                 "max_processes",
             ),
@@ -3614,7 +5573,7 @@ test:
             ),
         ];
         for (yaml, wanted) in cases {
-            let c: Config = serde_yaml_ng::from_str(yaml).expect("it parses");
+            let c: Config = yaml_compat::from_str(yaml).expect("it parses");
             let err = c
                 .version
                 .as_ref()
@@ -3635,7 +5594,7 @@ test:
     /// silently widened the window to the whole of history.
     #[test]
     fn an_empty_release_tag_is_refused_without_a_command_too() {
-        let c: Config = serde_yaml_ng::from_str("version:\n  release_tag: ''\n").expect("parses");
+        let c: Config = yaml_compat::from_str("version:\n  release_tag: ''\n").expect("parses");
         c.version
             .as_ref()
             .expect("the block")
@@ -3649,14 +5608,14 @@ test:
     fn the_version_floors_fill_in_only_what_the_adopter_left_out() {
         use aplan_core::task::VersionImpact as V;
 
-        let off: Config = serde_yaml_ng::from_str("").expect("empty loads");
+        let off: Config = yaml_compat::from_str("").expect("empty loads");
         assert!(off.version.is_none(), "silence asks for nothing");
 
         // Declared, but with `require_impact` left out: a `version` block that
         // only sets floors has not turned the rule on, and reading `levels` as
         // consent would enable a gate nobody asked for.
         let floors_only: Config =
-            serde_yaml_ng::from_str("version:\n  levels:\n    cut: none\n").expect("it parses");
+            yaml_compat::from_str("version:\n  levels:\n    cut: none\n").expect("it parses");
         let p = floors_only.version.as_ref().expect("the block is there");
         assert!(!p.requires_impact());
         assert_eq!(
@@ -3670,7 +5629,7 @@ test:
         );
 
         let on: Config =
-            serde_yaml_ng::from_str("version:\n  require_impact: true\n").expect("it parses");
+            yaml_compat::from_str("version:\n  require_impact: true\n").expect("it parses");
         let p = on.version.as_ref().expect("the block is there");
         assert!(p.requires_impact());
         assert_eq!(
@@ -3681,7 +5640,7 @@ test:
 
         // Every level overridden, including one raised: the map is the adopter's
         // in both directions.
-        let all: Config = serde_yaml_ng::from_str(
+        let all: Config = yaml_compat::from_str(
             "version:\n  require_impact: true\n  levels:\n    task: none\n    cut: fix\n    \
              release: breaking\n",
         )
@@ -3708,7 +5667,7 @@ mod throughput_tests {
     fn an_unusable_throughput_is_refused_and_says_what_one_looks_like() {
         for bad in ["0", "-5", "0.0"] {
             let text = format!("effort_days_per_week: {bad}\n");
-            let c: Config = serde_yaml_ng::from_str(&text).expect("it is a number");
+            let c: Config = yaml_compat::from_str(&text).expect("it is a number");
             let err = c.validate_throughput().expect_err("must be refused");
             let msg = err.to_string();
             assert!(
@@ -3721,13 +5680,13 @@ mod throughput_tests {
     /// The shapes that are fine: absent, and any positive number.
     #[test]
     fn a_positive_throughput_and_no_throughput_both_load() {
-        let none: Config = serde_yaml_ng::from_str("").expect("empty loads");
+        let none: Config = yaml_compat::from_str("").expect("empty loads");
         assert_eq!(none.effort_days_per_week, None);
         none.validate_throughput()
             .expect("silence is not a mistake");
 
         let declared: Config =
-            serde_yaml_ng::from_str("effort_days_per_week: 7.5\n").expect("it parses");
+            yaml_compat::from_str("effort_days_per_week: 7.5\n").expect("it parses");
         assert_eq!(declared.effort_days_per_week, Some(7.5));
         declared
             .validate_throughput()
@@ -3738,6 +5697,29 @@ mod throughput_tests {
 #[cfg(test)]
 mod docs_tests {
     use super::*;
+
+    /// A declaration that can never select a document is refused while loading
+    /// configuration, before `check-docs` can mistake it for an empty clean set
+    /// (`A1-203`).
+    #[test]
+    fn unusable_document_path_declarations_are_refused() {
+        for (yaml, wanted) in [
+            ("docs:\n  paths: []\n", "empty list"),
+            ("docs:\n  paths: ['  ']\n", "blank pattern"),
+            ("docs:\n  paths: [\"\\u200b\"]\n", "blank pattern"),
+            ("docs:\n  paths: ['docs/[']\n", "not a usable glob"),
+        ] {
+            let config: Config = yaml_compat::from_str(yaml).expect("the shape parses");
+            let message = config
+                .validate_docs()
+                .expect_err("a vacuous declaration must be refused")
+                .to_string();
+            assert!(
+                message.contains("`docs.paths`") && message.contains(wanted),
+                "the message must name the declaration and its defect: {message}"
+            );
+        }
+    }
 
     /// A `docs.membership` the check could not be run from is refused at load
     /// rather than ignored (`A1-165`).
@@ -3768,8 +5750,16 @@ mod docs_tests {
                 "docs:\n  membership:\n    - doc: \"\"\n      declared_by: table\n",
                 "names no document",
             ),
+            (
+                "docs:\n  membership:\n    - doc: \"\\u200b\"\n      declared_by: table\n",
+                "names no document",
+            ),
+            (
+                "docs:\n  membership:\n    - doc: PLAN.md\n      declared_by: line\n      marker: \"\\u200b\"\n",
+                "every line begins with",
+            ),
         ] {
-            let c: Config = serde_yaml_ng::from_str(yaml).expect("it parses");
+            let c: Config = yaml_compat::from_str(yaml).expect("it parses");
             let msg = c.validate_docs().expect_err("must be refused").to_string();
             assert!(
                 msg.contains("`docs.membership` in `.aplan.yml`") && msg.contains(wanted),
@@ -3781,7 +5771,7 @@ mod docs_tests {
     /// The shapes that are fine: absent, and each of the two declarations.
     #[test]
     fn the_membership_declarations_that_work_all_load() {
-        let none: Config = serde_yaml_ng::from_str("").expect("empty loads");
+        let none: Config = yaml_compat::from_str("").expect("empty loads");
         assert!(none.docs.is_none());
         none.validate_docs().expect("silence is not a mistake");
 
@@ -3791,8 +5781,90 @@ mod docs_tests {
             // `docs` with no `membership` is a section that asks for nothing.
             "docs: {}\n",
         ] {
-            let c: Config = serde_yaml_ng::from_str(yaml).expect("it parses");
+            let c: Config = yaml_compat::from_str(yaml).expect("it parses");
             c.validate_docs().expect("a usable declaration");
+        }
+    }
+
+    /// The declared set is a union rather than a list of runs: globs may
+    /// overlap literals, and a membership document is already a document
+    /// declaration. Each physical file is returned once, in a stable order.
+    #[test]
+    fn document_paths_expand_globs_deduplicate_and_fold_in_membership() {
+        let dir = tempfile::Builder::new()
+            .tempdir_in(aplan_core::fixture::fixture_root())
+            .expect("tempdir");
+        std::fs::create_dir_all(dir.path().join("docs/nested")).expect("directories");
+        for path in ["docs/a.md", "docs/b.md", "docs/nested/c.md", "PLAN.md"] {
+            std::fs::write(dir.path().join(path), path).expect("document");
+        }
+        let yaml = "\
+docs:
+  paths:
+    - docs/*.md
+    - docs/**/*.md
+    - PLAN.md
+  membership:
+    - doc: PLAN.md
+      declared_by: table
+";
+        let config: Config = yaml_compat::from_str(yaml).expect("config");
+        config.validate_docs().expect("valid declarations");
+        let documents = config
+            .docs
+            .expect("docs")
+            .document_paths(dir.path())
+            .expect("resolved documents");
+        let relative: Vec<PathBuf> = documents
+            .iter()
+            .map(|path| {
+                path.strip_prefix(dir.path())
+                    .expect("inside fixture")
+                    .into()
+            })
+            .collect();
+        assert_eq!(
+            relative,
+            [
+                PathBuf::from("PLAN.md"),
+                PathBuf::from("docs/a.md"),
+                PathBuf::from("docs/b.md"),
+                PathBuf::from("docs/nested/c.md"),
+            ]
+        );
+    }
+
+    /// Every declaration has to bind now. A missing literal, a glob whose last
+    /// file disappeared, and a directory passed as though it were a document
+    /// are three different easy ways to make a gate check nothing.
+    #[test]
+    fn document_path_resolution_refuses_every_vacuous_filesystem_shape() {
+        let dir = tempfile::Builder::new()
+            .tempdir_in(aplan_core::fixture::fixture_root())
+            .expect("tempdir");
+        std::fs::create_dir_all(dir.path().join("docs")).expect("directory");
+
+        for (yaml, wanted) in [
+            ("docs:\n  paths: [missing.md]\n", "not a file"),
+            ("docs:\n  paths: ['docs/*.md']\n", "matched no files"),
+            ("docs:\n  paths: [docs]\n", "not a file"),
+            (
+                "docs:\n  membership:\n    - doc: missing.md\n      declared_by: table\n",
+                "`docs.membership`",
+            ),
+        ] {
+            let config: Config = yaml_compat::from_str(yaml).expect("config");
+            config.validate_docs().expect("syntactically valid");
+            let message = config
+                .docs
+                .expect("docs")
+                .document_paths(dir.path())
+                .expect_err("the empty gate must be refused")
+                .to_string();
+            assert!(
+                message.contains(wanted),
+                "expected {wanted:?} in {message:?}"
+            );
         }
     }
 }

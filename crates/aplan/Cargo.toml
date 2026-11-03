@@ -1,4 +1,5 @@
 [package]
+autotests = false
 name = "aplan"
 description = "Spec-driven plan validator: evidence-gated tasks and an acyclic dependency graph, enforceable in CI."
 version.workspace = true
@@ -12,11 +13,17 @@ keywords = ["planning", "tasks", "dependencies", "ci", "cli"]
 categories = ["development-tools", "command-line-utilities"]
 authors.workspace = true
 
+[features]
+default = ["tui"]
+tui = ["dep:aplan-tui"]
+
 [[bin]]
 name = "aplan"
 path = "src/main.rs"
 
 [dependencies]
+aplan-app.workspace = true
+aplan-tui = { workspace = true, optional = true }
 aplan-core.workspace = true
 aplan-config.workspace = true
 aplan-output.workspace = true
@@ -30,10 +37,21 @@ anyhow.workspace = true
 clap.workspace = true
 serde.workspace = true
 serde_json.workspace = true
+yaml_compat.workspace = true
+shell-words.workspace = true
+tempfile.workspace = true
+
+[target.'cfg(unix)'.dependencies]
+signal-hook.workspace = true
+
+[target.'cfg(windows)'.dependencies]
+ctrlc.workspace = true
+
+[build-dependencies]
+sha2.workspace = true
 
 [dev-dependencies]
 anstyle.workspace = true
-tempfile.workspace = true
 trycmd = "1.2"
 git2 = { version = "0.21", default-features = false }
 serde.workspace = true
@@ -41,7 +59,11 @@ serde_json.workspace = true
 # For the workflow census (`A1-117`, audit): a gate that reads YAML should
 # parse it rather than scan lines, and this is already a workspace
 # dependency of three crates.
-serde_yaml_ng.workspace = true
+termlens.workspace = true
 
 [lints]
 workspace = true
+
+[[test]]
+name = "integration"
+path = "tests/integration/main.rs"

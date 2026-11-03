@@ -15,7 +15,7 @@
 
 use std::path::Path;
 
-mod common;
+use crate::common;
 use common::aplan;
 
 fn repo() -> tempfile::TempDir {

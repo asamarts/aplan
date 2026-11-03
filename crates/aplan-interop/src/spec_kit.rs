@@ -270,6 +270,7 @@ fn build(
             paths: Vec::new(),
             traces: Vec::new(),
             trace_fingerprints: BTreeMap::new(),
+            evidence_fingerprints: std::collections::BTreeMap::new(),
             tags,
             revisit_at: None,
             version_impact: None,
@@ -510,7 +511,7 @@ fn report_markers(items: &[Item], source_name: &str, report: &mut Report) {
         .filter(|m| !m.eq_ignore_ascii_case("p"))
         .map(String::as_str)
         .collect();
-    // ADR-0014: one modelled grouping level, and a second lives in tags.
+    // ADR-0014: one task-membership level, and a second dimension lives in tags.
     if !stories.is_empty() {
         report.push(Notice::new(
             source_name,
@@ -519,9 +520,9 @@ fn report_markers(items: &[Item], source_name: &str, report: &mut Report) {
                 // The decision number stays in the code comment above: a notice
                 // is read in the adopter's terminal, where this project's
                 // `docs/adr/` does not resolve (`A1-044`).
-                "{} user story grouping(s) became tags ({}); `aplan` models one grouping level \
-                 and it is the cut, so if these are your cuts, move the tasks into milestones \
-                 with `aplan mv --cut`",
+                "{} user story grouping(s) became tags ({}); `aplan` models one task-membership \
+                 level and it is the cut, so if these are your cuts, move the tasks into \
+                 milestones with `aplan mv --cut`",
                 stories.len(),
                 stories
                     .iter()

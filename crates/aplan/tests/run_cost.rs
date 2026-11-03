@@ -5,7 +5,7 @@
 //! something worth knowing, and does not otherwise. A report nobody needs is a
 //! report nobody reads, which is the failure mode that matters for a note.
 
-mod common;
+use crate::common;
 
 use common::run;
 use std::path::Path;

@@ -235,6 +235,7 @@ mod tests {
             paths: Vec::new(),
             traces: Vec::new(),
             trace_fingerprints: std::collections::BTreeMap::new(),
+            evidence_fingerprints: std::collections::BTreeMap::new(),
             tags: Vec::new(),
             revisit_at: None,
             version_impact: None,

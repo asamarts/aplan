@@ -20,7 +20,7 @@
 
 use std::path::Path;
 
-mod common;
+use crate::common;
 
 /// What to pass to exercise one flag, beside the arguments its command needs
 /// anyway.
@@ -66,13 +66,13 @@ impl Plan {
     ///
     /// `D-6` traces a file that only resolves once the root moves, which is an
     /// error; `D-7` cites a commit that does not exist, which is another; `D-9`
-    /// is live without an estimate, which is a warning. A variant is these three
-    /// dials.
+    /// is live without an estimate, which is a warning; `D-12` carries the one
+    /// computed repair. A variant is these four dials.
     fn without(self) -> &'static [&'static str] {
         match self {
             Plan::Rich => &[],
-            Plan::Verifying => &["D-5", "D-6", "D-7", "D-9"],
-            Plan::Warned | Plan::Strict => &["D-6", "D-7"],
+            Plan::Verifying => &["D-5", "D-6", "D-7", "D-9", "D-12"],
+            Plan::Warned | Plan::Strict => &["D-6", "D-7", "D-12"],
         }
     }
 }
@@ -154,14 +154,75 @@ fn fixture(dir: &Path, plan: Plan) {
     // without it the command refuses before it opens anything and `--repo` is
     // unreachable (`A1-313`). Silent for every other command: `APLAN048` needs
     // a release tag, and this plan's own repository has none.
-    let declares = "version:\n  current:\n    command: [echo, 0.1.0]\n";
+    let declares = "version:\n  current:\n    command: [echo, 0.1.0]\n\
+                    evidence:\n  observation_inputs: [.aplan.yml, 'src/**']\n\
+                    test:\n  list: [printf, 'suite::known_test\\n']\n  run: ['false', '{test}']\n";
+    let capture = "capture:\n  kinds: [question]\n  profiles:\n    triage:\n      kind: question\n      labels: [profiled]\n      body: scaffold\n      promotion:\n        phase: 2\n        cut: M-a\n";
     let config = if plan == Plan::Strict {
-        format!("root: aplan\ndeny_warnings: true\n{declares}")
+        format!("root: aplan\ndeny_warnings: true\n{declares}{capture}")
     } else {
-        format!("root: aplan\n{declares}")
+        format!("root: aplan\n{declares}{capture}")
     };
     std::fs::write(dir.join(".aplan.yml"), config).expect("config");
     std::fs::write(dir.join("src/one/a.rs"), "fn main() {}\n").expect("src");
+    std::fs::write(dir.join("capture-body.txt"), "body from a file\n").expect("capture body");
+    std::fs::create_dir_all(dir.join("aplan/.inbox")).expect("inbox");
+    std::fs::write(
+        dir.join("aplan/.inbox/I-01K8Z3A4H00000000000000000.yml"),
+        "schema: aplan/capture/v1\nid: I-01K8Z3A4H00000000000000000\n\
+         title: probe-capture\nkind: task\nstate: open\n\
+         captured_at: '2026-01-01T00:00:00Z'\norigin: cli\n\
+         source:\n  namespace: fixture\n  key: stable\n",
+    )
+    .expect("idempotent capture");
+    std::fs::write(
+        dir.join("aplan/.inbox/I-01K8Z3A4H00000000000000001.yml"),
+        concat!(
+            "schema: aplan/capture/v1\n",
+            "id: I-01K8Z3A4H00000000000000001\n",
+            "title: needle-inbox-record\n",
+            "kind: question\n",
+            "state: open\n",
+            "captured_at: '2026-01-01T00:00:00Z'\n",
+            "origin: cli\n",
+            "body: existing\n",
+            "labels: [alpha, beta]\n",
+            "revisit_at: '2020-01-01T00:00:00Z'\n",
+            "promotion_defaults:\n",
+            "  phase: 2\n",
+            "  cut: M-a\n",
+            "  effort_days: 2\n",
+            "  owner: kim\n",
+            "  paths: ['src/one/**']\n",
+            "  tags: [cli]\n",
+        ),
+    )
+    .expect("open capture");
+    std::fs::write(
+        dir.join("aplan/.inbox/I-01K8Z3A4H00000000000000002.yml"),
+        "schema: aplan/capture/v1\nid: I-01K8Z3A4H00000000000000002\n\
+         title: discarded-record\nkind: note\nstate: discarded\n\
+         captured_at: '2026-01-01T00:00:00Z'\norigin: cli\n\
+         disposed_at: '2026-01-02T00:00:00Z'\nreason: reviewed\n",
+    )
+    .expect("discarded capture");
+    std::fs::write(
+        dir.join("aplan/.inbox/I-01K8Z3A4H00000000000000003.yml"),
+        "schema: aplan/capture/v1\nid: I-01K8Z3A4H00000000000000003\n\
+         title: deferred-record\nkind: task\nstate: open\n\
+         captured_at: '2026-01-01T00:00:00Z'\norigin: cli\n\
+         revisit_at: '2030-01-01T00:00:00Z'\n",
+    )
+    .expect("deferred capture");
+    // A complete manifest with no receipt rows reaches current-only import and
+    // produces a typed absent observation. That makes `--test-receipts`
+    // observably different from ordinary deferred verification without
+    // granting this generic flag audit external trust facts.
+    std::fs::write(
+        dir.join("receipt-import.json"),
+        "{\"schema\":\"aplan/test-evidence-import-set/v1\",\"receipts\":[]}\n",
+    )
+    .expect("receipt import set");
     // What `add --from` reads. An explicit id, so the probe does not depend on
     // whatever the minting convention would produce here (`A1-241`).
     std::fs::write(
@@ -169,6 +230,26 @@ fn fixture(dir: &Path, plan: Plan) {
         "- title: From a manifest\n  id: D-90\n  effort: 1\n",
     )
     .expect("manifest");
+    std::fs::write(dir.join("edges.yml"), "- id: D-6\n  add: [D-3]\n")
+        .expect("dependency manifest");
+    std::fs::write(
+        dir.join("feature.blueprint.yml"),
+        concat!(
+            "schema: aplan/blueprint/v1\n",
+            "name: probe\n",
+            "title: Probe blueprint\n",
+            "description: Exercise blueprint flags.\n",
+            "parameters:\n",
+            "  - name: feature\n",
+            "    description: Feature name.\n",
+            "tasks:\n",
+            "  - key: work\n",
+            "    title: 'Build {{feature}}'\n",
+            "    effort: 1\n",
+            "    paths: [src/one/**]\n",
+        ),
+    )
+    .expect("blueprint");
     std::fs::write(
         dir.join("DOC.md"),
         "# Doc\n\n## The rail\n\nThe rail is fixed at three points.\n",
@@ -267,6 +348,14 @@ fn fixture(dir: &Path, plan: Plan) {
              evidence:\n  - kind: commit\n    ref: \"1111111\"\n---\n\nbody\n",
         ),
         (
+            // One exact near match, so `verify --fix` has an observable write
+            // and is not "proved" by two equally read-only runs (`A1-199`).
+            "D-12",
+            "---\nid: D-12\ntitle: repairable test citation\nphase: 0\nstatus: done\nowner: kim\n\
+             effort_days: 1\npaths:\n- src/one/**\ntags: [cli]\nevidence:\n  - kind: test\n\
+             \x20   ref: known_test\n---\n\nbody\n",
+        ),
+        (
             "M-a",
             "---\nid: M-a\ntitle: cut a\nphase: 0\nstatus: todo\ntags: [milestone, a]\n\
              blocked_by: [{members}]\n---\n\nbody\n",
@@ -278,7 +367,7 @@ fn fixture(dir: &Path, plan: Plan) {
         ),
     ];
     let out = plan.without();
-    let members: Vec<&str> = ["D-1", "D-2", "D-4", "D-5", "D-6", "D-7", "D-9"]
+    let members: Vec<&str> = ["D-1", "D-2", "D-4", "D-5", "D-6", "D-7", "D-9", "D-12"]
         .into_iter()
         .filter(|id| !out.contains(id))
         .collect();
@@ -297,6 +386,15 @@ fn fixture(dir: &Path, plan: Plan) {
     }
 
     commit_all(dir);
+    // `--unclaimed` now observes ephemeral claims rather than durable owner.
+    // Seed one ordinary ready task and the one due task so every command that
+    // flattens `SelectArgs` has a row the flag removes. This state deliberately
+    // lives below `.git`: copying the fixture preserves it, while `plan_state`
+    // continues to judge only changes to repository content (`A1-531`).
+    for id in ["D-1", "D-11"] {
+        let seeded = common::run(dir, &["claim", id, "--as", "kim"]);
+        assert_eq!(seeded.code, 0, "seeding claim for {id}: {seeded:?}");
+    }
 }
 
 fn commit_all(dir: &Path) {
@@ -328,6 +426,15 @@ fn copy_tree(from: &Path, to: &Path) {
         let target = to.join(entry.file_name());
         if entry.file_type().expect("kind").is_dir() {
             std::fs::create_dir_all(&target).expect("mkdir");
+            // The claim store's 0700 directory is part of its safety contract.
+            // `create_dir_all` applies the process umask instead of copying that
+            // mode, which would turn every copied fixture into intentionally
+            // unsafe state before the flag under test was reached (`A1-531`).
+            std::fs::set_permissions(
+                &target,
+                entry.metadata().expect("source metadata").permissions(),
+            )
+            .expect("copy directory permissions");
             copy_tree(&entry.path(), &target);
         } else {
             std::fs::copy(entry.path(), &target).expect("copy");
@@ -392,11 +499,17 @@ fn fixture_root(plan: Plan) -> std::path::PathBuf {
 /// would be answering about a different plan. The list is short and clap's tree
 /// does not say which of its commands write.
 fn writes(command: &str) -> bool {
-    matches!(
-        command.split(' ').next().unwrap_or(command),
-        "add"
+    command == "test receipt"
+        || matches!(
+            command,
+            "capture" | "inbox amend" | "inbox discard" | "inbox restore" | "inbox promote"
+        )
+        || matches!(
+            command.split(' ').next().unwrap_or(command),
+            "add"
             | "amend"
             | "attest"
+            | "blueprint"
             // `A1-359`'s four. Omitting one is not a silent miss: the probe
             // runs against the shared fixture, writes to it, and the next
             // read-only run reports a plan that moved under it, which is how
@@ -411,11 +524,14 @@ fn writes(command: &str) -> bool {
             | "import"
             | "init"
             | "mv"
+            | "park"
+            | "rekey"
             | "release"
             | "start"
             | "stop"
             | "supersede"
-    )
+            | "verify"
+        )
 }
 
 /// The answer a run gives: everything a reader would notice.
@@ -539,10 +655,527 @@ const fn v(
 /// chosen is the *list*: `declared()` walks clap, and a flag absent from both
 /// this table and [`HELD`] fails.
 const PROBES: &[Probe] = &[
+    p(
+        "capture",
+        "--body",
+        Some("changed"),
+        &["probe-capture", "--source", "fixture:stable"],
+    ),
+    p(
+        "capture",
+        "--body-file",
+        Some("capture-body.txt"),
+        &["probe-capture", "--source", "fixture:stable"],
+    ),
+    p(
+        "capture",
+        "--dry-run",
+        None,
+        &["probe-capture", "--source", "fixture:stable"],
+    ),
+    p(
+        "capture",
+        "--format",
+        Some("json"),
+        &["probe-capture", "--source", "fixture:stable"],
+    ),
+    p(
+        "capture",
+        "--kind",
+        Some("idea"),
+        &["probe-capture", "--source", "fixture:stable"],
+    ),
+    p(
+        "capture",
+        "--label",
+        Some("flagged"),
+        &["probe-capture", "--source", "fixture:stable"],
+    ),
+    p(
+        "capture",
+        "--profile",
+        Some("triage"),
+        &["probe-capture", "--source", "fixture:stable"],
+    ),
+    p(
+        "capture",
+        "--promotion-cut",
+        Some("M-a"),
+        &["probe-capture", "--source", "fixture:stable"],
+    ),
+    p(
+        "capture",
+        "--promotion-effort",
+        Some("4"),
+        &["probe-capture", "--source", "fixture:stable"],
+    ),
+    p(
+        "capture",
+        "--promotion-owner",
+        Some("ada"),
+        &["probe-capture", "--source", "fixture:stable"],
+    ),
+    p(
+        "capture",
+        "--promotion-path",
+        Some("src/two/**"),
+        &["probe-capture", "--source", "fixture:stable"],
+    ),
+    p(
+        "capture",
+        "--promotion-phase",
+        Some("3"),
+        &["probe-capture", "--source", "fixture:stable"],
+    ),
+    p(
+        "capture",
+        "--promotion-tag",
+        Some("docs"),
+        &["probe-capture", "--source", "fixture:stable"],
+    ),
+    p(
+        "capture",
+        "--revisit-at",
+        Some("2027-01-01T00:00:00Z"),
+        &["probe-capture", "--source", "fixture:stable"],
+    ),
+    p("inbox", "--kind", Some("question"), &[]),
+    p("inbox", "--label", Some("beta"), &[]),
+    p("inbox", "--limit", Some("1"), &[]),
+    p("inbox", "--revisit", Some("all"), &[]),
+    p("inbox", "--search", Some("needle"), &[]),
+    p("inbox", "--state", Some("all"), &[]),
+    p(
+        "inbox amend",
+        "--body",
+        Some("changed"),
+        &["I-01K8Z3A4H00000000000000001"],
+    ),
+    p(
+        "inbox amend",
+        "--body-file",
+        Some("capture-body.txt"),
+        &["I-01K8Z3A4H00000000000000001"],
+    ),
+    p(
+        "inbox amend",
+        "--clear-body",
+        None,
+        &["I-01K8Z3A4H00000000000000001"],
+    ),
+    p(
+        "inbox amend",
+        "--clear-labels",
+        None,
+        &["I-01K8Z3A4H00000000000000001"],
+    ),
+    p(
+        "inbox amend",
+        "--clear-promotion",
+        None,
+        &["I-01K8Z3A4H00000000000000001"],
+    ),
+    p(
+        "inbox amend",
+        "--clear-revisit",
+        None,
+        &["I-01K8Z3A4H00000000000000001"],
+    ),
+    p(
+        "inbox amend",
+        "--dry-run",
+        None,
+        &["I-01K8Z3A4H00000000000000001", "--title", "dry-run-title"],
+    ),
+    p(
+        "inbox amend",
+        "--kind",
+        Some("note"),
+        &["I-01K8Z3A4H00000000000000001"],
+    ),
+    p(
+        "inbox amend",
+        "--label",
+        Some("flagged"),
+        &["I-01K8Z3A4H00000000000000001"],
+    ),
+    p(
+        "inbox amend",
+        "--promotion-cut",
+        Some("M-b"),
+        &["I-01K8Z3A4H00000000000000001"],
+    ),
+    p(
+        "inbox amend",
+        "--promotion-effort",
+        Some("4"),
+        &["I-01K8Z3A4H00000000000000001"],
+    ),
+    p(
+        "inbox amend",
+        "--promotion-owner",
+        Some("ada"),
+        &["I-01K8Z3A4H00000000000000001"],
+    ),
+    p(
+        "inbox amend",
+        "--promotion-path",
+        Some("src/two/**"),
+        &["I-01K8Z3A4H00000000000000001"],
+    ),
+    p(
+        "inbox amend",
+        "--promotion-phase",
+        Some("3"),
+        &["I-01K8Z3A4H00000000000000001"],
+    ),
+    p(
+        "inbox amend",
+        "--promotion-tag",
+        Some("docs"),
+        &["I-01K8Z3A4H00000000000000001"],
+    ),
+    p(
+        "inbox amend",
+        "--revisit-at",
+        Some("2027-01-01T00:00:00Z"),
+        &["I-01K8Z3A4H00000000000000001"],
+    ),
+    p(
+        "inbox amend",
+        "--title",
+        Some("amended"),
+        &["I-01K8Z3A4H00000000000000001"],
+    ),
+    p(
+        "inbox discard",
+        "--dry-run",
+        None,
+        &["I-01K8Z3A4H00000000000000001"],
+    ),
+    p(
+        "inbox discard",
+        "--reason",
+        Some("flagged"),
+        &["I-01K8Z3A4H00000000000000001"],
+    ),
+    p(
+        "inbox restore",
+        "--dry-run",
+        None,
+        &["I-01K8Z3A4H00000000000000002"],
+    ),
+    p(
+        "inbox promote",
+        "--task-id",
+        Some("D-90"),
+        &[
+            "I-01K8Z3A4H00000000000000000",
+            "--phase",
+            "0",
+            "--effort",
+            "1",
+            "--path",
+            "src/one/**",
+            "--tag",
+            "cross-cutting",
+        ],
+    ),
+    p(
+        "inbox promote",
+        "--phase",
+        Some("3"),
+        &[
+            "I-01K8Z3A4H00000000000000000",
+            "--task-id",
+            "D-90",
+            "--effort",
+            "1",
+            "--path",
+            "src/one/**",
+            "--tag",
+            "cross-cutting",
+        ],
+    ),
+    p(
+        "inbox promote",
+        "--cut",
+        Some("M-b"),
+        &[
+            "I-01K8Z3A4H00000000000000000",
+            "--task-id",
+            "D-90",
+            "--phase",
+            "0",
+            "--effort",
+            "1",
+            "--path",
+            "src/one/**",
+        ],
+    ),
+    p(
+        "inbox promote",
+        "--effort",
+        Some("4"),
+        &[
+            "I-01K8Z3A4H00000000000000000",
+            "--task-id",
+            "D-90",
+            "--phase",
+            "0",
+            "--path",
+            "src/one/**",
+            "--tag",
+            "cross-cutting",
+        ],
+    ),
+    p(
+        "inbox promote",
+        "--owner",
+        Some("ada"),
+        &[
+            "I-01K8Z3A4H00000000000000000",
+            "--task-id",
+            "D-90",
+            "--phase",
+            "0",
+            "--effort",
+            "1",
+            "--path",
+            "src/one/**",
+            "--tag",
+            "cross-cutting",
+        ],
+    ),
+    p(
+        "inbox promote",
+        "--path",
+        Some("src/two/**"),
+        &[
+            "I-01K8Z3A4H00000000000000000",
+            "--task-id",
+            "D-90",
+            "--phase",
+            "0",
+            "--effort",
+            "1",
+            "--tag",
+            "cross-cutting",
+        ],
+    ),
+    p(
+        "inbox promote",
+        "--clear-paths",
+        None,
+        &[
+            "I-01K8Z3A4H00000000000000001",
+            "--task-id",
+            "D-90",
+            "--phase",
+            "0",
+        ],
+    ),
+    p(
+        "inbox promote",
+        "--tag",
+        Some("cross-cutting"),
+        &[
+            "I-01K8Z3A4H00000000000000000",
+            "--task-id",
+            "D-90",
+            "--phase",
+            "0",
+            "--effort",
+            "1",
+            "--path",
+            "src/one/**",
+        ],
+    ),
+    p(
+        "inbox promote",
+        "--clear-tags",
+        None,
+        &[
+            "I-01K8Z3A4H00000000000000001",
+            "--task-id",
+            "D-90",
+            "--phase",
+            "0",
+        ],
+    ),
+    p(
+        "inbox promote",
+        "--reason",
+        Some("triaged"),
+        &[
+            "I-01K8Z3A4H00000000000000000",
+            "--task-id",
+            "D-90",
+            "--phase",
+            "0",
+            "--effort",
+            "1",
+            "--path",
+            "src/one/**",
+            "--tag",
+            "cross-cutting",
+        ],
+    ),
+    p(
+        "inbox promote",
+        "--dry-run",
+        None,
+        &[
+            "I-01K8Z3A4H00000000000000000",
+            "--task-id",
+            "D-90",
+            "--phase",
+            "0",
+            "--effort",
+            "1",
+            "--path",
+            "src/one/**",
+            "--tag",
+            "cross-cutting",
+        ],
+    ),
+    p(
+        "blueprint apply",
+        "--file",
+        Some("feature.blueprint.yml"),
+        &["--cut", "M-a", "--set", "feature=probe"],
+    ),
+    p(
+        "blueprint apply",
+        "--cut",
+        Some("M-a"),
+        &["--file", "feature.blueprint.yml", "--set", "feature=probe"],
+    ),
+    p(
+        "blueprint apply",
+        "--set",
+        Some("feature=probe"),
+        &["--file", "feature.blueprint.yml", "--cut", "M-a"],
+    ),
+    p(
+        "blueprint apply",
+        "--dry-run",
+        None,
+        &[
+            "--file",
+            "feature.blueprint.yml",
+            "--cut",
+            "M-a",
+            "--set",
+            "feature=probe",
+        ],
+    ),
     p("dep add", "--after", Some("D-1"), &["D-6"]),
+    p("dep add", "--dry-run", None, &["D-6", "--after", "D-3"]),
     p("dep add", "--prefer", None, &["D-6", "--after", "D-1"]),
+    p("dep apply", "--from", Some("edges.yml"), &[]),
+    p("dep apply", "--dry-run", None, &["--from", "edges.yml"]),
     p("dep rm", "--after", Some("D-1"), &["D-2"]),
+    p("dep rm", "--dry-run", None, &["D-2", "--after", "D-1"]),
     p("dep rm", "--prefer", None, &["D-2", "--after", "D-1"]),
+    p(
+        "test receipt",
+        "--output",
+        Some("receipt.json"),
+        &[
+            "1",
+            "--producer-repository",
+            "owner/repository",
+            "--producer-workflow",
+            "checks:unit",
+            "--producer-run-id",
+            "17",
+            "--producer-event",
+            "push",
+            "--producer-privilege",
+            "trusted",
+        ],
+    ),
+    p(
+        "test receipt",
+        "--producer-repository",
+        Some("owner/repository"),
+        &[
+            "1",
+            "--producer-workflow",
+            "checks:unit",
+            "--producer-run-id",
+            "17",
+            "--producer-event",
+            "push",
+            "--producer-privilege",
+            "trusted",
+        ],
+    ),
+    p(
+        "test receipt",
+        "--producer-workflow",
+        Some("checks:unit"),
+        &[
+            "1",
+            "--producer-repository",
+            "owner/repository",
+            "--producer-run-id",
+            "17",
+            "--producer-event",
+            "push",
+            "--producer-privilege",
+            "trusted",
+        ],
+    ),
+    p(
+        "test receipt",
+        "--producer-run-id",
+        Some("17"),
+        &[
+            "1",
+            "--producer-repository",
+            "owner/repository",
+            "--producer-workflow",
+            "checks:unit",
+            "--producer-event",
+            "push",
+            "--producer-privilege",
+            "trusted",
+        ],
+    ),
+    p(
+        "test receipt",
+        "--producer-event",
+        Some("push"),
+        &[
+            "1",
+            "--producer-repository",
+            "owner/repository",
+            "--producer-workflow",
+            "checks:unit",
+            "--producer-run-id",
+            "17",
+            "--producer-privilege",
+            "trusted",
+        ],
+    ),
+    p(
+        "test receipt",
+        "--producer-privilege",
+        Some("trusted"),
+        &[
+            "1",
+            "--producer-repository",
+            "owner/repository",
+            "--producer-workflow",
+            "checks:unit",
+            "--producer-run-id",
+            "17",
+            "--producer-event",
+            "push",
+        ],
+    ),
     // `--from` is the one `add` flag with no pair that differs only by the
     // flag: it *replaces* the title, which clap refuses to accept beside it. So
     // the base run is `add` with nothing, and the contrast is that the flag is
@@ -550,20 +1183,63 @@ const PROBES: &[Probe] = &[
     // it, which is what this audit asks (`A1-241`).
     p("add", "--from", Some("bulk.yml"), &[]),
     p("add", "--id", Some("X-9"), &["Newtask"]),
-    // `D-1` is held by `kim` in this fixture, which is what lets each of these
-    // two runs differ by its flag alone (`A1-359`). For `--as`, both runs write
-    // and they differ in the name recorded: the base takes whatever identity
-    // this machine offers, and on a machine offering none it refuses instead,
-    // which is a difference either way. For `--from`, the base is refused
-    // because somebody holds the task and the flag is what permits the
-    // takeover.
+    p(
+        "add",
+        "--member",
+        Some("D-1"),
+        &[
+            "New cut",
+            "--id",
+            "M-new",
+            "--phase",
+            "2",
+            "--tag",
+            "milestone",
+        ],
+    ),
+    // `D-1` has an ephemeral claim held by `kim` in this fixture, which lets
+    // each run differ by its flag alone (`A1-531`). For `--as`, both runs write
+    // and differ in the new holder: the base takes whatever identity this
+    // machine offers, and on a machine offering none it refuses instead. For
+    // `--from`, the base is refused because somebody holds the task and the
+    // flag is what permits the takeover.
     p("claim", "--as", Some("probe"), &["D-1", "--from", "kim"]),
     p("claim", "--from", Some("kim"), &["D-1", "--as", "probe"]),
     p("add", "--phase", Some("3"), &["Newtask"]),
     p("add", "--blocked-by", Some("D-1"), &["Newtask"]),
+    p("add", "--prefer-after", Some("D-3"), &["Newtask"]),
+    p("add", "--ratified-by", Some("D-4"), &["Newtask"]),
+    p(
+        "add",
+        "--contains",
+        Some("M-b"),
+        &[
+            "New cut",
+            "--id",
+            "M-new",
+            "--phase",
+            "2",
+            "--tag",
+            "milestone",
+        ],
+    ),
+    p("add", "--status", Some("in_progress"), &["Newtask"]),
     p("add", "--tag", Some("docs"), &["Newtask"]),
     p("add", "--effort", Some("4"), &["Newtask"]),
     p("add", "--owner", Some("ada"), &["Newtask"]),
+    p(
+        "add",
+        "--revisit-at",
+        Some("2030-01-02T03:04:05Z"),
+        &["Newtask", "--status", "blocked"],
+    ),
+    p("add", "--version-impact", Some("feature"), &["Newtask"]),
+    p(
+        "add",
+        "--version-impact-reason",
+        Some("explicit consumer contract"),
+        &["Newtask", "--version-impact", "feature"],
+    ),
     p("add", "--paths", Some("src/**"), &["Newtask"]),
     p("add", "--traces", Some("DOC.md#the-rail"), &["Newtask"]),
     p("add", "--cut", Some("M-b"), &["Newtask"]),
@@ -598,12 +1274,13 @@ const PROBES: &[Probe] = &[
     v("attest", "--attach-note", Some("reviewed"), &[]),
     v("attest", "--execute", None, &[]),
     p("check", "--cut", Some("M-b"), &[]),
+    p("check", "--phase", Some("3"), &[]),
     p("check", "--tag", Some("docs"), &[]),
     p("check", "--owner", Some("ada"), &[]),
-    // `--unclaimed` on every command that flattens `SelectArgs` (`A1-359`).
-    // Every non-milestone task in this fixture has an owner, so the flag
-    // narrows to the two milestones -- which is a difference, and the one the
-    // audit asks about.
+    // `--unclaimed` on every command that flattens `SelectArgs` (`A1-531`).
+    // The fixture carries ephemeral claims on `D-1` and `D-11`, independently
+    // of their durable owners, so the flag removes observable work from both
+    // general reports and the due-only report.
     p("check", "--unclaimed", None, &[]),
     p("check", "--status", Some("in_progress"), &[]),
     p("check", "--format", Some("json"), &[]),
@@ -617,6 +1294,15 @@ const PROBES: &[Probe] = &[
     p("close", "--repo", Some("{elsewhere}"), &["D-1"]),
     p("close", "--restamp", None, &["D-1"]),
     p("close", "--no-resolve", None, &["D-1"]),
+    // Without the flag the configured listing resolves this citation at L2
+    // and close writes it. With the flag the deliberately failing provider is
+    // executed, so focused L3 refuses the same proposed closure.
+    p(
+        "close",
+        "--execute",
+        None,
+        &["D-1", "--evidence", "test:suite::known_test"],
+    ),
     // `A1-266`: probed here and excluded elsewhere, because the pair reaches
     // one function. `D-9` is live with no estimate, so closing it is a mutation
     // whose delta carries a warning -- the only state either flag can act on,
@@ -641,6 +1327,7 @@ const PROBES: &[Probe] = &[
     // which is a different answer to a different question (`A1-256`).
     p("facts", "--identity", None, &[]),
     p("graph", "--cut", Some("M-b"), &[]),
+    p("graph", "--phase", Some("3"), &[]),
     p("graph", "--tag", Some("docs"), &[]),
     p("graph", "--owner", Some("ada"), &[]),
     p("graph", "--unclaimed", None, &[]),
@@ -648,6 +1335,60 @@ const PROBES: &[Probe] = &[
     p("graph", "--reach", Some("downstream:D-1"), &[]),
     p("graph", "--membership", None, &[]),
     p("graph", "--format", Some("json"), &[]),
+    p(
+        "graph",
+        "--focus",
+        Some("D-1"),
+        &["--format", "text", "--layout", "lanes"],
+    ),
+    p(
+        "graph",
+        "--critical",
+        None,
+        &["--format", "text", "--layout", "lanes"],
+    ),
+    p(
+        "graph",
+        "--layout",
+        Some("lanes"),
+        &["--format", "text", "--width", "240"],
+    ),
+    p(
+        "graph",
+        "--level",
+        Some("task:D-1"),
+        &["--format", "text", "--layout", "layered", "--width", "240"],
+    ),
+    p(
+        "graph",
+        "--orientation",
+        Some("left-to-right"),
+        &["--format", "text", "--layout", "layered", "--width", "240"],
+    ),
+    p(
+        "graph",
+        "--order",
+        Some("id"),
+        &["--format", "text", "--layout", "layered", "--width", "240"],
+    ),
+    p(
+        "graph",
+        "--detail",
+        Some("compact"),
+        &["--format", "text", "--layout", "layered", "--width", "240"],
+    ),
+    p(
+        "graph",
+        "--width",
+        Some("240"),
+        &["--format", "text", "--layout", "layered"],
+    ),
+    p(
+        "graph",
+        "--ascii",
+        None,
+        &["--format", "text", "--layout", "layered", "--width", "240"],
+    ),
     p(
         "import",
         "--format",
@@ -706,10 +1447,27 @@ const PROBES: &[Probe] = &[
     ),
     p("mv", "--cut", Some("M-b"), &["D-1"]),
     p("mv", "--phase", Some("3"), &["D-1"]),
+    // `--reason` is required, so its unflagged half is the usage refusal. The
+    // other parking controls carry the required reason in both halves and are
+    // compared by the persisted task state.
+    p("park", "--reason", Some("capacity moved"), &["D-3"]),
+    p(
+        "park",
+        "--revisit-at",
+        Some("2030-01-02T03:04:05Z"),
+        &["D-3", "--reason", "capacity moved"],
+    ),
+    p(
+        "park",
+        "--tag",
+        Some("portfolio:parked"),
+        &["D-3", "--reason", "capacity moved"],
+    ),
     p("paths", "--sample", Some("2"), &[]),
     p("paths", "--repo", Some("{elsewhere}"), &[]),
     p("paths", "--format", Some("json"), &[]),
     p("paths", "--cut", Some("M-b"), &[]),
+    p("paths", "--phase", Some("3"), &[]),
     p("paths", "--tag", Some("docs"), &[]),
     p("paths", "--owner", Some("ada"), &[]),
     p("paths", "--unclaimed", None, &[]),
@@ -717,21 +1475,30 @@ const PROBES: &[Probe] = &[
     p("ready", "--explain", None, &[]),
     p("ready", "--format", Some("json"), &[]),
     p("ready", "--cut", Some("M-b"), &[]),
+    p("ready", "--phase", Some("3"), &[]),
     p("ready", "--tag", Some("docs"), &[]),
     p("ready", "--owner", Some("ada"), &[]),
     p("ready", "--unclaimed", None, &[]),
     p("ready", "--status", Some("in_progress"), &[]),
+    // `D-1` is deliberately claimed for the `--unclaimed` probes and rekey
+    // refuses it before reaching presentation. Use an otherwise equivalent
+    // unclaimed live task so this pair still drives `--format` (`A1-531`).
+    p("rekey", "--format", Some("json"), &["D-3", "D-90"]),
+    p("rekey", "--allow-terminal", None, &["D-4", "D-90"]),
     p("roadmap", "--format", Some("json"), &[]),
     p("roadmap", "--regenerate-with", Some("x"), &[]),
     p("show", "--format", Some("json"), &["D-1"]),
     p("show", "--body", None, &["D-1"]),
     p("show", "--repo", Some("{elsewhere}"), &["D-4"]),
     p("show", "--no-resolve", None, &["D-1"]),
+    p("show", "--refresh-evidence", None, &["D-12"]),
+    p("show", "--require-current-evidence", None, &["D-12"]),
     // `due` reports `D-11`, which is parked with a revisit in the past, so each
     // of these changes the answer rather than comparing two empty ones.
     p("due", "--as-of", Some("2019-01-01T00:00:00Z"), &[]),
     p("due", "--format", Some("json"), &[]),
     p("due", "--cut", Some("M-b"), &[]),
+    p("due", "--phase", Some("3"), &[]),
     p("due", "--tag", Some("docs"), &[]),
     p("due", "--owner", Some("ada"), &[]),
     p("due", "--unclaimed", None, &[]),
@@ -741,12 +1508,15 @@ const PROBES: &[Probe] = &[
     p("stale", "--repo", Some("{elsewhere}"), &[]),
     p("stale", "--format", Some("json"), &[]),
     p("stale", "--cut", Some("M-b"), &[]),
+    p("stale", "--phase", Some("3"), &[]),
     p("stale", "--tag", Some("docs"), &[]),
     p("stale", "--owner", Some("ada"), &[]),
     p("stale", "--unclaimed", None, &[]),
     p("stale", "--status", Some("in_progress"), &[]),
     p("summary", "--format", Some("json"), &[]),
+    p("summary", "--at", Some("HEAD"), &[]),
     p("summary", "--cut", Some("M-b"), &[]),
+    p("summary", "--phase", Some("3"), &[]),
     p("summary", "--tag", Some("docs"), &[]),
     p("summary", "--owner", Some("ada"), &[]),
     p("summary", "--unclaimed", None, &[]),
@@ -757,8 +1527,29 @@ const PROBES: &[Probe] = &[
     // `D-4` carries `docs`, so the successor inherits one tag without the flag
     // and carries this one with it: the line naming them differs either way.
     p("supersede", "--tag", Some("area-x"), &["D-4", "Successor"]),
+    p(
+        "supersede",
+        "--path",
+        Some("src/two/**"),
+        &["D-4", "Successor"],
+    ),
+    p("supersede", "--clear-paths", None, &["D-4", "Successor"]),
+    p(
+        "supersede",
+        "--trace",
+        Some("docs/design.md#the-spar"),
+        &["D-4", "Successor"],
+    ),
+    p("supersede", "--clear-traces", None, &["D-4", "Successor"]),
+    p(
+        "supersede",
+        "--body",
+        Some("replacement body"),
+        &["D-4", "Successor"],
+    ),
     p("tasks", "--format", Some("json"), &[]),
     p("tasks", "--cut", Some("M-b"), &[]),
+    p("tasks", "--phase", Some("3"), &[]),
     p("tasks", "--tag", Some("docs"), &[]),
     p("tasks", "--owner", Some("ada"), &[]),
     p("tasks", "--unclaimed", None, &[]),
@@ -767,11 +1558,13 @@ const PROBES: &[Probe] = &[
     p("tree", "--live", None, &["D-2"]),
     p("vacuity", "--format", Some("json"), &[]),
     p("vacuity", "--cut", Some("M-b"), &[]),
+    p("vacuity", "--phase", Some("3"), &[]),
     p("vacuity", "--tag", Some("docs"), &[]),
     p("vacuity", "--owner", Some("ada"), &[]),
     p("vacuity", "--unclaimed", None, &[]),
     p("vacuity", "--status", Some("in_progress"), &[]),
     p("verify", "--cut", Some("M-b"), &[]),
+    p("verify", "--phase", Some("3"), &[]),
     p("verify", "--tag", Some("docs"), &[]),
     p("verify", "--owner", Some("ada"), &[]),
     p("verify", "--unclaimed", None, &[]),
@@ -781,7 +1574,66 @@ const PROBES: &[Probe] = &[
     p("verify", "--no-require-effort", None, &[]),
     p("verify", "--traces-root", Some("docs"), &[]),
     p("verify", "--no-traces", None, &[]),
-    p("verify", "--execute", None, &[]),
+    p(
+        "verify",
+        "--test-receipts",
+        Some("receipt-import.json"),
+        &[],
+    ),
+    p(
+        "verify",
+        "--refresh-test-receipts",
+        Some("receipt-import.json"),
+        &["--refresh-base", "HEAD", "--refresh-head", "HEAD"],
+    ),
+    p(
+        "verify",
+        "--refresh-base",
+        Some("HEAD"),
+        &[
+            "--refresh-test-receipts",
+            "receipt-import.json",
+            "--refresh-head",
+            "HEAD",
+        ],
+    ),
+    p(
+        "verify",
+        "--refresh-head",
+        Some("HEAD"),
+        &[
+            "--refresh-test-receipts",
+            "receipt-import.json",
+            "--refresh-base",
+            "HEAD",
+        ],
+    ),
+    p(
+        "verify",
+        "--refresh-working-tree",
+        None,
+        &[
+            "--refresh-test-receipts",
+            "receipt-import.json",
+            "--refresh-base",
+            "HEAD",
+        ],
+    ),
+    p(
+        "verify",
+        "--refresh-shadow",
+        None,
+        &[
+            "--refresh-test-receipts",
+            "receipt-import.json",
+            "--refresh-base",
+            "HEAD",
+            "--refresh-head",
+            "HEAD",
+        ],
+    ),
+    v("verify", "--execute", None, &[]),
+    p("verify", "--fix", None, &[]),
     warned("verify", "--deny-warnings", None, &[]),
     strict("verify", "--no-deny-warnings", None, &[]),
     // The id is required before `--format` is reached, the same trap `why` had:
@@ -798,7 +1650,38 @@ const PROBES: &[Probe] = &[
 ];
 
 /// Flags no pair could be built for, each with the reason.
-const HELD: &[Held] = &[];
+const HELD: &[Held] = &[
+    Held {
+        command: "capture",
+        flag: "--source",
+        why: "owned by the idempotency and concurrent same-source journeys; without an injected clock, the unkeyed comparison mints a different ULID even if this flag is ignored",
+    },
+    Held {
+        command: "capture",
+        flag: "--edit",
+        why: "owned by the direct editor success, unchanged and failure journey; this generic process pair cannot safely invoke an ambient interactive editor",
+    },
+    Held {
+        command: "inbox amend",
+        flag: "--edit",
+        why: "owned by the direct editor success, unchanged and failure journey; this generic process pair cannot safely invoke an ambient interactive editor",
+    },
+    Held {
+        command: "tui",
+        flag: "--theme",
+        why: "owned by the real-PTY appearance journey and pure capability matrix; this non-terminal pair is refused before any theme can render",
+    },
+    Held {
+        command: "tui",
+        flag: "--ascii",
+        why: "owned by the real-PTY first-frame ASCII assertion; this non-terminal pair is refused before any glyph can render",
+    },
+    Held {
+        command: "tui",
+        flag: "--reduced-motion",
+        why: "owned by the real-PTY launch journey and reducer clock assertion; this non-terminal pair cannot start visible progress",
+    },
+];
 
 /// **Every per-command flag has a probe or a held reason.**
 ///

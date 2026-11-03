@@ -1,4 +1,5 @@
 /target
+/tools/tui-eval/target
 **/*.rs.bk
 *.pdb
 .DS_Store

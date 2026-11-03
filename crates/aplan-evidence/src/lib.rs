@@ -5,8 +5,8 @@
 //! the repository and asks whether the evidence *resolves* (L1) and is *relevant*
 //! (L2):
 //!
-//! - a `commit` SHA resolves to a real commit (`APLAN011`) whose diff touches at
-//!   least one of the task's `paths` (`APLAN012`);
+//! - a `commit` SHA resolves to `HEAD` or one of its ancestors (`APLAN011`),
+//!   whose diff touches at least one of the task's `paths` (`APLAN012`);
 //! - a `file` path exists at the cited rev, or at `HEAD` (`APLAN015`).
 //!
 //! The claim-to-artifact binding of L2, *this* cited commit touches *this*
@@ -21,18 +21,255 @@
 //! `.aplan.yml` and spawned with no shell (see `aplan_config`, HLD §5.5).
 //!
 //! Adding an evidence kind is a new [`EvidenceResolver`] impl, not a change to
-//! [`verify`]. `url` reachability stays absent: it is opt-in, non-deterministic,
-//! and needs config keys that are v0.4.
+//! [`verify`]. URL reachability is opt-in through a trusted `url.check`
+//! command: without that configuration it remains at L0 and no network access
+//! is attempted.
 
+mod batch;
 pub mod excerpt;
+mod material;
 mod repo;
 mod resolve;
+mod scheduler;
 pub mod version;
 
-pub use repo::{Breadth, ReleaseTag, Repo};
+pub use batch::{
+    MANIFEST_SCHEMA as TEST_BATCH_MANIFEST_SCHEMA, RESULT_SCHEMA as TEST_BATCH_RESULT_SCHEMA,
+    TestBatchManifest, TestBatchOutcome, TestBatchResult, TestBatchResultEntry,
+    validate_result_entry,
+};
+pub use material::{
+    TestMaterialIdentity, TestRuntimeIdentity, test_material_identity, test_material_includes_path,
+    test_runtime_identity,
+};
+
+/// One complete execution answer for one configured test provider.
+///
+/// This is the same typed vocabulary consumed by the local batch boundary.
+/// Portable receipts serialize this observation; they do not invent a second
+/// pass/fail model.
+#[derive(
+    Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize, schemars::JsonSchema,
+)]
+#[serde(deny_unknown_fields)]
+pub struct TestExecutionObservation {
+    /// Provider position, stable label and complete discovered namespace.
+    pub runner: TestCatalogueRunner,
+    /// Exact identities the provider was asked to execute.
+    pub requested: Vec<String>,
+    /// Exactly one typed outcome for every requested identity.
+    pub outcomes: Vec<TestBatchResultEntry>,
+    /// False means the observation must never satisfy evidence.
+    pub complete: bool,
+}
+
+/// Why a configured provider has no current receipt-backed observation.
+///
+/// The importer owns authentication and freshness. The evidence resolver owns
+/// how that absence affects citations, so the reason crosses the boundary as a
+/// typed value rather than being inferred from prose.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum TestObservationRejectionKind {
+    Absent,
+    Stale,
+    Partial,
+    Untrusted,
+    Incompatible,
+    Fault,
+}
+
+impl TestObservationRejectionKind {
+    #[must_use]
+    pub const fn label(self) -> &'static str {
+        match self {
+            Self::Absent => "absent",
+            Self::Stale => "stale",
+            Self::Partial => "partial",
+            Self::Untrusted => "untrusted",
+            Self::Incompatible => "incompatible",
+            Self::Fault => "faulted",
+        }
+    }
+
+    const fn citation_outcome(self) -> CitationOutcome {
+        match self {
+            Self::Untrusted | Self::Stale => CitationOutcome::Refused,
+            Self::Partial | Self::Absent | Self::Incompatible | Self::Fault => {
+                CitationOutcome::Unavailable
+            }
+        }
+    }
+}
+
+/// One configured provider row supplied to current-only receipt resolution.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum TestProviderObservation {
+    Current(TestExecutionObservation),
+    Rejected {
+        index: usize,
+        label: String,
+        kind: TestObservationRejectionKind,
+        detail: String,
+    },
+}
+
+/// A complete provider-ordered receipt import for one verification run.
+///
+/// Rejected rows are deliberately retained. Dropping them would let a missing
+/// provider narrow the catalogue and turn a cross-provider ambiguity into a
+/// false unambiguous match.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct TestExecutionObservations {
+    pub providers: Vec<TestProviderObservation>,
+}
+
+/// Select and completely observe one configured provider for a portable
+/// receipt. The selector is its one-based index or exact derived label.
+///
+/// # Errors
+///
+/// Refuses unknown or ambiguous selectors, a failed listing, and an empty
+/// provider namespace.
+pub fn observe_test_runner(
+    runners: &TestRunners,
+    repo_root: &Path,
+    config_file: Option<std::path::PathBuf>,
+    selector: &str,
+) -> Result<TestExecutionObservation, String> {
+    observe_test_runner_selected(runners, repo_root, config_file, selector, |names| {
+        Ok(names.to_vec())
+    })
+}
+
+/// List one provider once, select exact identities from that complete current
+/// namespace, and execute only the selected set through the ordinary batch or
+/// exact-test boundary.
+///
+/// The returned observation retains the complete catalogue but contains
+/// outcomes only for the selected identities. It is therefore an intermediate
+/// refresh value, not a portable complete receipt until a caller has merged
+/// current reusable outcomes and revalidated the complete set.
+pub fn observe_test_runner_selected(
+    runners: &TestRunners,
+    repo_root: &Path,
+    config_file: Option<std::path::PathBuf>,
+    selector: &str,
+    select: impl FnOnce(&[String]) -> Result<Vec<String>, String>,
+) -> Result<TestExecutionObservation, String> {
+    let (selected, label, runner) = test_runner_by_selector(runners, selector)?;
+    let resolver = configured_runner_resolver(runner.clone(), repo_root, true, config_file);
+    let catalogue = resolver.catalogue();
+    let row = catalogue
+        .runners
+        .into_iter()
+        .next()
+        .expect("one selected runner produces one catalogue row");
+    match row.state {
+        TestCatalogueRunnerState::Failed => {
+            let reason = catalogue
+                .diagnostics
+                .first()
+                .map_or("the listing failed".to_string(), |diagnostic| {
+                    diagnostic.message.clone()
+                });
+            Err(format!(
+                "test provider `{label}` could not be listed: {reason}"
+            ))
+        }
+        TestCatalogueRunnerState::Empty => Err(format!(
+            "test provider `{label}` listed no tests, so it cannot produce an evidence receipt"
+        )),
+        TestCatalogueRunnerState::Listed => {
+            let requested = select(&row.names)?;
+            let catalogue = row
+                .names
+                .iter()
+                .cloned()
+                .collect::<std::collections::BTreeSet<_>>();
+            if let Some(unknown) = requested.iter().find(|name| !catalogue.contains(*name)) {
+                return Err(format!(
+                    "incremental selection named `{unknown}`, which provider `{label}` did not list"
+                ));
+            }
+            Ok(resolver.observe_provider_selected(selected, label, row.names, requested))
+        }
+    }
+}
+
+/// Resolve a receipt provider selector without running configured code.
+///
+/// The returned index is one-based and therefore is the provider identity
+/// serialized in a receipt.
+pub fn test_runner_by_selector<'a>(
+    runners: &'a TestRunners,
+    selector: &str,
+) -> Result<(usize, String, &'a TestRunner), String> {
+    let configured = runners.all();
+    let labels = configured
+        .iter()
+        .enumerate()
+        .map(|(index, runner)| {
+            runner
+                .name
+                .clone()
+                .or_else(|| runner.dir.clone())
+                .unwrap_or_else(|| format!("runner {}", index + 1))
+        })
+        .collect::<Vec<_>>();
+    let candidates = selector.parse::<usize>().ok().map_or_else(
+        || {
+            labels
+                .iter()
+                .enumerate()
+                .filter_map(|(index, label)| (label == selector).then_some(index))
+                .collect::<Vec<_>>()
+        },
+        |index| {
+            (index > 0 && index <= configured.len())
+                .then(|| index - 1)
+                .into_iter()
+                .collect()
+        },
+    );
+    let selected = match candidates.as_slice() {
+        [selected] => *selected,
+        [] => {
+            return Err(format!(
+                "test provider selector `{selector}` matches no configured runner"
+            ));
+        }
+        _ => {
+            return Err(format!(
+                "test provider selector `{selector}` is ambiguous; use its one-based index"
+            ));
+        }
+    };
+    Ok((
+        selected + 1,
+        labels[selected].clone(),
+        &configured[selected],
+    ))
+}
+
+pub use repo::{
+    Breadth, ChangedPath, CommittedPlanFiles, HeadTree, ReleaseTag, Repo, ResolvedCommit,
+    WorktreeChanges, WorktreeStatus, WorktreeStatusEntry,
+};
+
+fn configured_runner_resolver(
+    runner: TestRunner,
+    repo_root: &Path,
+    execute: bool,
+    config_file: Option<std::path::PathBuf>,
+) -> TestResolver {
+    TestResolver::new(vec![runner], repo_root.to_path_buf(), execute, config_file)
+}
 pub use resolve::claims_locality;
 pub use resolve::report_dilution;
-pub use resolve::{Breach, Cost, Unenforced};
+pub use resolve::{
+    Breach, CitationOutcome, CitationResolution, CitationStrength, Cost, TestCatalogue,
+    TestCatalogueRunner, TestCatalogueRunnerState, Unenforced,
+};
 pub use resolve::{CommitResolver, EvidenceResolver, FileResolver, TestResolver, UrlResolver};
 
 use std::path::Path;
@@ -43,7 +280,8 @@ use std::path::Path;
 /// that constructs `VerifyOptions` has to name `test_runner`'s type, and one
 /// that depends on `aplan-evidence` and not on `aplan-config` could not
 /// (`A1-253`, found writing the agent surface's test).
-pub use aplan_config::{TestRunner, TestRunners};
+pub use aplan_config::{TestBatch, TestRunner, TestRunnerGroup, TestRunners, TestSchedule};
+use aplan_core::task::{EvidenceConfiguredResolver, EvidenceGitResolver, EvidenceResolution};
 use aplan_core::{EvidenceKind, Plan, Report};
 
 /// A failure that prevents verification from running at all, distinct from a
@@ -59,6 +297,22 @@ pub enum Error {
     NotARepository(std::path::PathBuf),
     #[error("the repository at `{0}` has no commits yet")]
     NoCommits(std::path::PathBuf),
+    #[error("repository path `{0}` must be relative and may not contain `..`")]
+    InvalidRepositoryPath(std::path::PathBuf),
+    #[error("repository symbolic link `{0}` has no safe target inside the repository")]
+    InvalidRepositorySymlink(std::path::PathBuf),
+    #[error("repository path `{0}` follows too many symbolic links")]
+    RepositorySymlinkLoop(std::path::PathBuf),
+    #[error(
+        "repository plan root contains submodule `{0}`, whose files are not in the selected tree"
+    )]
+    RepositorySubmodule(std::path::PathBuf),
+    #[error("repository path `{0}` is not a file in the selected tree")]
+    RepositoryNotFile(std::path::PathBuf),
+    #[error(
+        "mutable file evidence `{0}` resolves to no committed content that can be fingerprinted"
+    )]
+    CannotFingerprint(String),
     /// A configured command could not be run. The message names *which* key
     /// configured it: reporting a `url.check` failure as "running the test
     /// runner" sends the reader to the wrong half of their config (`A1-041`).
@@ -80,6 +334,10 @@ pub struct VerifyOptions {
     /// which is the silently-switched-off gate this project reports on
     /// everywhere else (`A1-269`).
     pub traces_root: Option<std::path::PathBuf>,
+    /// Compare stored fingerprints of mutable evidence referents. Off by
+    /// default, alongside trace drift detection; a repository opts into both
+    /// with `detect_drift`.
+    pub detect_drift: bool,
     /// Run `test` evidence (rung L3), not just resolve it. Off by default, and
     /// CI must not enable it for pull requests from forks (HLD §5.5).
     pub execute: bool,
@@ -92,6 +350,10 @@ pub struct VerifyOptions {
     /// reports the citation as diluted. `None` uses the built-in default; `0`
     /// turns the rule off.
     pub max_unrelated_files: Option<usize>,
+    /// Exhaustive repository-relative inputs declared for reusable configured
+    /// provider observations. The evidence engine does not interpret these;
+    /// the application observation store owns identity and reuse.
+    pub observation_inputs: Option<Vec<String>>,
     /// The command that decides whether a `url` citation answers (`APLAN016`).
     /// `None` leaves `url` evidence at L0, the way `test` has no L1 without a
     /// runner: no key, no network (`A1-041`).
@@ -108,6 +370,245 @@ pub struct VerifyOptions {
     /// for one in a manifest it does not understand. The same opt-in `url.check`
     /// has, for the same reason.
     pub version: Option<aplan_config::VersionPolicy>,
+}
+
+/// List the exact test names the configured evidence resolver accepts.
+///
+/// This uses [`TestResolver`] itself, so runner directories, command wrappers,
+/// limits, output capture and normalization cannot drift from `close` and
+/// `verify`. Provider failures remain diagnostics rather than being mistaken
+/// for empty listings.
+#[must_use]
+// This is an established public API. Keep ownership compatible even though
+// bounded discovery needs only a borrowed path internally.
+#[allow(clippy::needless_pass_by_value)]
+pub fn configured_test_catalogue(
+    runners: &TestRunners,
+    repo_root: &Path,
+    config_file: Option<std::path::PathBuf>,
+) -> TestCatalogue {
+    configured_test_catalogue_bounded(runners, repo_root, config_file.as_deref(), |_| {})
+}
+
+/// Boundary events from bounded configured-test discovery.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum CatalogueProgressEvent {
+    Started {
+        index: usize,
+        label: String,
+        completed: usize,
+        remaining: usize,
+    },
+    Finished {
+        index: usize,
+        label: String,
+        completed: usize,
+        remaining: usize,
+        elapsed_millis: u128,
+    },
+}
+
+#[derive(Debug)]
+struct CompletedCatalogueRunner {
+    index: usize,
+    runner: TestCatalogueRunner,
+    diagnostics: Vec<aplan_core::Diagnostic>,
+    elapsed_millis: u128,
+    spend: Vec<(String, Cost)>,
+    failure_outcome: Option<CitationOutcome>,
+}
+
+/// Ask every configured runner under its configured aggregate schedule.
+///
+/// The returned catalogue is in configuration order regardless of completion
+/// order. Each runner is still interpreted by [`TestResolver`], so bounded
+/// orchestration cannot fork the command, normalization or fault semantics.
+#[must_use]
+pub fn configured_test_catalogue_bounded(
+    runners: &TestRunners,
+    repo_root: &Path,
+    config_file: Option<&Path>,
+    mut progress: impl FnMut(CatalogueProgressEvent),
+) -> TestCatalogue {
+    let configured = runners.all();
+    let total = configured.len();
+    let labels = configured
+        .iter()
+        .enumerate()
+        .map(|(index, runner)| {
+            runner
+                .name
+                .clone()
+                .or_else(|| runner.dir.clone())
+                .unwrap_or_else(|| format!("runner {}", index + 1))
+        })
+        .collect::<Vec<_>>();
+    let jobs = configured
+        .iter()
+        .enumerate()
+        .map(|(index, runner)| scheduler::Job {
+            index,
+            weight: runner.weight(),
+            resources: runner.exclusive_resources(),
+        })
+        .collect();
+    let mut completed_count = 0usize;
+    let mut started_at = std::collections::BTreeMap::new();
+    let outcomes = scheduler::run(
+        jobs,
+        runners.schedule().capacity,
+        |index| {
+            catalogue_runner(
+                index,
+                configured[index].clone(),
+                repo_root,
+                config_file,
+                &labels[index],
+            )
+        },
+        resolve::configured_commands_terminating,
+        |event, completed| match event {
+            scheduler::Event::Started { index } => {
+                started_at.insert(index, std::time::Instant::now());
+                progress(CatalogueProgressEvent::Started {
+                    index: index + 1,
+                    label: labels[index].clone(),
+                    completed: completed_count,
+                    remaining: total.saturating_sub(completed_count),
+                });
+            }
+            scheduler::Event::Finished { index } => {
+                completed_count += 1;
+                started_at.remove(&index);
+                progress(CatalogueProgressEvent::Finished {
+                    index: index + 1,
+                    label: labels[index].clone(),
+                    completed: completed_count,
+                    remaining: total.saturating_sub(completed_count),
+                    elapsed_millis: completed
+                        .expect("a finished catalogue job has its result")
+                        .elapsed_millis,
+                });
+            }
+            scheduler::Event::Panicked { index } => {
+                completed_count += 1;
+                progress(CatalogueProgressEvent::Finished {
+                    index: index + 1,
+                    label: labels[index].clone(),
+                    completed: completed_count,
+                    remaining: total.saturating_sub(completed_count),
+                    elapsed_millis: started_at
+                        .remove(&index)
+                        .map_or(0, |started| started.elapsed().as_millis()),
+                });
+            }
+            scheduler::Event::Cancelled { .. } => {}
+        },
+    );
+    catalogue_from_outcomes(outcomes, configured, config_file)
+}
+
+fn catalogue_runner(
+    index: usize,
+    mut runner: TestRunner,
+    repo_root: &Path,
+    config_file: Option<&Path>,
+    label: &str,
+) -> CompletedCatalogueRunner {
+    // The isolated resolver below sees one local runner, but diagnostics and
+    // cost rows belong to this runner's position in the complete configuration.
+    // Give the clone its already-derived outer label before anything can render
+    // `runner 1`; `dir` is retained independently as the command's cwd.
+    let label = label.to_string();
+    runner.name = Some(label.clone());
+    let started = std::time::Instant::now();
+    let mut catalogue =
+        configured_runner_resolver(runner, repo_root, false, config_file.map(Path::to_path_buf))
+            .catalogue();
+    let mut observed = catalogue
+        .runners
+        .pop()
+        .expect("one configured runner produces one catalogue row");
+    observed.index = index + 1;
+    observed.label = label;
+    CompletedCatalogueRunner {
+        index: index + 1,
+        runner: observed,
+        diagnostics: catalogue.diagnostics,
+        elapsed_millis: started.elapsed().as_millis(),
+        spend: catalogue.spend,
+        failure_outcome: catalogue.failure_outcomes.into_iter().next().flatten(),
+    }
+}
+
+fn catalogue_from_outcomes(
+    outcomes: std::collections::BTreeMap<usize, scheduler::Outcome<CompletedCatalogueRunner>>,
+    configured: &[TestRunner],
+    config_file: Option<&Path>,
+) -> TestCatalogue {
+    let mut rows = std::collections::BTreeMap::new();
+    let mut diagnostics = Vec::new();
+    let mut spend = std::collections::BTreeMap::new();
+    let mut failure_outcomes = std::collections::BTreeMap::new();
+    for (index, outcome) in outcomes {
+        match outcome {
+            scheduler::Outcome::Completed(done) => {
+                diagnostics.extend(done.diagnostics);
+                spend.insert(done.index, done.spend);
+                failure_outcomes.insert(done.index, done.failure_outcome);
+                rows.insert(done.index, done.runner);
+            }
+            scheduler::Outcome::Cancelled | scheduler::Outcome::Panicked => {
+                let label = configured[index]
+                    .name
+                    .clone()
+                    .or_else(|| configured[index].dir.clone())
+                    .unwrap_or_else(|| format!("runner {}", index + 1));
+                let reason = match outcome {
+                    scheduler::Outcome::Cancelled => "was cancelled before it could be asked",
+                    scheduler::Outcome::Panicked => "failed inside the provider scheduler",
+                    scheduler::Outcome::Completed(_) => unreachable!(),
+                };
+                let mut diagnostic = aplan_core::Diagnostic::error(
+                    aplan_core::code::TEST_UNRESOLVED,
+                    format!("the `{label}` test runner {reason}, so its test namespace is unknown"),
+                )
+                .with_agent_instruction(
+                    "Re-run verification after the interruption, or fix the scheduler fault. No citation depending on an incomplete provider observation is verified.",
+                );
+                if let Some(path) = config_file {
+                    diagnostic = diagnostic.with_file(path);
+                }
+                diagnostics.push(diagnostic);
+                rows.insert(
+                    index + 1,
+                    TestCatalogueRunner {
+                        index: index + 1,
+                        label: label.clone(),
+                        state: TestCatalogueRunnerState::Failed,
+                        names: Vec::new(),
+                    },
+                );
+                spend.insert(
+                    index + 1,
+                    vec![(format!("the `{label}` test runner"), Cost::default())],
+                );
+                failure_outcomes.insert(index + 1, Some(CitationOutcome::Unavailable));
+            }
+        }
+    }
+    diagnostics.sort_by(|left, right| {
+        left.code
+            .cmp(right.code)
+            .then(left.file.cmp(&right.file))
+            .then(left.message.cmp(&right.message))
+    });
+    TestCatalogue {
+        runners: rows.into_values().collect(),
+        diagnostics,
+        spend: spend.into_values().flatten().collect(),
+        failure_outcomes: failure_outcomes.into_values().collect(),
+    }
 }
 
 /// The full SHA of `HEAD` in the repository at `repo_root`, for `aplan close` to
@@ -127,31 +628,231 @@ pub fn head_sha(repo_root: &Path) -> Result<String, Error> {
 /// that answer separately from the config would be a second implementation of
 /// this decision, and the two would disagree the first time a resolver's
 /// condition changed (`A1-253`).
-fn resolvers_for(opts: &VerifyOptions, repo_root: &Path) -> Vec<Box<dyn EvidenceResolver>> {
-    let mut resolvers: Vec<Box<dyn EvidenceResolver>> = vec![
-        Box::new(CommitResolver::new(opts.max_unrelated_files)),
-        Box::new(FileResolver),
-    ];
-    // The url resolver joins only when a checker is configured, for the same
-    // reason: an adopter who has not asked for network access does not get it.
-    if let Some(url) = &opts.url_check {
+fn resolvers_for(
+    opts: &VerifyOptions,
+    repo_root: &Path,
+    test_catalogue: Option<&TestCatalogue>,
+    test_observations: Option<&TestExecutionObservations>,
+    plan: Option<&Plan>,
+) -> Vec<Box<dyn EvidenceResolver>> {
+    let mut resolvers: Vec<Box<dyn EvidenceResolver>> = Vec::new();
+    if EvidenceKind::Commit.capabilities().resolution
+        == EvidenceResolution::Git(EvidenceGitResolver::Commit)
+    {
+        resolvers.push(Box::new(CommitResolver::new(opts.max_unrelated_files)));
+    }
+    if EvidenceKind::File.capabilities().resolution
+        == EvidenceResolution::Git(EvidenceGitResolver::File)
+    {
+        resolvers.push(Box::new(FileResolver::new(opts.detect_drift)));
+    }
+    // Configured resolvers join only when both the kind's capability and the
+    // repository opt-in name them. An adopter who has not asked for a command
+    // or network access does not get it.
+    if EvidenceKind::Url.capabilities().resolution
+        == EvidenceResolution::Configured(EvidenceConfiguredResolver::Url)
+        && let Some(url) = &opts.url_check
+    {
         resolvers.push(Box::new(UrlResolver::new(
             url,
             repo_root.to_path_buf(),
             opts.config_file.clone(),
         )));
     }
-    // The test resolver joins only when a runner is configured; without one,
-    // `test` evidence has no L1/L3 and stays at L0.
-    if let Some(runners) = &opts.test_runner {
-        resolvers.push(Box::new(TestResolver::new(
-            runners.all().to_vec(),
-            repo_root.to_path_buf(),
-            opts.execute,
-            opts.config_file.clone(),
-        )));
+    if EvidenceKind::Test.capabilities().resolution
+        == EvidenceResolution::Configured(EvidenceConfiguredResolver::Test)
+        && let Some(runners) = &opts.test_runner
+    {
+        let needs_catalogue = test_observations.is_none()
+            && plan.is_some_and(|plan| {
+                plan.tasks.iter().any(|loaded| {
+                    loaded.task.evidence.iter().any(|evidence| {
+                        evidence.kind == EvidenceKind::Test
+                            && !aplan_core::task::is_vacuous_ref(&evidence.reference)
+                    })
+                })
+            });
+        let discovered = (test_catalogue.is_none() && needs_catalogue).then(|| {
+            configured_test_catalogue_bounded(
+                runners,
+                repo_root,
+                opts.config_file.as_deref(),
+                |_| {},
+            )
+        });
+        let catalogue = test_catalogue.or(discovered.as_ref());
+        let resolver = if let Some(observations) = test_observations {
+            TestResolver::from_observations(
+                runners.all().to_vec(),
+                runners.schedule(),
+                runners.has_explicit_schedule(),
+                repo_root.to_path_buf(),
+                opts.config_file.clone(),
+                observations,
+            )
+        } else {
+            catalogue.map_or_else(
+                || {
+                    TestResolver::new_scheduled(
+                        runners.all().to_vec(),
+                        runners.schedule(),
+                        runners.has_explicit_schedule(),
+                        repo_root.to_path_buf(),
+                        opts.execute,
+                        opts.config_file.clone(),
+                    )
+                },
+                |catalogue| {
+                    TestResolver::from_catalogue(
+                        runners.all().to_vec(),
+                        runners.schedule(),
+                        runners.has_explicit_schedule(),
+                        repo_root.to_path_buf(),
+                        opts.execute,
+                        opts.config_file.clone(),
+                        catalogue,
+                    )
+                },
+            )
+        };
+        if test_observations.is_none()
+            && let Some(plan) = plan
+        {
+            resolver.prepare_batches(plan);
+        }
+        resolvers.push(Box::new(resolver));
     }
     resolvers
+}
+
+/// The stable map key for one evidence fingerprint.
+///
+/// The kind is part of the key even though only `file` is stampable today, so a
+/// later kind can never collide with an existing reference spelling.
+#[must_use]
+pub fn evidence_fingerprint_key(evidence: &aplan_core::Evidence) -> String {
+    format!("{}:{}", evidence.kind.as_str(), evidence.reference)
+}
+
+/// Whether a citation *appears* mutable without a repository to resolve it in.
+///
+/// This is only the fallback for pruning stamps when no repository can be
+/// opened. A hex-shaped revision can still be a branch or tag; the authoritative
+/// decision below also compares the resolved object id, just as `APLAN011`
+/// does for commit evidence.
+fn evidence_looks_mutable(evidence: &aplan_core::Evidence) -> bool {
+    if evidence.kind != EvidenceKind::File {
+        return false;
+    }
+    aplan_core::task::split_rev(&evidence.reference)
+        .1
+        .is_none_or(|rev| !resolve::is_sha_shaped(rev))
+}
+
+/// Whether a file citation's referent can move under the same spelling.
+fn evidence_needs_fingerprint(repo: &Repo, evidence: &aplan_core::Evidence) -> bool {
+    if evidence.kind != EvidenceKind::File {
+        return false;
+    }
+    let Some(rev) = aplan_core::task::split_rev(&evidence.reference).1 else {
+        return true;
+    };
+    if !resolve::is_sha_shaped(rev) {
+        return true;
+    }
+    // Shape is insufficient: Git permits a branch or tag named `deadbeef`, even
+    // one equal to the prefix of the commit it currently targets. It is
+    // content-addressed only when rev parsing selected the object id rather than
+    // a reference.
+    !repo.resolves_as_commit_id(rev)
+}
+
+/// Keep only stamps whose citation is still present, without reading the
+/// repository or minting a new stamp.
+///
+/// This is the `--no-resolve` path: an evidence edit must remove an orphaned
+/// key, but opting out of resolution must not claim it reviewed newly
+/// introduced proof.
+#[must_use]
+pub fn retained_evidence_fingerprints(
+    existing: &std::collections::BTreeMap<String, String>,
+    evidence: &[aplan_core::Evidence],
+) -> std::collections::BTreeMap<String, String> {
+    // Retain by identity rather than guessing mutability from syntax. An
+    // all-hex ref may be a moving branch; dropping its existing baseline would
+    // turn a detectable change into an unstamped historical citation. Once a
+    // repository is available, `update_evidence_fingerprints` makes the exact
+    // decision and removes any genuinely inapplicable stamp.
+    let keys: std::collections::BTreeSet<String> =
+        evidence.iter().map(evidence_fingerprint_key).collect();
+    existing
+        .iter()
+        .filter(|(key, _)| keys.contains(*key))
+        .map(|(key, value)| (key.clone(), value.clone()))
+        .collect()
+}
+
+/// Reconcile stored referent fingerprints across an evidence edit.
+///
+/// With `restamp_all`, every mutable referent is re-read after a deliberate
+/// review (`close --restamp`). Otherwise existing citations keep their stamp and
+/// only newly introduced citations are stamped (`close` and `amend`). Removed
+/// citations always lose their orphaned key. For ordinary closure or amendment,
+/// a repository with no readable HEAD returns the filtered existing map,
+/// preserving the command's established ability to record explicitly unresolved
+/// evidence. An explicit restamp refuses that state: claiming a new baseline
+/// without committed content would be false.
+pub fn update_evidence_fingerprints(
+    before: &[aplan_core::Evidence],
+    existing: &std::collections::BTreeMap<String, String>,
+    after: &[aplan_core::Evidence],
+    repo_root: &Path,
+    restamp_all: bool,
+) -> Result<std::collections::BTreeMap<String, String>, Error> {
+    use std::collections::BTreeMap;
+
+    let repo = match Repo::discover(repo_root) {
+        Ok(repo) => repo,
+        Err(error) if restamp_all && after.iter().any(evidence_looks_mutable) => return Err(error),
+        Err(_) => return Ok(retained_evidence_fingerprints(existing, after)),
+    };
+    if repo.head_sha().is_none() {
+        if restamp_all && after.iter().any(evidence_looks_mutable) {
+            return Err(Error::NoCommits(repo_root.to_path_buf()));
+        }
+        return Ok(retained_evidence_fingerprints(existing, after));
+    }
+
+    let stampable = |e: &&aplan_core::Evidence| evidence_needs_fingerprint(&repo, e);
+    let keys: std::collections::BTreeSet<String> = after
+        .iter()
+        .filter(stampable)
+        .map(evidence_fingerprint_key)
+        .collect();
+    let mut out: BTreeMap<String, String> = existing
+        .iter()
+        .filter(|(key, _)| keys.contains(*key))
+        .map(|(key, value)| (key.clone(), value.clone()))
+        .collect();
+
+    for evidence in after.iter().filter(stampable) {
+        let already_cited = before
+            .iter()
+            .any(|old| old.kind == evidence.kind && old.reference == evidence.reference);
+        if !restamp_all && already_cited {
+            continue;
+        }
+        let key = evidence_fingerprint_key(evidence);
+        match resolve::file_fingerprint(&repo, evidence)? {
+            Some(fingerprint) => {
+                out.insert(key, fingerprint);
+            }
+            None => {
+                return Err(Error::CannotFingerprint(evidence.reference.clone()));
+            }
+        }
+    }
+    Ok(out)
 }
 
 /// What a `verify` run under these options will not open, and why.
@@ -171,7 +872,7 @@ pub use aplan_core::Unopened;
 /// make the note fire on every plan that has one and mean nothing.
 #[must_use]
 pub fn unresolved_by_verify(plan: &Plan, repo_root: &Path, opts: &VerifyOptions) -> Unopened {
-    let covered: Vec<EvidenceKind> = resolvers_for(opts, repo_root)
+    let covered: Vec<EvidenceKind> = resolvers_for(opts, repo_root, None, None, None)
         .iter()
         .map(|r| r.kind())
         .collect();
@@ -179,7 +880,9 @@ pub fn unresolved_by_verify(plan: &Plan, repo_root: &Path, opts: &VerifyOptions)
     for lt in &plan.tasks {
         let mut here = 0;
         for ev in &lt.task.evidence {
-            if ev.kind == EvidenceKind::Note || covered.contains(&ev.kind) {
+            if matches!(ev.kind.capabilities().resolution, EvidenceResolution::None)
+                || covered.contains(&ev.kind)
+            {
                 continue;
             }
             here += 1;
@@ -195,18 +898,26 @@ pub fn unresolved_by_verify(plan: &Plan, repo_root: &Path, opts: &VerifyOptions)
     out
 }
 
-/// Resolve every task's evidence against the repository at `repo_root`.
-///
-/// Returns a [`Report`] of findings (empty when all evidence resolves), or an
-/// [`Error`] if the repository cannot be opened. A defect in one task is a
-/// finding about that task, never a reason to stop and report nothing about the
-/// rest of the plan (`A1-066`).
-/// `verify`, and what the configured commands cost while doing it (`A1-309`).
-///
-/// A separate entry point rather than a field on [`Report`]: that type is
-/// constructed in thirty-two places and serialised into every output format, so
-/// widening it would be a consumer contract change for a number most consumers
-/// do not want. A caller that wants the figure asks for it.
+fn repository_relative_path(path: &Path, workdir: Option<&Path>) -> std::path::PathBuf {
+    workdir
+        .and_then(|root| path.strip_prefix(root).ok())
+        .unwrap_or(path)
+        .to_path_buf()
+}
+
+fn historical_trace_path(
+    document: &str,
+    traces_root: Option<&Path>,
+    repository_root: &Path,
+) -> Option<String> {
+    let prefix = match traces_root {
+        Some(root) if root.is_absolute() => root.strip_prefix(repository_root).ok()?,
+        Some(root) => root,
+        None => return Some(document.to_string()),
+    };
+    Some(prefix.join(document).to_string_lossy().into_owned())
+}
+
 /// `APLAN045`: a live task whose traced section moved while it waited
 /// (`A1-301`).
 ///
@@ -234,7 +945,16 @@ fn report_stale_premises(
     if live.is_empty() {
         return Ok(());
     }
-    let paths: Vec<std::path::PathBuf> = live.iter().map(|lt| lt.path.clone()).collect();
+    // The filesystem loader preserves how its root was spelled, so a root
+    // resolved from `.aplan.yml` gives every task an absolute path. Git tree
+    // paths are repository-relative. Keeping the filesystem spelling here made
+    // every configured-root invocation silently find no baseline even though
+    // the hand-built unit fixture used relative paths (`A1-604`, audit).
+    let workdir = repo.workdir();
+    let paths: Vec<std::path::PathBuf> = live
+        .iter()
+        .map(|loaded| repository_relative_path(&loaded.path, workdir.as_deref()))
+        .collect();
     let born = repo.last_touched_commit(&paths)?;
 
     // A shallow clone cannot answer when a task was last touched: every path is
@@ -263,7 +983,8 @@ fn report_stale_premises(
     }
 
     for lt in live {
-        let Some(rev) = born.get(&lt.path) else {
+        let task_path = repository_relative_path(&lt.path, workdir.as_deref());
+        let Some(rev) = born.get(&task_path) else {
             continue;
         };
         // Being edited right now counts as having been looked at. Without this
@@ -271,9 +992,14 @@ fn report_stale_premises(
         // re-reads the task and records it, then re-runs, would still be told
         // the ground had moved, because the baseline is a commit and their edit
         // is not one yet (`A1-301`, found by dogfooding it).
-        let on_disk = std::fs::read_to_string(repo_root.join(&lt.path)).ok();
+        let on_disk_path = if lt.path.is_absolute() {
+            lt.path.clone()
+        } else {
+            repo_root.join(&lt.path)
+        };
+        let on_disk = std::fs::read_to_string(on_disk_path).ok();
         let at_head = repo
-            .text_at(None, &lt.path.to_string_lossy())
+            .text_at(None, &task_path.to_string_lossy())
             .ok()
             .flatten();
         if let (Some(disk), Some(head)) = (&on_disk, &at_head)
@@ -296,14 +1022,15 @@ fn report_stale_premises(
             // path, so the repository root is stripped back off. Where the two
             // are the same -- which is every plan measured so far -- this is the
             // trace's own spelling.
-            let at = match &opts.traces_root {
-                Some(root) => root
-                    .strip_prefix(repo_root)
-                    .unwrap_or(std::path::Path::new(""))
-                    .join(doc)
-                    .to_string_lossy()
-                    .into_owned(),
-                None => doc.to_string(),
+            // Compare in Git's canonical worktree frame rather than against the
+            // caller's spelling (`.` is the CLI default). An absolute configured
+            // root cannot be stripped from `.`, which used to collapse it to the
+            // repository root and miss the finding (`A1-604`, audit). An external
+            // root has no historical bytes in this tree, so it has no answer.
+            let repository_root = workdir.as_deref().unwrap_or(repo_root);
+            let Some(at) = historical_trace_path(doc, opts.traces_root.as_deref(), repository_root)
+            else {
+                continue;
             };
             let Ok(Some(then)) = repo.text_at(Some(rev), &at) else {
                 continue;
@@ -699,28 +1426,178 @@ fn version_verdict(
     Some(d)
 }
 
+/// Resolve every task's evidence and report the configured-command cost.
+///
+/// Returns a [`Report`] of findings (empty when all evidence resolves) beside
+/// the work performed by configured providers. A defect in one task is a
+/// finding about that task, never a reason to stop and report nothing about the
+/// rest of the plan (`A1-066`, `A1-309`). The cost is a separate return value
+/// because adding it to [`Report`] would widen every serialized report.
 pub fn verify_measured(
     plan: &Plan,
     repo_root: &Path,
     opts: &VerifyOptions,
 ) -> Result<(Report, Vec<(String, Cost)>), Error> {
     let mut spend = Vec::new();
-    let report = verify_inner(plan, repo_root, opts, &mut spend)?;
+    let mut citations = Vec::new();
+    let report = verify_inner(
+        plan,
+        repo_root,
+        opts,
+        None,
+        None,
+        &mut spend,
+        &mut citations,
+    )?;
     Ok((report, spend))
 }
 
+/// Resolve every task's evidence against the repository at `repo_root`.
+///
+/// Returns a [`Report`] of findings (empty when all evidence resolves), or an
+/// [`Error`] when repository-level resolution cannot start. A citation defect
+/// stays a finding about its task so one bad citation cannot hide the rest of
+/// the plan (`A1-066`).
 pub fn verify(plan: &Plan, repo_root: &Path, opts: &VerifyOptions) -> Result<Report, Error> {
-    verify_inner(plan, repo_root, opts, &mut Vec::new())
+    verify_inner(
+        plan,
+        repo_root,
+        opts,
+        None,
+        None,
+        &mut Vec::new(),
+        &mut Vec::new(),
+    )
+}
+
+/// One citation and the typed result its resolver produced in this run.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct CitationObservation {
+    pub task: String,
+    pub kind: EvidenceKind,
+    pub reference: String,
+    pub resolution: CitationResolution,
+}
+
+/// The evidence report, provider costs and citation ledger from one run.
+///
+/// The ledger exists for interactive inspection. It is generated by the same
+/// resolver calls as the report, so a client never has to infer a result by
+/// parsing a diagnostic message.
+#[derive(Debug)]
+pub struct ObservedVerification {
+    pub report: Report,
+    pub spend: Vec<(String, Cost)>,
+    pub citations: Vec<CitationObservation>,
+}
+
+pub fn verify_observed(
+    plan: &Plan,
+    repo_root: &Path,
+    opts: &VerifyOptions,
+) -> Result<ObservedVerification, Error> {
+    let mut spend = Vec::new();
+    let mut citations = Vec::new();
+    let report = verify_inner(
+        plan,
+        repo_root,
+        opts,
+        None,
+        None,
+        &mut spend,
+        &mut citations,
+    )?;
+    Ok(ObservedVerification {
+        report,
+        spend,
+        citations,
+    })
+}
+
+/// Resolve with a complete configured-test catalogue supplied by the caller.
+///
+/// No `test.list` command is started. Repository-backed evidence is still read
+/// now, and every plan-dependent test rule is recomputed from the retained raw
+/// names and the current task.
+pub fn verify_observed_with_test_catalogue(
+    plan: &Plan,
+    repo_root: &Path,
+    opts: &VerifyOptions,
+    catalogue: &TestCatalogue,
+) -> Result<ObservedVerification, Error> {
+    let mut spend = Vec::new();
+    let mut citations = Vec::new();
+    let report = verify_inner(
+        plan,
+        repo_root,
+        opts,
+        Some(catalogue),
+        None,
+        &mut spend,
+        &mut citations,
+    )?;
+    Ok(ObservedVerification {
+        report,
+        spend,
+        citations,
+    })
+}
+
+/// Resolve with one closed, provider-ordered portable observation per
+/// configured test runner. No test provider command can be started from this
+/// path; rejected rows remain findings rather than triggering fallback work.
+pub fn verify_observed_with_test_observations(
+    plan: &Plan,
+    repo_root: &Path,
+    opts: &VerifyOptions,
+    observations: &TestExecutionObservations,
+) -> Result<ObservedVerification, Error> {
+    let mut spend = Vec::new();
+    let mut citations = Vec::new();
+    let report = verify_inner(
+        plan,
+        repo_root,
+        opts,
+        None,
+        Some(observations),
+        &mut spend,
+        &mut citations,
+    )?;
+    Ok(ObservedVerification {
+        report,
+        spend,
+        citations,
+    })
+}
+
+/// Stop repository-configured commands before a process lifecycle owner
+/// re-raises a termination signal. New command starts are refused once this is
+/// called.
+///
+/// This is intentionally process-wide: the caller is about to terminate, and
+/// leaving a verifier child behind would turn prompt terminal cleanup into a
+/// detached side effect.
+pub fn terminate_active_configured_commands() {
+    resolve::terminate_active_configured_commands();
 }
 
 fn verify_inner(
     plan: &Plan,
     repo_root: &Path,
     opts: &VerifyOptions,
+    test_catalogue: Option<&TestCatalogue>,
+    test_observations: Option<&TestExecutionObservations>,
     spend: &mut Vec<(String, Cost)>,
+    citations: &mut Vec<CitationObservation>,
 ) -> Result<Report, Error> {
     let repo = Repo::discover(repo_root)?;
-    let resolvers = resolvers_for(opts, repo_root);
+    let resolvers = resolvers_for(
+        opts,
+        repo_root,
+        test_catalogue,
+        test_observations,
+        Some(plan),
+    );
 
     // `APLAN019`'s input, read once: the index does not change under us, and a
     // plan with a hundred tasks would otherwise walk it a hundred times. Computed
@@ -744,10 +1621,49 @@ fn verify_inner(
         // thing that can check it is the repository (`APLAN053`, `A1-359`).
         resolve::report_unstarted_in_progress(&lt.task, &lt.path, &tracked, &mut diagnostics);
         for ev in &lt.task.evidence {
+            let mut handled = false;
             for r in &resolvers {
                 if r.kind() == ev.kind {
+                    handled = true;
+                    let before = diagnostics.len();
                     r.resolve(&repo, &lt.task, &lt.path, ev, &mut diagnostics)?;
+                    citations.push(CitationObservation {
+                        task: lt.task.id.clone(),
+                        kind: ev.kind,
+                        reference: ev.reference.clone(),
+                        resolution: r.observation(&lt.task, ev, &diagnostics[before..]),
+                    });
                 }
+            }
+            if !handled {
+                let intrinsic =
+                    matches!(ev.kind.capabilities().resolution, EvidenceResolution::None);
+                citations.push(CitationObservation {
+                    task: lt.task.id.clone(),
+                    kind: ev.kind,
+                    reference: ev.reference.clone(),
+                    resolution: CitationResolution {
+                        resolver: if intrinsic {
+                            "no machine resolver".to_string()
+                        } else {
+                            "not configured".to_string()
+                        },
+                        strength: resolve::CitationStrength::Recorded,
+                        outcome: if intrinsic {
+                            resolve::CitationOutcome::Resolved
+                        } else {
+                            resolve::CitationOutcome::Unavailable
+                        },
+                        detail: Some(if intrinsic {
+                            "recorded provenance; this evidence kind has no machine resolver"
+                                .to_string()
+                        } else {
+                            "the repository did not configure this evidence kind's resolver"
+                                .to_string()
+                        }),
+                        cost_subject: None,
+                    },
+                });
             }
         }
         // Findings about the task's proof as a whole, judged once every citation
@@ -764,6 +1680,8 @@ fn verify_inner(
         spend.extend(r.spend());
         r.finish_plan(&mut diagnostics);
     }
+
+    remove_colliding_repairs(&mut diagnostics);
 
     // The same placement the validator does, for the same reason it does it:
     // an evidence finding is about the `evidence:` field, and a run that named
@@ -787,6 +1705,51 @@ fn verify_inner(
     })
 }
 
+/// Remove proposals that are exact alone but collide as a batch.
+///
+/// Two misspellings may both have one unambiguous near match and therefore the
+/// same replacement. Applying either is mechanical; deciding which duplicate
+/// claim to keep is not. A repair object promises more than a useful hint, so
+/// the report leaves both as prose advice rather than publishing an operation
+/// the shared rewrite primitive must refuse (`A1-199`, audit).
+fn remove_colliding_repairs(diagnostics: &mut [aplan_core::Diagnostic]) {
+    use std::collections::{BTreeMap, BTreeSet};
+
+    let mut sources_by_target: BTreeMap<(String, String, String), BTreeSet<(String, String)>> =
+        BTreeMap::new();
+    for diagnostic in diagnostics.iter() {
+        let (Some(task), Some(aplan_core::Repair::ReplaceEvidence { from, to })) =
+            (&diagnostic.task, &diagnostic.repair)
+        else {
+            continue;
+        };
+        sources_by_target
+            .entry((
+                task.clone(),
+                to.kind.as_str().to_string(),
+                to.reference.clone(),
+            ))
+            .or_default()
+            .insert((from.kind.as_str().to_string(), from.reference.clone()));
+    }
+
+    for diagnostic in diagnostics {
+        let conflicts = match (&diagnostic.task, &diagnostic.repair) {
+            (Some(task), Some(aplan_core::Repair::ReplaceEvidence { to, .. })) => sources_by_target
+                .get(&(
+                    task.clone(),
+                    to.kind.as_str().to_string(),
+                    to.reference.clone(),
+                ))
+                .is_some_and(|sources| sources.len() > 1),
+            _ => false,
+        };
+        if conflicts {
+            diagnostic.repair = None;
+        }
+    }
+}
+
 /// What resolving a proposed closure found, and what nothing was configured to
 /// check.
 #[derive(Debug)]
@@ -805,6 +1768,13 @@ pub struct CloseResolution {
     /// somebody standing outside one is the shape of wrong turn `A1-244` records
     /// about `APLAN018` (`A1-238`, audit).
     pub repository_unreadable: bool,
+    /// Typed resolver answers produced by the same run as [`Self::report`].
+    ///
+    /// Interactive mutation previews render this ledger directly. Keeping it
+    /// beside the verdict prevents a client from reconstructing resolver state
+    /// from diagnostic prose or running the citation a second time merely to
+    /// explain the first answer.
+    pub citations: Vec<CitationObservation>,
 }
 
 impl CloseResolution {
@@ -860,15 +1830,22 @@ pub fn resolve_proposed(
     proposed.status = aplan_core::Status::Done;
     proposed.evidence = evidence.to_vec();
 
-    // Which kinds a resolver would actually look at. `url` has no rung built
-    // (`APLAN016`, `A1-041`) and a `note` is unresolvable by construction, so
-    // both are reported as unchecked rather than quietly accepted.
+    // Which kinds this command actually looks at. Git-backed kinds are always
+    // checked and a note is unresolvable by construction. Configured kinds are
+    // command policy rather than an intrinsic capability: close resolves a
+    // named test through its trusted runner, but deliberately never fetches a
+    // url (`A1-041`), so that one remains unchecked even where `verify` has a
+    // checker. The capability model owns the first distinction; this command
+    // owns the narrower execution policy.
     let mut unchecked: Vec<EvidenceKind> = Vec::new();
     for ev in evidence {
-        let checked = match ev.kind {
-            EvidenceKind::Commit | EvidenceKind::File => true,
-            EvidenceKind::Test => opts.test_runner.is_some(),
-            EvidenceKind::Url | EvidenceKind::Note => false,
+        let checked = match ev.kind.capabilities().resolution {
+            EvidenceResolution::Git(_) => true,
+            EvidenceResolution::Configured(EvidenceConfiguredResolver::Test) => {
+                opts.test_runner.is_some()
+            }
+            EvidenceResolution::Configured(EvidenceConfiguredResolver::Url)
+            | EvidenceResolution::None => false,
         };
         if !checked && !unchecked.contains(&ev.kind) {
             unchecked.push(ev.kind);
@@ -888,11 +1865,12 @@ pub fn resolve_proposed(
         }],
         ..Plan::default()
     };
-    match verify(&plan, repo_root, opts) {
-        Ok(report) => Ok(CloseResolution {
-            report,
+    match verify_observed(&plan, repo_root, opts) {
+        Ok(observed) => Ok(CloseResolution {
+            report: observed.report,
             unchecked,
             repository_unreadable: false,
+            citations: observed.citations,
         }),
         // A plan kept outside a repository, or in one with no commits yet, is a
         // real situation and not a reason to refuse a closure: `close` was
@@ -911,6 +1889,7 @@ pub fn resolve_proposed(
                 },
                 unchecked,
                 repository_unreadable: true,
+                citations: Vec::new(),
             })
         }
         Err(e) => Err(e),
@@ -980,11 +1959,14 @@ pub fn commit_breadth(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use aplan_config::PLACEHOLDER;
     use aplan_config::TestRunner;
+    use aplan_config::{
+        BATCH_MANIFEST_PLACEHOLDER, BATCH_RESULT_PLACEHOLDER, PLACEHOLDER, TEST_BATCH_PROTOCOL,
+    };
     use aplan_core::task::{Evidence, EvidenceKind, Status, Task};
     use aplan_core::{Plan, code, load::LoadedTask};
     use git2::{Repository, Signature};
+    use std::collections::BTreeSet;
     use std::path::PathBuf;
 
     /// Write `files` into the repo's work tree and commit them, returning the
@@ -1019,6 +2001,86 @@ mod tests {
         (dir, repo)
     }
 
+    #[test]
+    fn committed_plan_inputs_refuse_unsafe_paths_and_keep_absence_distinct() {
+        let (dir, raw) = init();
+        commit(
+            &raw,
+            &[(
+                "aplan/tasks/T-1.md",
+                "---\nid: T-1\ntitle: One\nphase: 1\nstatus: todo\n---\n",
+            )],
+            "plan",
+        );
+        let repo = Repo::discover(dir.path()).expect("repository facade");
+
+        assert!(matches!(
+            repo.plan_files_at("HEAD", std::path::Path::new("../aplan")),
+            Err(Error::InvalidRepositoryPath(_))
+        ));
+        assert!(matches!(
+            repo.checkout_blob_at("HEAD", std::path::Path::new("../file")),
+            Err(Error::InvalidRepositoryPath(_))
+        ));
+        assert!(
+            repo.plan_files_at("unknown-revision", std::path::Path::new("aplan"))
+                .expect("unknown revision is not a repository fault")
+                .is_none()
+        );
+        assert!(
+            repo.checkout_blob_at("unknown-revision", std::path::Path::new("file"))
+                .expect("unknown revision is not a repository fault")
+                .is_none()
+        );
+        assert!(
+            repo.checkout_blob_at("HEAD", std::path::Path::new("missing"))
+                .expect("missing blob")
+                .is_none()
+        );
+
+        let whole_tree = repo
+            .plan_files_at("HEAD", std::path::Path::new(""))
+            .expect("tree read")
+            .expect("revision");
+        assert!(whole_tree.root_found);
+        assert!(
+            whole_tree
+                .files
+                .contains_key(std::path::Path::new("aplan/tasks/T-1.md"))
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn committed_links_refuse_escaping_broken_and_cyclic_targets() {
+        use std::os::unix::fs::symlink;
+
+        let (dir, raw) = init();
+        symlink("missing", dir.path().join("broken")).expect("broken link");
+        symlink("../../outside", dir.path().join("escape")).expect("escaping link");
+        symlink("cycle-b", dir.path().join("cycle-a")).expect("cycle a");
+        symlink("cycle-a", dir.path().join("cycle-b")).expect("cycle b");
+        commit(&raw, &[], "links");
+        let repo = Repo::discover(dir.path()).expect("repository facade");
+
+        assert!(matches!(
+            repo.checkout_blob_at("HEAD", std::path::Path::new("broken")),
+            Err(Error::InvalidRepositorySymlink(_))
+        ));
+        assert!(matches!(
+            repo.checkout_blob_at("HEAD", std::path::Path::new("escape")),
+            Err(Error::InvalidRepositorySymlink(_))
+        ));
+        assert!(matches!(
+            repo.checkout_blob_at("HEAD", std::path::Path::new("cycle-a")),
+            Err(Error::RepositorySymlinkLoop(_))
+        ));
+        assert!(matches!(
+            repo.plan_files_at("HEAD", std::path::Path::new("cycle-a")),
+            Err(Error::RepositorySymlinkLoop(_))
+        ));
+    }
+
     fn done_task(id: &str, evidence: Vec<Evidence>, paths: Vec<String>) -> Task {
         Task {
             id: id.to_string(),
@@ -1035,6 +2097,7 @@ mod tests {
             paths,
             traces: Vec::new(),
             trace_fingerprints: std::collections::BTreeMap::new(),
+            evidence_fingerprints: std::collections::BTreeMap::new(),
             tags: Vec::new(),
             revisit_at: None,
             version_impact: None,
@@ -1067,11 +2130,148 @@ mod tests {
         }
     }
 
+    /// Proof for `tui.verification_is_typed_and_non_blocking`: the inspection
+    /// ledger comes from the resolver calls themselves and keeps success,
+    /// failure, missing configuration and intrinsically recorded evidence
+    /// distinct without a consumer parsing diagnostic prose.
+    #[test]
+    fn observed_verification_reports_each_citations_actual_resolver_state() {
+        let (dir, repo) = init();
+        commit(&repo, &[("proof.txt", "proof\n")], "proof");
+        let note = Evidence {
+            kind: EvidenceKind::Note,
+            reference: "reviewed by release owner".to_string(),
+            captured: Some("2026-10-15".to_string()),
+        };
+        let plan = plan_of(done_task(
+            "A-1",
+            vec![
+                file_ev("proof.txt"),
+                file_ev("missing.txt"),
+                test_ev("suite::proof"),
+                note,
+            ],
+            vec!["proof.txt".to_string()],
+        ));
+
+        let observed = verify_observed(&plan, dir.path(), &VerifyOptions::default())
+            .expect("verification runs");
+        let states = observed
+            .citations
+            .iter()
+            .map(|citation| {
+                (
+                    citation.kind,
+                    citation.reference.as_str(),
+                    citation.resolution.strength,
+                    citation.resolution.outcome,
+                    citation.resolution.resolver.as_str(),
+                )
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(
+            states,
+            vec![
+                (
+                    EvidenceKind::File,
+                    "proof.txt",
+                    CitationStrength::Relevant,
+                    CitationOutcome::Resolved,
+                    "git tree file and optional section",
+                ),
+                (
+                    EvidenceKind::File,
+                    "missing.txt",
+                    CitationStrength::Recorded,
+                    CitationOutcome::Failed,
+                    "git tree file and optional section",
+                ),
+                (
+                    EvidenceKind::Test,
+                    "suite::proof",
+                    CitationStrength::Recorded,
+                    CitationOutcome::Unavailable,
+                    "not configured",
+                ),
+                (
+                    EvidenceKind::Note,
+                    "reviewed by release owner",
+                    CitationStrength::Recorded,
+                    CitationOutcome::Resolved,
+                    "no machine resolver",
+                ),
+            ]
+        );
+        assert!(observed.spend.is_empty());
+    }
+
+    /// Proof for `tui.verification_is_typed_and_non_blocking`: unavailable is
+    /// orthogonal to strength. A shallow checkout keeps an unresolved commit
+    /// at L0 but may report L1 for its boundary commit, whose object resolved
+    /// even though relevance could not be judged.
+    #[test]
+    fn a_shallow_checkout_preserves_the_highest_rung_it_actually_reached() {
+        let (origin, repo) = init();
+        let missing = commit(&repo, &[("proof.txt", "proof\n")], "first");
+        let boundary = commit(&repo, &[("other.txt", "other\n")], "second");
+        let clone_dir = tempfile::Builder::new()
+            .tempdir_in(aplan_core::fixture::fixture_root())
+            .expect("tempdir");
+        let clone = clone_dir.path().join("shallow");
+        let output = std::process::Command::new("git")
+            .args(["clone", "--quiet", "--depth", "1"])
+            .arg(format!("file://{}", origin.path().display()))
+            .arg(&clone)
+            .output()
+            .expect("git clone runs");
+        assert!(output.status.success(), "clone failed: {output:?}");
+
+        let observed = verify_observed(
+            &plan_of(done_task(
+                "A",
+                vec![commit_ev(&missing), commit_ev(&boundary)],
+                vec!["proof.txt".to_string()],
+            )),
+            &clone,
+            &VerifyOptions::default(),
+        )
+        .expect("shallow verification runs");
+        let states = observed
+            .citations
+            .iter()
+            .map(|citation| {
+                (
+                    citation.reference.as_str(),
+                    citation.resolution.strength,
+                    citation.resolution.outcome,
+                )
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(
+            states,
+            vec![
+                (
+                    missing.as_str(),
+                    CitationStrength::Recorded,
+                    CitationOutcome::Unavailable,
+                ),
+                (
+                    boundary.as_str(),
+                    CitationStrength::Resolved,
+                    CitationOutcome::Unavailable,
+                ),
+            ]
+        );
+    }
+
     fn runner(list: &[&str], run: &[&str]) -> TestRunner {
         TestRunner {
+            weight: None,
+            exclusive: None,
             output_lines: None,
             max_memory: None,
             max_processes: None,
+            max_output: None,
             wrap: None,
             expect_tests: None,
             skipped: None,
@@ -1079,11 +2279,115 @@ mod tests {
             timeout_seconds: None,
             covers: None,
             covers_by_test: None,
+            inputs_by_test: None,
             name: None,
             dir: None,
             list: list.iter().map(|s| (*s).to_string()).collect(),
             run: run.iter().map(|s| (*s).to_string()).collect(),
+            batch: None,
         }
+    }
+
+    #[test]
+    fn incomplete_scheduled_catalogues_keep_order_identity_and_typed_failure() {
+        let mut configured = vec![
+            runner(&["first"], &["true"]),
+            runner(&["second"], &["true"]),
+            runner(&["third"], &["true"]),
+        ];
+        for (runner, name) in configured
+            .iter_mut()
+            .zip(["cancelled", "complete", "panicked"])
+        {
+            runner.name = Some(name.to_string());
+        }
+        let measured = Cost {
+            peak_processes: 2,
+            measured: true,
+            ..Cost::default()
+        };
+        let outcomes = [
+            (0, scheduler::Outcome::Cancelled),
+            (
+                1,
+                scheduler::Outcome::Completed(CompletedCatalogueRunner {
+                    index: 2,
+                    runner: TestCatalogueRunner {
+                        index: 2,
+                        label: "complete".to_string(),
+                        state: TestCatalogueRunnerState::Listed,
+                        names: vec!["suite::works".to_string()],
+                    },
+                    diagnostics: Vec::new(),
+                    elapsed_millis: 7,
+                    spend: vec![("the `complete` test runner".to_string(), measured)],
+                    failure_outcome: None,
+                }),
+            ),
+            (2, scheduler::Outcome::Panicked),
+        ]
+        .into_iter()
+        .collect();
+        let config_file = PathBuf::from(".aplan.yml");
+
+        let catalogue = catalogue_from_outcomes(outcomes, &configured, Some(&config_file));
+
+        assert_eq!(
+            catalogue
+                .runners
+                .iter()
+                .map(|runner| (
+                    runner.index,
+                    runner.label.as_str(),
+                    runner.state,
+                    runner.names.as_slice()
+                ))
+                .collect::<Vec<_>>(),
+            [
+                (1, "cancelled", TestCatalogueRunnerState::Failed, &[][..]),
+                (
+                    2,
+                    "complete",
+                    TestCatalogueRunnerState::Listed,
+                    &["suite::works".to_string()][..]
+                ),
+                (3, "panicked", TestCatalogueRunnerState::Failed, &[][..]),
+            ]
+        );
+        assert_eq!(
+            catalogue.failure_outcomes,
+            [
+                Some(CitationOutcome::Unavailable),
+                None,
+                Some(CitationOutcome::Unavailable),
+            ]
+        );
+        assert_eq!(catalogue.diagnostics.len(), 2);
+        assert!(catalogue.diagnostics.iter().all(|diagnostic| {
+            diagnostic.code == code::TEST_UNRESOLVED
+                && diagnostic.file.as_deref() == Some(config_file.as_path())
+                && diagnostic.agent_instruction.is_some()
+        }));
+        assert!(catalogue.diagnostics[0].message.contains("cancelled"));
+        assert!(catalogue.diagnostics[1].message.contains("panicked"));
+        assert_eq!(catalogue.spend.len(), 3);
+        assert_eq!(catalogue.spend[1].1, measured);
+        assert_eq!(catalogue.spend[0].1, Cost::default());
+        assert_eq!(catalogue.spend[2].1, Cost::default());
+    }
+
+    #[test]
+    fn the_legacy_catalogue_entry_point_uses_the_bounded_scheduler() {
+        let (dir, _repo) = init();
+        let configured =
+            TestRunners::One(runner(&["sh", "-c", "printf 'suite::one\\n'"], &["true"]));
+
+        let catalogue = configured_test_catalogue(&configured, dir.path(), None);
+
+        assert_eq!(catalogue.runners.len(), 1);
+        assert_eq!(catalogue.runners[0].state, TestCatalogueRunnerState::Listed);
+        assert_eq!(catalogue.runners[0].names, ["suite::one"]);
+        assert!(catalogue.diagnostics.is_empty());
     }
 
     /// **The kinds a configuration can resolve are exactly the resolvers it
@@ -1098,7 +2402,7 @@ mod tests {
     fn a_resolver_joins_exactly_when_its_configuration_declares_it() {
         let (dir, _repo) = init();
         let kinds = |opts: &VerifyOptions| -> Vec<EvidenceKind> {
-            resolvers_for(opts, dir.path())
+            resolvers_for(opts, dir.path(), None, None, None)
                 .iter()
                 .map(|r| r.kind())
                 .collect()
@@ -1112,6 +2416,7 @@ mod tests {
         );
 
         let with_test = VerifyOptions {
+            detect_drift: false,
             test_runner: Some(TestRunners::One(runner(&["true"], &["true", PLACEHOLDER]))),
             ..VerifyOptions::default()
         };
@@ -1123,6 +2428,237 @@ mod tests {
             !kinds(&bare).contains(&EvidenceKind::Test),
             "and without one it is not, which is the whole finding"
         );
+
+        let with_url = url_opts(true);
+        assert!(
+            kinds(&with_url).contains(&EvidenceKind::Url),
+            "a declared checker is what puts `url` on the ladder"
+        );
+        assert!(
+            !kinds(&bare).contains(&EvidenceKind::Url),
+            "and without one no network request is made"
+        );
+    }
+
+    /// **The detector in the capability model is the diagnostic the resolver
+    /// actually raises.**
+    ///
+    /// Looking a code up in `Rule::ALL` proves only that it is spelled like a
+    /// real rule. Every detected kind gets exactly one real failure fixture,
+    /// enumerated from `EvidenceKind::ALL`, so swapping two valid codes or
+    /// adding a kind without a fixture fails even though every code exists.
+    #[test]
+    fn reference_rot_capabilities_name_the_resolver_diagnostics() {
+        let (dir, repo) = init();
+        commit(&repo, &[("present.txt", "present")], "initial tree");
+
+        let commit_report = verify(
+            &plan_of(done_task("C", vec![commit_ev("deadbee")], vec![])),
+            dir.path(),
+            &VerifyOptions::default(),
+        )
+        .expect("commit resolution runs");
+
+        let file_report = verify(
+            &plan_of(done_task("F", vec![file_ev("missing.txt")], vec![])),
+            dir.path(),
+            &VerifyOptions::default(),
+        )
+        .expect("file resolution runs");
+
+        let test_opts = VerifyOptions {
+            detect_drift: false,
+            test_runner: Some(TestRunners::One(runner(
+                &["printf", "present_test\\n"],
+                &["true", PLACEHOLDER],
+            ))),
+            ..VerifyOptions::default()
+        };
+        let test_report = verify(
+            &plan_of(done_task("T", vec![test_ev("missing_test")], vec![])),
+            dir.path(),
+            &test_opts,
+        )
+        .expect("test resolution runs");
+
+        let url_report = verify(
+            &url_task(&["https://example.invalid/missing"]),
+            dir.path(),
+            &url_opts(false),
+        )
+        .expect("url resolution runs");
+
+        let reports = [
+            (EvidenceKind::Commit, commit_report),
+            (EvidenceKind::Url, url_report),
+            (EvidenceKind::File, file_report),
+            (EvidenceKind::Test, test_report),
+        ];
+        for kind in EvidenceKind::ALL {
+            let actual: Vec<Vec<&str>> = reports
+                .iter()
+                .filter(|(reported, _)| reported == kind)
+                .map(|(_, report)| codes(report))
+                .collect();
+            let expected = kind
+                .capabilities()
+                .reference_rot
+                .detector()
+                .map(|code| vec![vec![code]])
+                .unwrap_or_default();
+            assert_eq!(
+                actual,
+                expected,
+                "`{}` must have exactly one fixture raising its declared detector",
+                kind.as_str()
+            );
+        }
+
+        let note = Evidence {
+            kind: EvidenceKind::Note,
+            reference: "reviewed by a person".to_string(),
+            captured: Some("2026-10-08".to_string()),
+        };
+        let note_report = verify(
+            &plan_of(done_task("N", vec![note], vec![])),
+            dir.path(),
+            &VerifyOptions::default(),
+        )
+        .expect("a note does not need resolution");
+        assert!(
+            note_report.is_clean(),
+            "a non-resolvable note cannot have a rot diagnostic: {:?}",
+            note_report.diagnostics
+        );
+    }
+
+    /// **The locality locator and detector in the capability model drive the
+    /// resolver that raises them.**
+    ///
+    /// Each path-local kind gets a real resolved-but-foreign citation. URL and
+    /// note get the same task paths and remain silent: their explicit answer is
+    /// that repository-path locality does not apply. Swapping two well-typed
+    /// locators or detector codes therefore fails instead of leaving the model
+    /// as a descriptive table beside the implementation.
+    #[test]
+    fn locality_capabilities_name_the_resolver_diagnostics() {
+        let (dir, repo) = init();
+        commit(&repo, &[("src/owned.rs", "owned")], "owned tree");
+        let foreign = commit(&repo, &[("elsewhere.txt", "foreign")], "other work");
+        let paths = vec!["src/**".to_string()];
+
+        let commit_report = verify(
+            &plan_of(done_task("C", vec![commit_ev(&foreign)], paths.clone())),
+            dir.path(),
+            &VerifyOptions::default(),
+        )
+        .expect("commit locality runs");
+
+        let file_report = verify(
+            &plan_of(done_task(
+                "F",
+                vec![file_ev("elsewhere.txt")],
+                paths.clone(),
+            )),
+            dir.path(),
+            &VerifyOptions::default(),
+        )
+        .expect("file locality runs");
+
+        let mut foreign_runner = runner(&["printf", "foreign_test\\n"], &["true", PLACEHOLDER]);
+        foreign_runner.covers = Some(vec!["elsewhere/**".to_string()]);
+        let test_report = verify(
+            &plan_of(done_task("T", vec![test_ev("foreign_test")], paths.clone())),
+            dir.path(),
+            &VerifyOptions {
+                detect_drift: false,
+                test_runner: Some(TestRunners::One(foreign_runner)),
+                ..VerifyOptions::default()
+            },
+        )
+        .expect("test locality runs");
+
+        let url = Evidence {
+            kind: EvidenceKind::Url,
+            reference: "https://example.invalid/proof".to_string(),
+            captured: None,
+        };
+        let url_report = verify(
+            &plan_of(done_task("U", vec![url], paths.clone())),
+            dir.path(),
+            &url_opts(true),
+        )
+        .expect("url resolution runs");
+
+        let note = Evidence {
+            kind: EvidenceKind::Note,
+            reference: "reviewed by a person".to_string(),
+            captured: Some("2026-10-09".to_string()),
+        };
+        let note_report = verify(
+            &plan_of(done_task("N", vec![note], paths)),
+            dir.path(),
+            &VerifyOptions::default(),
+        )
+        .expect("a note has no locality resolver");
+
+        let reports = [
+            (EvidenceKind::Commit, commit_report),
+            (EvidenceKind::Url, url_report),
+            (EvidenceKind::File, file_report),
+            (EvidenceKind::Test, test_report),
+            (EvidenceKind::Note, note_report),
+        ];
+        for (kind, report) in reports {
+            let expected: Vec<&str> = kind
+                .capabilities()
+                .locality
+                .detector()
+                .into_iter()
+                .collect();
+            assert_eq!(
+                codes(&report),
+                expected,
+                "`{}` must raise exactly its declared locality detector",
+                kind.as_str()
+            );
+        }
+    }
+
+    /// The only declared dilution measure drives the rule that reports it.
+    #[test]
+    fn dilution_capability_names_the_resolver_diagnostic() {
+        let (dir, repo) = init();
+        commit(&repo, &[("src/owned.rs", "before")], "owned tree");
+        let broad = commit(
+            &repo,
+            &[
+                ("src/owned.rs", "after"),
+                ("outside-a.txt", "a"),
+                ("outside-b.txt", "b"),
+            ],
+            "broad change",
+        );
+        let report = verify(
+            &plan_of(done_task(
+                "C",
+                vec![commit_ev(&broad)],
+                vec!["src/**".to_string()],
+            )),
+            dir.path(),
+            &VerifyOptions {
+                detect_drift: false,
+                max_unrelated_files: Some(1),
+                ..VerifyOptions::default()
+            },
+        )
+        .expect("commit dilution runs");
+        let expected = EvidenceKind::Commit
+            .capabilities()
+            .dilution
+            .detector()
+            .expect("commit dilution is measurable");
+        assert_eq!(codes(&report), vec![expected]);
     }
 
     /// **A `test` citation with no runner is counted, and a `note` is not.**
@@ -1172,6 +2708,7 @@ mod tests {
         let (dir, _repo) = init();
         let marker = dir.path().join("ran");
         let opts = VerifyOptions {
+            detect_drift: false,
             test_runner: Some(TestRunners::One(runner(
                 &["touch", marker.to_str().expect("utf8")],
                 &["true", PLACEHOLDER],
@@ -1435,6 +2972,7 @@ mod tests {
         );
 
         let with_root = VerifyOptions {
+            detect_drift: false,
             traces_root: Some(dir.path().join("docs")),
             ..VerifyOptions::default()
         };
@@ -1684,6 +3222,26 @@ mod tests {
     }
 
     #[test]
+    fn a_vacuous_test_does_not_acquit_diluted_commit_evidence() {
+        // Proves `evidence.vacuous_test_does_not_acquit_dilution`: an invisible
+        // reference is not proof here for the same reason it is not proof to
+        // `APLAN005`, even though `str::trim` leaves this character in place.
+        let (dir, repo) = init();
+        let sha = sprawling_commit(&repo, "a", 1, 60);
+        let task = done_task(
+            "A",
+            vec![commit_ev(&sha), test_ev("\u{200b}")],
+            vec!["src/**".into()],
+        );
+        let report = verify(&plan_of(task), dir.path(), &VerifyOptions::default()).unwrap();
+        assert!(
+            codes(&report).contains(&code::DILUTED_EVIDENCE),
+            "a citation that names nothing must not acquit diluted evidence: {:?}",
+            report.diagnostics
+        );
+    }
+
+    #[test]
     fn one_focused_citation_is_proof_however_many_others_sprawl() {
         // A task citing the commit that did the work and the merge that carried
         // it is evidenced; warning about the second would be noise.
@@ -1752,6 +3310,35 @@ mod tests {
         );
     }
 
+    /// Proves `evidence.commit_requires_head_reachability` for `APLAN024`
+    /// (`A1-572`): a focused but locally-only object cannot acquit a reachable
+    /// citation that is mostly about other work.
+    #[test]
+    fn unreachable_commit_cannot_acquit_diluted_reachable_evidence() {
+        let (dir, repo) = init();
+        let diluted = sprawling_commit(&repo, "d", 1, 60);
+        let unreachable = commit(&repo, &[("src/focused.rs", "side")], "focused side");
+        let head_object = repo
+            .find_object(git2::Oid::from_str(&diluted).unwrap(), None)
+            .expect("head object");
+        repo.reset(&head_object, git2::ResetType::Hard, None)
+            .expect("abandon the focused commit");
+
+        let task = done_task(
+            "A",
+            vec![commit_ev(&unreachable), commit_ev(&diluted)],
+            vec!["src/**".into()],
+        );
+        let report = verify(&plan_of(task), dir.path(), &VerifyOptions::default()).unwrap();
+        let found = codes(&report);
+        assert!(found.contains(&code::COMMIT_UNRESOLVED), "{found:?}");
+        assert!(
+            found.contains(&code::DILUTED_EVIDENCE),
+            "the rejected focused object acquitted diluted evidence: {:?}",
+            report.diagnostics
+        );
+    }
+
     #[test]
     fn only_a_done_task_is_claiming_its_evidence_proves_anything() {
         // The rule reads "a *done* task's commit evidence". On anything else a
@@ -1813,6 +3400,7 @@ mod tests {
         let task = done_task("A", vec![commit_ev(&sha)], vec!["src/**".into()]);
 
         let strict = VerifyOptions {
+            detect_drift: false,
             config_file: None,
             max_unrelated_files: Some(10),
             url_check: None,
@@ -1822,6 +3410,7 @@ mod tests {
         assert!(codes(&report).contains(&code::DILUTED_EVIDENCE));
 
         let off = VerifyOptions {
+            detect_drift: false,
             config_file: None,
             max_unrelated_files: Some(0),
             url_check: None,
@@ -2108,6 +3697,164 @@ mod tests {
         );
     }
 
+    /// Proves the named behaviour `evidence.commit_requires_head_reachability`
+    /// (`A1-572`). An object in the local database is not evidence about the
+    /// verified tree until `HEAD` reaches it, and that L1 failure must stop L2
+    /// from judging the object's otherwise-readable diff.
+    #[test]
+    fn commit_evidence_requires_head_reachability_before_relevance() {
+        let (dir, repo) = init();
+        let ancestor = commit(&repo, &[("src/a.rs", "base")], "ancestor");
+        let head = commit(&repo, &[("docs/notes.md", "head")], "head");
+        let unreachable = commit(&repo, &[("docs/side.md", "side")], "side");
+        let head_object = repo
+            .find_object(git2::Oid::from_str(&head).unwrap(), None)
+            .expect("head object");
+        repo.reset(&head_object, git2::ResetType::Hard, None)
+            .expect("leave the side commit locally present but unreachable");
+
+        for (reference, paths) in [
+            (&ancestor, vec!["src/**".into()]),
+            (&head, vec!["docs/**".into()]),
+        ] {
+            let task = done_task("A", vec![commit_ev(reference)], paths);
+            let report = verify(&plan_of(task), dir.path(), &VerifyOptions::default()).unwrap();
+            assert!(
+                report.is_clean(),
+                "HEAD and its ancestors remain valid: {:?}",
+                report.diagnostics
+            );
+        }
+
+        // `src/**` is live at HEAD but the side commit touched only docs. If L2
+        // ran after the ancestry failure it would add APLAN012, obscuring which
+        // rung actually failed.
+        let task = done_task("A", vec![commit_ev(&unreachable)], vec!["src/**".into()]);
+        let report = verify(&plan_of(task), dir.path(), &VerifyOptions::default()).unwrap();
+        assert_eq!(codes(&report), vec![code::COMMIT_UNRESOLVED]);
+        let finding = &report.diagnostics[0];
+        assert!(
+            finding.message.contains("resolves locally")
+                && finding.message.contains("not reachable")
+                && finding.message.contains("HEAD"),
+            "the locally-present case must not impersonate a missing object: {}",
+            finding.message
+        );
+        let instruction = finding.agent_instruction.as_deref().unwrap_or_default();
+        assert!(
+            instruction.contains("merge")
+                && instruction.contains("squash")
+                && instruction.contains("integration"),
+            "the remedy must name the reachable replacement citation: {instruction}"
+        );
+    }
+
+    /// An unreachable commit cannot keep a dead-at-HEAD path alive for
+    /// `APLAN019`, either through its diff or through its historical tree.
+    #[test]
+    fn unreachable_commit_evidence_does_not_bind_or_extend_task_paths() {
+        let (dir, repo) = init();
+        let head = commit(&repo, &[("src/live.rs", "base")], "head");
+        let unreachable = commit(&repo, &[("abandoned/only.rs", "side")], "side");
+        let head_object = repo
+            .find_object(git2::Oid::from_str(&head).unwrap(), None)
+            .expect("head object");
+        repo.reset(&head_object, git2::ResetType::Hard, None)
+            .expect("abandon side commit");
+
+        let task = done_task(
+            "A",
+            vec![commit_ev(&unreachable)],
+            vec!["abandoned/**".into()],
+        );
+        let report = verify(&plan_of(task), dir.path(), &VerifyOptions::default()).unwrap();
+        assert_eq!(
+            codes(&report),
+            vec![code::COMMIT_UNRESOLVED, code::PATHS_UNMATCHED],
+            "a locally-only object must not supply task history: {:?}",
+            report.diagnostics
+        );
+    }
+
+    /// A shallow graph can prove a positive ancestry result, but its negative
+    /// answer is incomplete. Preserve `A1-177`'s blame boundary: one checkout
+    /// finding, never advice to rewrite a task whose full history was not read.
+    /// Proves `evidence.commit_requires_head_reachability` (`A1-572`).
+    #[test]
+    fn shallow_history_does_not_turn_unknown_ancestry_into_task_blame() {
+        let (dir, repo) = init();
+        let head = commit(&repo, &[("src/live.rs", "base")], "head");
+        let side = commit(&repo, &[("src/side.rs", "side")], "side");
+        let head_object = repo
+            .find_object(git2::Oid::from_str(&head).unwrap(), None)
+            .expect("head object");
+        repo.reset(&head_object, git2::ResetType::Hard, None)
+            .expect("leave a locally present side object");
+        std::fs::write(repo.path().join("shallow"), format!("{head}\n"))
+            .expect("mark fixture shallow");
+
+        let task = done_task("A", vec![commit_ev(&side)], vec!["src/**".into()]);
+        let report = verify(&plan_of(task), dir.path(), &VerifyOptions::default()).unwrap();
+        assert_eq!(codes(&report), vec![code::COMMIT_UNRESOLVED]);
+        let finding = &report.diagnostics[0];
+        assert!(finding.task.is_none(), "the task was blamed: {finding:?}");
+        assert!(
+            finding.message.contains("shallow clone")
+                && finding.message.contains("whether `HEAD` reaches")
+                && finding.message.contains("about the checkout"),
+            "the unknown ancestry was reported as a task defect: {}",
+            finding.message
+        );
+        assert!(
+            finding
+                .agent_instruction
+                .as_deref()
+                .unwrap_or_default()
+                .contains("Do not remove the citations"),
+            "incomplete history must explicitly preserve the evidence: {finding:?}"
+        );
+    }
+
+    /// The three shallow-history limits share one cause and therefore one
+    /// checkout finding, even when one run encounters all of them (`A1-572`).
+    #[test]
+    fn shallow_history_aggregates_missing_unknown_and_boundary_citations() {
+        let (dir, repo) = init();
+        let head = commit(&repo, &[("src/live.rs", "base")], "head");
+        let side = commit(&repo, &[("src/side.rs", "side")], "side");
+        let head_object = repo
+            .find_object(git2::Oid::from_str(&head).unwrap(), None)
+            .expect("head object");
+        repo.reset(&head_object, git2::ResetType::Hard, None)
+            .expect("leave side object");
+        std::fs::write(repo.path().join("shallow"), format!("{head}\n"))
+            .expect("mark fixture shallow");
+        let missing = "0123456789abcdef0123456789abcdef01234567";
+
+        let task = done_task(
+            "A",
+            vec![commit_ev(missing), commit_ev(&side), commit_ev(&head)],
+            vec!["src/**".into()],
+        );
+        let report = verify(&plan_of(task), dir.path(), &VerifyOptions::default()).unwrap();
+        assert_eq!(codes(&report), vec![code::COMMIT_UNRESOLVED]);
+        let finding = &report.diagnostics[0];
+        assert!(finding.task.is_none(), "{finding:?}");
+        assert!(
+            finding
+                .message
+                .contains("1 `commit` citation could not be resolved")
+                && finding
+                    .message
+                    .contains("whether `HEAD` reaches 1 `commit` citation")
+                && finding
+                    .message
+                    .contains("1 `commit` citation sits on the clone's boundary"),
+            "the aggregate omitted a shallow-history limit: {}",
+            finding.message
+        );
+    }
+
     #[test]
     fn an_irrelevant_commit_without_paths_is_silent_on_012() {
         // No `paths` means relevance is unverifiable, not a violation of 012.
@@ -2234,6 +3981,284 @@ mod tests {
             report.diagnostics[0].message.contains("src/nope.rs"),
             "the message must name the path that did not resolve: {}",
             report.diagnostics[0].message
+        );
+    }
+
+    /// `APLAN054`: the reference still resolves, so `APLAN015` is silent, but
+    /// the committed referent no longer matches what closure reviewed.
+    #[test]
+    fn a_stamped_file_that_changes_under_the_same_reference_reports_evidence_drift() {
+        let (dir, repo) = init();
+        commit(&repo, &[("docs/proof.md", "the reviewed proof\n")], "proof");
+        let evidence = vec![file_ev("docs/proof.md")];
+        let stamps = update_evidence_fingerprints(
+            &[],
+            &std::collections::BTreeMap::new(),
+            &evidence,
+            dir.path(),
+            false,
+        )
+        .expect("stamp");
+        assert_eq!(stamps.len(), 1, "the unversioned file was stamped");
+
+        let mut task = done_task("A", evidence.clone(), vec!["docs/**".into()]);
+        task.evidence_fingerprints = stamps;
+        let opts = VerifyOptions {
+            detect_drift: true,
+            ..VerifyOptions::default()
+        };
+
+        // A dirty worktree is not the committed referent `file:path` at HEAD.
+        std::fs::write(dir.path().join("docs/proof.md"), "not committed\n").unwrap();
+        let report = verify(&plan_of(task.clone()), dir.path(), &opts).unwrap();
+        assert!(
+            report.is_clean(),
+            "dirty content is not cited: {:?}",
+            report.diagnostics
+        );
+
+        commit(
+            &repo,
+            &[("docs/proof.md", "different and contradictory\n")],
+            "rewrite proof",
+        );
+        let report = verify(&plan_of(task.clone()), dir.path(), &opts).unwrap();
+        assert_eq!(codes(&report), vec![code::EVIDENCE_DRIFT]);
+        let diagnostic = &report.diagnostics[0];
+        assert!(
+            diagnostic.message.contains("docs/proof.md"),
+            "{}",
+            diagnostic.message
+        );
+        assert!(
+            diagnostic
+                .message
+                .contains("changed since this task recorded it"),
+            "{}",
+            diagnostic.message
+        );
+        assert!(
+            diagnostic
+                .agent_instruction
+                .as_deref()
+                .is_some_and(|text| text.contains("aplan close A --restamp")
+                    && text.contains("aplan amend A --replace-evidence")),
+            "the instruction must name both honest outcomes: {:?}",
+            diagnostic.agent_instruction
+        );
+
+        // The policy remains opt-in, and a historical task with no stamp is
+        // unverifiable rather than retroactively wrong.
+        assert!(
+            verify(
+                &plan_of(task.clone()),
+                dir.path(),
+                &VerifyOptions::default()
+            )
+            .unwrap()
+            .is_clean(),
+            "detect_drift off must add no finding"
+        );
+        task.evidence_fingerprints.clear();
+        assert!(
+            verify(&plan_of(task), dir.path(), &opts)
+                .unwrap()
+                .is_clean(),
+            "an absent historical stamp is not a mismatch"
+        );
+    }
+
+    #[test]
+    fn a_partly_stamped_task_reports_the_mutable_citation_with_no_baseline() {
+        let (dir, repo) = init();
+        commit(
+            &repo,
+            &[("docs/one.md", "one\n"), ("docs/two.md", "two\n")],
+            "proofs",
+        );
+        let one = file_ev("docs/one.md");
+        let two = file_ev("docs/two.md");
+        let stamps = update_evidence_fingerprints(
+            &[],
+            &std::collections::BTreeMap::new(),
+            std::slice::from_ref(&one),
+            dir.path(),
+            false,
+        )
+        .expect("first stamp");
+        let mut task = done_task("A", vec![one, two], vec!["docs/**".into()]);
+        task.evidence_fingerprints = stamps;
+        let opts = VerifyOptions {
+            detect_drift: true,
+            ..VerifyOptions::default()
+        };
+        let report = verify(&plan_of(task), dir.path(), &opts).expect("verify");
+        assert_eq!(codes(&report), vec![code::EVIDENCE_DRIFT]);
+        assert!(
+            report.diagnostics[0].message.contains("docs/two.md")
+                && report.diagnostics[0]
+                    .message
+                    .contains("no recorded fingerprint"),
+            "{}",
+            report.diagnostics[0].message
+        );
+        assert!(
+            report.diagnostics[0]
+                .agent_instruction
+                .as_deref()
+                .is_some_and(|text| text.contains("aplan close A --restamp")),
+            "{:?}",
+            report.diagnostics[0].agent_instruction
+        );
+    }
+
+    #[test]
+    fn evidence_freshness_stamps_only_the_claimed_section_and_not_an_immutable_rev() {
+        let (dir, repo) = init();
+        let first = commit(
+            &repo,
+            &[("docs/proof.md", "# Proof\n\nheld\n\n# Notes\n\none\n")],
+            "proof",
+        );
+        let evidence = vec![
+            file_ev("docs/proof.md#proof"),
+            file_ev(&format!("docs/proof.md@{first}")),
+        ];
+        let stamps = update_evidence_fingerprints(
+            &[],
+            &std::collections::BTreeMap::new(),
+            &evidence,
+            dir.path(),
+            false,
+        )
+        .expect("stamp");
+        assert_eq!(
+            stamps.keys().cloned().collect::<Vec<_>>(),
+            vec!["file:docs/proof.md#proof"],
+            "a cited revision is content-addressed and needs no mutable stamp"
+        );
+
+        let mut task = done_task("A", evidence, vec!["docs/**".into()]);
+        task.evidence_fingerprints = stamps;
+        let opts = VerifyOptions {
+            detect_drift: true,
+            ..VerifyOptions::default()
+        };
+        commit(
+            &repo,
+            &[("docs/proof.md", "# Proof\n\nheld\n\n# Notes\n\ntwo\n")],
+            "change sibling section",
+        );
+        assert!(
+            verify(&plan_of(task.clone()), dir.path(), &opts)
+                .unwrap()
+                .is_clean(),
+            "content outside the cited section is not the referent"
+        );
+        commit(
+            &repo,
+            &[("docs/proof.md", "# Proof\n\nfailed\n\n# Notes\n\ntwo\n")],
+            "change proof section",
+        );
+        assert_eq!(
+            codes(&verify(&plan_of(task), dir.path(), &opts).unwrap()),
+            vec![code::EVIDENCE_DRIFT]
+        );
+    }
+
+    #[test]
+    fn a_symbolic_file_revision_is_fingerprinted_because_it_can_move() {
+        let (dir, repo) = init();
+        commit(&repo, &[("docs/proof.md", "first\n")], "first proof");
+        let evidence = vec![file_ev("docs/proof.md@HEAD")];
+        let stamps = update_evidence_fingerprints(
+            &[],
+            &std::collections::BTreeMap::new(),
+            &evidence,
+            dir.path(),
+            false,
+        )
+        .expect("stamp symbolic revision");
+        assert_eq!(
+            stamps.keys().cloned().collect::<Vec<_>>(),
+            vec!["file:docs/proof.md@HEAD"],
+            "a symbolic revision is not content-addressed"
+        );
+
+        let mut task = done_task("A", evidence, vec!["docs/**".into()]);
+        task.evidence_fingerprints = stamps;
+        commit(&repo, &[("docs/proof.md", "second\n")], "move HEAD");
+        let opts = VerifyOptions {
+            detect_drift: true,
+            ..VerifyOptions::default()
+        };
+        assert_eq!(
+            codes(&verify(&plan_of(task), dir.path(), &opts).unwrap()),
+            vec![code::EVIDENCE_DRIFT]
+        );
+    }
+
+    /// Hex syntax alone does not make a revision immutable: Git permits a
+    /// branch with that name. The resolved object must agree with the spelling,
+    /// or moving the branch could evade the freshness check (`A1-196` audit).
+    #[test]
+    fn a_hex_named_file_revision_is_fingerprinted_because_the_ref_can_move() {
+        let (dir, repo) = init();
+        let first = commit(&repo, &[("docs/proof.md", "first\n")], "first proof");
+        let first = repo
+            .find_commit(git2::Oid::from_str(&first).unwrap())
+            .unwrap();
+        let reference = first.id().to_string()[..12].to_string();
+        repo.branch(&reference, &first, false).unwrap();
+        let evidence = vec![file_ev(&format!("docs/proof.md@{reference}"))];
+        let stamps = update_evidence_fingerprints(
+            &[],
+            &std::collections::BTreeMap::new(),
+            &evidence,
+            dir.path(),
+            false,
+        )
+        .expect("stamp hex-named branch");
+        assert_eq!(
+            stamps.keys().cloned().collect::<Vec<_>>(),
+            vec![format!("file:docs/proof.md@{reference}")],
+            "a branch named after its target's prefix is still not content-addressed"
+        );
+
+        let mut task = done_task("A", evidence, vec!["docs/**".into()]);
+        task.evidence_fingerprints = stamps;
+        let second = commit(&repo, &[("docs/proof.md", "second\n")], "second proof");
+        repo.find_reference(&format!("refs/heads/{reference}"))
+            .unwrap()
+            .set_target(git2::Oid::from_str(&second).unwrap(), "move proof ref")
+            .unwrap();
+        let opts = VerifyOptions {
+            detect_drift: true,
+            ..VerifyOptions::default()
+        };
+        assert_eq!(
+            codes(&verify(&plan_of(task), dir.path(), &opts).unwrap()),
+            vec![code::EVIDENCE_DRIFT]
+        );
+    }
+
+    #[test]
+    fn restamping_mutable_evidence_without_committed_content_is_refused() {
+        let dir = tempfile::Builder::new()
+            .tempdir_in(aplan_core::fixture::fixture_root())
+            .expect("tempdir");
+        let evidence = vec![file_ev("docs/proof.md")];
+        let error = update_evidence_fingerprints(
+            &evidence,
+            &std::collections::BTreeMap::new(),
+            &evidence,
+            dir.path(),
+            true,
+        )
+        .expect_err("restamp must not claim it read a repository that does not exist");
+        assert!(
+            matches!(&error, Error::NotARepository(_)),
+            "wrong refusal: {error}"
         );
     }
 
@@ -2364,11 +4389,11 @@ mod tests {
         let workdir = repo.workdir().unwrap().to_path_buf();
         std::fs::create_dir_all(workdir.join("docs")).unwrap();
         std::fs::write(workdir.join("docs/scan.bin"), [0xff, 0xfe, 0x00, 0x01]).unwrap();
-        commit(&repo, &[("docs/keep.md", "# Keep\n")], "a binary proof");
+        let rev = commit(&repo, &[("docs/keep.md", "# Keep\n")], "a binary proof");
 
         let task = done_task(
             "A",
-            vec![file_ev("docs/scan.bin#result")],
+            vec![file_ev(&format!("docs/scan.bin#result@{rev}"))],
             vec!["docs/**".into()],
         );
         let report = verify(&plan_of(task), dir.path(), &VerifyOptions::default()).unwrap();
@@ -2377,6 +4402,49 @@ mod tests {
             report.diagnostics[0].message.contains("is not text"),
             "{:?}",
             report.diagnostics[0].message
+        );
+        assert_eq!(
+            report.diagnostics[0].repair,
+            Some(aplan_core::Repair::ReplaceEvidence {
+                from: file_ev(&format!("docs/scan.bin#result@{rev}")),
+                to: file_ev(&format!("docs/scan.bin@{rev}")),
+            }),
+            "the exact repair drops only the anchor and keeps the cited revision"
+        );
+
+        let duplicate = done_task(
+            "A2",
+            vec![
+                file_ev(&format!("docs/scan.bin#result@{rev}")),
+                file_ev(&format!("docs/scan.bin@{rev}")),
+            ],
+            vec!["docs/**".into()],
+        );
+        let report = verify(&plan_of(duplicate), dir.path(), &VerifyOptions::default()).unwrap();
+        assert_eq!(report.diagnostics[0].repair, None);
+
+        let duplicate_source = done_task(
+            "A3",
+            vec![
+                file_ev(&format!("docs/scan.bin#result@{rev}")),
+                file_ev(&format!("docs/scan.bin#result@{rev}")),
+            ],
+            vec!["docs/**".into()],
+        );
+        let report = verify(
+            &plan_of(duplicate_source),
+            dir.path(),
+            &VerifyOptions::default(),
+        )
+        .unwrap();
+        assert!(
+            report
+                .diagnostics
+                .iter()
+                .filter(|d| d.code == code::FILE_UNRESOLVED)
+                .all(|d| d.repair.is_none()),
+            "a source cited twice is ambiguous to the rewrite primitive: {:?}",
+            report.diagnostics
         );
 
         // Without the anchor the same citation is fine: a binary artefact is a
@@ -2505,9 +4573,12 @@ mod tests {
     /// `A1-054`: a repository whose tests are not reachable from one command.
     fn named_runner(name: &str, dir: Option<&str>, list: &[&str], run: &[&str]) -> TestRunner {
         TestRunner {
+            weight: None,
+            exclusive: None,
             output_lines: None,
             max_memory: None,
             max_processes: None,
+            max_output: None,
             wrap: None,
             expect_tests: None,
             skipped: None,
@@ -2515,11 +4586,159 @@ mod tests {
             timeout_seconds: None,
             covers: None,
             covers_by_test: None,
+            inputs_by_test: None,
             name: Some(name.to_string()),
             dir: dir.map(ToString::to_string),
             list: list.iter().map(|s| (*s).to_string()).collect(),
             run: run.iter().map(|s| (*s).to_string()).collect(),
+            batch: None,
         }
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn receipt_observation_does_not_promote_an_unsettled_selection_probe() {
+        use std::os::unix::fs::PermissionsExt as _;
+
+        let (dir, _repo) = init();
+        let executable = dir.path().join("one-shot-runner.sh");
+        std::fs::write(&executable, "#!/bin/sh\nrm -- \"$0\"\nexit 0\n").expect("runner");
+        std::fs::set_permissions(&executable, std::fs::Permissions::from_mode(0o700))
+            .expect("runner mode");
+        let runner = named_runner(
+            "one-shot",
+            None,
+            &["sh", "-c", "printf 'suite::case\\n'"],
+            &[
+                executable.to_str().expect("UTF-8 fixture path"),
+                PLACEHOLDER,
+            ],
+        );
+        let observation =
+            observe_test_runner(&TestRunners::One(runner), dir.path(), None, "one-shot")
+                .expect("listing succeeds even though exact-selection proof does not");
+        assert!(!observation.complete);
+        assert_eq!(observation.outcomes.len(), 1);
+        assert_eq!(
+            observation.outcomes[0].outcome,
+            TestBatchOutcome::Incomplete
+        );
+        assert!(
+            observation.outcomes[0]
+                .diagnostic
+                .as_deref()
+                .is_some_and(|text| text.contains("not settled"))
+        );
+    }
+
+    #[test]
+    fn receipt_provider_selection_and_listing_fail_closed() {
+        let (dir, _repo) = init();
+        let duplicate = TestRunners::Many(vec![
+            named_runner("same", None, &["true"], &["true", PLACEHOLDER]),
+            named_runner("same", None, &["true"], &["true", PLACEHOLDER]),
+        ]);
+        assert!(
+            test_runner_by_selector(&duplicate, "same")
+                .unwrap_err()
+                .contains("ambiguous")
+        );
+        assert!(test_runner_by_selector(&duplicate, "0").is_err());
+        assert!(test_runner_by_selector(&duplicate, "3").is_err());
+        let (index, label, _) = test_runner_by_selector(&duplicate, "2").expect("second runner");
+        assert_eq!((index, label.as_str()), (2, "same"));
+
+        let failed = named_runner("failed", None, &["false"], &["true", PLACEHOLDER]);
+        let error = observe_test_runner(&TestRunners::One(failed), dir.path(), None, "failed")
+            .expect_err("failed catalogue");
+        assert!(error.contains("could not be listed"), "{error}");
+
+        let empty = named_runner("empty", None, &["true"], &["true", PLACEHOLDER]);
+        let error = observe_test_runner(&TestRunners::One(empty), dir.path(), None, "empty")
+            .expect_err("empty catalogue");
+        assert!(error.contains("listed no tests"), "{error}");
+    }
+
+    #[test]
+    fn receipt_observation_records_configured_skips_without_running_them() {
+        let (dir, _repo) = init();
+        let mut runner = named_runner(
+            "skip",
+            None,
+            &["printf", "suite::case\n"],
+            &["false", PLACEHOLDER],
+        );
+        runner.skipped = Some(vec!["printf".into(), "suite::case\n".into()]);
+        let observation = observe_test_runner(&TestRunners::One(runner), dir.path(), None, "skip")
+            .expect("complete skipped observation");
+        assert!(observation.complete);
+        assert_eq!(observation.outcomes.len(), 1);
+        assert_eq!(observation.outcomes[0].outcome, TestBatchOutcome::Skipped);
+    }
+
+    #[test]
+    fn selected_receipt_identities_share_one_batch_and_keep_the_complete_catalogue() {
+        let (dir, _repo) = init();
+        let log = dir.path().join("selected-batch.json");
+        let mut runner = named_runner(
+            "selected-batch",
+            None,
+            &["printf", "alpha\nbeta\ngamma\n"],
+            &["false", PLACEHOLDER],
+        );
+        runner.batch = Some(TestBatch {
+            protocol: aplan_config::TEST_BATCH_PROTOCOL,
+            run: vec![
+                "python3".into(),
+                "-c".into(),
+                "import json,sys\nlog,manifest,result=sys.argv[1:]\nwith open(manifest,encoding='utf-8') as stream: request=json.load(stream)\nwith open(log,'w',encoding='utf-8') as stream: json.dump(request['tests'],stream)\nanswer={'schema':'aplan/test-batch-result/v1','nonce':request['nonce'],'provider':request['provider'],'complete':True,'tests':[{'test':name,'outcome':'passed'} for name in request['tests']]}\nwith open(result,'x',encoding='utf-8') as stream: json.dump(answer,stream,sort_keys=True)\n".into(),
+                log.display().to_string(),
+                aplan_config::BATCH_MANIFEST_PLACEHOLDER.into(),
+                aplan_config::BATCH_RESULT_PLACEHOLDER.into(),
+            ],
+        });
+
+        let observation = observe_test_runner_selected(
+            &TestRunners::One(runner),
+            dir.path(),
+            None,
+            "selected-batch",
+            |catalogue| {
+                assert_eq!(catalogue, ["alpha", "beta", "gamma"]);
+                Ok(vec!["alpha".into(), "gamma".into()])
+            },
+        )
+        .expect("selected batch observation");
+
+        assert_eq!(observation.runner.names, ["alpha", "beta", "gamma"]);
+        assert_eq!(observation.requested, ["alpha", "gamma"]);
+        assert_eq!(
+            observation
+                .outcomes
+                .iter()
+                .map(|outcome| outcome.test.as_str())
+                .collect::<Vec<_>>(),
+            ["alpha", "gamma"]
+        );
+        let batched: Vec<String> =
+            serde_json::from_slice(&std::fs::read(log).expect("batch log")).expect("batch JSON");
+        assert_eq!(batched, ["alpha", "gamma"]);
+
+        let runner = named_runner(
+            "selected-batch",
+            None,
+            &["printf", "alpha\nbeta\ngamma\n"],
+            &["false", PLACEHOLDER],
+        );
+        let error = observe_test_runner_selected(
+            &TestRunners::One(runner),
+            dir.path(),
+            None,
+            "selected-batch",
+            |_| Ok(vec!["not-listed".into()]),
+        )
+        .expect_err("selection outside the observed catalogue");
+        assert!(error.contains("not-listed"), "{error}");
     }
 
     #[test]
@@ -2529,6 +4748,7 @@ mod tests {
         // fell back to weaker kinds, quietly eroding `require_min_strength`.
         let (dir, _repo) = init();
         let opts = VerifyOptions {
+            detect_drift: false,
             version: None,
             traces_root: None,
             config_file: None,
@@ -2538,6 +4758,7 @@ mod tests {
                 named_runner("web", None, &["printf", "beta\n"], &["true", PLACEHOLDER]),
             ])),
             max_unrelated_files: None,
+            observation_inputs: None,
             url_check: None,
         };
         let r = verify(
@@ -2592,6 +4813,929 @@ mod tests {
             .collect()
     }
 
+    fn batched_runner(
+        dir: &Path,
+        runner_name: &str,
+        outcomes: &[TestBatchResultEntry],
+    ) -> TestRunner {
+        let names = outcomes
+            .iter()
+            .map(|entry| entry.test.as_str())
+            .collect::<Vec<_>>();
+        let listed = format!("{}\n", names.join("\n"));
+        let script = dir.join(format!("batch-{runner_name}.sh"));
+        std::fs::write(
+            &script,
+            format!(
+                "set -eu\n\
+                 nonce=$(sed -n 's/.*\"nonce\":\"\\([^\"]*\\)\".*/\\1/p' \"$1\")\n\
+                 provider=$(sed -n 's/.*\"provider\":\"\\([^\"]*\\)\".*/\\1/p' \"$1\")\n\
+                 test -n \"$nonce\"\n\
+                 test -n \"$provider\"\n\
+                 printf 'batch\\n' >> \"$3\"\n\
+                 printf '{{\"schema\":\"{TEST_BATCH_RESULT_SCHEMA}\",\"nonce\":\"%s\",\"provider\":\"%s\",\"complete\":true,\"tests\":%s}}\\n' \
+                   \"$nonce\" \"$provider\" \"$4\" > \"$2\"\n\
+                 if test \"${{5:-ok}}\" != ok; then\n\
+                   printf '%s %s\\n' \"$1\" \"$2\" >&2\n\
+                   exit 1\n\
+                 fi\n"
+            ),
+        )
+        .unwrap();
+        let batch_log = dir.join("batch-runs.log");
+        let legacy_log = dir.join("legacy-runs.log");
+        let rows = serde_json::to_string(outcomes).unwrap();
+        let mut runner = named_runner(
+            runner_name,
+            None,
+            &["printf", &listed],
+            &[
+                "sh",
+                "-c",
+                "printf '%s\\n' \"$1\" >> \"$0\"; exit 99",
+                &legacy_log.display().to_string(),
+                PLACEHOLDER,
+            ],
+        );
+        runner.batch = Some(TestBatch {
+            protocol: aplan_config::TEST_BATCH_PROTOCOL,
+            run: vec![
+                "sh".into(),
+                script.display().to_string(),
+                aplan_config::BATCH_MANIFEST_PLACEHOLDER.into(),
+                aplan_config::BATCH_RESULT_PLACEHOLDER.into(),
+                batch_log.display().to_string(),
+                rows,
+            ],
+        });
+        runner
+    }
+
+    fn batch_entry(name: &str, outcome: TestBatchOutcome) -> TestBatchResultEntry {
+        TestBatchResultEntry {
+            test: name.into(),
+            outcome,
+            attempts: None,
+            diagnostic: None,
+        }
+    }
+
+    fn imported_provider(
+        index: usize,
+        label: &str,
+        outcomes: Vec<TestBatchResultEntry>,
+    ) -> TestProviderObservation {
+        let names = outcomes.iter().map(|entry| entry.test.clone()).collect();
+        TestProviderObservation::Current(TestExecutionObservation {
+            runner: TestCatalogueRunner {
+                index,
+                label: label.into(),
+                state: TestCatalogueRunnerState::Listed,
+                names,
+            },
+            requested: outcomes.iter().map(|entry| entry.test.clone()).collect(),
+            outcomes,
+            complete: true,
+        })
+    }
+
+    /// Proof for `evidence.receipt_backed_whole_plan_resolution`.
+    #[test]
+    fn receipt_backed_resolution_starts_no_provider_and_fans_out_current_results() {
+        let (dir, _repo) = init();
+        let listed = dir.path().join("receipt-list-started");
+        let ran = dir.path().join("receipt-run-started");
+        let runner = named_runner(
+            "receipt",
+            None,
+            &[
+                "sh",
+                "-c",
+                &format!("touch '{}'; printf 'alpha\\n'", listed.display()),
+            ],
+            &[
+                "sh",
+                "-c",
+                &format!("touch '{}'; exit 99", ran.display()),
+                PLACEHOLDER,
+            ],
+        );
+        let opts = VerifyOptions {
+            execute: true,
+            test_runner: Some(TestRunners::One(runner)),
+            ..VerifyOptions::default()
+        };
+        let plan = plan_of_all(vec![
+            done_task("A", vec![test_ev("alpha")], vec![]),
+            done_task("B", vec![test_ev("alpha")], vec![]),
+        ]);
+        let observations = TestExecutionObservations {
+            providers: vec![imported_provider(
+                1,
+                "receipt",
+                vec![batch_entry("alpha", TestBatchOutcome::Passed)],
+            )],
+        };
+        let observed =
+            verify_observed_with_test_observations(&plan, dir.path(), &opts, &observations)
+                .expect("receipt-backed verification");
+        assert!(
+            observed.report.is_clean(),
+            "{:?}",
+            observed.report.diagnostics
+        );
+        assert!(
+            !listed.exists(),
+            "receipt resolution must not run test.list"
+        );
+        assert!(!ran.exists(), "receipt resolution must not run test.run");
+        assert_eq!(observed.citations.len(), 2);
+        assert!(observed.citations.iter().all(|citation| {
+            citation.resolution.strength == CitationStrength::Executed
+                && citation.resolution.outcome == CitationOutcome::Resolved
+        }));
+        assert!(observed.spend.iter().all(|(_, cost)| !cost.measured));
+    }
+
+    #[test]
+    fn receipt_catalogues_preserve_ambiguity_and_task_local_coverage() {
+        let (dir, _repo) = init();
+        let mut left = named_runner("left", None, &["false"], &["false", PLACEHOLDER]);
+        left.covers = Some(vec!["src/**".into()]);
+        let right = named_runner("right", None, &["false"], &["false", PLACEHOLDER]);
+        let opts = VerifyOptions {
+            execute: true,
+            test_runner: Some(TestRunners::Many(vec![left, right])),
+            ..VerifyOptions::default()
+        };
+        let observations = TestExecutionObservations {
+            providers: vec![
+                imported_provider(
+                    1,
+                    "left",
+                    vec![batch_entry("same", TestBatchOutcome::Passed)],
+                ),
+                imported_provider(
+                    2,
+                    "right",
+                    vec![batch_entry("same", TestBatchOutcome::Passed)],
+                ),
+            ],
+        };
+        let plan = plan_of(done_task(
+            "A",
+            vec![test_ev("same")],
+            vec!["docs/**".into()],
+        ));
+        let observed =
+            verify_observed_with_test_observations(&plan, dir.path(), &opts, &observations)
+                .expect("receipt-backed verification");
+        let ambiguity = observed
+            .report
+            .diagnostics
+            .iter()
+            .find(|diagnostic| diagnostic.code == code::TEST_UNRESOLVED)
+            .expect("a shared receipt catalogue name stays ambiguous");
+        assert!(ambiguity.message.contains("left"), "{}", ambiguity.message);
+        assert!(ambiguity.message.contains("right"), "{}", ambiguity.message);
+
+        let one = TestExecutionObservations {
+            providers: vec![observations.providers[0].clone()],
+        };
+        let one_opts = VerifyOptions {
+            execute: true,
+            test_runner: Some(TestRunners::One(match &opts.test_runner {
+                Some(TestRunners::Many(runners)) => runners[0].clone(),
+                _ => unreachable!("two runners were configured"),
+            })),
+            ..VerifyOptions::default()
+        };
+        let observed = verify_observed_with_test_observations(&plan, dir.path(), &one_opts, &one)
+            .expect("receipt-backed verification");
+        assert!(
+            codes(&observed.report).contains(&code::TEST_IRRELEVANT),
+            "receipt reuse must not bypass task-local coverage: {:?}",
+            observed.report.diagnostics
+        );
+    }
+
+    /// Proof for `evidence.receipt_backed_whole_plan_resolution`.
+    #[test]
+    fn rejected_receipt_rows_are_typed_findings_without_fallback() {
+        let (dir, _repo) = init();
+        let marker = dir.path().join("rejected-provider-started");
+        let runner = named_runner(
+            "receipt",
+            None,
+            &["sh", "-c", &format!("touch '{}'; exit 1", marker.display())],
+            &["false", PLACEHOLDER],
+        );
+        let opts = VerifyOptions {
+            execute: true,
+            test_runner: Some(TestRunners::One(runner)),
+            ..VerifyOptions::default()
+        };
+        for kind in [
+            TestObservationRejectionKind::Absent,
+            TestObservationRejectionKind::Stale,
+            TestObservationRejectionKind::Partial,
+            TestObservationRejectionKind::Untrusted,
+            TestObservationRejectionKind::Incompatible,
+            TestObservationRejectionKind::Fault,
+        ] {
+            let observations = TestExecutionObservations {
+                providers: vec![TestProviderObservation::Rejected {
+                    index: 1,
+                    label: "receipt".into(),
+                    kind,
+                    detail: "negative control".into(),
+                }],
+            };
+            let observed = verify_observed_with_test_observations(
+                &plan_of(done_task("A", vec![test_ev("alpha")], vec![])),
+                dir.path(),
+                &opts,
+                &observations,
+            )
+            .expect("a rejected receipt is a finding, not a verifier crash");
+            let finding = observed
+                .report
+                .diagnostics
+                .iter()
+                .find(|diagnostic| diagnostic.code == code::TEST_UNRESOLVED)
+                .expect("provider rejection finding");
+            assert!(
+                finding.message.contains(kind.label()),
+                "{}",
+                finding.message
+            );
+            let instruction = finding
+                .agent_instruction
+                .as_deref()
+                .expect("receipt rejection has a remedy");
+            assert!(instruction.contains("complete, current and authenticated receipt"));
+            assert!(instruction.contains("--execute"));
+            assert!(!instruction.contains("commands run there"));
+        }
+        assert!(!marker.exists(), "rejection must not start the provider");
+    }
+
+    #[test]
+    fn malformed_receipt_set_shape_and_rows_fail_closed_without_provider_fallback() {
+        let (dir, _repo) = init();
+        let marker = dir.path().join("malformed-receipt-provider-started");
+        let runner = named_runner(
+            "receipt",
+            None,
+            &["sh", "-c", &format!("touch '{}'; exit 1", marker.display())],
+            &["false", PLACEHOLDER],
+        );
+        let options = VerifyOptions {
+            execute: true,
+            test_runner: Some(TestRunners::One(runner)),
+            ..VerifyOptions::default()
+        };
+        let plan = plan_of(done_task("A", vec![test_ev("alpha")], vec![]));
+
+        let cases = [
+            TestExecutionObservations {
+                providers: Vec::new(),
+            },
+            TestExecutionObservations {
+                providers: vec![TestProviderObservation::Rejected {
+                    index: 2,
+                    label: "somebody-else".into(),
+                    kind: TestObservationRejectionKind::Absent,
+                    detail: "wrong row".into(),
+                }],
+            },
+            TestExecutionObservations {
+                providers: vec![TestProviderObservation::Current(TestExecutionObservation {
+                    runner: TestCatalogueRunner {
+                        index: 1,
+                        label: "receipt".into(),
+                        state: TestCatalogueRunnerState::Listed,
+                        names: vec!["alpha".into()],
+                    },
+                    requested: vec!["alpha".into()],
+                    outcomes: vec![batch_entry("alpha", TestBatchOutcome::Passed)],
+                    complete: false,
+                })],
+            },
+        ];
+        for observations in cases {
+            let observed =
+                verify_observed_with_test_observations(&plan, dir.path(), &options, &observations)
+                    .expect("malformed imported observation becomes a typed finding");
+            assert!(
+                codes(&observed.report).contains(&code::TEST_UNRESOLVED),
+                "{:?}",
+                observed.report.diagnostics
+            );
+        }
+        assert!(
+            !marker.exists(),
+            "malformed receipts must not run providers"
+        );
+    }
+
+    #[test]
+    fn receipt_and_direct_batch_outcomes_have_diagnostic_parity() {
+        for outcome in [
+            TestBatchOutcome::Passed,
+            TestBatchOutcome::Failed,
+            TestBatchOutcome::Skipped,
+            TestBatchOutcome::ResourceBreach,
+            TestBatchOutcome::Stopped,
+        ] {
+            let (dir, _repo) = init();
+            let entry = batch_entry("alpha", outcome);
+            let runner = batched_runner(dir.path(), "parity", std::slice::from_ref(&entry));
+            let opts = VerifyOptions {
+                execute: true,
+                test_runner: Some(TestRunners::One(runner)),
+                ..VerifyOptions::default()
+            };
+            let plan = plan_of(done_task("A", vec![test_ev("alpha")], vec![]));
+            let direct = verify_observed(&plan, dir.path(), &opts).expect("direct verify");
+            let receipts = TestExecutionObservations {
+                providers: vec![imported_provider(1, "parity", vec![entry])],
+            };
+            let imported =
+                verify_observed_with_test_observations(&plan, dir.path(), &opts, &receipts)
+                    .expect("receipt verify");
+            let diagnostic_key = |report: &Report| {
+                report
+                    .diagnostics
+                    .iter()
+                    .map(|diagnostic| {
+                        (
+                            diagnostic.code,
+                            diagnostic.task.clone(),
+                            diagnostic.message.clone(),
+                        )
+                    })
+                    .collect::<Vec<_>>()
+            };
+            assert_eq!(
+                diagnostic_key(&direct.report),
+                diagnostic_key(&imported.report),
+                "direct and receipt-backed projection diverged for {outcome:?}"
+            );
+            assert_eq!(
+                direct.citations[0].resolution.outcome, imported.citations[0].resolution.outcome,
+                "typed citation outcome diverged for {outcome:?}"
+            );
+        }
+    }
+
+    /// Proof for `evidence.receipt_backed_whole_plan_resolution`.
+    #[test]
+    fn receipt_and_direct_no_match_sentinel_have_diagnostic_parity() {
+        let (dir, _repo) = init();
+        let runner = named_runner(
+            "selection",
+            None,
+            &["printf", "known\n"],
+            &["true", PLACEHOLDER],
+        );
+        let runners = TestRunners::One(runner);
+        let opts = VerifyOptions {
+            execute: true,
+            test_runner: Some(runners.clone()),
+            ..VerifyOptions::default()
+        };
+        let plan = plan_of(done_task("A", vec![test_ev("known")], vec![]));
+        let direct = verify_observed(&plan, dir.path(), &opts).expect("direct verify");
+        let observation = observe_test_runner(&runners, dir.path(), None, "1")
+            .expect("portable provider observation");
+        assert_eq!(
+            observation.outcomes[0].outcome,
+            TestBatchOutcome::UnprovenSelection
+        );
+        let imported = verify_observed_with_test_observations(
+            &plan,
+            dir.path(),
+            &opts,
+            &TestExecutionObservations {
+                providers: vec![TestProviderObservation::Current(observation)],
+            },
+        )
+        .expect("receipt verify");
+        let diagnostic_key = |report: &Report| {
+            report
+                .diagnostics
+                .iter()
+                .map(|diagnostic| {
+                    (
+                        diagnostic.code,
+                        diagnostic.task.clone(),
+                        diagnostic.message.clone(),
+                    )
+                })
+                .collect::<Vec<_>>()
+        };
+        assert_eq!(
+            diagnostic_key(&direct.report),
+            diagnostic_key(&imported.report)
+        );
+        assert_eq!(
+            direct.citations[0].resolution,
+            imported.citations[0].resolution
+        );
+    }
+
+    #[test]
+    fn receipt_mode_leaves_non_test_evidence_resolution_unchanged() {
+        let (dir, repo) = init();
+        let revision = commit(&repo, &[("proof.txt", "proof\n")], "file proof");
+        let entry = batch_entry("alpha", TestBatchOutcome::Passed);
+        let runner = batched_runner(dir.path(), "mixed", std::slice::from_ref(&entry));
+        let opts = VerifyOptions {
+            execute: true,
+            test_runner: Some(TestRunners::One(runner)),
+            ..VerifyOptions::default()
+        };
+        let plan = plan_of_all(vec![
+            done_task(
+                "F",
+                vec![file_ev(&format!("proof.txt@{revision}"))],
+                vec!["proof.txt".into()],
+            ),
+            done_task("T", vec![test_ev("alpha")], vec![]),
+        ]);
+        let direct = verify_observed(&plan, dir.path(), &opts).expect("direct verify");
+        let imported = verify_observed_with_test_observations(
+            &plan,
+            dir.path(),
+            &opts,
+            &TestExecutionObservations {
+                providers: vec![imported_provider(1, "mixed", vec![entry])],
+            },
+        )
+        .expect("receipt verify");
+        let diagnostic_key = |observed: &ObservedVerification| {
+            observed
+                .report
+                .diagnostics
+                .iter()
+                .map(|diagnostic| {
+                    (
+                        diagnostic.code,
+                        diagnostic.task.clone(),
+                        diagnostic.message.clone(),
+                    )
+                })
+                .collect::<Vec<_>>()
+        };
+        assert_eq!(diagnostic_key(&direct), diagnostic_key(&imported));
+        let file_resolution = |observed: &ObservedVerification| {
+            observed
+                .citations
+                .iter()
+                .find(|citation| citation.kind == EvidenceKind::File)
+                .expect("file citation")
+                .resolution
+                .clone()
+        };
+        assert_eq!(file_resolution(&direct), file_resolution(&imported));
+        assert_eq!(
+            file_resolution(&imported).outcome,
+            CitationOutcome::Resolved
+        );
+    }
+
+    #[test]
+    fn one_batch_fans_exact_results_out_to_every_citation() {
+        let (dir, _repo) = init();
+        let runner = batched_runner(
+            dir.path(),
+            "batch",
+            &[
+                batch_entry("alpha", TestBatchOutcome::Passed),
+                batch_entry("beta", TestBatchOutcome::Passed),
+            ],
+        );
+        let opts = VerifyOptions {
+            execute: true,
+            test_runner: Some(TestRunners::One(runner)),
+            ..VerifyOptions::default()
+        };
+        let plan = plan_of_all(vec![
+            done_task("A", vec![test_ev("alpha")], vec![]),
+            done_task("B", vec![test_ev("alpha")], vec![]),
+            done_task("C", vec![test_ev("beta")], vec![]),
+        ]);
+        let observed = verify_observed(&plan, dir.path(), &opts).unwrap();
+        assert!(
+            observed.report.is_clean(),
+            "{:?}",
+            observed.report.diagnostics
+        );
+        assert_eq!(
+            std::fs::read_to_string(dir.path().join("batch-runs.log"))
+                .unwrap()
+                .lines()
+                .count(),
+            1,
+            "one process owns both unique identities"
+        );
+        assert!(!dir.path().join("legacy-runs.log").exists());
+        assert_eq!(observed.citations.len(), 3);
+        assert!(observed.citations.iter().all(|citation| {
+            citation.resolution.strength == CitationStrength::Executed
+                && citation.resolution.outcome == CitationOutcome::Resolved
+        }));
+        assert_eq!(observed.spend.len(), 1, "one runner reports one cost row");
+        assert!(
+            observed.spend[0].1.elapsed > std::time::Duration::ZERO,
+            "the batch process cost is recorded: {:?}",
+            observed.spend
+        );
+    }
+
+    #[test]
+    fn provider_observation_preserves_attempts_on_a_terminal_failure() {
+        let (dir, _repo) = init();
+        let mut failed = batch_entry("failed", TestBatchOutcome::Failed);
+        failed.attempts = Some(3);
+        let runner = batched_runner(dir.path(), "attempts", &[failed]);
+
+        let observation =
+            observe_test_runner(&TestRunners::One(runner), dir.path(), None, "attempts")
+                .expect("complete attributable failure can be exported");
+
+        assert!(observation.complete);
+        assert_eq!(observation.outcomes.len(), 1);
+        assert_eq!(observation.outcomes[0].outcome, TestBatchOutcome::Failed);
+        assert_eq!(observation.outcomes[0].attempts, Some(3));
+    }
+
+    #[test]
+    fn batching_never_turns_a_hostile_test_identity_into_shell_input() {
+        let (dir, _repo) = init();
+        let marker = dir.path().join("injected");
+        let hostile = format!("$(touch {}) ; echo 'quoted'", marker.display());
+        let runner = batched_runner(
+            dir.path(),
+            "hostile",
+            &[batch_entry(&hostile, TestBatchOutcome::Passed)],
+        );
+        let report = verify(
+            &plan_of(done_task("A", vec![test_ev(&hostile)], vec![])),
+            dir.path(),
+            &VerifyOptions {
+                execute: true,
+                test_runner: Some(TestRunners::One(runner)),
+                ..VerifyOptions::default()
+            },
+        )
+        .unwrap();
+        assert!(report.is_clean(), "{:?}", report.diagnostics);
+        assert!(!marker.exists(), "the test identity reached a shell parser");
+    }
+
+    #[test]
+    fn a_batch_is_not_started_without_execute_or_for_an_ambiguous_name() {
+        let (dir, _repo) = init();
+        let plan = plan_of(done_task("A", vec![test_ev("shared")], vec![]));
+        let runner = || {
+            batched_runner(
+                dir.path(),
+                "first",
+                &[batch_entry("shared", TestBatchOutcome::Passed)],
+            )
+        };
+        let report = verify(
+            &plan,
+            dir.path(),
+            &VerifyOptions {
+                execute: false,
+                test_runner: Some(TestRunners::One(runner())),
+                ..VerifyOptions::default()
+            },
+        )
+        .unwrap();
+        assert!(report.is_clean(), "{:?}", report.diagnostics);
+        assert!(!dir.path().join("batch-runs.log").exists());
+
+        let second = batched_runner(
+            dir.path(),
+            "second",
+            &[batch_entry("shared", TestBatchOutcome::Passed)],
+        );
+        let report = verify(
+            &plan,
+            dir.path(),
+            &VerifyOptions {
+                execute: true,
+                test_runner: Some(TestRunners::Many(vec![runner(), second])),
+                ..VerifyOptions::default()
+            },
+        )
+        .unwrap();
+        assert_eq!(codes(&report), vec![code::TEST_UNRESOLVED]);
+        assert!(
+            !dir.path().join("batch-runs.log").exists(),
+            "ambiguity must be settled before execution"
+        );
+    }
+
+    /// Proof for `evidence.batch_outcomes_preserve_terminal_semantics`.
+    #[test]
+    fn batch_retry_and_terminal_outcomes_do_not_satisfy_l3() {
+        let (dir, _repo) = init();
+        let secret = "ghp_abcdefghijklmnopqrstuvwxyz0123";
+        let mut failed = batch_entry("failed", TestBatchOutcome::Failed);
+        failed.diagnostic = Some(format!("assertion printed TOKEN={secret}"));
+        let mut retried = batch_entry("retried", TestBatchOutcome::RetriedPassed);
+        retried.attempts = Some(2);
+        let mut flaky = batch_entry("flaky", TestBatchOutcome::Flaky);
+        flaky.attempts = Some(3);
+        let runner = batched_runner(
+            dir.path(),
+            "typed",
+            &[
+                batch_entry("passed", TestBatchOutcome::Passed),
+                failed,
+                batch_entry("skipped", TestBatchOutcome::Skipped),
+                batch_entry("expected", TestBatchOutcome::ExpectedFailure),
+                batch_entry("unexpected", TestBatchOutcome::UnexpectedPass),
+                retried,
+                flaky,
+                batch_entry("cancelled", TestBatchOutcome::Cancelled),
+                batch_entry("timed", TestBatchOutcome::TimedOut),
+                batch_entry("resource", TestBatchOutcome::ResourceBreach),
+                batch_entry("framework", TestBatchOutcome::FrameworkCrash),
+                batch_entry("incomplete", TestBatchOutcome::Incomplete),
+                batch_entry("stopped", TestBatchOutcome::Stopped),
+                batch_entry("unavailable", TestBatchOutcome::Unavailable),
+            ],
+        );
+        let opts = VerifyOptions {
+            execute: true,
+            test_runner: Some(TestRunners::One(runner)),
+            ..VerifyOptions::default()
+        };
+        let plan = plan_of_all(vec![
+            done_task("P", vec![test_ev("passed")], vec![]),
+            done_task("F1", vec![test_ev("failed")], vec![]),
+            done_task("F2", vec![test_ev("failed")], vec![]),
+            done_task("S", vec![test_ev("skipped")], vec![]),
+            done_task("E", vec![test_ev("expected")], vec![]),
+            done_task("X", vec![test_ev("unexpected")], vec![]),
+            done_task("R", vec![test_ev("retried")], vec![]),
+            done_task("L", vec![test_ev("flaky")], vec![]),
+            done_task("C", vec![test_ev("cancelled")], vec![]),
+            done_task("TO", vec![test_ev("timed")], vec![]),
+            done_task("RB", vec![test_ev("resource")], vec![]),
+            done_task("FC", vec![test_ev("framework")], vec![]),
+            done_task("I", vec![test_ev("incomplete")], vec![]),
+            done_task("T", vec![test_ev("stopped")], vec![]),
+            done_task("U", vec![test_ev("unavailable")], vec![]),
+        ]);
+        let report = verify(&plan, dir.path(), &opts).unwrap();
+        let failures = report
+            .diagnostics
+            .iter()
+            .filter(|diagnostic| diagnostic.code == code::TEST_FAILED)
+            .collect::<Vec<_>>();
+        assert_eq!(failures.len(), 14, "every unproved citation: {failures:?}");
+        for (task, word) in [
+            ("F1", "failed"),
+            ("F2", "failed"),
+            ("S", "skipped"),
+            ("E", "an expected failure"),
+            ("X", "an unexpected pass"),
+            ("R", "passed after retry"),
+            ("L", "flaky"),
+            ("C", "cancelled"),
+            ("TO", "timed out"),
+            ("RB", "stopped at a resource boundary"),
+            ("FC", "lost to a framework crash"),
+            ("I", "reported incompletely"),
+            ("T", "stopped"),
+            ("U", "unavailable"),
+        ] {
+            let finding = failures
+                .iter()
+                .find(|diagnostic| diagnostic.task.as_deref() == Some(task))
+                .unwrap_or_else(|| panic!("no finding for {task}: {failures:?}"));
+            assert!(finding.message.contains(word), "{}", finding.message);
+            assert!(
+                finding
+                    .agent_instruction
+                    .as_deref()
+                    .is_some_and(|instruction| {
+                        instruction.contains("complete `passed` outcome")
+                            || (word == "failed"
+                                && instruction.contains("stop citing it as evidence"))
+                    }),
+                "instruction does not explain the remedy: {finding:?}"
+            );
+        }
+        let rendered = format!("{failures:?}");
+        assert!(
+            !rendered.contains(secret),
+            "adapter secret leaked: {rendered}"
+        );
+        assert!(
+            rendered.contains("[redacted]"),
+            "detail vanished: {rendered}"
+        );
+    }
+
+    #[test]
+    fn a_nonzero_batch_cannot_overrule_failure_with_claimed_passes() {
+        let (dir, _repo) = init();
+        let mut runner = batched_runner(
+            dir.path(),
+            "nonzero",
+            &[
+                batch_entry("alpha", TestBatchOutcome::Passed),
+                batch_entry("beta", TestBatchOutcome::Passed),
+            ],
+        );
+        runner.batch.as_mut().unwrap().run.push("fail".into());
+        let opts = VerifyOptions {
+            execute: true,
+            test_runner: Some(TestRunners::One(runner)),
+            ..VerifyOptions::default()
+        };
+        let report = verify(
+            &plan_of_all(vec![
+                done_task("A", vec![test_ev("alpha")], vec![]),
+                done_task("B", vec![test_ev("beta")], vec![]),
+            ]),
+            dir.path(),
+            &opts,
+        )
+        .unwrap();
+        let failed = report
+            .diagnostics
+            .iter()
+            .filter(|diagnostic| diagnostic.code == code::TEST_FAILED)
+            .collect::<Vec<_>>();
+        assert_eq!(failed.len(), 2, "every claimed pass is refused: {failed:?}");
+        assert!(
+            failed
+                .iter()
+                .all(|finding| finding.message.contains("unavailable")),
+            "a nonzero adapter did not produce attributable outcomes: {failed:?}"
+        );
+        assert_eq!(
+            failed
+                .iter()
+                .filter(|finding| !finding.detail.is_empty())
+                .count(),
+            1,
+            "one runner-level failure must print its detail once: {failed:?}"
+        );
+        assert!(
+            !format!("{failed:?}").contains("aplan-test-batch-"),
+            "private invocation paths reached the finding: {failed:?}"
+        );
+    }
+
+    #[test]
+    fn an_incomplete_batch_fails_every_requested_identity_not_only_the_missing_one() {
+        let (dir, _repo) = init();
+        let mut runner = batched_runner(
+            dir.path(),
+            "partial",
+            &[batch_entry("alpha", TestBatchOutcome::Passed)],
+        );
+        runner.list = vec!["printf".into(), "alpha\nbeta\n".into()];
+        let report = verify(
+            &plan_of_all(vec![
+                done_task("A", vec![test_ev("alpha")], vec![]),
+                done_task("B", vec![test_ev("beta")], vec![]),
+            ]),
+            dir.path(),
+            &VerifyOptions {
+                execute: true,
+                test_runner: Some(TestRunners::One(runner)),
+                ..VerifyOptions::default()
+            },
+        )
+        .unwrap();
+        let failed = report
+            .diagnostics
+            .iter()
+            .filter(|diagnostic| diagnostic.code == code::TEST_FAILED)
+            .collect::<Vec<_>>();
+        assert_eq!(
+            failed.len(),
+            2,
+            "a partial answer proves nothing: {failed:?}"
+        );
+        assert!(
+            failed
+                .iter()
+                .all(|finding| finding.message.contains("unavailable"))
+        );
+    }
+
+    #[test]
+    fn an_unstartable_batch_fails_every_identity_without_inventing_output() {
+        let (dir, _repo) = init();
+        let mut runner = batched_runner(
+            dir.path(),
+            "missing",
+            &[
+                batch_entry("alpha", TestBatchOutcome::Passed),
+                batch_entry("beta", TestBatchOutcome::Passed),
+            ],
+        );
+        runner.output_lines = Some(0);
+        runner.batch.as_mut().unwrap().run = vec![
+            "aplan-a1-642-no-such-adapter".into(),
+            aplan_config::BATCH_MANIFEST_PLACEHOLDER.into(),
+            aplan_config::BATCH_RESULT_PLACEHOLDER.into(),
+        ];
+        let observed = verify_observed(
+            &plan_of_all(vec![
+                done_task("A", vec![test_ev("alpha")], vec![]),
+                done_task("B", vec![test_ev("beta")], vec![]),
+            ]),
+            dir.path(),
+            &VerifyOptions {
+                execute: true,
+                test_runner: Some(TestRunners::One(runner)),
+                ..VerifyOptions::default()
+            },
+        )
+        .unwrap();
+        let failures = observed
+            .report
+            .diagnostics
+            .iter()
+            .filter(|diagnostic| diagnostic.code == code::TEST_FAILED)
+            .collect::<Vec<_>>();
+        assert_eq!(failures.len(), 2);
+        assert!(failures.iter().all(|finding| {
+            finding.message.contains("unavailable") && finding.detail.is_empty()
+        }));
+        assert!(observed.citations.iter().all(|citation| {
+            citation.resolution.outcome == CitationOutcome::Unavailable
+                && citation.resolution.strength == CitationStrength::Resolved
+        }));
+    }
+
+    #[test]
+    fn a_rolestat_shaped_plan_starts_one_batch_for_each_of_eight_runners() {
+        let (dir, _repo) = init();
+        let mut runners = Vec::new();
+        let mut distinct = Vec::new();
+        for runner_index in 0..8 {
+            let count = if runner_index == 7 { 24 } else { 25 };
+            let names = (0..count)
+                .map(|test_index| format!("r{runner_index}::test_{test_index:03}"))
+                .collect::<Vec<_>>();
+            let outcomes = names
+                .iter()
+                .map(|name| batch_entry(name, TestBatchOutcome::Passed))
+                .collect::<Vec<_>>();
+            runners.push(batched_runner(
+                dir.path(),
+                &format!("r{runner_index}"),
+                &outcomes,
+            ));
+            distinct.extend(names);
+        }
+        assert_eq!(distinct.len(), 199);
+        let mut citations = distinct.clone();
+        citations.extend(distinct.iter().take(42).cloned());
+        assert_eq!(citations.len(), 241);
+        let tasks = citations
+            .into_iter()
+            .enumerate()
+            .map(|(index, name)| done_task(&format!("R-{index:03}"), vec![test_ev(&name)], vec![]))
+            .collect();
+        let opts = VerifyOptions {
+            execute: true,
+            test_runner: Some(TestRunners::Many(runners)),
+            ..VerifyOptions::default()
+        };
+        let (report, spend) = verify_measured(&plan_of_all(tasks), dir.path(), &opts).unwrap();
+        assert!(report.is_clean(), "{:?}", report.diagnostics);
+        assert_eq!(
+            std::fs::read_to_string(dir.path().join("batch-runs.log"))
+                .unwrap()
+                .lines()
+                .count(),
+            8
+        );
+        assert!(!dir.path().join("legacy-runs.log").exists());
+        assert_eq!(spend.len(), 8, "one cost row per runner: {spend:?}");
+        assert!(
+            spend
+                .iter()
+                .all(|(_, cost)| cost.elapsed > std::time::Duration::ZERO),
+            "every batch process contributes its measured cost: {spend:?}"
+        );
+    }
+
     /// One runner and one exact name select one execution, however many tasks
     /// cite it (`A1-243`).
     ///
@@ -2604,12 +5748,14 @@ mod tests {
     fn each_distinct_cited_test_runs_once_however_many_tasks_cite_it() {
         let (dir, _repo) = init();
         let opts = VerifyOptions {
+            detect_drift: false,
             version: None,
             traces_root: None,
             config_file: None,
             execute: true,
             test_runner: Some(TestRunners::One(counting_runner(dir.path(), true))),
             max_unrelated_files: None,
+            observation_inputs: None,
             url_check: None,
         };
         let plan = plan_of_all(vec![
@@ -2617,7 +5763,7 @@ mod tests {
             done_task("B", vec![test_ev("alpha")], vec![]),
             done_task("C", vec![test_ev("beta")], vec![]),
         ]);
-        let r = verify(&plan, dir.path(), &opts).unwrap();
+        let (r, spend) = verify_measured(&plan, dir.path(), &opts).unwrap();
         assert!(r.is_clean(), "{:?}", r.diagnostics);
 
         let mut ran = names_run(dir.path());
@@ -2628,9 +5774,11 @@ mod tests {
             crate::resolve::MISS_SENTINEL.to_string(),
         ];
         want.sort();
-        assert_eq!(
-            ran, want,
-            "two names and the sentinel, each exactly once -- three spawns for three citations"
+        assert_eq!(ran, want, "two names and the sentinel, each exactly once");
+        assert_eq!(spend.len(), 1, "the legacy fallback reports runner cost");
+        assert!(
+            spend[0].1.elapsed > std::time::Duration::ZERO,
+            "legacy process cost was not recorded: {spend:?}"
         );
     }
 
@@ -2639,12 +5787,14 @@ mod tests {
     fn a_failing_test_fails_every_citation_without_running_twice() {
         let (dir, _repo) = init();
         let opts = VerifyOptions {
+            detect_drift: false,
             version: None,
             traces_root: None,
             config_file: None,
             execute: true,
             test_runner: Some(TestRunners::One(counting_runner(dir.path(), false))),
             max_unrelated_files: None,
+            observation_inputs: None,
             url_check: None,
         };
         let plan = plan_of_all(vec![
@@ -2681,6 +5831,7 @@ mod tests {
         // Exits 0 and says nothing, whatever name it is handed: a pass and a
         // miss are the same bytes.
         let opts = VerifyOptions {
+            detect_drift: false,
             config_file: Some(config),
             execute: true,
             test_runner: Some(TestRunners::One(runner(
@@ -2714,12 +5865,14 @@ mod tests {
     fn a_second_verify_runs_the_tests_again() {
         let (dir, _repo) = init();
         let opts = VerifyOptions {
+            detect_drift: false,
             version: None,
             traces_root: None,
             config_file: None,
             execute: true,
             test_runner: Some(TestRunners::One(counting_runner(dir.path(), true))),
             max_unrelated_files: None,
+            observation_inputs: None,
             url_check: None,
         };
         let plan = plan_of_all(vec![done_task("A", vec![test_ev("alpha")], vec![])]);
@@ -2735,10 +5888,12 @@ mod tests {
 
     fn url_opts(reachable: bool) -> VerifyOptions {
         VerifyOptions {
+            detect_drift: false,
             config_file: None,
             url_check: Some(aplan_config::UrlCheck {
                 max_memory: None,
                 max_processes: None,
+                max_output: None,
                 wrap: None,
                 timeout_seconds: None,
                 check: vec![
@@ -2821,10 +5976,12 @@ mod tests {
         let (dir, _repo) = init();
         let log = dir.path().join("handed.log");
         let opts = VerifyOptions {
+            detect_drift: false,
             config_file: None,
             url_check: Some(aplan_config::UrlCheck {
                 max_memory: None,
                 max_processes: None,
+                max_output: None,
                 wrap: None,
                 timeout_seconds: None,
                 check: vec![
@@ -2877,10 +6034,12 @@ mod tests {
         let (dir, _repo) = init();
         let counter = dir.path().join("asked.log");
         let opts = VerifyOptions {
+            detect_drift: false,
             config_file: None,
             url_check: Some(aplan_config::UrlCheck {
                 max_memory: None,
                 max_processes: None,
+                max_output: None,
                 wrap: None,
                 timeout_seconds: None,
                 check: vec![
@@ -2897,6 +6056,90 @@ mod tests {
         assert_eq!(report.diagnostics.len(), 3, "each citation is reported");
         let asked = std::fs::read_to_string(&counter).unwrap().lines().count();
         assert_eq!(asked, 1, "the checker was asked {asked} times for one url");
+    }
+
+    /// A normal refusal cached before a different URL crashes the checker stays
+    /// the answer for every citation of the first URL (`A1-473`).
+    ///
+    /// More than one candidate, with the offending one in the middle: this is
+    /// the ordering that distinguishes a per-URL verdict cache from a global
+    /// fault checked first. It also proves the named behaviour
+    /// `verify.url_checker_outcomes_are_stable`.
+    #[cfg(unix)]
+    #[test]
+    fn a_url_checker_fault_does_not_erase_an_earlier_cached_answer() {
+        let (dir, _repo) = init();
+        let asked = dir.path().join("asked.log");
+        let script = format!(
+            "echo \"$0\" >> {}; case \"$0\" in */crash) kill -KILL $$ ;; *) exit 1 ;; esac",
+            asked.display()
+        );
+        let opts = VerifyOptions {
+            detect_drift: false,
+            config_file: Some(dir.path().join(".aplan.yml")),
+            url_check: Some(aplan_config::UrlCheck {
+                max_memory: None,
+                max_processes: None,
+                max_output: None,
+                wrap: None,
+                timeout_seconds: None,
+                check: vec![
+                    "sh".into(),
+                    "-c".into(),
+                    script,
+                    aplan_config::URL_PLACEHOLDER.into(),
+                ],
+            }),
+            ..VerifyOptions::default()
+        };
+        let first = "https://example.invalid/first";
+        let crash = "https://example.invalid/crash";
+        let evidence = |reference: &str| Evidence {
+            kind: EvidenceKind::Url,
+            reference: reference.to_string(),
+            captured: None,
+        };
+        let plan = plan_of_all(vec![
+            done_task("A", vec![evidence(first)], vec![]),
+            done_task("B", vec![evidence(crash)], vec![]),
+            done_task("C", vec![evidence(first)], vec![]),
+        ]);
+
+        let report = verify(&plan, dir.path(), &opts).expect("a finding, not an abort");
+        let dead: Vec<_> = report
+            .diagnostics
+            .iter()
+            .filter(|d| d.message.contains("did not answer"))
+            .collect();
+        assert_eq!(
+            dead.iter()
+                .filter_map(|d| d.task.as_deref())
+                .collect::<Vec<_>>(),
+            vec!["A", "C"],
+            "the cached refusal applies to both of its citations, never the crashed one: {:?}",
+            report.diagnostics
+        );
+        let fault = report
+            .diagnostics
+            .iter()
+            .find(|d| d.task.is_none())
+            .expect("one finding about the checker");
+        assert!(fault.message.contains("killed"), "{}", fault.message);
+        assert!(
+            !fault.message.contains("no `url` citation was checked"),
+            "the first citation was checked: {}",
+            fault.message
+        );
+        let calls: Vec<_> = std::fs::read_to_string(asked)
+            .expect("the checker recorded its calls")
+            .lines()
+            .map(str::to_string)
+            .collect();
+        assert_eq!(
+            calls,
+            vec![first, crash],
+            "the cached first answer survives the later checker fault"
+        );
     }
 
     /// The measurement and the check answer the same question, and this asks
@@ -3029,6 +6272,38 @@ mod tests {
         );
     }
 
+    /// The ancestry cache is an optimization, not a snapshot claim: moving
+    /// `HEAD` changes the key, so a result established against the old tree is
+    /// never reused for the new one (`A1-572`).
+    #[test]
+    fn head_reachability_cache_is_keyed_by_the_observed_head() {
+        let (dir, raw) = init();
+        let base = commit(&raw, &[("src/base.rs", "base")], "base");
+        let tip = commit(&raw, &[("src/tip.rs", "tip")], "tip");
+        let repo = Repo::discover(dir.path()).expect("discover");
+        let tip_commit = repo.resolve_commit(&tip).expect("tip");
+        assert_eq!(
+            repo.head_reachability(&tip_commit),
+            crate::repo::HeadReachability::Reachable
+        );
+        // Populate and hit the same cache entry before changing the subject.
+        assert_eq!(
+            repo.head_reachability(&tip_commit),
+            crate::repo::HeadReachability::Reachable
+        );
+
+        let base_object = raw
+            .find_object(git2::Oid::from_str(&base).unwrap(), None)
+            .expect("base object");
+        raw.reset(&base_object, git2::ResetType::Hard, None)
+            .expect("move HEAD behind tip");
+        assert_eq!(
+            repo.head_reachability(&tip_commit),
+            crate::repo::HeadReachability::Unreachable,
+            "the cache reused the old HEAD's answer"
+        );
+    }
+
     #[test]
     fn a_runner_that_could_not_answer_is_not_a_runner_that_listed_nothing() {
         // Found auditing `A1-120`. The exit status was ignored, so a package that
@@ -3042,6 +6317,7 @@ mod tests {
         // no task is at fault, and the run still reports everything else.
         let (dir, _repo) = init();
         let opts = VerifyOptions {
+            detect_drift: false,
             config_file: None,
             test_runner: Some(TestRunners::One(runner(
                 &[
@@ -3138,9 +6414,11 @@ mod tests {
     fn a_url_checker_that_cannot_run_is_a_finding_not_an_abort() {
         let (dir, _repo) = init();
         let opts = VerifyOptions {
+            detect_drift: false,
             url_check: Some(aplan_config::UrlCheck {
                 max_memory: None,
                 max_processes: None,
+                max_output: None,
                 wrap: None,
                 timeout_seconds: None,
                 check: vec![
@@ -3180,6 +6458,7 @@ mod tests {
     fn a_run_command_that_will_not_launch_is_not_a_failing_test() {
         let (dir, _repo) = init();
         let opts = VerifyOptions {
+            detect_drift: false,
             execute: true,
             test_runner: Some(TestRunners::One(runner(
                 &["printf", "a_real_test\n"],
@@ -3231,6 +6510,7 @@ mod tests {
     fn an_execution_fault_does_not_silence_what_the_listing_settled() {
         let (dir, _repo) = init();
         let opts = VerifyOptions {
+            detect_drift: false,
             execute: true,
             test_runner: Some(TestRunners::One(runner(
                 &["printf", "a_real_test\n"],
@@ -3256,22 +6536,38 @@ mod tests {
 
     /// The defect, as a test that would hang without the fix.
     ///
-    /// `sleep 30` against a one-second limit: with the timeout this finishes in
-    /// about a second, and a regression makes it take thirty, which is the
-    /// bounded version of "forever" a test suite can afford to assert.
-    /// Proves the named behaviour `verify.configured_commands_are_bounded` (`A1-211`).
+    /// A child blocked opening a FIFO against a one-second limit finishes when
+    /// the verifier kills it. The test observes the configured timeout rather
+    /// than arranging correctness around a fixed sleep.
+    /// Proves the named behaviours `verify.configured_commands_are_bounded` and
+    /// `verify.url_checker_outcomes_are_stable` (`A1-211`).
     #[test]
     fn a_url_check_that_never_returns_is_abandoned_and_reported() {
         let (dir, _repo) = init();
+        let asked = dir.path().join("url-timeouts.log");
+        let blocked = dir.path().join("url-blocked.fifo");
+        assert!(
+            std::process::Command::new("mkfifo")
+                .arg(&blocked)
+                .status()
+                .expect("mkfifo runs")
+                .success()
+        );
         let opts = VerifyOptions {
+            detect_drift: false,
             url_check: Some(aplan_config::UrlCheck {
                 max_memory: None,
                 max_processes: None,
+                max_output: None,
                 wrap: None,
                 check: vec![
                     "sh".to_string(),
                     "-c".to_string(),
-                    "sleep 30".to_string(),
+                    format!(
+                        "echo x >> {}; exec cat {}",
+                        asked.display(),
+                        blocked.display()
+                    ),
                     aplan_config::URL_PLACEHOLDER.to_string(),
                 ],
                 timeout_seconds: Some(1),
@@ -3279,19 +6575,23 @@ mod tests {
             ..VerifyOptions::default()
         };
         let started = std::time::Instant::now();
-        let report = verify(&url_task(&["https://example.com/a"]), dir.path(), &opts)
-            .expect("a finding, not a wait");
+        let same = "https://example.com/a";
+        let observed = verify_observed(&url_task(&[same, same, same]), dir.path(), &opts)
+            .expect("findings, not repeated waits");
         let took = started.elapsed();
         assert!(
             took < std::time::Duration::from_secs(20),
             "the run waited {took:?}, so nothing bounded it"
         );
 
-        let d = report
+        let found: Vec<_> = observed
+            .report
             .diagnostics
             .iter()
-            .find(|d| d.code == aplan_core::code::URL_UNREACHABLE)
-            .expect("the citation is reported");
+            .filter(|d| d.code == aplan_core::code::URL_UNREACHABLE)
+            .collect();
+        assert_eq!(found.len(), 3, "every citation is reported: {found:?}");
+        let d = found[0];
         // Nothing was learned, and the message says which of the three outcomes
         // this is: not answered, not refused, *not checked*.
         assert!(
@@ -3300,29 +6600,59 @@ mod tests {
             d.message
         );
         assert_eq!(d.severity, aplan_core::Severity::Warning);
+        assert!(
+            observed.citations.iter().all(|citation| {
+                citation.resolution.outcome == CitationOutcome::TimedOut
+                    && citation.resolution.strength == CitationStrength::Recorded
+            }),
+            "the inspection ledger must not turn a timeout into failure or success: {:?}",
+            observed.citations
+        );
+        assert_eq!(
+            std::fs::read_to_string(asked)
+                .expect("the checker recorded its call")
+                .lines()
+                .count(),
+            1,
+            "one URL gets one terminal check outcome, including a timeout"
+        );
     }
 
     /// The same for a runner that will not answer: an error, because a runner
     /// that cannot list is not a plan that is clean, and it takes the route
     /// `A1-066` built for a runner that could not be asked.
-    /// Proves the named behaviour `verify.configured_commands_are_bounded` (`A1-211`).
+    /// Proves the named behaviours `verify.configured_commands_are_bounded` and
+    /// `tui.verification_is_typed_and_non_blocking` (`A1-211`).
     #[test]
     fn a_test_list_that_never_returns_is_abandoned_and_reported() {
         let (dir, _repo) = init();
-        let mut runner = runner(&["sh", "-c", "sleep 30"], &["true", PLACEHOLDER]);
+        let blocked = dir.path().join("test-list-blocked.fifo");
+        assert!(
+            std::process::Command::new("mkfifo")
+                .arg(&blocked)
+                .status()
+                .expect("mkfifo runs")
+                .success()
+        );
+        let mut runner = runner(
+            &["cat", blocked.to_str().expect("fixture path is UTF-8")],
+            &["true", PLACEHOLDER],
+        );
         runner.timeout_seconds = Some(1);
         let opts = VerifyOptions {
+            detect_drift: false,
             test_runner: Some(TestRunners::One(runner)),
             ..VerifyOptions::default()
         };
         let started = std::time::Instant::now();
         let plan = plan_of(done_task("A", vec![test_ev("a_real_test")], vec![]));
-        let report = verify(&plan, dir.path(), &opts).expect("a finding, not a wait");
+        let observed = verify_observed(&plan, dir.path(), &opts).expect("a finding, not a wait");
         assert!(
             started.elapsed() < std::time::Duration::from_secs(20),
             "nothing bounded the listing"
         );
-        let d = report
+        let d = observed
+            .report
             .diagnostics
             .iter()
             .find(|d| d.task.is_none())
@@ -3333,6 +6663,43 @@ mod tests {
             d.message
         );
         assert_eq!(d.severity, aplan_core::Severity::Error);
+        assert_eq!(
+            observed.citations[0].resolution.outcome,
+            CitationOutcome::TimedOut
+        );
+    }
+
+    /// Proof for `tui.verification_is_typed_and_non_blocking`: the
+    /// output-retention bound is not rendered as a generic unavailable
+    /// provider. A user deciding whether to raise the bound needs the exact
+    /// state, and the typed ledger carries it without parsing the finding.
+    #[test]
+    fn an_output_limited_test_listing_is_distinct_in_the_citation_ledger() {
+        let (dir, _repo) = init();
+        let mut configured = runner(
+            &["sh", "-c", "head -c 2048 /dev/zero"],
+            &["true", PLACEHOLDER],
+        );
+        configured.max_output = Some("1K".to_string());
+        let options = VerifyOptions {
+            test_runner: Some(TestRunners::One(configured)),
+            ..VerifyOptions::default()
+        };
+        let plan = plan_of(done_task("A", vec![test_ev("a_real_test")], vec![]));
+
+        let observed = verify_observed(&plan, dir.path(), &options).expect("a typed result");
+        assert_eq!(
+            observed.citations[0].resolution.outcome,
+            CitationOutcome::OutputLimited
+        );
+        assert!(
+            observed
+                .report
+                .diagnostics
+                .iter()
+                .any(|finding| finding.message.contains("test.max_output")),
+            "the report and typed result must describe the same bound"
+        );
     }
 
     /// Killed with its descendants, not merely signalled (`A1-121`).
@@ -3359,6 +6726,7 @@ mod tests {
         // Well below the sleep, so the command is killed mid-sleep.
         runner.timeout_seconds = Some(1);
         let opts = VerifyOptions {
+            detect_drift: false,
             test_runner: Some(TestRunners::One(runner)),
             ..VerifyOptions::default()
         };
@@ -3383,6 +6751,7 @@ mod tests {
         let mut runner = runner(&["printf", "a_real_test\n"], &["true", PLACEHOLDER]);
         runner.timeout_seconds = Some(0);
         let opts = VerifyOptions {
+            detect_drift: false,
             test_runner: Some(TestRunners::One(runner)),
             ..VerifyOptions::default()
         };
@@ -3497,6 +6866,55 @@ mod tests {
         );
     }
 
+    /// Proves `evidence.commit_requires_head_reachability` for `APLAN035`
+    /// (`A1-572`): an ordinary commit outside `HEAD` history cannot make a
+    /// reachable merge look as though the task also cited the work commit.
+    #[test]
+    fn unreachable_ordinary_commit_cannot_acquit_reachable_merge_evidence() {
+        let (dir, repo) = init();
+        let base = commit(&repo, &[("f.txt", "one")], "first");
+        let work = commit(&repo, &[("src/a.rs", "work")], "the work");
+        let sig = git2::Signature::now("Test", "test@example.com").expect("sig");
+        let base_commit = repo
+            .find_commit(git2::Oid::from_str(&base).expect("base oid"))
+            .expect("base");
+        let work_commit = repo
+            .find_commit(git2::Oid::from_str(&work).expect("work oid"))
+            .expect("work");
+        let tree = work_commit.tree().expect("tree");
+        let merge = repo
+            .commit(
+                Some("HEAD"),
+                &sig,
+                &sig,
+                "Merge",
+                &tree,
+                &[&work_commit, &base_commit],
+            )
+            .expect("merge")
+            .to_string();
+        let unreachable = commit(&repo, &[("src/side.rs", "side")], "ordinary side");
+        let merge_object = repo
+            .find_object(git2::Oid::from_str(&merge).unwrap(), None)
+            .expect("merge object");
+        repo.reset(&merge_object, git2::ResetType::Hard, None)
+            .expect("abandon the ordinary commit");
+
+        let task = done_task(
+            "A",
+            vec![commit_ev(&merge), commit_ev(&unreachable)],
+            vec!["src/**".into()],
+        );
+        let report = verify(&plan_of(task), dir.path(), &VerifyOptions::default()).unwrap();
+        let found = codes(&report);
+        assert!(found.contains(&code::COMMIT_UNRESOLVED), "{found:?}");
+        assert!(
+            found.contains(&code::MERGE_COMMIT_EVIDENCE),
+            "the rejected ordinary object acquitted merge evidence: {:?}",
+            report.diagnostics
+        );
+    }
+
     /// The `A1-066` property, at the layer that had the defect: one runner that
     /// will not run must not cost an unrelated task its finding.
     #[test]
@@ -3504,6 +6922,7 @@ mod tests {
         let (dir, repo) = init();
         let sha = commit(&repo, &[("src/a.rs", "x")], "work");
         let opts = VerifyOptions {
+            detect_drift: false,
             config_file: None,
             test_runner: Some(TestRunners::One(runner(
                 &["bash", "-c", "exit 3"],
@@ -3554,6 +6973,7 @@ mod tests {
         // possible flake. There is no file to be busy now.
         let script = format!("echo x >> {}; printf 'alpha\\nbeta\\n'", counter.display());
         let opts = VerifyOptions {
+            detect_drift: false,
             version: None,
             traces_root: None,
             config_file: None,
@@ -3563,6 +6983,7 @@ mod tests {
                 &["true", PLACEHOLDER],
             ))),
             max_unrelated_files: None,
+            observation_inputs: None,
             url_check: None,
         };
         // Three tasks, each citing a test.
@@ -3606,13 +7027,17 @@ mod tests {
             std::fs::create_dir_all(tmp.path().join(d)).unwrap();
         }
         let opts = VerifyOptions {
+            detect_drift: false,
             version: None,
             traces_root: None,
             config_file: None,
             execute: false,
             test_runner: Some(TestRunners::One(TestRunner {
+                weight: None,
+                exclusive: None,
                 max_memory: None,
                 max_processes: None,
+                max_output: None,
                 wrap: None,
                 expect_tests: None,
                 skipped: None,
@@ -3627,6 +7052,7 @@ mod tests {
                 )
             })),
             max_unrelated_files: None,
+            observation_inputs: None,
             url_check: None,
         };
         let task = done_task("A", vec![test_ev("app_builds")], paths);
@@ -3716,6 +7142,7 @@ mod tests {
         let (tmp, _repo) = init();
         std::fs::create_dir_all(tmp.path().join("server")).unwrap();
         let opts = VerifyOptions {
+            detect_drift: false,
             version: None,
             traces_root: None,
             config_file: None,
@@ -3727,6 +7154,7 @@ mod tests {
                 &["true", PLACEHOLDER],
             ))),
             max_unrelated_files: None,
+            observation_inputs: None,
             url_check: None,
         };
         let task = done_task(
@@ -3895,14 +7323,18 @@ mod tests {
         // would fail the build for it.
         let (tmp, _repo) = init();
         let opts = VerifyOptions {
+            detect_drift: false,
             version: None,
             traces_root: None,
             config_file: None,
             execute: false,
             test_runner: Some(TestRunners::Many(vec![
                 TestRunner {
+                    weight: None,
+                    exclusive: None,
                     max_memory: None,
                     max_processes: None,
+                    max_output: None,
                     wrap: None,
                     expect_tests: None,
                     skipped: None,
@@ -3912,8 +7344,11 @@ mod tests {
                     ..named_runner("libs", None, &["printf", "local\n"], &["true", PLACEHOLDER])
                 },
                 TestRunner {
+                    weight: None,
+                    exclusive: None,
                     max_memory: None,
                     max_processes: None,
+                    max_output: None,
                     wrap: None,
                     expect_tests: None,
                     skipped: None,
@@ -3924,6 +7359,7 @@ mod tests {
                 },
             ])),
             max_unrelated_files: None,
+            observation_inputs: None,
             url_check: None,
         };
         let task = done_task(
@@ -3945,14 +7381,18 @@ mod tests {
         // covering the task, is exactly the borrowed proof the rule is for.
         let (tmp, _repo) = init();
         let opts = VerifyOptions {
+            detect_drift: false,
             version: None,
             traces_root: None,
             config_file: None,
             execute: false,
             test_runner: Some(TestRunners::Many(vec![
                 TestRunner {
+                    weight: None,
+                    exclusive: None,
                     max_memory: None,
                     max_processes: None,
+                    max_output: None,
                     wrap: None,
                     expect_tests: None,
                     skipped: None,
@@ -3962,8 +7402,11 @@ mod tests {
                     ..named_runner("server", None, &["printf", "srv\n"], &["true", PLACEHOLDER])
                 },
                 TestRunner {
+                    weight: None,
+                    exclusive: None,
                     max_memory: None,
                     max_processes: None,
+                    max_output: None,
                     wrap: None,
                     expect_tests: None,
                     skipped: None,
@@ -3974,6 +7417,7 @@ mod tests {
                 },
             ])),
             max_unrelated_files: None,
+            observation_inputs: None,
             url_check: None,
         };
         let task = done_task(
@@ -4008,14 +7452,18 @@ mod tests {
         // and the rule reports only what it can demonstrate.
         let (tmp, _repo) = init();
         let opts = VerifyOptions {
+            detect_drift: false,
             version: None,
             traces_root: None,
             config_file: None,
             execute: false,
             test_runner: Some(TestRunners::Many(vec![
                 TestRunner {
+                    weight: None,
+                    exclusive: None,
                     max_memory: None,
                     max_processes: None,
+                    max_output: None,
                     wrap: None,
                     expect_tests: None,
                     skipped: None,
@@ -4032,6 +7480,7 @@ mod tests {
                 ),
             ])),
             max_unrelated_files: None,
+            observation_inputs: None,
             url_check: None,
         };
         let task = done_task(
@@ -4051,8 +7500,11 @@ mod tests {
     /// while the rest of the same crate covers only itself.
     fn invariant_runner() -> TestRunner {
         TestRunner {
+            weight: None,
+            exclusive: None,
             max_memory: None,
             max_processes: None,
+            max_output: None,
             wrap: None,
             expect_tests: None,
             skipped: None,
@@ -4083,12 +7535,14 @@ mod tests {
         // true, and `APLAN024` is what asks for such tests in the first place.
         let (tmp, _repo) = init();
         let opts = VerifyOptions {
+            detect_drift: false,
             version: None,
             traces_root: None,
             config_file: None,
             execute: false,
             test_runner: Some(TestRunners::One(invariant_runner())),
             max_unrelated_files: None,
+            observation_inputs: None,
             url_check: None,
         };
         let task = done_task(
@@ -4111,12 +7565,14 @@ mod tests {
         // was built for still fires from the very same runner.
         let (tmp, _repo) = init();
         let opts = VerifyOptions {
+            detect_drift: false,
             version: None,
             traces_root: None,
             config_file: None,
             execute: false,
             test_runner: Some(TestRunners::One(invariant_runner())),
             max_unrelated_files: None,
+            observation_inputs: None,
             url_check: None,
         };
         let task = done_task(
@@ -4139,8 +7595,11 @@ mod tests {
         // one, or they cannot see why the verdict came out as it did.
         let (tmp, _repo) = init();
         let runner = TestRunner {
+            weight: None,
+            exclusive: None,
             max_memory: None,
             max_processes: None,
+            max_output: None,
             wrap: None,
             expect_tests: None,
             skipped: None,
@@ -4153,12 +7612,14 @@ mod tests {
             ..invariant_runner()
         };
         let opts = VerifyOptions {
+            detect_drift: false,
             version: None,
             traces_root: None,
             config_file: None,
             execute: false,
             test_runner: Some(TestRunners::One(runner)),
             max_unrelated_files: None,
+            observation_inputs: None,
             url_check: None,
         };
         let task = done_task(
@@ -4185,8 +7646,11 @@ mod tests {
         // ahead of a broad one. Untested, that is just a comment.
         let (tmp, _repo) = init();
         let runner = TestRunner {
+            weight: None,
+            exclusive: None,
             max_memory: None,
             max_processes: None,
+            max_output: None,
             wrap: None,
             expect_tests: None,
             skipped: None,
@@ -4211,12 +7675,14 @@ mod tests {
             )
         };
         let opts = VerifyOptions {
+            detect_drift: false,
             version: None,
             traces_root: None,
             config_file: None,
             execute: false,
             test_runner: Some(TestRunners::One(runner)),
             max_unrelated_files: None,
+            observation_inputs: None,
             url_check: None,
         };
         // The narrow entry claims only the web tree, so a task elsewhere is
@@ -4245,8 +7711,11 @@ mod tests {
         // subset says this particular test only proves something about xtask.
         let (tmp, _repo) = init();
         let runner = TestRunner {
+            weight: None,
+            exclusive: None,
             max_memory: None,
             max_processes: None,
+            max_output: None,
             wrap: None,
             expect_tests: None,
             skipped: None,
@@ -4265,12 +7734,14 @@ mod tests {
             )
         };
         let opts = VerifyOptions {
+            detect_drift: false,
             version: None,
             traces_root: None,
             config_file: None,
             execute: false,
             test_runner: Some(TestRunners::One(runner)),
             max_unrelated_files: None,
+            observation_inputs: None,
             url_check: None,
         };
         let task = done_task("A", vec![test_ev("unit::a")], vec!["libs/**".into()]);
@@ -4282,12 +7753,196 @@ mod tests {
         );
     }
 
+    /// A single near match is data, not only a sentence: this is the case a
+    /// guarded `verify --fix` may apply (`A1-199`).
+    #[test]
+    fn a_single_near_test_name_carries_the_exact_repair() {
+        let (dir, _repo) = init();
+        let opts = VerifyOptions {
+            detect_drift: false,
+            test_runner: Some(TestRunners::One(named_runner(
+                "tests",
+                None,
+                &["printf", "suite::known_name\n"],
+                &["true", PLACEHOLDER],
+            ))),
+            ..VerifyOptions::default()
+        };
+        let report = verify(
+            &plan_of(done_task("A", vec![test_ev("known_name")], vec![])),
+            dir.path(),
+            &opts,
+        )
+        .expect("verify");
+        let diagnostic = report
+            .diagnostics
+            .iter()
+            .find(|d| d.code == code::TEST_UNRESOLVED)
+            .expect("near miss");
+        assert_eq!(
+            diagnostic.repair,
+            Some(aplan_core::Repair::ReplaceEvidence {
+                from: test_ev("known_name"),
+                to: test_ev("suite::known_name"),
+            })
+        );
+
+        let report = verify(
+            &plan_of(done_task(
+                "B",
+                vec![test_ev("known_name"), test_ev("suite::known_name")],
+                vec![],
+            )),
+            dir.path(),
+            &opts,
+        )
+        .expect("verify");
+        let diagnostic = report
+            .diagnostics
+            .iter()
+            .find(|d| d.code == code::TEST_UNRESOLVED)
+            .expect("near miss remains a finding");
+        assert_eq!(
+            diagnostic.repair, None,
+            "a replacement the task already cites would be rejected by amend"
+        );
+    }
+
+    /// A useful suggestion is still not a machine edit when the rewrite would
+    /// merge records or when more than one listed name is plausible.
+    #[test]
+    fn ambiguous_test_replacements_stay_prose_advice() {
+        let (dir, _repo) = init();
+        let opts = VerifyOptions {
+            detect_drift: false,
+            test_runner: Some(TestRunners::One(named_runner(
+                "tests",
+                None,
+                &["printf", "suite::known_name\n"],
+                &["true", PLACEHOLDER],
+            ))),
+            ..VerifyOptions::default()
+        };
+
+        let report = verify(
+            &plan_of(done_task(
+                "C",
+                vec![test_ev("known_name"), test_ev("known_name")],
+                vec![],
+            )),
+            dir.path(),
+            &opts,
+        )
+        .expect("verify");
+        assert!(
+            report
+                .diagnostics
+                .iter()
+                .filter(|d| d.code == code::TEST_UNRESOLVED)
+                .all(|d| d.repair.is_none()),
+            "a source cited twice is not a surgical replacement: {:?}",
+            report.diagnostics
+        );
+
+        let report = verify(
+            &plan_of(done_task(
+                "D",
+                vec![test_ev("known_name"), test_ev("suite::known_nam")],
+                vec![],
+            )),
+            dir.path(),
+            &opts,
+        )
+        .expect("verify");
+        assert!(
+            report
+                .diagnostics
+                .iter()
+                .filter(|d| d.code == code::TEST_UNRESOLVED)
+                .all(|d| d.repair.is_none()),
+            "two sources that collapse to one target require judgement: {:?}",
+            report.diagnostics
+        );
+
+        let ambiguous_opts = VerifyOptions {
+            detect_drift: false,
+            test_runner: Some(TestRunners::One(named_runner(
+                "tests",
+                None,
+                &["printf", "alpha::known_name\nbeta::known_name\n"],
+                &["true", PLACEHOLDER],
+            ))),
+            ..VerifyOptions::default()
+        };
+        let report = verify(
+            &plan_of(done_task("E", vec![test_ev("known_name")], vec![])),
+            dir.path(),
+            &ambiguous_opts,
+        )
+        .expect("verify");
+        let diagnostic = report
+            .diagnostics
+            .iter()
+            .find(|d| d.code == code::TEST_UNRESOLVED)
+            .expect("near miss remains a finding");
+        assert_eq!(
+            diagnostic.repair, None,
+            "the first suggestion is not authority when another name is equally plausible"
+        );
+    }
+
+    /// One suggested spelling is still ambiguous when two runners list it
+    /// (`A1-458`).
+    #[test]
+    fn a_shared_near_match_is_not_machine_applicable() {
+        let (dir, _repo) = init();
+        let opts = VerifyOptions {
+            detect_drift: false,
+            test_runner: Some(TestRunners::Many(vec![
+                named_runner(
+                    "libs",
+                    None,
+                    &["printf", "suite::known_name\n"],
+                    &["true", PLACEHOLDER],
+                ),
+                named_runner(
+                    "web",
+                    None,
+                    &["printf", "suite::known_name\n"],
+                    &["true", PLACEHOLDER],
+                ),
+            ])),
+            ..VerifyOptions::default()
+        };
+        let report = verify(
+            &plan_of(done_task("F", vec![test_ev("known_name")], vec![])),
+            dir.path(),
+            &opts,
+        )
+        .expect("verify");
+        let diagnostic = report
+            .diagnostics
+            .iter()
+            .find(|d| d.code == code::TEST_UNRESOLVED)
+            .expect("near miss remains a finding");
+        assert!(
+            diagnostic.message.contains("suite::known_name"),
+            "the shared spelling is still useful advice: {}",
+            diagnostic.message
+        );
+        assert_eq!(
+            diagnostic.repair, None,
+            "one spelling listed by two runners is not a resolvable replacement"
+        );
+    }
+
     #[test]
     fn a_name_two_runners_list_is_refused_rather_than_guessed() {
         // Resolving it would make the verdict depend on the order of a config
         // file. The message has to name both, or the author cannot act on it.
         let (dir, _repo) = init();
         let opts = VerifyOptions {
+            detect_drift: false,
             version: None,
             traces_root: None,
             config_file: None,
@@ -4297,6 +7952,7 @@ mod tests {
                 named_runner("web", None, &["printf", "same\n"], &["true", PLACEHOLDER]),
             ])),
             max_unrelated_files: None,
+            observation_inputs: None,
             url_check: None,
         };
         let r = verify(
@@ -4316,6 +7972,10 @@ mod tests {
             "{}",
             d.message
         );
+        assert_eq!(
+            d.repair, None,
+            "choosing one of two runners is judgement, not a machine repair"
+        );
     }
 
     #[test]
@@ -4327,6 +7987,7 @@ mod tests {
         std::fs::create_dir_all(&sub).unwrap();
         std::fs::write(sub.join("names.txt"), "only_here\n").unwrap();
         let opts = VerifyOptions {
+            detect_drift: false,
             version: None,
             traces_root: None,
             config_file: None,
@@ -4339,6 +8000,7 @@ mod tests {
                 &["true", PLACEHOLDER],
             )])),
             max_unrelated_files: None,
+            observation_inputs: None,
             url_check: None,
         };
         let r = verify(
@@ -4360,12 +8022,14 @@ mod tests {
         // `list` prints two names, one per line; `run` passes (`true`).
         let good = runner(&["printf", "alpha\nbeta\n"], &["true", PLACEHOLDER]);
         let opts = VerifyOptions {
+            detect_drift: false,
             version: None,
             traces_root: None,
             config_file: None,
             execute: true,
             test_runner: Some(TestRunners::One(good.clone())),
             max_unrelated_files: None,
+            observation_inputs: None,
             url_check: None,
         };
 
@@ -4390,12 +8054,14 @@ mod tests {
         // Exists but the runner exits non-zero under --execute -> APLAN014.
         let failing = runner(&["printf", "alpha\n"], &["false", PLACEHOLDER]);
         let opts_fail = VerifyOptions {
+            detect_drift: false,
             version: None,
             traces_root: None,
             config_file: None,
             execute: true,
             test_runner: Some(TestRunners::One(failing.clone())),
             max_unrelated_files: None,
+            observation_inputs: None,
             url_check: None,
         };
         let r = verify(
@@ -4413,12 +8079,14 @@ mod tests {
 
         // Without --execute the test is never run: only existence (L1) is checked.
         let opts_noexec = VerifyOptions {
+            detect_drift: false,
             version: None,
             traces_root: None,
             config_file: None,
             execute: false,
             test_runner: Some(TestRunners::One(failing)),
             max_unrelated_files: None,
+            observation_inputs: None,
             url_check: None,
         };
         let r = verify(
@@ -4432,6 +8100,16 @@ mod tests {
             "no --execute must not run: {:?}",
             r.diagnostics
         );
+    }
+
+    fn only_proves_nothing(report: &Report) -> &aplan_core::Diagnostic {
+        let found: Vec<_> = report
+            .diagnostics
+            .iter()
+            .filter(|d| d.code == code::RUN_PROVES_NOTHING)
+            .collect();
+        assert_eq!(found.len(), 1, "once per runner: {:?}", report.diagnostics);
+        found[0]
     }
 
     /// `APLAN036`: a runner that answers and names nothing is reported against
@@ -4455,6 +8133,7 @@ mod tests {
         let config = dir.path().join(".aplan.yml");
         let verdict = |r: TestRunner| {
             let opts = VerifyOptions {
+                detect_drift: false,
                 config_file: Some(config.clone()),
                 test_runner: Some(TestRunners::One(r)),
                 execute: true,
@@ -4463,27 +8142,20 @@ mod tests {
             verify(&plan, dir.path(), &opts).unwrap()
         };
         let lists = ["printf", "known\\n"];
-
-        // Says nothing, exits 0 whatever it is handed: a miss and a pass are the
-        // same bytes, so `--execute` proved nothing.
+        // Says nothing and exits 0 for both a miss and a supposed pass.
         let r = verdict(runner(&lists, &["true", PLACEHOLDER]));
-        let found: Vec<_> = r
-            .diagnostics
-            .iter()
-            .filter(|d| d.code == code::RUN_PROVES_NOTHING)
-            .collect();
-        assert_eq!(found.len(), 1, "once per runner: {:?}", r.diagnostics);
+        let found = only_proves_nothing(&r);
         assert!(
-            found[0].task.is_none(),
+            found.task.is_none(),
             "the pairing of `list` and `run` is a fact about the configuration"
         );
         assert!(
-            found[0].message.contains("did not prove the test ran"),
+            found.message.contains("did not prove the test ran"),
             "{}",
-            found[0].message
+            found.message
         );
         assert_eq!(
-            found[0].file.as_deref(),
+            found.file.as_deref(),
             Some(config.as_path()),
             "it is about the runner, so it lands where the runner is declared"
         );
@@ -4586,6 +8258,7 @@ mod tests {
         let plan = plan_of(done_task("A", vec![test_ev("known")], vec![]));
         let verdict = |r: TestRunner| {
             let opts = VerifyOptions {
+                detect_drift: false,
                 config_file: None,
                 test_runner: Some(TestRunners::One(r)),
                 execute: true,
@@ -4639,6 +8312,7 @@ mod tests {
             ],
         );
         let opts = VerifyOptions {
+            detect_drift: false,
             config_file: None,
             test_runner: Some(TestRunners::One(counted)),
             execute: true,
@@ -4663,6 +8337,7 @@ mod tests {
 
         // Silent without `--execute`: nothing ran, so nothing is claimed.
         let opts = VerifyOptions {
+            detect_drift: false,
             config_file: None,
             test_runner: Some(TestRunners::One(runner(&lists, &["true", PLACEHOLDER]))),
             ..VerifyOptions::default()
@@ -4684,6 +8359,7 @@ mod tests {
         let blind = runner(&["printf", ""], &["true", PLACEHOLDER]);
         let config = dir.path().join(".aplan.yml");
         let opts = VerifyOptions {
+            detect_drift: false,
             config_file: Some(config.clone()),
             test_runner: Some(TestRunners::One(blind.clone())),
             ..VerifyOptions::default()
@@ -4716,6 +8392,7 @@ mod tests {
         let mut inert = blind;
         inert.expect_tests = Some(false);
         let opts = VerifyOptions {
+            detect_drift: false,
             config_file: None,
             test_runner: Some(TestRunners::One(inert)),
             ..VerifyOptions::default()
@@ -4742,6 +8419,7 @@ mod tests {
         );
         let answers = runner(&["printf", "ghost\n"], &["true", PLACEHOLDER]);
         let opts = VerifyOptions {
+            detect_drift: false,
             config_file: None,
             test_runner: Some(TestRunners::Many(vec![answers, broken])),
             ..VerifyOptions::default()
@@ -4768,6 +8446,7 @@ mod tests {
         // keeps `verify` on a commit-only plan from compiling a workspace.
         let never = runner(&["aplan-no-such-command-a1-064"], &["true", PLACEHOLDER]);
         let opts = VerifyOptions {
+            detect_drift: false,
             config_file: None,
             test_runner: Some(TestRunners::One(never)),
             ..VerifyOptions::default()
@@ -4809,19 +8488,20 @@ mod tests {
     fn a_hostile_test_name_cannot_inject_a_command() {
         let (dir, _repo) = init();
         let sentinel = dir.path().join("PWNED");
-        let payload = format!("x; touch {} #", sentinel.display());
-        // The runner lists the payload as valid so resolution reaches --execute.
-        let list_arg = format!("{payload}\n");
+        let payload = format!("x%s; touch {} #", sentinel.display());
+        // The runner lists the payload as literal data so resolution reaches --execute.
         let opts = VerifyOptions {
+            detect_drift: false,
             version: None,
             traces_root: None,
             config_file: None,
             execute: true,
             test_runner: Some(TestRunners::One(runner(
-                &["printf", &list_arg],
+                &["printf", "%s\n", &payload],
                 &["true", PLACEHOLDER],
             ))),
             max_unrelated_files: None,
+            observation_inputs: None,
             url_check: None,
         };
         let report = verify(
@@ -4834,6 +8514,421 @@ mod tests {
         assert!(
             !sentinel.exists(),
             "the test name was interpreted as a command"
+        );
+    }
+
+    #[cfg(unix)]
+    /// Proof for `show.evidence_observations_are_nonblocking`.
+    #[test]
+    fn bounded_catalogue_is_event_driven_deterministic_and_exactly_once() {
+        use std::io::Write as _;
+
+        let directory = tempfile::Builder::new()
+            .prefix("bounded-catalogue-")
+            .tempdir_in(aplan_core::fixture::fixture_root())
+            .expect("fixture");
+        let log = directory.path().join("started.log");
+        let mut configured = Vec::new();
+        let mut gates = Vec::new();
+        for index in 1..=12 {
+            let gate = directory.path().join(format!("gate-{index}"));
+            let index_string = index.to_string();
+            let made = std::process::Command::new("mkfifo")
+                .arg(&gate)
+                .status()
+                .expect("mkfifo runs");
+            assert!(made.success(), "mkfifo failed: {made}");
+            let mut configured_runner = runner(
+                &[
+                    "sh",
+                    "-c",
+                    "IFS= read -r ignored < \"$1\"; printf '%s\\n' \"suite::$2: test\"; printf '%s\\n' \"$2\" >> \"$3\"",
+                    "aplan-catalogue-fixture",
+                    gate.to_str().expect("UTF-8 gate"),
+                    &index_string,
+                    log.to_str().expect("UTF-8 log"),
+                ],
+                &["true", PLACEHOLDER],
+            );
+            configured_runner.name = Some(format!("runner-{index:02}"));
+            configured.push(configured_runner);
+            gates.push(gate);
+        }
+
+        let mut active = 0usize;
+        let mut maximum = 0usize;
+        let mut pending = Vec::new();
+        let mut events = Vec::new();
+        let catalogue = configured_test_catalogue_bounded(
+            &TestRunners::Scheduled(TestRunnerGroup {
+                schedule: TestSchedule { capacity: 2 },
+                runners: configured,
+            }),
+            directory.path(),
+            None,
+            |event| {
+                match &event {
+                    CatalogueProgressEvent::Started { index, .. } => {
+                        active += 1;
+                        maximum = maximum.max(active);
+                        pending.push(*index);
+                        if pending.len() == 2 {
+                            for release in pending.drain(..) {
+                                let mut fifo = std::fs::OpenOptions::new()
+                                    .write(true)
+                                    .open(&gates[release - 1])
+                                    .expect("a started runner owns the FIFO reader");
+                                fifo.write_all(b"go\n").expect("release runner");
+                            }
+                        }
+                    }
+                    CatalogueProgressEvent::Finished { .. } => active -= 1,
+                }
+                events.push(event);
+            },
+        );
+
+        assert_bounded_catalogue_result(&catalogue, &events, maximum, active, &log);
+    }
+
+    /// Proof for `evidence.scheduled_runner_identity_is_configured`.
+    #[test]
+    fn bounded_catalogue_preserves_the_configured_identity_of_an_unnamed_failure() {
+        let directory = tempfile::Builder::new()
+            .prefix("bounded-catalogue-identity-")
+            .tempdir_in(aplan_core::fixture::fixture_root())
+            .expect("fixture");
+        let component = directory.path().join("component");
+        std::fs::create_dir(&component).expect("component directory");
+        std::fs::write(component.join("catalogue.marker"), b"owned by component\n")
+            .expect("component marker");
+        let mut directory_runner = runner(
+            &[
+                "sh",
+                "-c",
+                "test -f catalogue.marker && printf '%s\\n' 'suite::three: test'",
+                "aplan-catalogue-directory",
+            ],
+            &["true", PLACEHOLDER],
+        );
+        directory_runner.dir = Some("component".into());
+        let configured = TestRunners::Scheduled(TestRunnerGroup {
+            schedule: TestSchedule { capacity: 3 },
+            runners: vec![
+                runner(
+                    &["printf", "%s\\n", "suite::one: test"],
+                    &["true", PLACEHOLDER],
+                ),
+                runner(
+                    &["aplan-no-such-list-command-a1-658"],
+                    &["true", PLACEHOLDER],
+                ),
+                directory_runner,
+            ],
+        });
+
+        let catalogue =
+            configured_test_catalogue_bounded(&configured, directory.path(), None, |_| {});
+
+        assert_eq!(catalogue.runners[0].label, "runner 1");
+        assert_eq!(catalogue.runners[1].label, "runner 2");
+        assert_eq!(catalogue.runners[2].label, "component");
+        assert_eq!(
+            catalogue.runners[2].state,
+            TestCatalogueRunnerState::Listed,
+            "the directory-labelled runner retained its working directory"
+        );
+        assert_eq!(catalogue.runners[1].state, TestCatalogueRunnerState::Failed);
+        let diagnostic = catalogue
+            .diagnostics
+            .iter()
+            .find(|diagnostic| diagnostic.code == code::TEST_UNRESOLVED)
+            .expect("the second runner failure is reported");
+        assert!(diagnostic.message.contains("`runner 2`"), "{diagnostic:?}");
+        assert!(!diagnostic.message.contains("`runner 1`"), "{diagnostic:?}");
+        assert_eq!(
+            catalogue
+                .spend
+                .iter()
+                .map(|(subject, _)| subject.as_str())
+                .collect::<Vec<_>>(),
+            [
+                "the `runner 1` test runner",
+                "the `runner 2` test runner",
+                "the `component` test runner"
+            ]
+        );
+    }
+
+    #[cfg(unix)]
+    fn gated_execution_runner(
+        root: &Path,
+        event_fifo: &Path,
+        index: usize,
+    ) -> (TestRunner, PathBuf, PathBuf) {
+        let skip_gate = root.join(format!("skip-gate-{index}"));
+        let batch_gate = root.join(format!("batch-gate-{index}"));
+        for gate in [&skip_gate, &batch_gate] {
+            assert!(
+                std::process::Command::new("mkfifo")
+                    .arg(gate)
+                    .status()
+                    .expect("mkfifo runs")
+                    .success()
+            );
+        }
+        let name = format!("suite::{index}");
+        let mut configured = runner(&["printf", "%s\n", &name], &["true", PLACEHOLDER]);
+        configured.name = Some(format!("runner-{index}"));
+        configured.skipped = Some(vec![
+            "sh".into(),
+            "-c".into(),
+            "printf 'skip-%s\\n' \"$1\" > \"$2\"; IFS= read -r ignored < \"$3\"".into(),
+            "aplan-scheduled-skip".into(),
+            index.to_string(),
+            event_fifo.display().to_string(),
+            skip_gate.display().to_string(),
+        ]);
+        configured.batch = Some(TestBatch {
+            protocol: TEST_BATCH_PROTOCOL,
+            run: vec![
+                "python3".into(),
+                "-c".into(),
+                "import json,sys\nrunner,events,gate,manifest,result=sys.argv[1:]\nwith open(events,'w',encoding='utf-8') as stream: stream.write(f'batch-{runner}\\n')\nwith open(gate,encoding='utf-8') as stream: stream.readline()\nwith open(manifest,encoding='utf-8') as stream: request=json.load(stream)\nanswer={'schema':'aplan/test-batch-result/v1','nonce':request['nonce'],'provider':request['provider'],'complete':True,'tests':[{'test':name,'outcome':'passed'} for name in request['tests']]}\nwith open(result,'x',encoding='utf-8') as stream: json.dump(answer,stream,sort_keys=True)\n".into(),
+                index.to_string(),
+                event_fifo.display().to_string(),
+                batch_gate.display().to_string(),
+                BATCH_MANIFEST_PLACEHOLDER.into(),
+                BATCH_RESULT_PLACEHOLDER.into(),
+            ],
+        });
+        (configured, skip_gate, batch_gate)
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn skipped_and_batch_stages_overlap_across_independent_runners() {
+        use std::io::{BufRead as _, Write as _};
+
+        let (directory, _repository) = init();
+        let event_fifo = directory.path().join("provider-events");
+        assert!(
+            std::process::Command::new("mkfifo")
+                .arg(&event_fifo)
+                .status()
+                .expect("mkfifo runs")
+                .success()
+        );
+        // Holding both ends prevents an EOF between the two short-lived
+        // writers. Each line is one actual configured command reaching its
+        // gate, so overlap is proven without a timing assertion.
+        let event_stream = std::fs::OpenOptions::new()
+            .read(true)
+            .write(true)
+            .open(&event_fifo)
+            .expect("open event FIFO without blocking");
+        let mut events = std::io::BufReader::new(event_stream);
+
+        let mut runners = Vec::new();
+        let mut skip_gates = Vec::new();
+        let mut batch_gates = Vec::new();
+        for index in 1..=2 {
+            let (configured, skip_gate, batch_gate) =
+                gated_execution_runner(directory.path(), &event_fifo, index);
+            runners.push(configured);
+            skip_gates.push(skip_gate);
+            batch_gates.push(batch_gate);
+        }
+        let options = VerifyOptions {
+            execute: true,
+            test_runner: Some(TestRunners::Scheduled(TestRunnerGroup {
+                schedule: TestSchedule { capacity: 2 },
+                runners,
+            })),
+            ..VerifyOptions::default()
+        };
+        let plan = plan_of_all(vec![
+            done_task("A", vec![test_ev("suite::1")], vec![]),
+            done_task("B", vec![test_ev("suite::2")], vec![]),
+        ]);
+
+        let read_stage = |stream: &mut std::io::BufReader<std::fs::File>, prefix: &str| {
+            let mut observed = BTreeSet::new();
+            for _ in 0..2 {
+                let mut line = String::new();
+                stream.read_line(&mut line).expect("read provider event");
+                observed.insert(line.trim().to_string());
+            }
+            assert_eq!(
+                observed,
+                [format!("{prefix}-1"), format!("{prefix}-2")]
+                    .into_iter()
+                    .collect(),
+                "both independent runners must reach {prefix} before either is released"
+            );
+        };
+        let release = |gates: &[PathBuf]| {
+            for gate in gates {
+                let mut writer = std::fs::OpenOptions::new()
+                    .write(true)
+                    .open(gate)
+                    .expect("an active provider owns the FIFO reader");
+                writer.write_all(b"go\n").expect("release provider");
+            }
+        };
+        let root = directory.path().to_path_buf();
+        let observed = std::thread::scope(|scope| {
+            let verifier = scope.spawn(|| verify_measured(&plan, &root, &options));
+            read_stage(&mut events, "skip");
+            release(&skip_gates);
+            read_stage(&mut events, "batch");
+            release(&batch_gates);
+            verifier.join().expect("verification worker did not panic")
+        })
+        .expect("scheduled verification answers");
+        assert!(observed.0.is_clean(), "{:?}", observed.0.diagnostics);
+        assert_eq!(observed.1.len(), 2, "one deterministic cost row per runner");
+    }
+
+    #[test]
+    fn an_explicit_schedule_preserves_a_completed_workers_provider_fault() {
+        let (directory, _repository) = init();
+        let mut configured = runner(
+            &["sh", "-c", "printf 'suite::one\\n'"],
+            &["true", PLACEHOLDER],
+        );
+        configured.skipped = Some(vec!["aplan-no-such-skipped-command-a1-643".to_string()]);
+        let options = VerifyOptions {
+            execute: true,
+            test_runner: Some(TestRunners::Scheduled(TestRunnerGroup {
+                schedule: TestSchedule { capacity: 1 },
+                runners: vec![configured],
+            })),
+            ..VerifyOptions::default()
+        };
+        let plan = plan_of(done_task("A", vec![test_ev("suite::one")], vec![]));
+
+        let observed = verify_observed(&plan, directory.path(), &options)
+            .expect("a provider fault is an evidence result, not an engine abort");
+
+        assert_eq!(observed.citations.len(), 1);
+        assert!(observed.report.diagnostics.iter().any(|diagnostic| {
+            diagnostic.code == code::TEST_UNRESOLVED
+                && diagnostic.message.contains("which tests it will not run")
+        }));
+    }
+
+    fn assert_bounded_catalogue_result(
+        catalogue: &TestCatalogue,
+        events: &[CatalogueProgressEvent],
+        maximum: usize,
+        active: usize,
+        log: &Path,
+    ) {
+        assert_eq!(maximum, 2, "the concurrency bound was not exercised");
+        assert_eq!(active, 0, "a finished runner remained active");
+        assert_eq!(events.len(), 24, "each runner has one start and finish");
+        let mut started_events = std::collections::BTreeSet::new();
+        let mut finished_events = std::collections::BTreeSet::new();
+        let mut completed_events = 0usize;
+        for event in events {
+            match event {
+                CatalogueProgressEvent::Started {
+                    index,
+                    label,
+                    completed,
+                    remaining,
+                } => {
+                    assert!(
+                        started_events.insert(*index),
+                        "runner {index} started twice"
+                    );
+                    assert_eq!(label, &format!("runner-{index:02}"));
+                    assert_eq!(*completed, completed_events);
+                    assert_eq!(*remaining, 12 - completed_events);
+                }
+                CatalogueProgressEvent::Finished {
+                    index,
+                    label,
+                    completed,
+                    remaining,
+                    ..
+                } => {
+                    assert!(
+                        started_events.contains(index),
+                        "runner {index} finished first"
+                    );
+                    assert!(
+                        finished_events.insert(*index),
+                        "runner {index} finished twice"
+                    );
+                    completed_events += 1;
+                    assert_eq!(label, &format!("runner-{index:02}"));
+                    assert_eq!(*completed, completed_events);
+                    assert_eq!(*remaining, 12 - completed_events);
+                }
+            }
+        }
+        assert_eq!(started_events, (1..=12).collect());
+        assert_eq!(finished_events, started_events);
+        assert_eq!(catalogue.runners.len(), 12);
+        for (offset, observed) in catalogue.runners.iter().enumerate() {
+            let index = offset + 1;
+            assert_eq!(observed.index, index);
+            assert_eq!(observed.label, format!("runner-{index:02}"));
+            assert_eq!(observed.names, vec![format!("suite::{index}")]);
+        }
+        assert_eq!(
+            catalogue
+                .spend
+                .iter()
+                .map(|(subject, _)| subject.as_str())
+                .collect::<Vec<_>>(),
+            (1..=12)
+                .map(|index| format!("the `runner-{index:02}` test runner"))
+                .collect::<Vec<_>>(),
+            "parallel completion order leaked into provider-cost ownership"
+        );
+        let starts = std::fs::read_to_string(log).expect("provider start log");
+        let started = starts.lines().collect::<std::collections::BTreeSet<_>>();
+        assert_eq!(starts.lines().count(), 12, "a provider ran more than once");
+        assert_eq!(started.len(), 12, "a configured provider did not run");
+    }
+
+    #[test]
+    fn supplied_catalogue_never_falls_back_to_a_live_provider() {
+        let (directory, _repository) = init();
+        let sentinel = directory.path().join("provider-ran");
+        let command = format!("printf ran > '{}'", sentinel.display());
+        let options = VerifyOptions {
+            test_runner: Some(TestRunners::One(runner(
+                &["sh", "-c", &command],
+                &["true", PLACEHOLDER],
+            ))),
+            ..VerifyOptions::default()
+        };
+        let malformed = TestCatalogue {
+            runners: Vec::new(),
+            diagnostics: Vec::new(),
+            spend: Vec::new(),
+            failure_outcomes: Vec::new(),
+        };
+        let observed = verify_observed_with_test_catalogue(
+            &plan_of(done_task("A", vec![test_ev("suite::proof")], vec![])),
+            directory.path(),
+            &options,
+            &malformed,
+        )
+        .expect("a malformed retained catalogue is an evidence fault");
+        assert!(!sentinel.exists(), "the retained path spawned test.list");
+        assert!(
+            observed
+                .report
+                .diagnostics
+                .iter()
+                .any(|diagnostic| diagnostic.code == code::TEST_UNRESOLVED),
+            "the malformed observation must fail closed: {:?}",
+            observed.report.diagnostics
         );
     }
 }
@@ -4889,6 +8984,7 @@ mod version_behind_tests {
             paths: vec!["src/**".to_string()],
             traces: Vec::new(),
             trace_fingerprints: std::collections::BTreeMap::new(),
+            evidence_fingerprints: std::collections::BTreeMap::new(),
             tags: Vec::new(),
             revisit_at: None,
             version_impact: impact,
@@ -4908,6 +9004,7 @@ mod version_behind_tests {
                 timeout_seconds: None,
                 max_memory: None,
                 max_processes: None,
+                max_output: None,
                 wrap: None,
             }),
         }
@@ -4967,6 +9064,7 @@ mod version_behind_tests {
             unloadable: std::collections::BTreeMap::new(),
         };
         let opts = VerifyOptions {
+            detect_drift: false,
             version,
             ..VerifyOptions::default()
         };
@@ -5092,6 +9190,7 @@ mod version_behind_tests {
                 timeout_seconds: None,
                 max_memory: None,
                 max_processes: None,
+                max_output: None,
                 wrap: None,
             };
             assert_eq!(
@@ -5337,6 +9436,7 @@ mod version_behind_tests {
                 timeout_seconds: None,
                 max_memory: None,
                 max_processes: None,
+                max_output: None,
                 wrap: None,
             });
             run(dir.path(), vec![task("A-1", &sha, impact)], Some(p))
@@ -5388,6 +9488,7 @@ mod version_behind_tests {
             timeout_seconds: None,
             max_memory: None,
             max_processes: None,
+            max_output: None,
             wrap: None,
         });
         let found = run(
@@ -5446,6 +9547,7 @@ mod version_behind_tests {
                 timeout_seconds: None,
                 max_memory: None,
                 max_processes: None,
+                max_output: None,
                 wrap: None,
             });
             run(
@@ -5492,6 +9594,7 @@ mod version_behind_tests {
             timeout_seconds: None,
             max_memory: None,
             max_processes: None,
+            max_output: None,
             wrap: None,
         });
         let plan = Plan {
@@ -5505,6 +9608,7 @@ mod version_behind_tests {
             unloadable: std::collections::BTreeMap::new(),
         };
         let opts = VerifyOptions {
+            detect_drift: false,
             version: Some(p),
             ..VerifyOptions::default()
         };
@@ -5539,6 +9643,7 @@ mod version_behind_tests {
             timeout_seconds: None,
             max_memory: None,
             max_processes: None,
+            max_output: None,
             wrap: None,
         });
         let found = run(

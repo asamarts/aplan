@@ -12,16 +12,18 @@
 //! 1. the target exists,
 //! 2. it is tagged `milestone`, so import cannot quietly turn a unit of work
 //!    into a checkpoint, and
-//! 3. it is **not already `done` or `dropped`**. Appending an unfinished task
-//!    to a settled cut would make that milestone depend on an unfinished one
-//!    (`APLAN007`, an error), so import refuses rather than invalidate a claim
-//!    somebody already closed.
+//! 3. an ordinary member cannot extend a `done` or `dropped` cut. Appending an
+//!    unfinished task to a settled cut would invalidate a claim somebody
+//!    already closed. The ledger-correction path is deliberately narrower: a
+//!    `done` cut can gain only members whose `done` evidence has resolved in the
+//!    same atomic batch. A `dropped` cut remains immutable.
 //!
 //! The edit is surgical, in the style of `aplan close`: one line is rewritten
 //! and the rest of the file, including its line endings, comments, and body,
 //! is left byte-for-byte alone. Re-serialising the whole task would reformat a
 //! hand-authored file, which is a diff nobody asked for.
 
+use std::collections::{BTreeMap, BTreeSet};
 use std::path::{Path, PathBuf};
 
 use aplan_core::load::split_frontmatter;
@@ -30,6 +32,50 @@ use aplan_core::{Plan, Status, Task};
 /// Why imported tasks could not be placed in a cut.
 #[derive(Debug, thiserror::Error)]
 pub enum CutError {
+    /// A create-around-existing-work request named no work.
+    #[error("creating a cut around existing work needs at least one `member`")]
+    NoMembers,
+    /// The same member was supplied twice. Repeats are refused rather than
+    /// hidden because this operation reports every membership transition.
+    #[error("member `{id}` was named more than once; name each task once")]
+    DuplicateMember { id: String },
+    /// No task answers to the requested member id.
+    #[error("no task `{id}` in this plan; every member must already exist")]
+    NoSuchMember { id: String },
+    /// A dirty plan contains the same stable id more than once.
+    #[error("task id `{id}` appears in more than one file; fix the duplicate before moving it")]
+    AmbiguousMember { id: String },
+    /// Historical work is not silently revived by placing it in a new cut.
+    #[error("member `{id}` is already `{status}`; only live work can move into a new cut")]
+    TerminalMember { id: String, status: String },
+    /// Cuts sequence other cuts; they are not nested as members.
+    #[error(
+        "member `{id}` is a milestone, not work inside a cut; sequence it with `blocked_by` instead"
+    )]
+    MilestoneMember { id: String },
+    /// `cross-cutting` deliberately means no cut membership.
+    #[error(
+        "member `{id}` is tagged `cross-cutting`, which deliberately means it belongs to no cut; remove the tag before moving it"
+    )]
+    CrossCuttingMember { id: String },
+    /// This operation moves ownership; it does not turn unowned work into a
+    /// member (ordinary add/manifest authoring already covers that shape).
+    #[error(
+        "member `{id}` belongs to no cut; use ordinary cut authoring to place unowned work, or name work that this operation can move"
+    )]
+    UnownedMember { id: String },
+    /// A multiply-owned input is already ambiguous and must be repaired first.
+    #[error(
+        "member `{id}` already belongs to multiple cuts ({}); repair that ambiguity before moving it",
+        .cuts.join(", ")
+    )]
+    MultiplyOwnedMember { id: String, cuts: Vec<String> },
+    /// Removing all live work would leave a source cut shaped like no cut.
+    #[error(
+        "moving {} would leave source cut `{cut}` with no live members; retain work there or dispose of that cut explicitly",
+        .members.join(", ")
+    )]
+    EmptySource { cut: String, members: Vec<String> },
     /// Nothing in the plan answers to that name, by id or by label.
     ///
     /// The message names the cuts the plan *has*, the way `graph --cut` already
@@ -70,6 +116,17 @@ pub enum CutError {
         /// The milestone ids that *report* themselves under it.
         labelled: Vec<String>,
     },
+    /// A proposed task id is already part of the cut vocabulary.
+    #[error(
+        "`{id}` is already the label of cut(s) {}; using it as a task id would make that label unusable",
+        .cuts.join(", ")
+    )]
+    TaskIdShadowsLabel {
+        /// The proposed task id.
+        id: String,
+        /// Milestone ids that currently report this label.
+        cuts: Vec<String>,
+    },
     /// The target is a unit of work, not a cut.
     #[error("`{id}` is not tagged `milestone`, so it is not a cut")]
     NotAMilestone {
@@ -78,8 +135,9 @@ pub enum CutError {
     },
     /// The target is already closed or abandoned.
     #[error(
-        "`{id}` is `{status}`; adding an unfinished task to a settled cut would break it \
-         (APLAN007). Reopen it, or choose another cut."
+        "`{id}` is a settled cut with status `{status}` and cannot gain this member. A `done` cut accepts only proved \
+         `done` ledger entries; a `dropped` cut cannot be extended. Choose another cut or use \
+         the evidence-resolving ledger workflow."
     )]
     Settled {
         /// The id asked for.
@@ -153,6 +211,123 @@ pub enum CutError {
     },
 }
 
+/// A fully prepared move from existing source cuts into a cut which the caller
+/// will create in the same publication batch.
+#[derive(Debug)]
+pub struct NewCutMove {
+    members: Vec<String>,
+    removals: Vec<(String, PendingRemoval)>,
+}
+
+impl NewCutMove {
+    /// Members in the order the author supplied them. This is the order the new
+    /// milestone records and the adapters report.
+    #[must_use]
+    pub fn members(&self) -> &[String] {
+        &self.members
+    }
+
+    /// Every source-cut edit, ordered by source id for deterministic review.
+    #[must_use]
+    pub fn removals(&self) -> &[(String, PendingRemoval)] {
+        &self.removals
+    }
+}
+
+/// Prepare moving existing live work into a new cut without writing anything.
+///
+/// Each member must currently belong to exactly one source cut. Every source
+/// removal is prepared before this returns, and a source which would retain no
+/// live work is refused. The caller adds the destination milestone creation to
+/// these replacements and publishes the complete set with
+/// [`aplan_core::save::replace_all`].
+///
+/// # Errors
+/// Returns a precise [`CutError`] for every unsupported member shape, or for a
+/// source file which cannot be rewritten safely.
+pub fn plan_new_cut(plan: &Plan, ids: &[String]) -> Result<NewCutMove, CutError> {
+    if ids.is_empty() {
+        return Err(CutError::NoMembers);
+    }
+    let mut seen = BTreeSet::new();
+    let mut leaving = BTreeMap::<String, Vec<String>>::new();
+    for id in ids {
+        if !seen.insert(id.clone()) {
+            return Err(CutError::DuplicateMember { id: id.clone() });
+        }
+        let matches = plan
+            .tasks
+            .iter()
+            .filter(|loaded| loaded.task.id == *id)
+            .collect::<Vec<_>>();
+        let member = match matches.as_slice() {
+            [] => return Err(CutError::NoSuchMember { id: id.clone() }),
+            [one] => &one.task,
+            _ => return Err(CutError::AmbiguousMember { id: id.clone() }),
+        };
+        if member.status.is_terminal() {
+            return Err(CutError::TerminalMember {
+                id: id.clone(),
+                status: member.status.to_string(),
+            });
+        }
+        if member.is_milestone() {
+            return Err(CutError::MilestoneMember { id: id.clone() });
+        }
+        if member.tags.iter().any(|tag| tag == "cross-cutting") {
+            return Err(CutError::CrossCuttingMember { id: id.clone() });
+        }
+        let cuts = plan
+            .tasks
+            .iter()
+            .filter(|loaded| loaded.task.is_milestone() && loaded.task.blocked_by.contains(id))
+            .map(|loaded| loaded.task.id.clone())
+            .collect::<Vec<_>>();
+        match cuts.as_slice() {
+            [] => return Err(CutError::UnownedMember { id: id.clone() }),
+            [cut] => leaving.entry(cut.clone()).or_default().push(id.clone()),
+            _ => {
+                return Err(CutError::MultiplyOwnedMember {
+                    id: id.clone(),
+                    cuts,
+                });
+            }
+        }
+    }
+
+    for (cut, going) in &leaving {
+        let source = plan
+            .tasks
+            .iter()
+            .find(|loaded| loaded.task.id == *cut)
+            .expect("a source cut was found above");
+        let retains_live_work = source.task.blocked_by.iter().any(|candidate| {
+            !going.contains(candidate)
+                && plan.tasks.iter().any(|loaded| {
+                    loaded.task.id == *candidate
+                        && !loaded.task.is_milestone()
+                        && !loaded.task.status.is_terminal()
+                        && !loaded.task.tags.iter().any(|tag| tag == "cross-cutting")
+                })
+        });
+        if !retains_live_work {
+            return Err(CutError::EmptySource {
+                cut: cut.clone(),
+                members: going.clone(),
+            });
+        }
+    }
+
+    let mut removals = Vec::with_capacity(leaving.len());
+    for (cut, going) in leaving {
+        removals.push((cut.clone(), plan_removal(plan, &cut, &going)?));
+    }
+    Ok(NewCutMove {
+        members: ids.to_vec(),
+        removals,
+    })
+}
+
 /// What placing the ids did.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Placed {
@@ -170,6 +345,39 @@ pub struct Placed {
 /// outside any cut, and an error message implying nothing had happened.
 pub fn check_target(plan: &Plan, cut: &str) -> Result<(), CutError> {
     resolve_extendable(plan, cut).map(|_| ())
+}
+
+/// Check whether a cut may gain a task in `status`.
+///
+/// Ordinary live creation still refuses every settled cut. The sole exception
+/// is a proved historical ledger entry: adding `done` work to a `done` cut
+/// preserves the cut's completion claim. A dropped cut remains a disposition
+/// nobody may extend, and a live member would invalidate a done cut.
+pub fn check_target_for_status(plan: &Plan, cut: &str, status: Status) -> Result<(), CutError> {
+    let found = resolve(plan, cut)?;
+    check_status_compatibility(&found.task.id, found.task.status, status)
+}
+
+/// Check the status half of settled-cut placement when the target cut is being
+/// created in the same batch and therefore is not yet resolvable from a plan.
+///
+/// Kept beside [`check_target_for_status`] so existing-cut and forward-cut
+/// authoring cannot drift to different terminal-history rules.
+pub fn check_status_compatibility(
+    cut: &str,
+    cut_status: Status,
+    member_status: Status,
+) -> Result<(), CutError> {
+    if cut_status == Status::Done && member_status == Status::Done {
+        return Ok(());
+    }
+    if cut_status.is_terminal() {
+        return Err(CutError::Settled {
+            id: cut.to_string(),
+            status: status_word(cut_status).to_string(),
+        });
+    }
+    Ok(())
 }
 
 /// The milestone id a `--cut` argument names (`A1-139`, ADR-0013's vocabulary).
@@ -230,6 +438,41 @@ pub fn resolve_id(plan: &Plan, cut: &str) -> Result<String, CutError> {
             label: cut.to_string(),
             ids: many.to_vec(),
         }),
+    }
+}
+
+/// Refuse a task id that would take over an existing cut label.
+///
+/// Cut-taking commands resolve exact task ids before labels. Creating an
+/// ordinary task whose id is already a cut label would therefore leave the
+/// plan structurally valid while making the displayed label unusable. `except`
+/// names the subject task when it is already present in `plan`: a milestone may
+/// legitimately report its own id as its label because both names still select
+/// that same cut. Rekey and complete atomic-batch validation use that exclusion;
+/// validation before a new task is inserted passes none.
+///
+/// # Errors
+///
+/// [`CutError::TaskIdShadowsLabel`] with every conflicting cut id, in plan
+/// order, when the proposed id is already in the cut vocabulary.
+pub fn check_task_id_label(plan: &Plan, id: &str, except: Option<&str>) -> Result<(), CutError> {
+    let cuts = plan
+        .tasks
+        .iter()
+        .filter(|loaded| {
+            loaded.task.is_milestone()
+                && Some(loaded.task.id.as_str()) != except
+                && label_of(&loaded.task) == id
+        })
+        .map(|loaded| loaded.task.id.clone())
+        .collect::<Vec<_>>();
+    if cuts.is_empty() {
+        Ok(())
+    } else {
+        Err(CutError::TaskIdShadowsLabel {
+            id: id.to_string(),
+            cuts,
+        })
     }
 }
 
@@ -682,7 +925,7 @@ pub fn plan_removal(
     // needed, and this one did.
     aplan_core::load::frontmatter_is_loadable(rewritten_fm)
         .map_err(|_| CutError::Unsupported { path: path.clone() })?;
-    let parsed: crate::cut::TaskProbe = serde_yaml_ng::from_str(rewritten_fm)
+    let parsed: crate::cut::TaskProbe = yaml_compat::from_str(rewritten_fm)
         .map_err(|_| CutError::Unsupported { path: path.clone() })?;
     // **Exactly what was intended, not merely "the removed ones are gone"**
     // (`A1-363`). An empty list satisfied the weaker assertion, which is the one
@@ -769,6 +1012,39 @@ pub fn plan_placement(
     ids: &[String],
 ) -> Result<PendingPlacement, CutError> {
     let target = resolve_extendable(plan, milestone_id)?;
+    plan_placement_into(target, ids)
+}
+
+/// Work out one placement while preserving a completed ledger.
+///
+/// Every named member status is checked before the milestone is rewritten.
+/// This differs from [`plan_placement`] only for a `done` target, which accepts
+/// exclusively `done` members. The caller remains responsible for resolving
+/// those members' evidence before publishing this replacement in the same
+/// atomic batch.
+pub fn plan_placement_for_members(
+    plan: &Plan,
+    milestone_id: &str,
+    members: &[(String, Status)],
+) -> Result<PendingPlacement, CutError> {
+    let target = resolve(plan, milestone_id)?;
+    if target.task.status == Status::Dropped
+        || (target.task.status == Status::Done
+            && members.iter().any(|(_, status)| *status != Status::Done))
+    {
+        return Err(CutError::Settled {
+            id: target.task.id.clone(),
+            status: status_word(target.task.status).to_string(),
+        });
+    }
+    let ids = members.iter().map(|(id, _)| id.clone()).collect::<Vec<_>>();
+    plan_placement_into(target, &ids)
+}
+
+fn plan_placement_into(
+    target: &aplan_core::load::LoadedTask,
+    ids: &[String],
+) -> Result<PendingPlacement, CutError> {
     let path = target.path.clone();
 
     let added = missing_from(&target.task, ids);
@@ -820,7 +1096,7 @@ fn self_check(updated: &str, added: &[String], path: &Path) -> Result<(), CutErr
     // the removal -- but "the rewrite is still something aplan can read" is the
     // claim this function makes, and only the schema settles it.
     aplan_core::load::frontmatter_is_loadable(frontmatter).map_err(fail)?;
-    let parsed: Task = serde_yaml_ng::from_str(frontmatter).map_err(|e| fail(e.to_string()))?;
+    let parsed: Task = yaml_compat::from_str(frontmatter).map_err(|e| fail(e.to_string()))?;
 
     if let Some(missing) = added.iter().find(|id| !parsed.blocked_by.contains(id)) {
         return Err(fail(format!(
@@ -917,6 +1193,27 @@ mod tests {
         assert_eq!(out.removed, vec!["A-01".to_string()]);
         let text = std::fs::read_to_string(out.path).expect("read");
         assert!(text.contains("blocked_by: []"), "{text}");
+    }
+
+    #[test]
+    fn proposed_task_ids_report_every_cut_label_they_would_shadow() {
+        let dir = plan_dir(
+            "---\nid: M-s0\ntitle: Cut\nphase: 0\nstatus: todo\n\
+             tags: [milestone, s0]\nblocked_by: [A-01]\n---\n",
+        );
+        let plan = aplan_core::load_plan(dir.path());
+        let error = check_task_id_label(&plan, "s0", None)
+            .expect_err("a task id must not take over the displayed cut label");
+        assert!(
+            matches!(error, CutError::TaskIdShadowsLabel { ref id, ref cuts }
+                if id == "s0" && cuts == &["M-s0"]),
+            "{error}"
+        );
+        assert!(check_task_id_label(&plan, "A-02", None).is_ok());
+
+        // Rekeying a milestone to its own label keeps both names selecting the
+        // same cut; only a different cut's label is a collision.
+        assert!(check_task_id_label(&plan, "s0", Some("M-s0")).is_ok());
     }
 
     #[test]
@@ -1067,7 +1364,7 @@ mod tests {
             });
             let (fm, _) = aplan_core::load::split_frontmatter(&out).expect("frontmatter");
             let parsed: super::TaskProbe =
-                serde_yaml_ng::from_str(fm).unwrap_or_else(|e| panic!("{what}: {e}\n{out}"));
+                yaml_compat::from_str(fm).unwrap_or_else(|e| panic!("{what}: {e}\n{out}"));
             assert_eq!(
                 parsed.blocked_by,
                 vec!["W-001".to_string()],
@@ -1091,7 +1388,7 @@ mod tests {
             "a top-level one is created: {out}"
         );
         let (fm, _) = aplan_core::load::split_frontmatter(&out).expect("frontmatter");
-        let parsed: super::TaskProbe = serde_yaml_ng::from_str(fm).expect("parses");
+        let parsed: super::TaskProbe = yaml_compat::from_str(fm).expect("parses");
         assert_eq!(parsed.blocked_by, vec!["W-001".to_string()], "{out}");
     }
 

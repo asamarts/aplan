@@ -8,7 +8,7 @@
 
 use std::path::Path;
 
-mod common;
+use crate::common;
 use common::aplan;
 
 /// The p00025 case, end to end: every `done` task cites a commit and none

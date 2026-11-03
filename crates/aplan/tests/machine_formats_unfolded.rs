@@ -14,7 +14,7 @@
 
 use std::path::Path;
 
-mod common;
+use crate::common;
 
 /// A plan whose one task carries a title far wider than the fold width and a
 /// `traces` anchor that does not resolve, so `check` produces a finding whose

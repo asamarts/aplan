@@ -7,10 +7,10 @@
 # check that gives up early reports "CI never ran" for a commit that is about to
 # be checked, which is what happened twice that day.
 #
-# It deliberately does not dispatch. A manual `workflow_dispatch` races the push
-# run, and the `concurrency` group then cancels one of the two: on `2f327d1` the
-# dispatched run was cancelled twenty seconds after it started, by the very run
-# it was standing in for.
+# It deliberately does not dispatch. Manual dispatch is an independent full
+# run, not a substitute for the development verdict created by a push. The API
+# filter below admits only the push event so a full run on the same SHA cannot
+# be mistaken for the result this monitor promises to observe.
 #
 #   bash ci/scripts/pushed.sh              # HEAD
 #   bash ci/scripts/pushed.sh <sha>
@@ -25,17 +25,47 @@ interval="${PUSHED_INTERVAL:-20}"
 
 command -v gh >/dev/null || { echo "pushed: needs the gh CLI" >&2; exit 2; }
 
+if ! [[ "$timeout" =~ ^[0-9]{1,9}$ ]]; then
+    echo "pushed: PUSHED_TIMEOUT must be a non-negative integer (got '$timeout')" >&2
+    exit 2
+fi
+if ! [[ "$interval" =~ ^[0-9]{1,9}$ ]] || [ "$((10#$interval))" -eq 0 ]; then
+    echo "pushed: PUSHED_INTERVAL must be a positive integer (got '$interval')" >&2
+    exit 2
+fi
+timeout=$((10#$timeout))
+interval=$((10#$interval))
+
 if [ "$(git rev-parse "origin/$(git rev-parse --abbrev-ref HEAD)" 2>/dev/null || echo none)" != "$sha" ]; then
     echo "pushed: $short is not what origin has for this branch; push first" >&2
 fi
 
 echo "pushed: waiting up to $((timeout / 60))m for a run on $short in $repo"
 waited=0
+seen_run=0
+last_status=""
+last_url=""
 while :; do
-    row="$(gh api "repos/$repo/actions/runs?head_sha=$sha" \
-        -q '.workflow_runs[]|select(.name=="CI")|"\(.status) \(.conclusion // "-") \(.html_url)"' 2>/dev/null | head -1 || true)"
+    if ! rows="$(gh api "repos/$repo/actions/runs?head_sha=$sha" \
+        -q '[.workflow_runs[] | select(.name == "CI" and .event == "push")] | sort_by(.created_at, .id) | last | if . == null then empty else "\(.status) \(.conclusion // "-") \(.html_url)" end' 2>&1)"; then
+        echo "pushed: GitHub API query failed for $repo; CI status is unknown:" >&2
+        printf '%s\n' "$rows" >&2
+        exit 2
+    fi
+    row="$rows"
+    if [[ "$row" == *$'\n'* ]]; then
+        echo "pushed: GitHub API returned more than one selected CI run; status is unknown" >&2
+        exit 2
+    fi
     if [ -n "$row" ]; then
         read -r status conclusion url <<<"$row"
+        if [ -z "${status:-}" ] || [ -z "${conclusion:-}" ] || [ -z "${url:-}" ]; then
+            echo "pushed: GitHub API returned a malformed CI run; status is unknown" >&2
+            exit 2
+        fi
+        seen_run=1
+        last_status="${status:-unknown}"
+        last_url="${url:-no URL}"
         if [ "${status:-}" = "completed" ]; then
             echo "pushed: $short -> $conclusion  (${url:-no url})"
             if [ "$conclusion" = "success" ]; then exit 0; fi
@@ -46,12 +76,23 @@ while :; do
         printf 'pushed: no run object for %s yet, %ds elapsed\n' "$short" "$waited"
     fi
     [ "$waited" -ge "$timeout" ] && break
-    sleep "$interval"
-    waited=$((waited + interval))
+    remaining=$((timeout - waited))
+    sleep_for="$interval"
+    if [ "$sleep_for" -gt "$remaining" ]; then
+        sleep_for="$remaining"
+    fi
+    sleep "$sleep_for"
+    waited=$((waited + sleep_for))
 done
+
+if [ "$seen_run" = 1 ]; then
+    echo "pushed: CI run for $short appeared but did not complete within $((timeout / 60))m." >&2
+    echo "        Last status: $last_status  (${last_url})" >&2
+    exit 3
+fi
 
 echo "pushed: no CI run appeared for $short within $((timeout / 60))m." >&2
 echo "        That is not proof the push was rejected: creation has been seen to take 18m." >&2
-echo "        Check https://github.com/$repo/actions before dispatching by hand, because a" >&2
-echo "        dispatch races the push run and the concurrency group cancels one of them." >&2
+echo "        Check https://github.com/$repo/actions; a manual dispatch is a separate full" >&2
+echo "        run and is not evidence for the missing push-triggered development verdict." >&2
 exit 3

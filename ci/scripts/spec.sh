@@ -4,7 +4,12 @@ set -euo pipefail
 REPO_ROOT="$(cd "$(dirname "$0")/../.." && pwd)"
 cd "$REPO_ROOT"
 
-export RUSTFLAGS="${RUSTFLAGS:--D warnings}"
+export CARGO_BUILD_WARNINGS=deny
+
+# The validation manifest is the one source for hook and workflow gate
+# membership. Its generated shell table and both consumers must agree.
+echo "==> cargo xtask validation --check"
+cargo run -q -p xtask -- validation --check
 
 # The keystone gates: the committed JSON Schema and ROADMAP.status.md must be
 # regenerated from the code and the plan, not hand-written. Fail on any drift.
@@ -13,6 +18,13 @@ cargo run -q -p xtask -- gen-schema --check
 
 echo "==> cargo xtask gen-roadmap --check"
 cargo run -q -p xtask -- gen-roadmap --check
+
+# The TUI's user reference is a generated view of the same closed action,
+# mutation and CLI-boundary catalogues used by dispatch, help and the palette.
+# A hand-maintained key table would immediately become the second copy this
+# project exists to reject.
+echo "==> cargo xtask tui-reference --check"
+cargo run -q -p xtask -- tui-reference --check
 
 # `rust-version` is a consumer contract and nothing checked it: it read 1.85
 # while the locked graph needed 1.88, so the reviewed revision did not build
@@ -47,16 +59,13 @@ cargo run -q -p xtask -- check-docs
 # left the membership check unrun here -- the `A1-164` failure in the other
 # direction, with the shipped copy as the untested one. Found when a cut gained a
 # task and `preflight` stayed green (`A1-136`'s audit).
-# **Every document of ours that names a task**, not the three that happened to be
-# listed. `README.md`, `HLD.md`, `AGENTS.md` and `CONTRIBUTING.md` carry 105
-# distinct task references between them -- 82 in the HLD alone -- and nothing read
-# any of them: `xtask check-docs` above checks *ADR* citations in those files,
-# which is a different question. An id that stops resolving reads as *handled*,
-# which is the state this command exists to catch, and the README is the document
-# an adopter meets first (`A1-283`, audit).
-echo "==> aplan check-docs (references and cut membership)"
-cargo run -q -p aplan -- check-docs \
-    README.md HLD.md AGENTS.md CONTRIBUTING.md ROADMAP.md CHANGELOG.md docs/upgrading.md
+# **Every document this repository declared**, expanded from `docs.paths` and
+# `docs.membership[].doc`. The old argument list was a second configuration:
+# adding a pilot or another plan-bearing document did not add it to the gate.
+# The no-argument invocation is the adopter surface and the self-hosted proof of
+# `A1-203`; explicit paths remain the narrow one-off form.
+echo "==> aplan check-docs (declared references and cut membership)"
+cargo run -q -p aplan -- check-docs
 
 # The agent contract's generated half. This repository's own AGENTS.md told
 # agents that `.aplan.yml` accepts `commit`, `test` or `file` evidence for three

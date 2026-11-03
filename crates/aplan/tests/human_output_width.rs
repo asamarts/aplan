@@ -18,7 +18,7 @@
 
 use std::path::Path;
 
-mod common;
+use crate::common;
 
 /// Whether the renderer added more width than the terminal has.
 ///
@@ -53,6 +53,19 @@ fn renderer_added_too_much(line: &str, width: usize) -> bool {
         .max()
         .unwrap_or(0);
     aplan_output::fold::display_width(line).saturating_sub(longest) > width
+}
+
+#[test]
+fn width_oracle_applies_the_progress_erase_before_measuring_output() {
+    let captured = concat!(
+        "\u{1b}[36m\u{280b} progress: building the requested view\u{1b}[0m",
+        "\r\u{1b}[2K",
+        "T-001  done  a fitted title\r\n"
+    );
+    assert_eq!(
+        common::terminal_text(captured),
+        "T-001  done  a fitted title\n"
+    );
 }
 
 use common::on_a_terminal;
@@ -156,6 +169,7 @@ const HUMAN: &[(&[&str], &str)] = &[
     // The fixture carries findings on purpose, so what `check` renders is the
     // diagnostic block rather than a clean verdict.
     (&["check"], "error["),
+    (&["test", "list"], "test catalogue:"),
     (&["ready"], "T-002"),
     (&["roadmap"], "roadmap:"),
     (&["summary"], "effort"),
@@ -164,6 +178,18 @@ const HUMAN: &[(&[&str], &str)] = &[
     (&["vacuity"], "rule/task pair"),
     (&["deprecations"], "announced in"),
     (&["paths"], "commit(s) sampled"),
+    (
+        &[
+            "capture",
+            "A captured idea whose title is deliberately long enough to require wrapping on a narrow terminal",
+            "--source",
+            "width:census",
+            "--body",
+            "A body with enough explanatory prose to require wrapping under its field indentation as well",
+        ],
+        "capture",
+    ),
+    (&["inbox"], "source=width"),
     (&["critical-path"], "critical path:"),
     // The target-bounded form puts an id a reader chose into the header, so the
     // line's length stopped being the renderer's alone (`A1-345`).
@@ -171,6 +197,7 @@ const HUMAN: &[(&[&str], &str)] = &[
     (&["tasks"], "status"),
     (&["tree", "T-002"], "waits on:"),
     (&["show", "T-001"], "phase 0"),
+    (&["explain", "rule", "APLAN012"], "APLAN012"),
     // `why` on a task whose blocker is `done` prints one sentence and no rows,
     // which is what this file was measuring before `A1-291`.
     (&["why", "T-005"], "is blocked by"),
@@ -178,6 +205,7 @@ const HUMAN: &[(&[&str], &str)] = &[
     // a single task have to be pointed at it or they never see the case.
     (&["show", "T-003"], "phase 0"),
     (&["tree", "T-003"], "T-003"),
+    (&["graph", "--ascii"], "level: plan"),
 ];
 
 /// Commands whose output no person reads as prose, and why each is out of scope
@@ -193,6 +221,10 @@ const HUMAN: &[(&[&str], &str)] = &[
 /// omission from one.
 const NOT_PROSE: &[(&str, &str)] = &[
     ("add", "writes a task and prints its path"),
+    (
+        "blueprint",
+        "prints correctness-bearing file paths, task ids and SHA-256 identities whose exact tokens must not be re-flowed",
+    ),
     (
         "version",
         "one word from a closed vocabulary, or a version number: there is nothing to \
@@ -231,14 +263,29 @@ const NOT_PROSE: &[(&str, &str)] = &[
     ("export-agents-md", "writes a document"),
     ("export-roadmap-json", "a machine format"),
     ("facts", "a machine format"),
-    ("graph", "Mermaid, gated by machine_formats_unfolded.rs"),
     ("help", "clap renders it, gated by help_wraps.rs (A1-205)"),
     ("import", "writes tasks and prints a count"),
     ("init", "writes a config and prints its path"),
     ("mcp", "speaks JSON-RPC on a pipe, never to a terminal"),
+    (
+        "park",
+        "writes tasks and prints a fixed confirmation count and ids",
+    ),
+    (
+        "tui",
+        "owns the whole terminal grid rather than printing prose lines; fixed-size buffer and PTY tests gate its layout",
+    ),
     ("mv", "writes tasks and prints a confirmation"),
+    (
+        "rekey",
+        "writes tasks and prints a migration confirmation plus unbreakable path-and-line review locations",
+    ),
     ("schema", "a machine format"),
     ("supersede", "writes a task and prints its path"),
+    (
+        "unpark",
+        "writes tasks and prints a fixed confirmation count and ids",
+    ),
     (
         "verify",
         "its findings are the same renderer `check` uses and are gated there; \

@@ -65,6 +65,17 @@ pub const DEFAULT_LINES: usize = 8;
 /// fold what they are given.
 pub const DEFAULT_LINE_CHARS: usize = 200;
 
+/// The bounded pieces retained from one pipe (`A1-366`).
+#[derive(Debug, Clone, Copy)]
+pub struct Captured<'a> {
+    /// The complete stream when `omitted_bytes` is zero; otherwise its prefix.
+    pub head: &'a [u8],
+    /// The stream's suffix when bytes between it and `head` were dropped.
+    pub tail: &'a [u8],
+    /// Bytes drained but not held in the parent process.
+    pub omitted_bytes: u64,
+}
+
 impl Default for Bound {
     fn default() -> Self {
         Self {
@@ -92,12 +103,42 @@ const MASKED: &str = "[redacted]";
 /// return the banner.
 #[must_use]
 pub fn of(stdout: &[u8], stderr: &[u8], bound: Bound) -> Option<String> {
+    of_captured(
+        Captured {
+            head: stdout,
+            tail: &[],
+            omitted_bytes: 0,
+        },
+        Captured {
+            head: stderr,
+            tail: &[],
+            omitted_bytes: 0,
+        },
+        bound,
+        "max_output",
+    )
+}
+
+/// A bounded excerpt from output whose capture was itself bounded (`A1-366`).
+///
+/// The retained suffix feeds the tail-oriented excerpt, so bounding what the
+/// parent holds does not discard the assertion or summary this module was built
+/// to show. A separate line states how many bytes were drained and discarded,
+/// and names the dial responsible; an excerpt must never imply it saw a whole
+/// stream after capture omitted its middle.
+#[must_use]
+pub fn of_captured(
+    stdout: Captured<'_>,
+    stderr: Captured<'_>,
+    bound: Bound,
+    output_key: &str,
+) -> Option<String> {
     if bound.lines == 0 {
         return None;
     }
-    let err = kept(stderr, bound);
-    let out = kept(stdout, bound);
-    if err.is_empty() && out.is_empty() {
+    let err = kept(captured_tail(stderr), bound);
+    let out = kept(captured_tail(stdout), bound);
+    if err.is_empty() && out.is_empty() && stderr.omitted_bytes == 0 && stdout.omitted_bytes == 0 {
         return None;
     }
 
@@ -109,26 +150,63 @@ pub fn of(stdout: &[u8], stderr: &[u8], bound: Bound) -> Option<String> {
     let take_out = out.len().min(bound.lines - take_err);
 
     let mut shown = Vec::new();
-    push_stream(&mut shown, "stderr", &err, take_err);
-    push_stream(&mut shown, "stdout", &out, take_out);
+    push_stream(
+        &mut shown,
+        "stderr",
+        &err,
+        take_err,
+        stderr.omitted_bytes,
+        output_key,
+    );
+    push_stream(
+        &mut shown,
+        "stdout",
+        &out,
+        take_out,
+        stdout.omitted_bytes,
+        output_key,
+    );
     Some(shown.join("\n"))
 }
 
+fn captured_tail(captured: Captured<'_>) -> &[u8] {
+    if captured.omitted_bytes == 0 {
+        captured.head
+    } else {
+        captured.tail
+    }
+}
+
 /// One stream's kept lines, with whatever was left out said out loud.
-fn push_stream(into: &mut Vec<String>, name: &str, lines: &[String], take: usize) {
-    if lines.is_empty() {
+fn push_stream(
+    into: &mut Vec<String>,
+    name: &str,
+    lines: &[String],
+    take: usize,
+    omitted_bytes: u64,
+    output_key: &str,
+) {
+    if lines.is_empty() && omitted_bytes == 0 {
         return;
+    }
+    if omitted_bytes > 0 {
+        into.push(format!(
+            "  {name}: {omitted_bytes} byte(s) dropped while draining because retained output \
+             reached `{output_key}`; showing the retained tail"
+        ));
     }
     if take == 0 {
         // Said rather than dropped: a reader who sees only stderr has to know
         // stdout had something too, or they will go looking for it twice.
-        into.push(format!("  {name}: {} line(s) not shown", lines.len()));
+        if !lines.is_empty() {
+            into.push(format!("  {name}: {} line(s) not shown", lines.len()));
+        }
         return;
     }
     let omitted = lines.len() - take;
     if omitted > 0 {
         into.push(format!("  {name}: {omitted} earlier line(s) not shown"));
-    } else {
+    } else if omitted_bytes == 0 {
         into.push(format!("  {name}:"));
     }
     for line in &lines[lines.len() - take..] {
@@ -409,6 +487,39 @@ mod tests {
                 line.chars().count()
             );
         }
+    }
+
+    /// Capture truncation and display truncation are separate facts. The tail
+    /// remains the excerpt's source, while the byte omission names the parent
+    /// memory dial that caused it (`A1-366`).
+    #[test]
+    fn capture_omission_names_its_byte_bound_and_keeps_the_failure_tail() {
+        let shown = of_captured(
+            Captured {
+                head: b"banner and first assertion\n",
+                tail: b"the final failure reason\n",
+                omitted_bytes: 98_765,
+            },
+            Captured {
+                head: b"",
+                tail: b"",
+                omitted_bytes: 0,
+            },
+            Bound::default(),
+            "test.max_output",
+        )
+        .expect("there is retained output");
+        assert!(
+            shown.contains("98,765") || shown.contains("98765"),
+            "{shown}"
+        );
+        assert!(shown.contains("dropped"), "{shown}");
+        assert!(shown.contains("test.max_output"), "{shown}");
+        assert!(shown.contains("the final failure reason"), "{shown}");
+        assert!(
+            !shown.contains("banner and first assertion"),
+            "the tail contract changed: {shown}"
+        );
     }
 
     /// **Hostile bytes cannot corrupt the result** (`A1-365`, criterion 3).

@@ -1,0 +1,148 @@
+{
+  "$defs": {
+    "ProducerIdentity": {
+      "additionalProperties": false,
+      "description": "Authenticated producer coordinates. In a statement these are self-reported;\na trust policy gives them meaning only after transport authentication.",
+      "properties": {
+        "event": {
+          "type": "string"
+        },
+        "privilege": {
+          "$ref": "#/$defs/ProducerPrivilege"
+        },
+        "repository": {
+          "type": "string"
+        },
+        "run_id": {
+          "type": "string"
+        },
+        "workflow": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "repository",
+        "workflow",
+        "run_id",
+        "event",
+        "privilege"
+      ],
+      "type": "object"
+    },
+    "ProducerPrivilege": {
+      "description": "Whether the workflow was allowed to publish privileged evidence.",
+      "enum": [
+        "trusted",
+        "untrusted"
+      ],
+      "type": "string"
+    },
+    "ReceiptImportEntry": {
+      "additionalProperties": false,
+      "description": "One configured provider's receipt and current-source policy.",
+      "properties": {
+        "allow_source_revision_movement": {
+          "default": false,
+          "type": "boolean"
+        },
+        "path": {
+          "description": "Receipt path, relative to the import-set document unless absolute.",
+          "type": "string"
+        },
+        "provider": {
+          "description": "One-based provider index or exact configured label.",
+          "type": "string"
+        },
+        "trust": {
+          "$ref": "#/$defs/ReceiptImportTrust"
+        }
+      },
+      "required": [
+        "provider",
+        "path",
+        "trust"
+      ],
+      "type": "object"
+    },
+    "ReceiptImportTrust": {
+      "description": "Caller-owned trust facts for one imported receipt.\n\nThese values are not authenticated by their presence in this document. The\ncaller must create the import set in its trusted orchestration boundary,\nusing artifact or signature facts established outside the receipt bytes.",
+      "oneOf": [
+        {
+          "additionalProperties": false,
+          "properties": {
+            "mode": {
+              "const": "local_file",
+              "type": "string"
+            }
+          },
+          "required": [
+            "mode"
+          ],
+          "type": "object"
+        },
+        {
+          "additionalProperties": false,
+          "properties": {
+            "artifact_sha256": {
+              "type": "string"
+            },
+            "mode": {
+              "const": "same_workflow",
+              "type": "string"
+            },
+            "producer": {
+              "$ref": "#/$defs/ProducerIdentity"
+            }
+          },
+          "required": [
+            "mode",
+            "artifact_sha256",
+            "producer"
+          ],
+          "type": "object"
+        },
+        {
+          "additionalProperties": false,
+          "properties": {
+            "mode": {
+              "const": "signed",
+              "type": "string"
+            },
+            "payload_sha256": {
+              "type": "string"
+            },
+            "producer": {
+              "$ref": "#/$defs/ProducerIdentity"
+            }
+          },
+          "required": [
+            "mode",
+            "payload_sha256",
+            "producer"
+          ],
+          "type": "object"
+        }
+      ]
+    }
+  },
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "additionalProperties": false,
+  "description": "Complete current-only input for receipt-backed whole-plan verification.",
+  "properties": {
+    "receipts": {
+      "items": {
+        "$ref": "#/$defs/ReceiptImportEntry"
+      },
+      "type": "array"
+    },
+    "schema": {
+      "type": "string"
+    }
+  },
+  "required": [
+    "schema",
+    "receipts"
+  ],
+  "title": "ReceiptImportSet",
+  "type": "object"
+}

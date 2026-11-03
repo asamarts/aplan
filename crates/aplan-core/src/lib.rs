@@ -61,10 +61,13 @@ macro_rules! str_enum {
 
 pub mod anchor;
 pub mod behaviour;
+pub mod capture;
+pub mod claim;
 pub mod close;
 pub mod contract;
 pub mod deprecation;
 pub mod diagnostic;
+pub mod explain;
 pub mod export;
 pub mod fixture;
 pub mod glob;
@@ -86,21 +89,34 @@ pub mod validate;
 pub mod version;
 
 pub use anchor::{anchor_fingerprint, fingerprint_holds, heading_anchors, resolvable_anchors};
+pub use capture::{Capture, CapturePolicy, CaptureSchema, CaptureState, Inbox, load_inbox};
+pub use claim::{ClaimOrigin, ClaimRecord, ClaimScope, ClaimSnapshot};
 pub use close::trace_fingerprints;
-pub use close::{CloseError, add_evidence, close, remove_evidence, replace_evidence, restamp};
-pub use diagnostic::{Diagnostic, Report, Rule, Severity, Verdict, code};
+pub use close::{
+    CloseError, add_evidence, apply_repair, close, remove_evidence, replace_evidence, restamp,
+    set_evidence_fingerprints,
+};
+pub use diagnostic::{Diagnostic, Repair, Report, Rule, Severity, Verdict, code};
+pub use explain::{RuleExplanation, explain_rule};
 pub use export::{TaskExport, TaskRow};
-pub use graph::{CriticalPath, CriticalTask, EdgeKind, Graph, Rank, Weigh, edge_kind};
+pub use graph::{
+    CriticalPath, CriticalRoute, CriticalStep, CriticalTask, EdgeKind, Graph, Rank, Weigh,
+    edge_kind, graph_constructions,
+};
 pub use id::IdStrategy;
-pub use load::{Plan, load_plan};
+pub use load::{
+    IdentifiedPlan, LoadStats, Plan, PlanFileContent, PlanFileInput, is_plan_directory_path,
+    is_plan_file_path, load_plan, load_plan_files, load_plan_identified,
+    load_plan_identified_measured, load_plan_measured,
+};
 pub use load::{Unopened, Unresolved, unresolved_by_check};
 pub use roadmap::{Cut, Roadmap, RoadmapTask, cut_label, parse_cut_version};
-pub use show::Show;
-pub use summary::{PhaseSummary, Summary};
+pub use show::{Show, ShowSources};
+pub use summary::{GroupSummary, GroupedSummary, PhaseSummary, Summary};
 pub use task::{Evidence, EvidenceKind, Status, Task};
 pub use validate::{
-    AgentsBlock, Cardinality, MilestoneScope, Options, StatusScope, TagFamily, is_iso_date,
-    is_one_edit_apart, validate,
+    AgentsBlock, Cardinality, MilestoneScope, Options, StatusScope, TagFamily, TraceDocumentWork,
+    is_iso_date, is_one_edit_apart, trace_document_work, validate, validate_with_graph,
 };
 
 #[cfg(test)]

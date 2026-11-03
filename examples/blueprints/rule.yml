@@ -1,0 +1,33 @@
+# The listed surfaces are a review checklist; the owning crate and exact paths vary by rule.
+schema: aplan/blueprint/v1
+name: validation-rule
+title: Validation rule
+description: Create one task to implement and announce {{code}} for {{subject}}.
+parameters:
+  - name: code
+    description: Permanent public rule code, such as APLAN999.
+  - name: subject
+    description: Short description of the invalid plan state the rule reports.
+tasks:
+  - key: rule
+    title: Report {{subject}} ({{code}})
+    effort: 1
+    tags: [rules]
+    paths:
+      - crates/aplan-core/src/diagnostic.rs
+      - crates/aplan-core/src/validate.rs
+      - crates/aplan-e2e/tests/coverage.rs
+      - crates/aplan-e2e/tests/rule_tests.rs
+      - docs/rule-catalogue.md
+      - CHANGELOG.md
+    body: |
+      ## Why
+
+      `{{code}}` reports {{subject}}. Confirm the owning predicate and adjust this task's paths
+      before applying the change.
+
+      ## Acceptance criteria
+
+      - [ ] `{{code}}` fires for the invalid neighbour and stays silent for the valid near-miss
+      - [ ] crate-local and end-to-end tests assert the subject, message and agent instruction
+      - [ ] the rule catalogue and changelog announce `{{code}}`

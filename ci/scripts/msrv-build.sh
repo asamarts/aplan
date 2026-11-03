@@ -35,6 +35,10 @@ fi
 # every artifact, so this would silently double the cost of the next stable
 # build. Measured on this workspace: 27s cold, under a second warm.
 export CARGO_TARGET_DIR="${CARGO_TARGET_DIR:-$REPO_ROOT/target}/msrv"
+# Cargo at the 1.88 consumer floor predates `build.warnings` and silently
+# ignores `CARGO_BUILD_WARNINGS`. This isolated target therefore keeps the one
+# intentional rustflag exception (`A1-631`).
+export RUSTFLAGS="-D warnings"
 
 if ! rustup toolchain list 2>/dev/null | grep -q "^${MSRV}"; then
     if ! command -v rustup >/dev/null 2>&1; then

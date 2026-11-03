@@ -19,6 +19,31 @@ pub struct CriticalPath {
     pub tasks: Vec<CriticalTask>,
 }
 
+/// The exact graph route from which a [`CriticalPath`] is reported.
+///
+/// [`CriticalPath::tasks`] deliberately hides milestone checkpoints because
+/// they carry no work. A graph painter cannot hide those nodes while also
+/// claiming to mark the exact edges: a zero-weight milestone may be the
+/// passthrough between two reported tasks. This companion keeps every node and
+/// step chosen by the same dynamic-programming walk, while retaining the
+/// existing work-only report unchanged.
+#[derive(Debug, Clone, PartialEq)]
+pub struct CriticalRoute {
+    /// The existing work-only critical-path answer.
+    pub path: CriticalPath,
+    /// Every node on the chosen route, including zero-weight milestones.
+    pub nodes: Vec<String>,
+    /// Every exact ordering step on that route.
+    pub steps: Vec<CriticalStep>,
+}
+
+/// One exact ordering step on a [`CriticalRoute`].
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
+pub struct CriticalStep {
+    pub from: String,
+    pub to: String,
+}
+
 /// One task on the [`CriticalPath`].
 #[derive(Debug, Clone, PartialEq)]
 pub struct CriticalTask {
@@ -272,10 +297,43 @@ pub struct Graph<'a> {
     pub by_id: BTreeMap<&'a str, &'a Task>,
     /// Blockers a task inherits from the cut it belongs to (`A1-073`).
     sequenced: BTreeMap<&'a str, Vec<&'a str>>,
+    /// Reverse adjacency built once, on the first query for this graph.
+    ///
+    /// Rebuilding this map for every selected task is observably quadratic:
+    /// the TUI constructs a complete inspector catalogue, so 10,000 calls used
+    /// to rebuild the same 10,000-node index 10,000 times (`A1-447`).
+    // Owned ids keep `Graph<'a>` covariant in `'a`; caching borrowed values in
+    // interior mutable storage would make ordinary shorter graph borrows fail
+    // to type-check in roadmap and critical-path projections.
+    dependents: std::sync::OnceLock<BTreeMap<String, Vec<String>>>,
+}
+
+std::thread_local! {
+    static GRAPH_CONSTRUCTIONS: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+}
+
+/// Number of [`Graph::new`] calls on the current thread.
+///
+/// A caller measures one operation by subtracting the value before and after
+/// it. The counter observes work only; it carries no graph state and
+/// establishes no synchronization contract between threads.
+#[must_use]
+pub fn graph_constructions() -> usize {
+    GRAPH_CONSTRUCTIONS.get()
+}
+
+/// One result from the shared unmet-blocker walk.
+///
+/// Keep the loaded task or unresolved id attached to the traversal decision;
+/// adapters may project one or both without reimplementing its boundary.
+enum Unmet<'a> {
+    Known(&'a Task),
+    Unknown(&'a str),
 }
 
 impl<'a> Graph<'a> {
     pub fn new(tasks: impl IntoIterator<Item = &'a Task>) -> Self {
+        GRAPH_CONSTRUCTIONS.set(GRAPH_CONSTRUCTIONS.get().saturating_add(1));
         let mut by_id = BTreeMap::new();
         for t in tasks {
             // First writer wins; duplicate ids are reported separately by the
@@ -283,7 +341,11 @@ impl<'a> Graph<'a> {
             by_id.entry(t.id.as_str()).or_insert(t);
         }
         let sequenced = Self::sequenced_edges(&by_id);
-        Self { by_id, sequenced }
+        Self {
+            by_id,
+            sequenced,
+            dependents: std::sync::OnceLock::new(),
+        }
     }
 
     /// Cut sequencing, derived rather than hand-maintained (`A1-073`).
@@ -393,6 +455,80 @@ impl<'a> Graph<'a> {
             .collect()
     }
 
+    /// Undefined blockers reachable within the same boundary as
+    /// [`Self::why_blocked`].
+    ///
+    /// An undefined id is still an unmet blocker: `check` reports it as
+    /// `APLAN003`, and a complete explanation must not lose it merely because
+    /// the edge is below another loaded task. A cut-bounded explanation stops
+    /// before the cut's members, so unknown ids behind that cut remain folded
+    /// too. Reported by a deterministic breadth-first walk, preserving the
+    /// subject's existing direct declaration order, and deduplicated even on a
+    /// plan whose graph is already invalid.
+    #[must_use]
+    pub fn unknown_blockers(&self, id: &str, walk: Walk) -> Vec<&'a str> {
+        self.walk_unmet(id, walk)
+            .into_iter()
+            .filter_map(|blocker| match blocker {
+                Unmet::Known(_) => None,
+                Unmet::Unknown(id) => Some(id),
+            })
+            .collect()
+    }
+
+    /// One traversal for loaded and undefined unmet blockers.
+    ///
+    /// `why_blocked` and `unknown_blockers` are two projections of this answer,
+    /// so status handling and cut boundaries cannot diverge between them.
+    fn walk_unmet(&self, id: &str, walk: Walk) -> Vec<Unmet<'a>> {
+        let mut seen = BTreeSet::new();
+        let mut out = Vec::new();
+        let mut queue = VecDeque::new();
+
+        if let Some(task) = self.get(id) {
+            // Preserve the direct-answer order that `why` has always exposed:
+            // these strings occur in the task's declaration order. Loaded
+            // blockers use the graph's deterministic order below.
+            for blocker in self.direct_unknown_blockers(id) {
+                if self.blocks(task, blocker) && seen.insert(blocker) {
+                    out.push(Unmet::Unknown(blocker));
+                }
+            }
+            for blocker in self.blockers_of(id) {
+                if self.get(blocker).is_some() && self.blocks(task, blocker) {
+                    queue.push_back(blocker);
+                }
+            }
+        }
+
+        while let Some(current) = queue.pop_front() {
+            if !seen.insert(current) {
+                continue;
+            }
+            let Some(task) = self.get(current) else {
+                continue;
+            };
+            if task.status.satisfies_dependency() {
+                continue;
+            }
+            out.push(Unmet::Known(task));
+            if walk == Walk::CutBounded && task.is_milestone() {
+                continue;
+            }
+            for blocker in self.direct_unknown_blockers(&task.id) {
+                if self.blocks(task, blocker) && seen.insert(blocker) {
+                    out.push(Unmet::Unknown(blocker));
+                }
+            }
+            for blocker in self.blockers_of(&task.id) {
+                if self.get(blocker).is_some() && self.blocks(task, blocker) {
+                    queue.push_back(blocker);
+                }
+            }
+        }
+        out
+    }
+
     /// Tasks that are not terminal, not milestones, and whose blockers are all
     /// `done`. Milestones are checkpoints, never workable, so advertising one as
     /// ready would offer a checkpoint as if it were work.
@@ -479,22 +615,38 @@ impl<'a> Graph<'a> {
         self.ready_ranked().into_iter().map(|(t, _)| t).collect()
     }
 
+    /// Whether one named task belongs in [`Self::ready`], without computing
+    /// the full plan's derived ranking.
+    ///
+    /// Contextual clients need the eligibility predicate for the selected task,
+    /// not the critical path, release counts and downstream depths used to sort
+    /// every ready task. Keeping the predicate here prevents those clients from
+    /// growing a subtly different definition of ready.
+    #[must_use]
+    pub fn is_ready(&self, id: &str) -> bool {
+        self.get(id).is_some_and(|task| {
+            !task.is_milestone()
+                && task.status.is_workable()
+                && self
+                    .blockers_of(id)
+                    .iter()
+                    .all(|blocker| !self.blocks(task, blocker))
+        })
+    }
+
     /// The same answer with the reason each task is where it is.
     ///
     /// Ordered by [`Rank::key`]: what a task releases, then whether it is on the
-    /// spine, then its effort, then its id. The explanation travels with the
-    /// order because an order nobody can interrogate is one people learn to
-    /// distrust, which is the standard `why` already sets for blocking.
+    /// spine, then its downstream depth, effort and id. The explanation travels
+    /// with the order because an order nobody can interrogate is one people
+    /// learn to distrust, which is the standard `why` already sets for blocking.
     #[must_use]
     pub fn ready_ranked(&self) -> Vec<(&'a Task, Rank)> {
         let workable: Vec<&'a Task> = self
             .by_id
             .values()
             .copied()
-            .filter(|t| !t.is_milestone())
-            .filter(|t| {
-                t.status.is_workable() && self.blockers_of(&t.id).iter().all(|b| !self.blocks(t, b))
-            })
+            .filter(|task| self.is_ready(&task.id))
             .collect();
 
         let spine: BTreeSet<String> = self
@@ -725,45 +877,13 @@ impl<'a> Graph<'a> {
     ///
     /// Returns an empty vec when the task is ready (or unknown).
     pub fn why_blocked(&self, id: &str, walk: Walk) -> Vec<&'a Task> {
-        let mut seen = BTreeSet::new();
-        let mut out = Vec::new();
-        let mut queue = VecDeque::new();
-
-        if let Some(t) = self.get(id) {
-            for b in self.blockers_of(id) {
-                if self.blocks(t, b) {
-                    queue.push_back(b);
-                }
-            }
-        }
-
-        while let Some(cur) = queue.pop_front() {
-            if !seen.insert(cur) {
-                continue;
-            }
-            let Some(task) = self.get(cur) else { continue };
-            if task.status.satisfies_dependency() {
-                continue;
-            }
-            out.push(task);
-            // A cut is reported and not walked through, under `CutBounded`. The
-            // members behind it are true and are not the answer: `p0000014`
-            // asked why one task was blocked and got 86 lines, of which the
-            // three that could be acted on were two work blockers and the
-            // unfinished cut, and the other 83 were that cut's membership
-            // (`A1-263`). A milestone is the one node whose *name* is a better
-            // answer than its members, because closing it is a real step and
-            // the reader can ask for the list.
-            if walk == Walk::CutBounded && task.is_milestone() {
-                continue;
-            }
-            for b in self.blockers_of(&task.id) {
-                if self.blocks(task, b) {
-                    queue.push_back(b);
-                }
-            }
-        }
-        out
+        self.walk_unmet(id, walk)
+            .into_iter()
+            .filter_map(|blocker| match blocker {
+                Unmet::Known(task) => Some(task),
+                Unmet::Unknown(_) => None,
+            })
+            .collect()
     }
 
     /// How many unmet tasks lie behind `id`, transitively.
@@ -786,14 +906,20 @@ impl<'a> Graph<'a> {
 
     /// The tasks that wait on `id`: [`blockers_of`](Self::blockers_of) inverted.
     ///
-    /// One lookup into [`Self::dependents_index`], which is where the definition
-    /// lives, so a single query and a whole walk cannot answer differently.
+    /// One lookup into the cached index returned by [`Self::dependents_index`],
+    /// so a single query and a whole walk cannot answer differently.
     #[must_use]
     pub fn dependents_of(&self, id: &str) -> Vec<&'a Task> {
-        self.dependents_index().remove(id).unwrap_or_default()
+        self.dependents()
+            .get(id)
+            .into_iter()
+            .flatten()
+            .filter_map(|dependent| self.get(dependent))
+            .collect()
     }
 
-    /// Every task's dependents, inverted in one pass.
+    /// An owned snapshot of every task's dependents, inverted once on first
+    /// use for this graph.
     ///
     /// Includes the edges a cut implies (ADR-0013) rather than only the declared
     /// ones, so the answer matches what `ready` acts on. Sorted by id, because
@@ -801,20 +927,51 @@ impl<'a> Graph<'a> {
     /// its member is a real edge, and hiding it from a *view* would make the
     /// picture disagree with the graph it is a picture of (`A1-126`).
     ///
-    /// **One pass, for the reason `releases_all` is one pass.** Asking per node
+    /// **One shared pass, for the reason `releases_all` is one pass.** Asking per node
     /// while walking a tree, with each answer scanning every task, made `tree`
     /// quadratic: a 4000-task chain took 7.7s. The same defect twice in two
     /// commits is what makes it worth a shared index rather than a note
     /// (`A1-126`, measured while auditing it).
     #[must_use]
     pub fn dependents_index(&self) -> BTreeMap<&'a str, Vec<&'a Task>> {
-        let mut out: BTreeMap<&'a str, Vec<&'a Task>> = BTreeMap::new();
-        for d in self.by_id.values().copied() {
-            for b in self.blockers_of(&d.id) {
-                out.entry(b).or_default().push(d);
+        self.dependents()
+            .iter()
+            .filter_map(|(blocker, dependents)| {
+                let blocker = self
+                    .by_id
+                    .get_key_value(blocker.as_str())
+                    .map(|(id, _)| *id)
+                    .or_else(|| {
+                        dependents.iter().find_map(|dependent| {
+                            self.get(dependent).and_then(|task| {
+                                task.blocked_by
+                                    .iter()
+                                    .find(|id| id.as_str() == blocker)
+                                    .map(String::as_str)
+                            })
+                        })
+                    })?;
+                let dependents = dependents
+                    .iter()
+                    .filter_map(|dependent| self.get(dependent))
+                    .collect();
+                Some((blocker, dependents))
+            })
+            .collect()
+    }
+
+    fn dependents(&self) -> &BTreeMap<String, Vec<String>> {
+        self.dependents.get_or_init(|| {
+            let mut out: BTreeMap<String, Vec<String>> = BTreeMap::new();
+            for dependent in self.by_id.values().copied() {
+                for blocker in self.blockers_of(&dependent.id) {
+                    out.entry(blocker.to_string())
+                        .or_default()
+                        .push(dependent.id.clone());
+                }
             }
-        }
-        out
+            out
+        })
     }
 
     /// Find one dependency cycle, if any, as the sequence of ids forming it.
@@ -986,7 +1143,18 @@ impl<'a> Graph<'a> {
     /// cut's work, but a milestone is never the endpoint and is filtered out of
     /// the reported spine: a checkpoint is not itself work.
     pub fn critical_path(&self) -> Option<CriticalPath> {
-        self.critical_path_within(&self.live_nodes())
+        self.critical_route().map(|route| route.path)
+    }
+
+    /// The exact node-and-edge route behind [`Self::critical_path`].
+    ///
+    /// This is a presentation fact, not another critical-path algorithm. It is
+    /// produced by the same predecessor table and tie-break as the existing
+    /// report, retaining milestone passthroughs that the work-only report
+    /// intentionally filters out.
+    #[must_use]
+    pub fn critical_route(&self) -> Option<CriticalRoute> {
+        self.critical_route_within(&self.live_nodes())
     }
 
     /// The whole plan's longest chain under an explicit weighting (`A1-352`).
@@ -1138,6 +1306,10 @@ impl<'a> Graph<'a> {
     /// endpoint, and filtered from the reported spine. `None` if the induced
     /// subgraph is cyclic.
     pub(crate) fn critical_path_within(&self, nodes: &BTreeSet<&'a str>) -> Option<CriticalPath> {
+        self.critical_route_within(nodes).map(|route| route.path)
+    }
+
+    fn critical_route_within(&self, nodes: &BTreeSet<&'a str>) -> Option<CriticalRoute> {
         let dp = self.longest_paths(nodes, Weigh::All)?;
         // The endpoint is the non-milestone task with the greatest finish
         // (smallest id on a tie, since `nodes` iterates in id order). A milestone
@@ -1156,11 +1328,15 @@ impl<'a> Graph<'a> {
             }
         }
         match end {
-            Some(end) => Some(self.chain_to(&dp, end, Weigh::All)),
+            Some(end) => Some(self.route_to(&dp, end, Weigh::All)),
             // Every node is a milestone, so there is no spine to report.
-            None => Some(CriticalPath {
-                total_effort_days: 0.0,
-                tasks: Vec::new(),
+            None => Some(CriticalRoute {
+                path: CriticalPath {
+                    total_effort_days: 0.0,
+                    tasks: Vec::new(),
+                },
+                nodes: Vec::new(),
+                steps: Vec::new(),
             }),
         }
     }
@@ -1195,7 +1371,7 @@ impl<'a> Graph<'a> {
     /// The chain the DP found ending at `end`, as a reported spine: walk
     /// predecessors back to its start, reverse into execution order, then drop
     /// the milestones, which are passthroughs rather than work.
-    fn chain_to(&self, dp: &LongestPaths<'a>, end: &'a str, w: Weigh) -> CriticalPath {
+    fn chain_ids(dp: &LongestPaths<'a>, end: &'a str) -> Vec<&'a str> {
         let mut ids = Vec::new();
         let mut cur = Some(end);
         while let Some(v) = cur {
@@ -1203,7 +1379,31 @@ impl<'a> Graph<'a> {
             cur = dp.pred[v];
         }
         ids.reverse();
+        ids
+    }
 
+    fn route_to(&self, dp: &LongestPaths<'a>, end: &'a str, w: Weigh) -> CriticalRoute {
+        let ids = Self::chain_ids(dp, end);
+        let steps = ids
+            .windows(2)
+            .map(|pair| CriticalStep {
+                from: pair[0].to_string(),
+                to: pair[1].to_string(),
+            })
+            .collect();
+        CriticalRoute {
+            path: self.path_from_ids(&ids, w),
+            nodes: ids.into_iter().map(str::to_string).collect(),
+            steps,
+        }
+    }
+
+    fn chain_to(&self, dp: &LongestPaths<'a>, end: &'a str, w: Weigh) -> CriticalPath {
+        let ids = Self::chain_ids(dp, end);
+        self.path_from_ids(&ids, w)
+    }
+
+    fn path_from_ids(&self, ids: &[&'a str], w: Weigh) -> CriticalPath {
         let tasks: Vec<CriticalTask> = ids
             .iter()
             .filter_map(|id| self.get(id))
@@ -1253,6 +1453,7 @@ mod tests {
             paths: Vec::new(),
             traces: Vec::new(),
             trace_fingerprints: std::collections::BTreeMap::new(),
+            evidence_fingerprints: std::collections::BTreeMap::new(),
             tags: Vec::new(),
             revisit_at: None,
             version_impact: None,
@@ -1289,6 +1490,115 @@ mod tests {
     }
 
     #[test]
+    fn dependent_queries_share_one_lazy_reverse_index() {
+        let root = task("ROOT", Status::Todo, &[]);
+        let left = task("LEFT", Status::Todo, &["ROOT"]);
+        let right = task("RIGHT", Status::Todo, &["ROOT"]);
+        let graph = Graph::new([&root, &left, &right]);
+        assert!(graph.dependents.get().is_none());
+
+        assert_eq!(
+            graph
+                .dependents_of("ROOT")
+                .iter()
+                .map(|task| task.id.as_str())
+                .collect::<Vec<_>>(),
+            ["LEFT", "RIGHT"]
+        );
+        let first = std::ptr::from_ref(graph.dependents.get().expect("reverse index after query"));
+        assert!(graph.dependents_of("LEFT").is_empty());
+        let second = std::ptr::from_ref(graph.dependents.get().expect("same reverse index"));
+        assert_eq!(first, second, "a second query rebuilt the shared index");
+
+        let unresolved = task("UNRESOLVED", Status::Todo, &["GHOST"]);
+        let unresolved_graph = Graph::new([&unresolved]);
+        assert_eq!(
+            unresolved_graph
+                .dependents_of("GHOST")
+                .iter()
+                .map(|task| task.id.as_str())
+                .collect::<Vec<_>>(),
+            ["UNRESOLVED"]
+        );
+        assert_eq!(
+            unresolved_graph
+                .dependents_index()
+                .get("GHOST")
+                .expect("unresolved dependency remains visible")
+                .iter()
+                .map(|task| task.id.as_str())
+                .collect::<Vec<_>>(),
+            ["UNRESOLVED"]
+        );
+    }
+
+    /// Proof for `why.complete_retains_nested_undefined_blockers`: an unknown
+    /// id below loaded work belongs to the closure, while a cut is an honest
+    /// boundary for the default walk.
+    #[test]
+    fn undefined_blockers_follow_the_requested_why_boundary() {
+        let leaf = task("LEAF", Status::Todo, &["GHOST"]);
+        let mut cut = task("CUT", Status::Todo, &["LEAF"]);
+        cut.tags.push("milestone".to_string());
+        let subject = task("SUBJECT", Status::Todo, &["CUT"]);
+        let ordinary = task("ORDINARY", Status::Todo, &["LEAF"]);
+        let tasks = [leaf, cut, subject, ordinary];
+        let graph = Graph::new(tasks.iter());
+
+        assert!(
+            graph
+                .unknown_blockers("SUBJECT", Walk::CutBounded)
+                .is_empty(),
+            "the bounded answer walked through its cut"
+        );
+        assert_eq!(
+            graph.unknown_blockers("SUBJECT", Walk::Complete),
+            vec!["GHOST"]
+        );
+        assert_eq!(
+            graph.unknown_blockers("ORDINARY", Walk::CutBounded),
+            vec!["GHOST"],
+            "ordinary work is not a fold boundary"
+        );
+        assert_eq!(
+            graph.unknown_blockers("ORDINARY", Walk::Complete),
+            vec!["GHOST"]
+        );
+    }
+
+    /// Proof for `why.complete_retains_nested_undefined_blockers`: unresolved
+    /// ids retain direct declaration order, repeat once, and do not leak
+    /// through a dependency a completed task already satisfies.
+    #[test]
+    fn undefined_blocker_walk_is_ordered_deduplicated_and_stops_at_done() {
+        let mut subject = task(
+            "SUBJECT",
+            Status::Todo,
+            &["DIRECT-Z", "BRANCH", "DIRECT-A", "DIRECT-Z"],
+        );
+        // Keep the intentionally invalid duplicate: a graph query still has to
+        // terminate and report one identity when validation already rejects it.
+        subject.blocked_by.push("BRANCH".to_string());
+        let branch = task("BRANCH", Status::Todo, &["NESTED", "DONE", "NESTED"]);
+        let done = task("DONE", Status::Done, &["BEHIND-DONE"]);
+        let tasks = [subject, branch, done];
+        let graph = Graph::new(tasks.iter());
+
+        assert_eq!(
+            graph.unknown_blockers("SUBJECT", Walk::Complete),
+            vec!["DIRECT-Z", "DIRECT-A", "NESTED"]
+        );
+        assert_eq!(
+            graph
+                .why_blocked("SUBJECT", Walk::Complete)
+                .into_iter()
+                .map(|task| task.id.as_str())
+                .collect::<Vec<_>>(),
+            vec!["BRANCH"]
+        );
+    }
+
+    #[test]
     fn acyclic_chain_has_no_cycle() {
         let a = task("A", Status::Done, &[]);
         let b = task("B", Status::Todo, &["A"]);
@@ -1305,6 +1615,10 @@ mod tests {
         let g = Graph::new([&a, &b, &c]);
         let ready: Vec<_> = g.ready().iter().map(|t| t.id.as_str()).collect();
         assert_eq!(ready, vec!["B"]);
+        assert!(!g.is_ready("A"), "terminal work is not ready");
+        assert!(g.is_ready("B"), "a satisfied live task is ready");
+        assert!(!g.is_ready("C"), "an unfinished blocker still blocks");
+        assert!(!g.is_ready("missing"), "an unknown task is not ready");
     }
 
     /// Two sequential cuts: `M-s1` follows `M-s0`, declared once on the
@@ -1563,14 +1877,15 @@ mod tests {
         let tasks = [task("A", Status::Todo, &["GHOST"])];
         let g = Graph::new(tasks.iter());
         assert!(g.ready().is_empty(), "a ghost still blocks");
+        assert!(!g.is_ready("A"), "single-task query preserves ghost edges");
         assert_eq!(g.unmet_blockers("A"), vec!["GHOST"]);
     }
 
     #[test]
     fn ready_excludes_milestones() {
-        // A milestone whose members are all done would pass `is_ready` (workable,
-        // blockers done), but it is a checkpoint, not work, so it is never
-        // offered as ready. A normal task in the same state still is.
+        // A milestone whose members are all done is workable by status and has
+        // satisfied blockers, but it is a checkpoint, not work, so neither the
+        // list nor the selected-task predicate may offer it as ready.
         let a = task("A", Status::Done, &[]);
         let work = task("W", Status::Todo, &["A"]);
         let mut milestone = task("M", Status::Todo, &["A"]);
@@ -1578,6 +1893,8 @@ mod tests {
         let g = Graph::new([&a, &work, &milestone]);
         let ready: Vec<_> = g.ready().iter().map(|t| t.id.as_str()).collect();
         assert_eq!(ready, vec!["W"]);
+        assert!(g.is_ready("W"));
+        assert!(!g.is_ready("M"));
     }
 
     #[test]
@@ -1709,6 +2026,71 @@ mod tests {
             "the milestone is hidden but its member A still gates X"
         );
         assert!((cp.total_effort_days - 4.0).abs() < 1e-9);
+    }
+
+    /// Proof for `graph.text_focus_and_critical_overlay`: the overlay consumes
+    /// exact route steps and cannot infer them from the work-only task list.
+    #[test]
+    fn critical_route_keeps_the_exact_milestone_steps_the_report_hides() {
+        let a = task_e("A", &[], 3.0);
+        let mut milestone = task("M", Status::Todo, &["A"]);
+        milestone.tags = vec!["milestone".into()];
+        let x = task_e("X", &["M"], 1.0);
+        let route = Graph::new([&x, &milestone, &a])
+            .critical_route()
+            .expect("acyclic");
+
+        assert_eq!(
+            route
+                .path
+                .tasks
+                .iter()
+                .map(|task| task.id.as_str())
+                .collect::<Vec<_>>(),
+            ["A", "X"],
+            "the existing report must remain work-only"
+        );
+        assert_eq!(route.nodes, ["A", "M", "X"]);
+        assert_eq!(
+            route.steps,
+            [
+                CriticalStep {
+                    from: "A".to_string(),
+                    to: "M".to_string(),
+                },
+                CriticalStep {
+                    from: "M".to_string(),
+                    to: "X".to_string(),
+                },
+            ]
+        );
+    }
+
+    #[test]
+    fn critical_route_uses_the_paths_deterministic_tie_break() {
+        let a = task_e("A", &[], 1.0);
+        let b = task_e("B", &["A"], 1.0);
+        let c = task_e("C", &["A"], 1.0);
+        let d = task_e("D", &["B", "C"], 1.0);
+        let graph = Graph::new([&d, &c, &b, &a]);
+        let path = graph.critical_path().expect("acyclic");
+        let route = graph.critical_route().expect("acyclic");
+
+        assert_eq!(route.path, path);
+        assert_eq!(route.nodes, ["A", "B", "D"]);
+        assert_eq!(
+            route.steps,
+            [
+                CriticalStep {
+                    from: "A".to_string(),
+                    to: "B".to_string(),
+                },
+                CriticalStep {
+                    from: "B".to_string(),
+                    to: "D".to_string(),
+                },
+            ]
+        );
     }
 
     #[test]
@@ -2475,6 +2857,7 @@ mod closeable {
             paths: Vec::new(),
             traces: Vec::new(),
             trace_fingerprints: std::collections::BTreeMap::new(),
+            evidence_fingerprints: std::collections::BTreeMap::new(),
             tags: tags.iter().map(|s| (*s).to_string()).collect(),
             revisit_at: None,
             version_impact: None,
@@ -2648,6 +3031,7 @@ mod ranking {
             paths: Vec::new(),
             traces: Vec::new(),
             trace_fingerprints: std::collections::BTreeMap::new(),
+            evidence_fingerprints: std::collections::BTreeMap::new(),
             tags: Vec::new(),
             revisit_at: None,
             version_impact: None,

@@ -42,7 +42,7 @@ use std::path::Path;
 use aplan_core::validate;
 use aplan_mcp::tools;
 
-mod common;
+use crate::common;
 
 /// How a tool is compared with the command it mirrors.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -151,7 +151,7 @@ fn claim_leaves_the_same_file() -> Result<(), String> {
         &policy(mcp_dir.path(), false),
     )
     .map_err(|e| format!("the MCP claim failed: {e}"))?;
-    same_file(&cli_dir, &mcp_dir, "aplan/tasks/A-1.md")?;
+    same_claim_holders(&cli_dir, &mcp_dir)?;
 
     // And both refuse an unnamed takeover of what `ada` now holds.
     let out = common::output(cli_dir.path(), &["claim", "A-1", "--as", "grace"]);
@@ -169,20 +169,28 @@ fn claim_leaves_the_same_file() -> Result<(), String> {
     {
         return Err("the MCP tool took a held task without naming the holder".to_string());
     }
-    same_file(&cli_dir, &mcp_dir, "aplan/tasks/A-1.md")
+    same_claim_holders(&cli_dir, &mcp_dir)
 }
 
 /// Releasing leaves the same file on both surfaces, key removed rather than
 /// emptied (`A1-359`).
 fn release_leaves_the_same_file() -> Result<(), String> {
     let (cli_dir, mcp_dir) = two_fixtures();
-    for dir in [&cli_dir, &mcp_dir] {
-        let p = dir.path().join("aplan/tasks/A-1.md");
-        let held = std::fs::read_to_string(&p)
-            .map_err(|e| e.to_string())?
-            .replace("status: todo", "status: todo\nowner: ada");
-        std::fs::write(&p, held).map_err(|e| e.to_string())?;
+    let setup = common::output(cli_dir.path(), &["claim", "A-1", "--as", "ada"]);
+    if !setup.status.success() {
+        return Err(format!(
+            "the CLI refused the setup claim: {}",
+            String::from_utf8_lossy(&setup.stderr)
+        ));
     }
+    tools::claim(
+        &mcp_dir.path().join("aplan"),
+        "A-1",
+        Some("ada"),
+        None,
+        &policy(mcp_dir.path(), false),
+    )
+    .map_err(|e| format!("the MCP setup claim failed: {e}"))?;
 
     let out = common::output(cli_dir.path(), &["release", "A-1"]);
     if !out.status.success() {
@@ -197,7 +205,7 @@ fn release_leaves_the_same_file() -> Result<(), String> {
         &policy(mcp_dir.path(), false),
     )
     .map_err(|e| format!("the MCP release failed: {e}"))?;
-    same_file(&cli_dir, &mcp_dir, "aplan/tasks/A-1.md")
+    same_file(&cli_dir, &mcp_dir, ".git/aplan/claims-v1.json")
 }
 
 /// Starting leaves the same file on both surfaces (`A1-359`).
@@ -277,6 +285,7 @@ fn two_fixtures() -> (tempfile::TempDir, tempfile::TempDir) {
         .expect("tempdir");
     for dir in [&cli_dir, &mcp_dir] {
         fixture(dir.path());
+        git2::Repository::init(dir.path()).expect("git init");
     }
     (cli_dir, mcp_dir)
 }
@@ -295,6 +304,39 @@ fn same_file(
         ));
     }
     Ok(())
+}
+
+fn same_claim_holders(
+    cli_dir: &tempfile::TempDir,
+    mcp_dir: &tempfile::TempDir,
+) -> Result<(), String> {
+    let read =
+        |dir: &tempfile::TempDir| -> Result<std::collections::BTreeMap<String, String>, String> {
+            let text = std::fs::read_to_string(dir.path().join(".git/aplan/claims-v1.json"))
+                .map_err(|error| error.to_string())?;
+            let value: serde_json::Value =
+                serde_json::from_str(&text).map_err(|error| error.to_string())?;
+            value["claims"]
+                .as_object()
+                .ok_or_else(|| "claim store has no claims object".to_string())?
+                .iter()
+                .map(|(id, claim)| {
+                    claim["holder"]
+                        .as_str()
+                        .map(|holder| (id.clone(), holder.to_string()))
+                        .ok_or_else(|| format!("claim `{id}` has no holder"))
+                })
+                .collect()
+        };
+    let cli = read(cli_dir)?;
+    let mcp = read(mcp_dir)?;
+    if cli == mcp {
+        Ok(())
+    } else {
+        Err(format!(
+            "the two surfaces recorded different claims: {cli:?} != {mcp:?}"
+        ))
+    }
 }
 
 #[test]
@@ -327,6 +369,8 @@ fn every_tool_is_classified_and_every_classification_is_exercised() {
 }
 
 #[test]
+/// Proof for `tui.mutation_surface_has_cross_adapter_parity`: applicable MCP
+/// mutations execute the same exact comparison functions as their CLI peers.
 fn every_tool_agrees_with_the_command_it_mirrors() {
     let mut problems = Vec::new();
     let mut checked = 0usize;
@@ -349,6 +393,43 @@ fn every_tool_agrees_with_the_command_it_mirrors() {
         "the surfaces disagree:\n  {}",
         problems.join("\n  ")
     );
+}
+
+#[test]
+fn ready_parity_ignores_only_the_independent_observation_instant() {
+    let cli = serde_json::json!({
+        "ready": [{"id": "A-1"}],
+        "closeable_cuts": [{"id": "M-1"}],
+        "claim_observed_at_epoch_seconds": 10,
+    });
+    let mcp = serde_json::json!({
+        "ready": [{"id": "A-1"}],
+        "closeable_cuts": [{"id": "M-1"}],
+        "claim_observed_at_epoch_seconds": 11,
+    });
+
+    assert_eq!(
+        ready_payload_without_observation_instant(cli.clone(), "CLI").expect("valid CLI payload"),
+        ready_payload_without_observation_instant(mcp.clone(), "MCP").expect("valid MCP payload")
+    );
+
+    let mut changed = mcp;
+    changed["ready"][0]["id"] = serde_json::json!("A-2");
+    assert_ne!(
+        ready_payload_without_observation_instant(cli.clone(), "CLI").expect("valid CLI payload"),
+        ready_payload_without_observation_instant(changed, "MCP").expect("valid MCP payload")
+    );
+
+    let mut missing = cli.clone();
+    missing
+        .as_object_mut()
+        .expect("object")
+        .remove("claim_observed_at_epoch_seconds");
+    assert!(ready_payload_without_observation_instant(missing, "CLI").is_err());
+
+    let mut malformed = cli;
+    malformed["claim_observed_at_epoch_seconds"] = serde_json::json!("now");
+    assert!(ready_payload_without_observation_instant(malformed, "CLI").is_err());
 }
 
 /// A plan with one traced, closeable task and one warning, written to `dir`.
@@ -378,9 +459,12 @@ fn fixture(dir: &Path) {
 /// The runner both surfaces are given: it lists one test, bare.
 fn runner() -> aplan_config::TestRunner {
     aplan_config::TestRunner {
+        weight: None,
+        exclusive: None,
         output_lines: None,
         max_memory: None,
         max_processes: None,
+        max_output: None,
         wrap: None,
         expect_tests: None,
         skipped: None,
@@ -388,10 +472,12 @@ fn runner() -> aplan_config::TestRunner {
         timeout_seconds: None,
         covers: None,
         covers_by_test: None,
+        inputs_by_test: None,
         name: None,
         dir: None,
         list: vec!["printf".into(), "known\n".into()],
         run: vec!["true".into(), "{test}".into()],
+        batch: None,
     }
 }
 
@@ -515,20 +601,156 @@ fn show_returns_what_the_command_prints() -> Result<(), String> {
 
 /// refused by each on the same plan.
 fn dep_leaves_the_same_files() -> Result<(), String> {
+    unsupported_dependency_source_is_refused_on_every_client()?;
     let cli_dir = tempfile::Builder::new()
         .tempdir_in(aplan_core::fixture::fixture_root())
         .expect("tempdir");
     let mcp_dir = tempfile::Builder::new()
         .tempdir_in(aplan_core::fixture::fixture_root())
         .expect("tempdir");
-    for dir in [&cli_dir, &mcp_dir] {
+    let app_dir = tempfile::Builder::new()
+        .tempdir_in(aplan_core::fixture::fixture_root())
+        .expect("tempdir");
+    for dir in [&cli_dir, &mcp_dir, &app_dir] {
         fixture(dir.path());
     }
 
+    let out = common::output(cli_dir.path(), &["dep", "rm", "A-2", "--after", "A-1"]);
+    if !out.status.success() {
+        return Err(format!(
+            "the CLI refused removing a legal edge: {}",
+            String::from_utf8_lossy(&out.stderr)
+        ));
+    }
+    tools::dep(
+        &mcp_dir.path().join("aplan"),
+        "A-2",
+        "A-1",
+        false,
+        &policy(mcp_dir.path(), false),
+    )
+    .map_err(|e| format!("the MCP dep failed: {e}"))?;
+    let app_policy = policy(app_dir.path(), false);
+    let app_context = application_context(app_dir.path(), &app_policy);
+    let app_response = aplan_app::edit_dependency(
+        &app_context,
+        &aplan_app::DependencyRequest {
+            id: "A-2".to_string(),
+            after: "A-1".to_string(),
+            operation: aplan_app::DependencyOperation::Remove,
+        },
+    )
+    .map_err(|e| format!("the direct application client failed: {e}"))?;
+    if !app_response.changed || app_response.denied || !app_response.diagnostics.added.is_empty() {
+        return Err(format!(
+            "the direct application result did not describe the clean applied removal: \
+             {app_response:?}"
+        ));
+    }
+
+    let rel = "aplan/tasks/A-2.md";
+    let from_cli = std::fs::read_to_string(cli_dir.path().join(rel)).map_err(|e| e.to_string())?;
+    let from_mcp = std::fs::read_to_string(mcp_dir.path().join(rel)).map_err(|e| e.to_string())?;
+    let from_app = std::fs::read_to_string(app_dir.path().join(rel)).map_err(|e| e.to_string())?;
+    if from_cli != from_mcp || from_cli != from_app {
+        return Err(format!(
+            "the three clients wrote different files:\n--- cli\n{from_cli}\n--- mcp\n{from_mcp}\n--- app\n{from_app}"
+        ));
+    }
+
+    restore_edge_then_refuse_cycle(&cli_dir, &mcp_dir, &app_dir, rel)
+}
+
+fn unsupported_dependency_source_is_refused_on_every_client() -> Result<(), String> {
+    let cli_dir = tempfile::Builder::new()
+        .tempdir_in(aplan_core::fixture::fixture_root())
+        .expect("tempdir");
+    let mcp_dir = tempfile::Builder::new()
+        .tempdir_in(aplan_core::fixture::fixture_root())
+        .expect("tempdir");
+    let app_dir = tempfile::Builder::new()
+        .tempdir_in(aplan_core::fixture::fixture_root())
+        .expect("tempdir");
+    let target = "---\nid: A-2\ntitle: A-2\nphase: 0\nstatus: todo\neffort_days: 1\n\
+                  blocked_by: &edges\n  - A-1\ntags: *edges\n---\n\nbody\n";
+    for dir in [&cli_dir, &mcp_dir, &app_dir] {
+        fixture(dir.path());
+        std::fs::write(dir.path().join("aplan/tasks/A-2.md"), target).expect("anchored target");
+        std::fs::write(
+            dir.path().join("aplan/tasks/A-3.md"),
+            "---\nid: A-3\ntitle: A-3\nphase: 0\nstatus: todo\neffort_days: 1\n---\n",
+        )
+        .expect("tail");
+    }
+
+    let out = common::output(cli_dir.path(), &["dep", "add", "A-2", "--after", "A-3"]);
+    if out.status.code() != Some(2)
+        || !String::from_utf8_lossy(&out.stderr).contains("source-preserving delta")
+    {
+        return Err(format!(
+            "the CLI did not retain the typed source-preservation refusal at exit 2 ({:?}): {}",
+            out.status.code(),
+            String::from_utf8_lossy(&out.stderr)
+        ));
+    }
+    let mcp_error = tools::dep(
+        &mcp_dir.path().join("aplan"),
+        "A-2",
+        "A-3",
+        true,
+        &policy(mcp_dir.path(), false),
+    )
+    .expect_err("the MCP adapter must retain the source-preservation refusal");
+    if !mcp_error.to_string().contains("source-preserving delta") {
+        return Err(format!(
+            "the MCP adapter flattened the source-preservation refusal: {mcp_error}"
+        ));
+    }
+    let app_policy = policy(app_dir.path(), false);
+    let app_context = application_context(app_dir.path(), &app_policy);
+    let app_error = aplan_app::edit_dependency(
+        &app_context,
+        &aplan_app::DependencyRequest {
+            id: "A-2".to_string(),
+            after: "A-3".to_string(),
+            operation: aplan_app::DependencyOperation::Add,
+        },
+    )
+    .expect_err("the application boundary must retain the source-preservation refusal");
+    if !matches!(
+        app_error,
+        aplan_app::Error::Rewrite {
+            source: aplan_core::CloseError::NoSequenceDelta("blocked_by"),
+            ..
+        }
+    ) {
+        return Err(format!(
+            "the application boundary flattened the source-preservation refusal: {app_error}"
+        ));
+    }
+    for dir in [&cli_dir, &mcp_dir, &app_dir] {
+        let after = std::fs::read_to_string(dir.path().join("aplan/tasks/A-2.md"))
+            .map_err(|error| error.to_string())?;
+        if after != target {
+            return Err("an unsupported source delta changed the target file".to_string());
+        }
+    }
+    Ok(())
+}
+
+/// Put the edge back through all three clients, then prove their cycle refusal.
+/// The second direction makes the refusal non-vacuous and proves both edit
+/// shapes use the shared writer.
+fn restore_edge_then_refuse_cycle(
+    cli_dir: &tempfile::TempDir,
+    mcp_dir: &tempfile::TempDir,
+    app_dir: &tempfile::TempDir,
+    rel: &str,
+) -> Result<(), String> {
     let out = common::output(cli_dir.path(), &["dep", "add", "A-2", "--after", "A-1"]);
     if !out.status.success() {
         return Err(format!(
-            "the CLI refused a legal edge: {}",
+            "the CLI refused restoring a legal edge: {}",
             String::from_utf8_lossy(&out.stderr)
         ));
     }
@@ -539,34 +761,122 @@ fn dep_leaves_the_same_files() -> Result<(), String> {
         true,
         &policy(mcp_dir.path(), false),
     )
-    .map_err(|e| format!("the MCP dep failed: {e}"))?;
-
-    let rel = "aplan/tasks/A-2.md";
-    let from_cli = std::fs::read_to_string(cli_dir.path().join(rel)).map_err(|e| e.to_string())?;
-    let from_mcp = std::fs::read_to_string(mcp_dir.path().join(rel)).map_err(|e| e.to_string())?;
-    if from_cli != from_mcp {
+    .map_err(|e| format!("the MCP dep could not restore the edge: {e}"))?;
+    let app_policy = policy(app_dir.path(), false);
+    let app_context = application_context(app_dir.path(), &app_policy);
+    let restored = aplan_app::edit_dependency(
+        &app_context,
+        &aplan_app::DependencyRequest {
+            id: "A-2".to_string(),
+            after: "A-1".to_string(),
+            operation: aplan_app::DependencyOperation::Add,
+        },
+    )
+    .map_err(|e| format!("the application boundary could not restore the edge: {e}"))?;
+    if !restored.changed || restored.denied {
         return Err(format!(
-            "the two surfaces wrote different files:\n--- cli\n{from_cli}\n--- mcp\n{from_mcp}"
+            "the application did not restore the edge: {restored:?}"
         ));
     }
+    let restored_cli =
+        std::fs::read_to_string(cli_dir.path().join(rel)).map_err(|e| e.to_string())?;
+    let restored_mcp =
+        std::fs::read_to_string(mcp_dir.path().join(rel)).map_err(|e| e.to_string())?;
+    let restored_app =
+        std::fs::read_to_string(app_dir.path().join(rel)).map_err(|e| e.to_string())?;
+    if restored_cli != restored_mcp || restored_cli != restored_app {
+        return Err("the three clients restored different post-states".to_string());
+    }
 
-    // And both refuse the same thing: the cycle the edge above makes available.
+    all_three_refuse_cycle(cli_dir, mcp_dir, app_dir)
+}
+
+fn all_three_refuse_cycle(
+    cli_dir: &tempfile::TempDir,
+    mcp_dir: &tempfile::TempDir,
+    app_dir: &tempfile::TempDir,
+) -> Result<(), String> {
+    // All three refuse the cycle the restored edge makes available, return the
+    // same rule finding, and leave the complete target post-state untouched.
+    let denied_rel = "aplan/tasks/A-1.md";
+    let before_cli =
+        std::fs::read_to_string(cli_dir.path().join(denied_rel)).map_err(|e| e.to_string())?;
+    let before_mcp =
+        std::fs::read_to_string(mcp_dir.path().join(denied_rel)).map_err(|e| e.to_string())?;
+    let before_app =
+        std::fs::read_to_string(app_dir.path().join(denied_rel)).map_err(|e| e.to_string())?;
     let out = common::output(cli_dir.path(), &["dep", "add", "A-1", "--after", "A-2"]);
     if out.status.success() {
         return Err("the CLI wrote a cycle".to_string());
     }
-    if tools::dep(
+    let cli_refusal = format!(
+        "{}{}",
+        String::from_utf8_lossy(&out.stdout),
+        String::from_utf8_lossy(&out.stderr)
+    );
+    let mcp_refusal = tools::dep(
         &mcp_dir.path().join("aplan"),
         "A-1",
         "A-2",
         true,
         &policy(mcp_dir.path(), false),
     )
-    .is_ok()
+    .expect_err("the MCP tool must refuse the cycle")
+    .to_string();
+    let app_policy = policy(app_dir.path(), false);
+    let app_context = application_context(app_dir.path(), &app_policy);
+    let app_denied = aplan_app::edit_dependency(
+        &app_context,
+        &aplan_app::DependencyRequest {
+            id: "A-1".to_string(),
+            after: "A-2".to_string(),
+            operation: aplan_app::DependencyOperation::Add,
+        },
+    )
+    .map_err(|e| format!("the application boundary could not judge the cycle: {e}"))?;
+    if !app_denied.denied || app_denied.changed || app_denied.diagnostics.added.is_empty() {
+        return Err(format!(
+            "the direct application client did not return a denied post-state: {app_denied:?}"
+        ));
+    }
+    for finding in app_denied.diagnostics.lines() {
+        let code = finding.split_whitespace().next().unwrap_or_default();
+        if !cli_refusal.contains(code) || !mcp_refusal.contains(code) {
+            return Err(format!(
+                "the denied mutation's `{code}` finding did not cross every adapter:\n  CLI \
+                 {cli_refusal}\n  MCP {mcp_refusal}\n  app {finding}"
+            ));
+        }
+    }
+    let after_cli =
+        std::fs::read_to_string(cli_dir.path().join(denied_rel)).map_err(|e| e.to_string())?;
+    let after_mcp =
+        std::fs::read_to_string(mcp_dir.path().join(denied_rel)).map_err(|e| e.to_string())?;
+    let after_app =
+        std::fs::read_to_string(app_dir.path().join(denied_rel)).map_err(|e| e.to_string())?;
+    if after_cli != before_cli
+        || after_mcp != before_mcp
+        || after_app != before_app
+        || after_cli != after_mcp
+        || after_cli != after_app
     {
-        return Err("the MCP tool wrote a cycle the CLI refused".to_string());
+        return Err("a denied dependency edit changed or diverged a target file".to_string());
     }
     Ok(())
+}
+
+fn application_context(dir: &Path, policy: &aplan_mcp::Policy) -> aplan_app::PlanContext {
+    let root = dir.join("aplan");
+    aplan_app::PlanContext::new(
+        aplan_core::load_plan_identified(&root),
+        aplan_app::ContextInputs {
+            repository_root: policy.repo_root.clone(),
+            configuration_file: policy.verify.config_file.clone(),
+            trust: aplan_app::Trust::Hermetic,
+            options: policy.options.clone(),
+            verdict: policy.verdict.clone(),
+        },
+    )
 }
 
 fn add_leaves_the_same_files() -> Result<(), String> {
@@ -637,6 +947,18 @@ fn add_leaves_the_same_files() -> Result<(), String> {
     Ok(())
 }
 
+fn close_fixture_with_stale_stamp(dir: &Path) {
+    fixture(dir);
+    std::fs::write(dir.join(".aplan.yml"), "detect_drift: true\n").expect("config");
+    let path = dir.join("aplan/tasks/A-1.md");
+    let task = std::fs::read_to_string(&path).expect("task").replace(
+        "traces:\n- DOC.md#intro\n",
+        "traces:\n- DOC.md#intro\ntrace_fingerprints:\n  DOC.md#old: stale-first\n\n\
+         # Keep this author note.\n  DOC.md#intro: stale-second\n",
+    );
+    std::fs::write(path, task).expect("stale live stamp");
+}
+
 fn close_leaves_the_same_file() -> Result<(), String> {
     // `A1-100`. What `close` writes is what every later run reads, so the file
     // afterwards is the whole contract.
@@ -647,8 +969,7 @@ fn close_leaves_the_same_file() -> Result<(), String> {
         .tempdir_in(aplan_core::fixture::fixture_root())
         .expect("tempdir");
     for d in [cli_dir.path(), mcp_dir.path()] {
-        fixture(d);
-        std::fs::write(d.join(".aplan.yml"), "detect_drift: true\n").expect("config");
+        close_fixture_with_stale_stamp(d);
     }
 
     let out = common::output(
@@ -716,13 +1037,8 @@ fn close_leaves_the_same_file() -> Result<(), String> {
             options: validate::Options::default(),
             verdict: aplan_core::Verdict::default(),
             verify: aplan_evidence::VerifyOptions {
-                version: None,
-                traces_root: None,
-                config_file: None,
-                execute: false,
                 test_runner: Some(aplan_config::TestRunners::One(runner())),
-                max_unrelated_files: None,
-                url_check: None,
+                ..aplan_evidence::VerifyOptions::default()
             },
             repo_root: mcp_repo.path().to_path_buf(),
         },
@@ -737,6 +1053,15 @@ fn close_leaves_the_same_file() -> Result<(), String> {
 
     let from_cli = std::fs::read_to_string(cli_dir.path().join("aplan/tasks/A-1.md")).expect("cli");
     let from_mcp = std::fs::read_to_string(mcp_dir.path().join("aplan/tasks/A-1.md")).expect("mcp");
+    if from_cli.matches("trace_fingerprints:").count() != 1
+        || from_cli.contains("stale-first")
+        || from_cli.contains("stale-second")
+        || !from_cli.contains("\n# Keep this author note.\n")
+    {
+        return Err(format!(
+            "close did not replace the live fingerprint block: {from_cli:?}"
+        ));
+    }
     if from_cli == from_mcp {
         return Ok(());
     }
@@ -762,12 +1087,14 @@ fn policy_with(dir: &Path, deny_warnings: bool, advisory: Vec<String>) -> aplan_
             advisory,
         },
         verify: aplan_evidence::VerifyOptions {
+            detect_drift: false,
             version: None,
             traces_root: None,
             config_file: None,
             execute: false,
             test_runner: None,
             max_unrelated_files: None,
+            observation_inputs: None,
             url_check: None,
         },
         repo_root: dir.to_path_buf(),
@@ -907,6 +1234,73 @@ fn payload_findings(payload: &serde_json::Value) -> Vec<(String, String)> {
         .unwrap_or_default()
 }
 
+/// The complete diagnostic fields common to every machine adapter, in order.
+/// Transport-only guidance may be added beside them; the application result is
+/// the authority for the finding itself.
+fn common_diagnostics(payload: &serde_json::Value, repository: &Path) -> Vec<serde_json::Value> {
+    payload["diagnostics"]
+        .as_array()
+        .map(|diagnostics| {
+            diagnostics
+                .iter()
+                .map(|finding| {
+                    serde_json::json!({
+                        "code": finding["code"],
+                        "severity": finding["severity"],
+                        "task": finding["task"],
+                        "file": normalized_file(&finding["file"], repository),
+                        "line": finding["line"],
+                        "column": finding["column"],
+                        "message": finding["message"],
+                        "detail": finding.get("detail").cloned().unwrap_or_else(|| serde_json::json!([])),
+                    })
+                })
+                .collect()
+        })
+        .unwrap_or_default()
+}
+
+fn normalized_file(value: &serde_json::Value, repository: &Path) -> serde_json::Value {
+    let Some(rendered) = value.as_str() else {
+        return serde_json::Value::Null;
+    };
+    let path = Path::new(rendered);
+    serde_json::Value::String(
+        path.strip_prefix(repository)
+            .unwrap_or(path)
+            .display()
+            .to_string(),
+    )
+}
+
+fn application_diagnostics(
+    response: &aplan_app::CheckResponse,
+    repository: &Path,
+) -> Vec<serde_json::Value> {
+    response
+        .report
+        .diagnostics
+        .iter()
+        .map(|finding| {
+            serde_json::json!({
+                "code": finding.code,
+                "severity": finding.severity.to_string(),
+                "task": finding.task,
+                "file": finding.file.as_ref().map_or(serde_json::Value::Null, |path| {
+                    normalized_file(
+                        &serde_json::Value::String(path.display().to_string()),
+                        repository,
+                    )
+                }),
+                "line": finding.location.map(|location| location.line),
+                "column": finding.location.map(|location| location.column),
+                "message": finding.message,
+                "detail": finding.detail,
+            })
+        })
+        .collect()
+}
+
 /// The same, from the CLI's `--format json`.
 fn cli_findings(out: &std::process::Output) -> Vec<(String, String)> {
     serde_json::from_slice::<serde_json::Value>(&out.stdout)
@@ -944,6 +1338,14 @@ fn check_says_the_evidence_went_unopened_on_both_surfaces() -> Result<(), String
     let payload = tools::check(&dir.path().join("aplan"), &policy(dir.path(), false))
         .map_err(|e| format!("the MCP check failed: {e}"))?;
     let mcp_said = payload.get("evidence_unresolved");
+    let app_policy = policy(dir.path(), false);
+    let app_context = application_context(dir.path(), &app_policy);
+    let app_response = aplan_app::check(&app_context, aplan_app::CheckRequest);
+    if !app_response.evidence_unresolved.any() {
+        return Err(
+            "the direct application client lost the unresolved-evidence result".to_string(),
+        );
+    }
 
     // Absent rather than zero where there is nothing to open, so the field's
     // presence is itself the signal and a plan with no resolvable citation reads
@@ -965,6 +1367,16 @@ fn check_says_the_evidence_went_unopened_on_both_surfaces() -> Result<(), String
             let citations = left.get("citations").and_then(serde_json::Value::as_u64);
             if citations.is_none_or(|n| n == 0) {
                 return Err(format!("a count an agent can act on: {left}"));
+            }
+            if citations != Some(app_response.evidence_unresolved.citations as u64)
+                || left.get("tasks").and_then(serde_json::Value::as_u64)
+                    != Some(app_response.evidence_unresolved.tasks as u64)
+            {
+                return Err(format!(
+                    "the MCP and application clients disagree about unresolved evidence: MCP \
+                     {left}, app {:?}",
+                    app_response.evidence_unresolved
+                ));
             }
             if left.get("resolved_by").and_then(serde_json::Value::as_str) != Some("verify") {
                 return Err(format!("and the command that would: {left}"));
@@ -1008,6 +1420,9 @@ fn check_reports_the_same_verdict() -> Result<(), String> {
         .get("denied")
         .and_then(serde_json::Value::as_bool)
         .unwrap_or(false);
+    let app_policy = policy(dir.path(), true);
+    let app_context = application_context(dir.path(), &app_policy);
+    let app_response = aplan_app::check(&app_context, aplan_app::CheckRequest);
 
     // The diagnostics as well as the verdict, which is what `A1-104` promised and
     // the first version of this comparison did not do: two surfaces can agree
@@ -1024,13 +1439,23 @@ fn check_reports_the_same_verdict() -> Result<(), String> {
             "check reports different findings: CLI {from_cli:?}, MCP {from_mcp:?}"
         ));
     }
-
-    if mcp_denied != cli_denied {
+    let cli_document: serde_json::Value = serde_json::from_slice(&cli_json.stdout)
+        .map_err(|error| format!("the CLI check document did not parse: {error}"))?;
+    let complete_cli = common_diagnostics(&cli_document, dir.path());
+    let complete_mcp = common_diagnostics(&payload, dir.path());
+    let complete_app = application_diagnostics(&app_response, dir.path());
+    if complete_cli != complete_mcp || complete_cli != complete_app {
         return Err(format!(
-            "the CLI denies this plan and the MCP payload does not say so. The counts are \
-             there, so the information is not lost, but the answer is: an agent reading \
-             the obvious field concludes the plan passes and hands CI a build that fails \
-             on the gate it thought it had just run.\n  payload: {payload}"
+            "the ordered diagnostics differ across clients:\n  CLI {complete_cli:?}\n  MCP \
+             {complete_mcp:?}\n  app {complete_app:?}"
+        ));
+    }
+
+    if mcp_denied != cli_denied || app_response.denied != cli_denied {
+        return Err(format!(
+            "the clients disagree about the verdict: CLI {cli_denied}, MCP {mcp_denied}, \
+             direct application {}.\n  payload: {payload}",
+            app_response.denied
         ));
     }
 
@@ -1065,21 +1490,37 @@ fn check_reports_the_same_counts_including_advisory() -> Result<(), String> {
         &policy_with(dir.path(), true, vec!["APLAN009".to_string()]),
     )
     .map_err(|e| format!("the MCP check failed: {e}"))?;
+    let app_policy = policy_with(dir.path(), true, vec!["APLAN009".to_string()]);
+    let app_context = application_context(dir.path(), &app_policy);
+    let app_response = aplan_app::check(&app_context, aplan_app::CheckRequest);
+    let app_counts = serde_json::json!({
+        "tasks_checked": app_response.report.tasks_checked,
+        "errors": app_response
+            .report
+            .blocking(&app_policy.verdict, aplan_core::Severity::Error),
+        "warnings": app_response
+            .report
+            .blocking(&app_policy.verdict, aplan_core::Severity::Warning),
+        "advisory": app_response.report.advisory_count(&app_policy.verdict),
+    });
 
     if from_cli["advisory"].as_u64() == Some(0) {
         return Err("nothing was downgraded, so this proves nothing".to_string());
     }
-    for field in ["errors", "warnings", "advisory"] {
-        if from_cli[field] != payload[field] {
+    for field in ["tasks_checked", "errors", "warnings", "advisory"] {
+        if from_cli[field] != payload[field] || from_cli[field] != app_counts[field] {
             return Err(format!(
-                "`{field}` differs: CLI {}, MCP {}",
-                from_cli[field], payload[field]
+                "`{field}` differs: CLI {}, MCP {}, app {}",
+                from_cli[field], payload[field], app_counts[field]
             ));
         }
     }
     // And the verdict agrees with the counts on both: nothing blocking, so the
     // build passes despite `deny_warnings`.
-    if payload["denied"] != serde_json::json!(false) || !cli_json.status.success() {
+    if payload["denied"] != serde_json::json!(false)
+        || app_response.denied
+        || !cli_json.status.success()
+    {
         return Err(format!(
             "a plan whose only finding is advisory was denied: {payload}"
         ));
@@ -1239,6 +1680,35 @@ fn must_list(doc: &serde_json::Value, field: &str) -> Result<(), String> {
     }
 }
 
+/// Remove the only value that two sequential `ready` observations cannot share.
+///
+/// CLI and MCP each take an independent coordination snapshot. Their observation
+/// seconds may straddle a clock boundary even when every piece of plan and claim
+/// state agrees. Keep requiring the field and its public numeric shape, then
+/// compare every stable field byte for byte.
+fn ready_payload_without_observation_instant(
+    mut doc: serde_json::Value,
+    surface: &str,
+) -> Result<serde_json::Value, String> {
+    if !doc.is_object() {
+        return Err(format!(
+            "the {surface} ready payload is not an object: {doc}"
+        ));
+    }
+    let object = doc
+        .as_object_mut()
+        .expect("the object shape was checked above");
+    let observed = object
+        .remove("claim_observed_at_epoch_seconds")
+        .ok_or_else(|| format!("the {surface} ready payload has no observation instant"))?;
+    if observed.as_u64().is_none() {
+        return Err(format!(
+            "the {surface} ready observation instant is not an unsigned integer: {observed}"
+        ));
+    }
+    Ok(doc)
+}
+
 fn ready_returns_what_the_command_prints() -> Result<(), String> {
     let dir = tempfile::Builder::new()
         .tempdir_in(aplan_core::fixture::fixture_root())
@@ -1249,7 +1719,9 @@ fn ready_returns_what_the_command_prints() -> Result<(), String> {
     let from_cli = payload(&common::output(dir.path(), &["ready", "--format", "json"]))?;
     let from_mcp = serde_json::to_value(tools::ready(&plan).map_err(|e| e.to_string())?)
         .map_err(|e| e.to_string())?;
-    if from_cli != from_mcp {
+    let stable_cli = ready_payload_without_observation_instant(from_cli.clone(), "CLI")?;
+    let stable_mcp = ready_payload_without_observation_instant(from_mcp.clone(), "MCP")?;
+    if stable_cli != stable_mcp {
         return Err(format!(
             "the two surfaces list ready work differently.\n  cli: {from_cli}\n  mcp: {from_mcp}"
         ));

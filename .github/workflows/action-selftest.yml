@@ -3,14 +3,8 @@ name: Action self-test
 on:
   push:
     branches: [main]
-    paths:
-      - action.yml
-      - .github/workflows/action-selftest.yml
   pull_request:
     branches: [main]
-    paths:
-      - action.yml
-      - .github/workflows/action-selftest.yml
   workflow_dispatch:
 
 concurrency:
@@ -19,9 +13,9 @@ concurrency:
 
 # Dogfoods `action.yml`, which is the only way to know the adoption path works:
 # the unit of value is "a consumer adds four lines to a workflow and gets
-# annotations", and nothing but running it proves that. Runs on the self-hosted
-# runner like every other job (the pre-public repository-boundary decision), so the adoption surface is proven
-# without a billed minute.
+# annotations", and nothing but running it proves that. It uses the self-hosted
+# runner while this repository is private and a fresh GitHub-hosted VM once it
+# is public (the pre-public repository-boundary decision, the pre-public repository-boundary decision).
 #
 # Against `ci/fixtures/action-selftest/` and not this repository's own plan
 # (`A1-278`). The action installs a *pinned release*, `.aplan.yml` tracks `main`,
@@ -29,39 +23,27 @@ concurrency:
 # today's configuration and the last tag -- which went red on `unknown field
 # effort_days_per_week` the first time the workflow ran in a month, with nothing
 # in `action.yml` wrong. That directory explains itself; the short version is that
-# its plan is written to what `v0.3.0` can parse. The repository's own plan is
-# checked on every push by `ci/scripts/dogfood.sh`, with the binary built from the
-# commit under test, which is the stronger check and the right place for it.
+# its plan is written to what `v0.4.0` can parse. The repository's own plan is
+# checked structurally on every push and with full-history evidence resolution
+# nightly, on dispatch and before release, using the binary built from the
+# commit under test. Those are the stronger checks and the right place for it.
 permissions:
   contents: read
 
 jobs:
   selftest:
     name: the action checks aplan's own plan
-    # **Unreachable by an untrusted event, by refusal rather than by
-    # redirection** (`A1-117`). Routing would keep this job reachable and merely
-    # move it; the property wanted is that it does not run.
-    #
-    # **A job condition, not a step** -- proved, not assumed. Written as a step
-    # first, and a real fork pull request on the proof fixture showed why that is
-    # wrong: a step cannot run until the job has been assigned a runner, so the
-    # job sat queued against the box's label, waiting for the box to pick up
-    # untrusted work in order to refuse it. Here, where that runner is
-    # registered, it would have been picked up. A job-level `if` is evaluated
-    # before any assignment, and the job is skipped without ever being queued.
-    # Stated as an allow-list of the events this workflow is for, not as an
-    # exclusion of the two that are dangerous today. An exclusion admits every
-    # event type nobody has thought of yet; naming what is permitted means a new
-    # trigger is refused until somebody decides it should not be.
-    if: github.event_name == 'push' || github.event_name == 'workflow_dispatch'
-    # Why this one refuses: it drives the action against this repository's own release artefacts.
-    runs-on: [self-hosted, linux, aplan]
+    # A private pull request cannot reach the persistent box. Once public, this
+    # self-test is a required context on every public pull request, and no
+    # persistent runner remains registered for attacker-authored labels to name.
+    if: github.event_name == 'push' || github.event_name == 'workflow_dispatch' || (github.event_name == 'pull_request' && github.event.repository.private == false)
+    runs-on: ${{ (github.event.repository.private && fromJSON('["self-hosted","linux","aplan"]')) || fromJSON('["ubuntu-latest"]') }}
     timeout-minutes: 15
     steps:
       # `fetch-depth: 0` because the `verify` case below resolves evidence
       # against real git objects; a shallow clone would make a valid old SHA
       # look unresolvable.
-      - uses: actions/checkout@v7
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           fetch-depth: 0
 
@@ -73,21 +55,21 @@ jobs:
         id: check
         uses: ./
         with:
-          version: v0.3.0
+          version: v0.4.0
           command: check
           working-directory: ci/fixtures/action-selftest
 
       - name: the installed version is the one that was asked for
         run: |
-          test "${{ steps.check.outputs.version }}" = "v0.3.0" \
-            || { echo "installed '${{ steps.check.outputs.version }}', expected v0.3.0" >&2; exit 1; }
+          test "${{ steps.check.outputs.version }}" = "v0.4.0" \
+            || { echo "installed '${{ steps.check.outputs.version }}', expected v0.4.0" >&2; exit 1; }
 
       # A second run exercising the other command and an explicit root, so the
       # inputs are covered rather than assumed.
       - name: verify, with an explicit root
         uses: ./
         with:
-          version: v0.3.0
+          version: v0.4.0
           command: verify
           root: tasks
           format: human

@@ -7,7 +7,9 @@ count, or a status disagree with reality is a bug, not a detail.
 ## Build and check
 
 ```sh
-cargo test --workspace          # all unit tests (NOT `cargo test`, see below)
+bash ci/scripts/preflight.sh        # selected development contract for the current changes
+bash ci/scripts/preflight.sh --full # exact complete integration/release contract
+ci/scripts/test.sh              # pinned nextest tests, Cargo doctests and CLI audit
 cargo fmt --all --check         # formatting (CI-enforced)
 cargo clippy --workspace --all-targets -- -D warnings
 RUSTDOCFLAGS="-D warnings" cargo doc --workspace --no-deps  # intra-doc links resolve
@@ -15,16 +17,34 @@ cargo xtask gen-schema --check  # the schema is derived from the types, not hand
 cargo xtask gen-roadmap --check # ROADMAP.status.md is generated from the plan (ADR-0009)
 cargo xtask check-docs          # ROADMAP.md and private pre-public adoption records agree with the plan
 cargo xtask lint                # house style: no typographic tells (see below)
+cargo deny --locked check advisories bans licenses sources
+cargo xtask dependency-audit   # admitted dependencies and default/headless budgets
 cargo xtask coverage --check    # per-crate coverage floors (slow: instrumented rebuild)
-cargo run -p aplan -- check     # aplan lints its own plan (the dogfood)
+cargo run -p aplan -- check     # structural half of the dogfood
+cargo run -p aplan -- verify    # resolves the plan's evidence (the authoritative half)
 ```
 
-A PR is expected to leave all of these green. The dogfood is not optional: a plan tool
-whose own plan does not validate has no business merging.
+Ordinary handoff runs the development profile; release and explicit integration checkpoints require
+full. The dogfood is not optional: a plan tool whose own plan does not validate has no business
+merging. The `development` profile is selected feedback,
+not a full or verified claim; its summary names selected packages plus selected, widened and
+deferred gates. The assurance vocabulary and executable inventory are defined once in
+[`ci/README.md`](ci/README.md#run-the-gates-locally).
 
-**`--workspace` is load-bearing.** `default-members = ["crates/aplan"]`, so a bare
-`cargo test` runs only that crate's handful of tests, skips `aplan-core` entirely, and
-reports success. That has already caused a false pass in a review.
+Rustup selects the exact development/release compiler and required rustfmt/Clippy components from
+`rust-toolchain.toml`. Do not add a compiler version to a workflow, hosted setup or runner image.
+`Cargo.toml`'s `rust-version` is the separate consumer floor. The scheduled/manual
+`latest-stable.yml` workflow is advance compatibility feedback, not permission to release under a
+moving compiler; the reviewed update procedure is in
+[`ci/README.md`](ci/README.md#updating-rust-deliberately).
+
+Install the exact test runner once with `ci/scripts/install-nextest.sh install`; the shared test
+gate refuses an absent or merely compatible build before compilation. Direct
+`cargo test --workspace` remains a supported diagnostic fallback when isolating runner behavior,
+but it is not the repository's test-gate verdict: it omits the pinned runner contract, inventory
+and mutex census, run-owned cache/ledger, and CLI-surface audit. A bare `cargo test` is weaker still:
+`default-members = ["crates/aplan"]`, so it skips every other workspace crate and has already
+caused a false pass in review.
 
 ## Tests
 

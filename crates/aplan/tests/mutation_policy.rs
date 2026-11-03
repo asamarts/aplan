@@ -13,7 +13,7 @@
 //! one rule's ergonomics, proposing `close --criteria-met` -- which is refused
 //! (`A1-224`), and is not what it wanted.
 
-mod common;
+use crate::common;
 
 use crate::common::census::{NOT_RUN, RUNS, Start, a_plan_to_act_on, plan_bytes};
 
@@ -26,6 +26,21 @@ fn one_unticked(dir: &Path) {
     std::fs::create_dir_all(dir.join("src")).expect("src");
     std::fs::write(dir.join(".aplan.yml"), "root: aplan\n").expect("config");
     std::fs::write(dir.join("src/a.rs"), "fn main() {}\n").expect("src");
+    std::fs::write(
+        dir.join("feature.blueprint.yml"),
+        concat!(
+            "schema: aplan/blueprint/v1\n",
+            "name: policy\n",
+            "title: Policy blueprint\n",
+            "description: Exercise mutation policy.\n",
+            "tasks:\n",
+            "  - key: work\n",
+            "    title: New work\n",
+            "    effort: 1\n",
+            "    paths: [src/**]\n",
+        ),
+    )
+    .expect("blueprint");
     std::fs::write(
         dir.join("aplan/tasks/T-1.md"),
         "---\nid: T-1\ntitle: T-1\nphase: 1\nstatus: in_progress\neffort_days: 1\n\
@@ -125,17 +140,46 @@ fn the_config_can_be_overridden_in_both_directions() {
 const GATED: &[&str] = &[
     "add",
     "amend",
-    "claim",
+    "blueprint",
     "close",
     "dep",
     "drop",
     "mv",
-    "release",
+    "park",
+    "rekey",
     "start",
     "stop",
     "supersede",
     "tag",
+    "unpark",
 ];
+
+/// Commands whose ordinary mode only reports, but whose explicit mode writes
+/// through the same post-state gate as [`GATED`].
+///
+/// Keeping these separate matters to the write census: `verify` is read-only,
+/// while `verify --fix` is a mutation. Calling the whole command mutating would
+/// make a read-only invocation pass that audit for the wrong reason.
+const CONDITIONALLY_GATED: &[(&str, &str)] = &[(
+    "verify",
+    "reports by default; `--fix` atomically applies typed repairs through the post-state gate",
+)];
+
+/// Nested modes whose parent primarily reports or mutates non-task state, but
+/// this named operation creates a task through the ordinary post-state gate.
+const NESTED_GATED: &[(&str, &str, &str)] = &[(
+    "inbox",
+    "promote",
+    "listing and capture-only lifecycle actions do not change the task graph; `promote` creates an ordinary task and therefore runs the complete task post-state gate",
+)];
+
+/// Commands whose ordinary invocation writes versioned intake beside the task
+/// graph without changing that graph.
+///
+/// These writes are intentionally visible to the byte measurement below, but
+/// they cannot run the task post-state gate: a capture is not a task and the
+/// capture validator is its own model boundary (ADR-0063).
+const INTAKE_WRITES: &[&str] = &["capture"];
 
 /// Every other command, with why the pair does not apply to it.
 ///
@@ -146,13 +190,28 @@ const GATED: &[&str] = &[
 /// command with no prior plan to compare against has nothing to refuse.
 const UNGATED: &[(&str, &str)] = &[
     (
+        "capture",
+        "writes a validated versioned intake record outside the task graph, so there is no task post-state for the plan rule gate to judge",
+    ),
+    (
+        "claim",
+        "writes only private Git-common ephemeral coordination state, not a plan post-state",
+    ),
+    (
+        "release",
+        "writes only private Git-common ephemeral coordination state, including orphan recovery",
+    ),
+    (
         "check",
         "is the gate; it reports rather than running a post-state of its own",
     ),
-    ("verify", "resolves evidence and reports; it writes nothing"),
     (
         "ready",
         "orders the workable tasks and reports; it changes no file",
+    ),
+    (
+        "test",
+        "lists or searches configured test evidence names and changes no file",
     ),
     (
         "due",
@@ -164,7 +223,15 @@ const UNGATED: &[(&str, &str)] = &[
         "graph",
         "renders the dependency graph and reports; it changes no file",
     ),
+    (
+        "tui",
+        "is currently a read-only interactive view; later native mutations cross the same typed post-state gate",
+    ),
     ("show", "renders one task and reports; it changes no file"),
+    (
+        "explain",
+        "renders one rule's stable meaning and changes no file",
+    ),
     (
         "tree",
         "renders the plan as a tree and reports; it changes no file",
@@ -256,8 +323,12 @@ const CREATES: &[&str] = &["import"];
 /// hand-written claim: the set of commands that touch the plan at all.
 #[test]
 fn whether_a_command_writes_the_plan_is_measured_not_declared() {
-    let declared_to_write: std::collections::BTreeSet<&str> =
-        GATED.iter().chain(CREATES.iter()).copied().collect();
+    let declared_to_write: std::collections::BTreeSet<&str> = GATED
+        .iter()
+        .chain(CREATES.iter())
+        .chain(INTAKE_WRITES.iter())
+        .copied()
+        .collect();
     let mut wrong = Vec::new();
     let mut ran = 0usize;
 
@@ -268,6 +339,17 @@ fn whether_a_command_writes_the_plan_is_measured_not_declared() {
             .expect("tempdir");
         if *start == Start::Populated {
             a_plan_to_act_on(dir.path());
+        }
+        // Parking deliberately fails closed unless claims share a Git-common
+        // coordination scope. Give those two measurements a repository so
+        // they reach their writes; the common command fixture stays neutral
+        // because other audits explicitly control when Git history exists.
+        if matches!(*name, "park" | "unpark") {
+            common::git(dir.path(), &["init", "-q", "."]);
+            common::git(dir.path(), &["config", "user.email", "t@example.invalid"]);
+            common::git(dir.path(), &["config", "user.name", "t"]);
+            common::git(dir.path(), &["add", "-A"]);
+            common::git(dir.path(), &["commit", "-q", "-m", "fixture"]);
         }
         let before = plan_bytes(dir.path());
         let out = common::run(dir.path(), argv);
@@ -295,6 +377,69 @@ fn whether_a_command_writes_the_plan_is_measured_not_declared() {
         wrong.join("\n  - ")
     );
     assert!(ran > 30, "the measurement drove only {ran} command(s)");
+}
+
+/// **A conditionally mutating command is measured in both modes.**
+///
+/// The broad census deliberately drives `verify` without `--fix`, because that
+/// is the command's ordinary, read-only meaning. This second measurement gives
+/// its writing mode a real repair to apply, so neither half can pass merely
+/// because both invocations happened to leave the plan untouched.
+#[test]
+fn verify_fix_is_the_conditionally_mutating_mode() {
+    let dir = tempfile::Builder::new()
+        .prefix("verify-fix-writes-")
+        .tempdir_in(aplan_core::fixture::fixture_root())
+        .expect("tempdir");
+    std::fs::create_dir_all(dir.path().join("aplan/tasks")).expect("tasks");
+    std::fs::create_dir_all(dir.path().join("src")).expect("src");
+    std::fs::write(dir.path().join("src/a.rs"), "pub fn a() {}\n").expect("source");
+    std::fs::write(
+        dir.path().join(".aplan.yml"),
+        "root: aplan\ntest:\n  list: [printf, 'suite::known_test\\n']\n  \
+         run: ['true', '{test}']\n",
+    )
+    .expect("config");
+    let task = dir.path().join("aplan/tasks/T-1.md");
+    std::fs::write(
+        &task,
+        "---\nid: T-1\ntitle: repairable\nphase: 1\nstatus: done\neffort_days: 1\n\
+         paths: [src/**]\ntags: [cross-cutting]\nevidence:\n  - kind: test\n    ref: known_test\n\
+         ---\n\nbody\n",
+    )
+    .expect("task");
+    for args in [
+        &["init", "-q", "."][..],
+        &["config", "user.email", "t@example.com"],
+        &["config", "user.name", "t"],
+        &["add", "-A"],
+        &["commit", "-q", "-m", "fixture"],
+    ] {
+        let out = std::process::Command::new("git")
+            .args(args)
+            .current_dir(dir.path())
+            .output()
+            .expect("git");
+        assert!(out.status.success(), "git {args:?}");
+    }
+    let before = std::fs::read_to_string(&task).expect("read");
+
+    let report = common::run(dir.path(), &["verify"]);
+    assert_eq!(
+        std::fs::read_to_string(&task).expect("read"),
+        before,
+        "ordinary `verify` wrote the plan: {report:?}"
+    );
+    assert!(
+        report.text().contains("repair: replace evidence"),
+        "{report:?}"
+    );
+
+    let fixed = common::run(dir.path(), &["verify", "--fix"]);
+    assert!(fixed.ok(), "the computed repair was not applied: {fixed:?}");
+    let after = std::fs::read_to_string(&task).expect("read");
+    assert_ne!(after, before, "`verify --fix` wrote nothing: {fixed:?}");
+    assert!(after.contains("ref: suite::known_test"), "{after}");
 }
 
 /// **Every command is either driven by the measurement or excused from it.**
@@ -347,6 +492,8 @@ fn every_command_says_whether_the_pair_applies_to_it() {
     let answered: std::collections::BTreeSet<String> = GATED
         .iter()
         .map(|c| (*c).to_string())
+        .chain(CONDITIONALLY_GATED.iter().map(|(c, _)| (*c).to_string()))
+        .chain(NESTED_GATED.iter().map(|(c, _, _)| (*c).to_string()))
         .chain(UNGATED.iter().map(|(c, _)| (*c).to_string()))
         .collect();
 
@@ -367,16 +514,31 @@ fn every_command_says_whether_the_pair_applies_to_it() {
             "`{command}` is excused with no reason worth reading: {why:?}"
         );
     }
+    for (command, why) in CONDITIONALLY_GATED {
+        assert!(
+            why.len() > 20,
+            "`{command}` is conditionally gated with no reason worth reading: {why:?}"
+        );
+    }
+    for (command, mode, why) in NESTED_GATED {
+        assert!(
+            why.len() > 20,
+            "`{command} {mode}` is nested-gated with no reason worth reading: {why:?}"
+        );
+    }
 }
 
 /// **Every command that writes takes the pair.**
 #[test]
 fn every_mutating_command_can_be_told_the_policy() {
-    let writes = GATED;
     let mut missing = Vec::new();
     let cli = aplan::cli_command();
-    for name in writes {
-        let Some(cmd) = cli.get_subcommands().find(|c| c.get_name() == *name) else {
+    for name in GATED
+        .iter()
+        .copied()
+        .chain(CONDITIONALLY_GATED.iter().map(|(name, _)| *name))
+    {
+        let Some(cmd) = cli.get_subcommands().find(|c| c.get_name() == name) else {
             missing.push(format!("`{name}` is not a command any more"));
             continue;
         };
@@ -393,6 +555,25 @@ fn every_mutating_command_can_be_told_the_policy() {
                 if !longs.contains(&flag) {
                     missing.push(format!("`{name} {}` has no `--{flag}`", c.get_name()));
                 }
+            }
+        }
+    }
+    for (name, mode, _) in NESTED_GATED {
+        let Some(cmd) = cli.get_subcommands().find(|c| c.get_name() == *name) else {
+            missing.push(format!("`{name}` is not a command any more"));
+            continue;
+        };
+        let Some(carrier) = cmd.get_subcommands().find(|c| c.get_name() == *mode) else {
+            missing.push(format!("`{name} {mode}` is not a command any more"));
+            continue;
+        };
+        let longs: Vec<&str> = carrier
+            .get_arguments()
+            .filter_map(clap::Arg::get_long)
+            .collect();
+        for flag in ["deny-warnings", "no-deny-warnings"] {
+            if !longs.contains(&flag) {
+                missing.push(format!("`{name} {mode}` has no `--{flag}`"));
             }
         }
     }
@@ -428,25 +609,53 @@ fn each_mutating_command_accepts_the_pair_when_run() {
     )
     .expect("milestone");
 
-    let runs: &[&[&str]] = &[
-        &["close", "T-1"],
-        &["amend", "T-1", "--add-evidence", "file:src/a.rs"],
-        &["supersede", "T-1", "the next one"],
-        &["add", "a new task", "--effort", "1"],
-        &["drop", "T-1"],
-        &["mv", "T-1", "--cut", "M-a"],
-        &["dep", "add", "T-1", "--after", "M-a"],
-        &["dep", "rm", "T-1", "--after", "M-a"],
-        // `A1-359`'s four. Each runs the post-state gate, so each takes the
-        // pair, and the surface ratchet counts a declared flag no invocation
-        // ever passes as unexercised -- which is how a flag nothing reads gets
-        // noticed.
-        &["claim", "T-1", "--as", "ada"],
-        &["release", "T-1"],
-        &["start", "T-1"],
-        &["stop", "T-1"],
+    let runs: &[(&str, &[&str])] = &[
+        ("close", &["close", "T-1"]),
+        (
+            "blueprint",
+            &[
+                "blueprint",
+                "apply",
+                "--file",
+                "feature.blueprint.yml",
+                "--cut",
+                "M-a",
+            ],
+        ),
+        (
+            "amend",
+            &["amend", "T-1", "--add-evidence", "file:src/a.rs"],
+        ),
+        ("supersede", &["supersede", "T-1", "the next one"]),
+        ("add", &["add", "a new task", "--effort", "1"]),
+        ("drop", &["drop", "T-1"]),
+        ("mv", &["mv", "T-1", "--cut", "M-a"]),
+        ("park", &["park", "T-1", "--reason", "later"]),
+        ("unpark", &["unpark", "T-1"]),
+        ("rekey", &["rekey", "T-1", "T-9"]),
+        ("dep", &["dep", "add", "T-1", "--after", "M-a"]),
+        ("dep", &["dep", "rm", "T-1", "--after", "M-a"]),
+        ("start", &["start", "T-1"]),
+        ("stop", &["stop", "T-1"]),
+        ("tag", &["tag", "add", "T-1", "kept"]),
+        ("verify", &["verify", "--fix"]),
+        (
+            "inbox",
+            &["inbox", "promote", "I-01K8Z3A4H00000000000000000"],
+        ),
     ];
-    for base in runs {
+    let expected: std::collections::BTreeSet<&str> = GATED
+        .iter()
+        .copied()
+        .chain(CONDITIONALLY_GATED.iter().map(|(name, _)| *name))
+        .chain(NESTED_GATED.iter().map(|(name, _, _)| *name))
+        .collect();
+    let driven: std::collections::BTreeSet<&str> = runs.iter().map(|(name, _)| *name).collect();
+    assert_eq!(
+        driven, expected,
+        "the runtime policy-flag probes drifted from the classified commands"
+    );
+    for (_, base) in runs {
         for flag in ["--deny-warnings", "--no-deny-warnings"] {
             let mut argv: Vec<&str> = base.to_vec();
             argv.push(flag);
@@ -458,6 +667,32 @@ fn each_mutating_command_accepts_the_pair_when_run() {
                 out.text()
             );
         }
+    }
+}
+
+/// Proof for `coordination.is_not_a_plan_verdict_mutation`: the flags removed
+/// from claim and release cannot suggest that changing local coordination ran
+/// or overrode the repository's plan gate.
+#[test]
+fn local_coordination_commands_refuse_plan_verdict_overrides() {
+    let dir = tempfile::Builder::new()
+        .prefix("coordination-verdict-")
+        .tempdir_in(aplan_core::fixture::fixture_root())
+        .expect("tempdir");
+    one_unticked(dir.path());
+
+    for argv in [
+        &["claim", "T-1", "--deny-warnings"][..],
+        &["release", "T-1", "--no-deny-warnings"][..],
+    ] {
+        let out = common::run(dir.path(), argv);
+        assert_eq!(out.code, 2, "`aplan {}`: {}", argv.join(" "), out.text());
+        assert!(
+            out.text().contains("unexpected argument"),
+            "`aplan {}` did not explicitly refuse the inapplicable plan-verdict flag: {}",
+            argv.join(" "),
+            out.text()
+        );
     }
 }
 

@@ -1,0 +1,470 @@
+{
+  "inventory": {
+    "gates": [
+      {
+        "command": "ci/scripts/fmt.sh",
+        "development": "always",
+        "full": "required",
+        "input_class": "repository",
+        "isolation": [
+          "none"
+        ],
+        "name": "fmt",
+        "release": "inherited"
+      },
+      {
+        "command": "ci/scripts/clippy.sh",
+        "development": "selectable",
+        "full": "required",
+        "input_class": "rust-workspace",
+        "isolation": [
+          "shared-cargo-target"
+        ],
+        "name": "clippy",
+        "release": "inherited"
+      },
+      {
+        "command": "ci/scripts/doc.sh",
+        "development": "selectable",
+        "full": "required",
+        "input_class": "rust-workspace",
+        "isolation": [
+          "shared-cargo-target"
+        ],
+        "name": "doc",
+        "release": "inherited"
+      },
+      {
+        "command": "ci/scripts/test.sh",
+        "development": "selectable",
+        "full": "required",
+        "input_class": "rust-workspace",
+        "isolation": [
+          "shared-cargo-target",
+          "isolated-aplan-cache"
+        ],
+        "name": "test",
+        "release": "inherited"
+      },
+      {
+        "command": "ci/scripts/spec.sh",
+        "development": "selectable",
+        "full": "required",
+        "input_class": "generated-contracts",
+        "isolation": [
+          "shared-cargo-target"
+        ],
+        "name": "spec",
+        "release": "inherited"
+      },
+      {
+        "command": "ci/scripts/msrv-build.sh",
+        "development": "selectable",
+        "full": "required",
+        "input_class": "declared-msrv",
+        "isolation": [
+          "isolated-cargo-target"
+        ],
+        "name": "msrv-build",
+        "release": "inherited"
+      },
+      {
+        "command": "ci/scripts/style.sh",
+        "development": "always",
+        "full": "required",
+        "input_class": "repository",
+        "isolation": [
+          "none"
+        ],
+        "name": "style",
+        "release": "inherited"
+      },
+      {
+        "command": "ci/scripts/supply-chain.sh",
+        "development": "selectable",
+        "full": "required",
+        "input_class": "dependency-policy",
+        "isolation": [
+          "shared-cargo-target",
+          "network-advisory-db"
+        ],
+        "name": "supply-chain",
+        "release": "inherited"
+      },
+      {
+        "command": "ci/scripts/coverage.sh",
+        "development": "deferred",
+        "full": "required",
+        "input_class": "rust-workspace",
+        "isolation": [
+          "isolated-coverage-target"
+        ],
+        "name": "coverage",
+        "release": "inherited"
+      },
+      {
+        "command": "ci/scripts/structural.sh",
+        "development": "always",
+        "full": "required",
+        "input_class": "plan-structure",
+        "isolation": [
+          "shared-cargo-target"
+        ],
+        "name": "structural",
+        "release": "inherited"
+      },
+      {
+        "command": "ci/scripts/evidence.sh",
+        "development": "deferred",
+        "full": "required",
+        "input_class": "plan-and-evidence",
+        "isolation": [
+          "shared-cargo-target",
+          "full-git-history"
+        ],
+        "name": "evidence",
+        "release": "inherited"
+      }
+    ],
+    "profiles": {
+      "development": {
+        "assurance": "selected",
+        "requires": null,
+        "same_source": false
+      },
+      "full": {
+        "assurance": "full",
+        "requires": null,
+        "same_source": false
+      },
+      "release": {
+        "assurance": "release",
+        "requires": "full",
+        "same_source": true
+      }
+    },
+    "schema": 1,
+    "selection": {
+      "global_gates": [
+        "clippy",
+        "doc",
+        "test",
+        "spec",
+        "msrv-build",
+        "supply-chain"
+      ],
+      "paths": [
+        {
+          "disposition": "global",
+          "exact": [
+            ".containerignore",
+            ".config/nextest.toml",
+            "Cargo.lock",
+            "Cargo.toml",
+            "deny.toml",
+            "action.yml",
+            "rust-toolchain.toml"
+          ],
+          "gates": [
+            "clippy",
+            "doc",
+            "test",
+            "spec",
+            "msrv-build",
+            "supply-chain"
+          ],
+          "name": "build-and-ci",
+          "prefixes": [
+            ".cargo/",
+            ".github/",
+            "ci/",
+            "tools/"
+          ]
+        },
+        {
+          "disposition": "selected",
+          "exact": [
+            ".aplan.yml",
+            "AGENTS.md",
+            "ROADMAP.md",
+            "ROADMAP.status.md"
+          ],
+          "gates": [
+            "spec"
+          ],
+          "name": "plan-and-generated-contracts",
+          "prefixes": [
+            "aplan/"
+          ]
+        },
+        {
+          "disposition": "global",
+          "exact": [
+            "cli-surface.json",
+            "coverage.json",
+            "facts.json"
+          ],
+          "gates": [
+            "clippy",
+            "doc",
+            "test",
+            "spec",
+            "msrv-build",
+            "supply-chain"
+          ],
+          "name": "generated-contracts",
+          "prefixes": [
+            "schemas/"
+          ]
+        },
+        {
+          "disposition": "selected",
+          "exact": [
+            ".github-account",
+            ".gitignore",
+            ".house-style.yml",
+            "CHANGELOG.md",
+            "CLAUDE.md",
+            "CODE_OF_CONDUCT.md",
+            "CONTRIBUTING.md",
+            "HLD.md",
+            "LICENSE-APACHE",
+            "LICENSE-MIT",
+            "README.md",
+            "SECURITY.md"
+          ],
+          "gates": [
+            "spec"
+          ],
+          "name": "documentation-and-policy",
+          "prefixes": [
+            "docs/"
+          ]
+        },
+        {
+          "disposition": "selected",
+          "exact": [],
+          "gates": [
+            "test",
+            "spec"
+          ],
+          "name": "executable-examples",
+          "prefixes": [
+            "examples/"
+          ]
+        }
+      ],
+      "rust": {
+        "cross_cutting_packages": [
+          "aplan",
+          "aplan-e2e",
+          "xtask"
+        ],
+        "gates": [
+          "clippy",
+          "doc",
+          "test",
+          "spec"
+        ],
+        "global_basenames": [
+          "Cargo.toml",
+          "build.rs"
+        ]
+      },
+      "schema": 1
+    }
+  },
+  "schema": "aplan/validation-selection-policy/v1",
+  "source": {
+    "path": "ci/validation.yml",
+    "sha256": "499ff2f615f977a3a12c26d00c670fd1c68eb277474ca5ece3d1f01229886c6c"
+  },
+  "workspace": {
+    "inputs": [
+      {
+        "path": ".cargo/config.toml",
+        "sha256": "8fa5e6b7c054b00aba504a6227566ac412c3a00451e38ae2d72321925bd25970"
+      },
+      {
+        "path": "Cargo.lock",
+        "sha256": "9e63991bebce304ee4e80a6e8e0e19fea5a62b036429cca1c684e7faa4d5adfd"
+      },
+      {
+        "path": "Cargo.toml",
+        "sha256": "3ff6f726d3fdc1ab54cdbbb89d7cde6a9858ed3d5227a9f77148714ad2582e13"
+      },
+      {
+        "path": "crates/aplan-app/Cargo.toml",
+        "sha256": "da4879d02f5fdaa5ddcd86c0b42ff537f5385636736e31fba01877e33fd5a46a"
+      },
+      {
+        "path": "crates/aplan-attest/Cargo.toml",
+        "sha256": "7bc817d7d4fc04cd7e9f837d19eb911af985863af8195e4b25692e3ef4cf1fb0"
+      },
+      {
+        "path": "crates/aplan-config/Cargo.toml",
+        "sha256": "ba1f615c5888c405ae5be8ca6901ba25b14ae7b7ef0c50f5a1927d57ac04b2ec"
+      },
+      {
+        "path": "crates/aplan-core/Cargo.toml",
+        "sha256": "80586e6992a3f0ffb0e0fec1796bce1549c3bdc397f657c44bd937441614f928"
+      },
+      {
+        "path": "crates/aplan-e2e/Cargo.toml",
+        "sha256": "9c4fb0db880708bfc4707410970dde0cb46c6c8a7d5be3b6efb3d343599a646d"
+      },
+      {
+        "path": "crates/aplan-evidence/Cargo.toml",
+        "sha256": "6a6869abcb3c4be7dd391412d9ea92ba7d743e5181fb1a70139a360d1ca8f128"
+      },
+      {
+        "path": "crates/aplan-interop/Cargo.toml",
+        "sha256": "7b8d473ad81638028f590d62345782bedd81bcd1527cdfb4dd87cb75b0d69b37"
+      },
+      {
+        "path": "crates/aplan-mcp/Cargo.toml",
+        "sha256": "6b4f9665356f250e3787de64e2fcfb3544cc6311d10d9ef48cb7ccb0d1cc08a6"
+      },
+      {
+        "path": "crates/aplan-output/Cargo.toml",
+        "sha256": "38b627b530a1a858ac5ff1aa595e161097627b99d75548ebb65c5375d774cbdc"
+      },
+      {
+        "path": "crates/aplan-tui/Cargo.toml",
+        "sha256": "77c7f708201c249ee11346ba8f44751b810c31139cc6a687ebef5aaa26dd9bc4"
+      },
+      {
+        "path": "crates/aplan/Cargo.toml",
+        "sha256": "014d0aaf8b7f5e237869c3757e2eb84bc66cfb9404fe88ee893ea7b48b31f0db"
+      },
+      {
+        "path": "rust-toolchain.toml",
+        "sha256": "b9c8d2d59f6f46474c0cfa0b8b77bea21d94fc73a30ad93d5bf6385c422197d2"
+      },
+      {
+        "path": "xtask/Cargo.toml",
+        "sha256": "635ee4e27cd13073a65d323865624c73478e70244f27971923fabcdaf1f1c17c"
+      }
+    ],
+    "packages": [
+      {
+        "name": "aplan",
+        "root": "crates/aplan/"
+      },
+      {
+        "name": "aplan-app",
+        "root": "crates/aplan-app/"
+      },
+      {
+        "name": "aplan-attest",
+        "root": "crates/aplan-attest/"
+      },
+      {
+        "name": "aplan-config",
+        "root": "crates/aplan-config/"
+      },
+      {
+        "name": "aplan-core",
+        "root": "crates/aplan-core/"
+      },
+      {
+        "name": "aplan-e2e",
+        "root": "crates/aplan-e2e/"
+      },
+      {
+        "name": "aplan-evidence",
+        "root": "crates/aplan-evidence/"
+      },
+      {
+        "name": "aplan-interop",
+        "root": "crates/aplan-interop/"
+      },
+      {
+        "name": "aplan-mcp",
+        "root": "crates/aplan-mcp/"
+      },
+      {
+        "name": "aplan-output",
+        "root": "crates/aplan-output/"
+      },
+      {
+        "name": "aplan-tui",
+        "root": "crates/aplan-tui/"
+      },
+      {
+        "name": "xtask",
+        "root": "xtask/"
+      }
+    ],
+    "reverse": {
+      "aplan": [
+        "xtask"
+      ],
+      "aplan-app": [
+        "aplan",
+        "aplan-mcp",
+        "aplan-tui"
+      ],
+      "aplan-attest": [
+        "aplan",
+        "aplan-app",
+        "xtask"
+      ],
+      "aplan-config": [
+        "aplan",
+        "aplan-app",
+        "aplan-attest",
+        "aplan-e2e",
+        "aplan-evidence",
+        "aplan-interop",
+        "aplan-mcp",
+        "aplan-tui",
+        "xtask"
+      ],
+      "aplan-core": [
+        "aplan",
+        "aplan-app",
+        "aplan-attest",
+        "aplan-config",
+        "aplan-e2e",
+        "aplan-evidence",
+        "aplan-interop",
+        "aplan-mcp",
+        "aplan-output",
+        "aplan-tui",
+        "xtask"
+      ],
+      "aplan-evidence": [
+        "aplan",
+        "aplan-app",
+        "aplan-attest",
+        "aplan-e2e",
+        "aplan-mcp",
+        "aplan-tui"
+      ],
+      "aplan-interop": [
+        "aplan",
+        "aplan-app",
+        "aplan-mcp",
+        "xtask"
+      ],
+      "aplan-mcp": [
+        "aplan"
+      ],
+      "aplan-output": [
+        "aplan",
+        "aplan-app",
+        "aplan-attest",
+        "aplan-e2e",
+        "aplan-evidence",
+        "aplan-interop",
+        "aplan-tui",
+        "xtask"
+      ],
+      "aplan-tui": [
+        "aplan",
+        "xtask"
+      ]
+    }
+  }
+}

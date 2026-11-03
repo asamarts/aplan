@@ -59,11 +59,13 @@ pub enum Bootstrap {
 impl Delta {
     /// Whether this refusal is half of the bootstrap deadlock, and which half.
     ///
-    /// `before` rather than a pair of booleans, because both questions this asks
-    /// of it are easy to get wrong at a call site: whether the plan has any cut,
-    /// and whether the empty milestone is one this change is *creating*.
+    /// `before` and `after` rather than booleans, because all three questions
+    /// this asks are easy to get wrong at a call site: whether the plan had any
+    /// cut, whether the milestone is one this change is *creating*, and whether
+    /// that milestone actually has live work rather than merely sharing
+    /// `APLAN021` with a different shape.
     #[must_use]
-    pub fn bootstrap(&self, before: &Plan, policy: &Verdict) -> Bootstrap {
+    pub fn bootstrap(&self, before: &Plan, after: &Plan, policy: &Verdict) -> Bootstrap {
         use crate::diagnostic::code;
 
         let fired = |c: &str| {
@@ -80,7 +82,24 @@ impl Delta {
         let creates_an_empty_cut = self.added.iter().any(|d| {
             d.code == code::MILESTONE_HYGIENE
                 && !policy.is_advisory(d.code)
-                && d.task.as_deref().is_some_and(|id| !known(id))
+                && d.task.as_deref().is_some_and(|id| {
+                    !known(id)
+                        && after.tasks.iter().any(|lt| {
+                            let cut = &lt.task;
+                            cut.id == id
+                                && cut.is_milestone()
+                                && !cut.is_release()
+                                && cut.contains.is_empty()
+                                && cut.status != crate::task::Status::Dropped
+                                && !cut.blocked_by.iter().any(|member| {
+                                    after.tasks.iter().any(|candidate| {
+                                        candidate.task.id == *member
+                                            && !candidate.task.is_milestone()
+                                            && candidate.task.status != crate::task::Status::Dropped
+                                    })
+                                })
+                        })
+                })
         });
         if creates_an_empty_cut {
             return Bootstrap::EmptyCut;
@@ -117,6 +136,34 @@ impl Delta {
                     .added
                     .iter()
                     .any(|d| !policy.is_advisory(d.code) && d.severity == Severity::Warning))
+    }
+
+    /// Whether an `add` must be refused, including explicit work fields on a
+    /// checkpoint this add creates (`A1-369`, `A1-407`).
+    ///
+    /// APLAN021 remains warning-shaped for ordinary mutations: moving work can
+    /// temporarily empty a cut, and warning policy decides whether that
+    /// two-step repair is allowed. An add already has all of its input, so a new
+    /// milestone carrying `effort_days` or `paths` is invalid author input and
+    /// is refused under every policy. The milestone must be absent from
+    /// `before`: adding valid work to an existing malformed cut can change its
+    /// diagnostic text, but did not introduce its work fields (`A1-406`).
+    #[must_use]
+    pub fn refuses_add(&self, before: &Plan, after: &Plan, policy: &Verdict) -> bool {
+        use crate::diagnostic::code;
+
+        self.refuses(policy)
+            || self.added.iter().any(|finding| {
+                finding.code == code::MILESTONE_HYGIENE
+                    && finding.task.as_deref().is_some_and(|id| {
+                        !before.tasks.iter().any(|lt| lt.task.id == id)
+                            && after.tasks.iter().any(|lt| {
+                                lt.task.id == id
+                                    && lt.task.is_milestone()
+                                    && (lt.task.effort_days.is_some() || !lt.task.paths.is_empty())
+                            })
+                    })
+            })
     }
 
     /// The findings, one per line, each carrying the remedy it was written with.
@@ -206,7 +253,7 @@ fn key(d: &Diagnostic) -> String {
 pub fn task_of(content: &str) -> Result<Task, String> {
     let (frontmatter, _) = crate::load::split_frontmatter(content)
         .ok_or_else(|| "the rewritten file has no frontmatter".to_string())?;
-    serde_yaml_ng::from_str(frontmatter).map_err(|e| format!("the rewritten frontmatter: {e}"))
+    yaml_compat::from_str(frontmatter).map_err(|e| format!("the rewritten frontmatter: {e}"))
 }
 
 /// A copy of this plan with one task's content replaced.
@@ -379,6 +426,7 @@ mod tests {
     fn milestone(id: &str) -> Task {
         let mut m = task(id, Status::Todo);
         m.tags = vec!["milestone".to_string()];
+        m.effort_days = None;
         m
     }
 
@@ -402,14 +450,21 @@ mod tests {
         let empty = plan_of(Vec::new());
         let has_a_cut = plan_of(vec![milestone("M-a")]);
         let first_task = one_finding(code::MEMBERSHIP_TOTALITY, Severity::Error, "T-001");
-        assert_eq!(first_task.bootstrap(&empty, &lenient), Bootstrap::NoCut);
+        let first_after = plan_of(vec![task("T-001", Status::Todo)]);
         assert_eq!(
-            first_task.bootstrap(&empty, &strict),
+            first_task.bootstrap(&empty, &first_after, &lenient),
+            Bootstrap::NoCut
+        );
+        assert_eq!(
+            first_task.bootstrap(&empty, &first_after, &strict),
             Bootstrap::NoCutAndNoneCanBeEmpty
         );
         // A plan that has a cut is not in this situation at all: "add it to one"
         // is complete advice.
-        assert_eq!(first_task.bootstrap(&has_a_cut, &strict), Bootstrap::No);
+        assert_eq!(
+            first_task.bootstrap(&has_a_cut, &first_after, &strict),
+            Bootstrap::No
+        );
     }
 
     #[test]
@@ -419,15 +474,18 @@ mod tests {
             advisory: Vec::new(),
         };
         let new_cut = one_finding(code::MILESTONE_HYGIENE, Severity::Warning, "M-new");
+        let after = plan_of(vec![milestone("M-new")]);
         assert_eq!(
-            new_cut.bootstrap(&plan_of(Vec::new()), &strict),
+            new_cut.bootstrap(&plan_of(Vec::new()), &after, &strict),
             Bootstrap::EmptyCut
         );
         // And on a plan that already has cuts, because the trap is not confined
         // to an empty plan: an empty milestone is the finding wherever it is
         // added.
+        let before = plan_of(vec![milestone("M-a")]);
+        let after = plan_of(vec![milestone("M-a"), milestone("M-new")]);
         assert_eq!(
-            new_cut.bootstrap(&plan_of(vec![milestone("M-a")]), &strict),
+            new_cut.bootstrap(&before, &after, &strict),
             Bootstrap::EmptyCut
         );
     }
@@ -445,10 +503,65 @@ mod tests {
             advisory: Vec::new(),
         };
         let emptied = one_finding(code::MILESTONE_HYGIENE, Severity::Warning, "M-a");
+        let plan = plan_of(vec![milestone("M-a")]);
+        assert_eq!(emptied.bootstrap(&plan, &plan, &strict), Bootstrap::No);
+    }
+
+    /// A warning about work fields is not evidence that the cut has no work.
+    ///
+    /// `APLAN021` covers both shapes. Classifying by code alone sent a newly
+    /// added, populated milestone carrying `effort_days` to the empty-cut
+    /// remedy, which told the author to add members it already had (`A1-369`).
+    #[test]
+    fn milestone_work_fields_are_not_misclassified_as_an_empty_cut() {
+        let strict = Verdict {
+            deny_warnings: true,
+            advisory: Vec::new(),
+        };
+        let work = task("T-001", Status::Todo);
+        let mut cut = milestone("M-new");
+        cut.blocked_by.push(work.id.clone());
+        cut.effort_days = Some(0.0);
+        let after = plan_of(vec![work, cut]);
+        let work_fields = one_finding(code::MILESTONE_HYGIENE, Severity::Warning, "M-new");
+
         assert_eq!(
-            emptied.bootstrap(&plan_of(vec![milestone("M-a")]), &strict),
+            work_fields.bootstrap(&plan_of(Vec::new()), &after, &strict),
             Bootstrap::No
         );
+    }
+
+    /// The add-specific refusal is about input introduced by this add, not any
+    /// milestone named by a diagnostic whose wording changed (`A1-406`,
+    /// `A1-407`). Keeping this at the shared predicate pins the answer for every
+    /// caller, independently of either surface's wiring test.
+    #[test]
+    fn add_refusal_distinguishes_a_new_bad_milestone_from_an_existing_one() {
+        let lenient = Verdict {
+            deny_warnings: false,
+            advisory: Vec::new(),
+        };
+        let advisory = Verdict {
+            deny_warnings: true,
+            advisory: vec![code::MILESTONE_HYGIENE.to_string()],
+        };
+        let finding = one_finding(code::MILESTONE_HYGIENE, Severity::Warning, "M-bad");
+
+        let mut bad = milestone("M-bad");
+        bad.effort_days = Some(0.0);
+        let after = plan_of(vec![bad.clone()]);
+        assert!(finding.refuses_add(&plan_of(Vec::new()), &after, &lenient));
+        assert!(finding.refuses_add(&plan_of(Vec::new()), &after, &advisory));
+
+        // A changed APLAN021 message makes the finding new in the delta, but
+        // the malformed milestone and its work field both predate this add.
+        let before = plan_of(vec![bad]);
+        assert!(!finding.refuses_add(&before, &after, &lenient));
+
+        // A new, clean milestone can still have an APLAN021 for being empty;
+        // warning policy, not the work-field exception, owns that case.
+        let clean_after = plan_of(vec![milestone("M-bad")]);
+        assert!(!finding.refuses_add(&plan_of(Vec::new()), &clean_after, &lenient));
     }
 
     #[test]
@@ -461,14 +574,19 @@ mod tests {
             advisory: vec![code::MILESTONE_HYGIENE.to_string()],
         };
         let empty = plan_of(Vec::new());
+        let first_after = plan_of(vec![task("T-001", Status::Todo)]);
         assert_eq!(
-            one_finding(code::MEMBERSHIP_TOTALITY, Severity::Error, "T-001")
-                .bootstrap(&empty, &hears),
+            one_finding(code::MEMBERSHIP_TOTALITY, Severity::Error, "T-001").bootstrap(
+                &empty,
+                &first_after,
+                &hears
+            ),
             Bootstrap::NoCut
         );
+        let cut_after = plan_of(vec![milestone("M-new")]);
         assert_eq!(
             one_finding(code::MILESTONE_HYGIENE, Severity::Warning, "M-new")
-                .bootstrap(&empty, &hears),
+                .bootstrap(&empty, &cut_after, &hears),
             Bootstrap::No
         );
     }
@@ -489,6 +607,7 @@ mod tests {
             paths: Vec::new(),
             traces: Vec::new(),
             trace_fingerprints: BTreeMap::new(),
+            evidence_fingerprints: std::collections::BTreeMap::new(),
             tags: Vec::new(),
             revisit_at: None,
             version_impact: None,

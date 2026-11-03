@@ -315,6 +315,7 @@ mod tests {
             paths: Vec::new(),
             traces: Vec::new(),
             trace_fingerprints: std::collections::BTreeMap::new(),
+            evidence_fingerprints: std::collections::BTreeMap::new(),
             tags: if milestone {
                 vec![crate::task::MILESTONE_TAG.to_string()]
             } else {
@@ -686,6 +687,24 @@ mod tests {
         assert_eq!(
             next_version("0.4.0-dev", VersionImpact::Breaking).as_deref(),
             Some("0.5.0")
+        );
+
+        // At or above 1.0, compatible work likewise finishes the version that
+        // is already being prepared; only a breaking change advances it.
+        for owes in [
+            VersionImpact::Fix,
+            VersionImpact::Feature,
+            VersionImpact::None,
+        ] {
+            assert_eq!(
+                next_version("1.2.3-dev", owes).as_deref(),
+                Some("1.2.3"),
+                "{owes:?}"
+            );
+        }
+        assert_eq!(
+            next_version("1.2.3-dev", VersionImpact::Breaking).as_deref(),
+            Some("2.0.0")
         );
     }
 

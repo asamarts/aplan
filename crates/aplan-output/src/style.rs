@@ -118,6 +118,19 @@ pub fn status(status: &str) -> Style {
     }
 }
 
+/// The style for an inbox capture's lifecycle state.
+///
+/// An open capture is ordinary pending intake, promotion is the successful
+/// terminal state, and a discarded capture is retained history.
+#[must_use]
+pub fn capture_state(state: &str) -> Style {
+    match state {
+        "promoted" => DONE,
+        "discarded" => DIM,
+        _ => Style::new(),
+    }
+}
+
 /// The style for a diagnostic severity, by the word it renders as.
 #[must_use]
 pub fn severity(severity: &str) -> Style {
@@ -151,6 +164,21 @@ mod tests {
             ("dropped", DIM),
         ] {
             assert_eq!(status(word), want, "`{word}` is styled unexpectedly");
+        }
+    }
+
+    #[test]
+    fn every_capture_state_in_the_model_is_answered_here() {
+        for (word, want) in [
+            ("open", Style::new()),
+            ("promoted", DONE),
+            ("discarded", DIM),
+        ] {
+            assert_eq!(
+                capture_state(word),
+                want,
+                "capture state `{word}` is styled unexpectedly"
+            );
         }
     }
 

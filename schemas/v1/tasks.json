@@ -1,5 +1,96 @@
 {
   "$defs": {
+    "ClaimOrigin": {
+      "additionalProperties": false,
+      "description": "Where an unauthenticated holder label was observed.",
+      "properties": {
+        "host": {
+          "description": "Host label, when the environment offered one.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "worktree": {
+          "description": "Canonical worktree path. `None` for a bare repository.",
+          "type": [
+            "string",
+            "null"
+          ]
+        }
+      },
+      "type": "object"
+    },
+    "ClaimRecord": {
+      "additionalProperties": false,
+      "description": "One ephemeral claim.",
+      "properties": {
+        "claimed_at_epoch_seconds": {
+          "description": "Signed Unix seconds when this exact claim or takeover was recorded.",
+          "format": "int64",
+          "type": "integer"
+        },
+        "holder": {
+          "description": "An attribution label, not an authenticated principal.",
+          "type": "string"
+        },
+        "identity_source": {
+          "description": "Which deterministic identity source supplied `holder`.",
+          "type": "string"
+        },
+        "origin": {
+          "$ref": "#/$defs/ClaimOrigin",
+          "description": "Where the command that recorded it ran."
+        }
+      },
+      "required": [
+        "holder",
+        "identity_source",
+        "claimed_at_epoch_seconds",
+        "origin"
+      ],
+      "type": "object"
+    },
+    "ClaimScope": {
+      "additionalProperties": false,
+      "description": "The coordination boundary behind a claim snapshot.",
+      "properties": {
+        "available": {
+          "description": "Whether a shared local scope was available.",
+          "type": "boolean"
+        },
+        "durability": {
+          "description": "The durability contract, always explicit in machine output.",
+          "type": "string"
+        },
+        "id": {
+          "description": "Stable digest of the canonical common-directory path.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "kind": {
+          "description": "`git_common_directory` when available.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "reason": {
+          "description": "Why coordination was unavailable.",
+          "type": [
+            "string",
+            "null"
+          ]
+        }
+      },
+      "required": [
+        "available",
+        "durability"
+      ],
+      "type": "object"
+    },
     "EvidenceKind": {
       "description": "What kind of proof closes a task.\n\nThe point of typing this is that \"I finished it\" is not evidence. A commit,\na URL, a committed artefact, a named test, or a dated note is.",
       "oneOf": [
@@ -34,7 +125,7 @@
       "description": "One citation, as the data surface carries it.\n\n**Its own type, and not `task::Evidence`.** That type is the *file format*,\nwhere `captured` is omitted when absent because a task file should not carry\n`captured: null` on a commit. A contract a consumer reads is the opposite\ncase: a key that comes and goes hands it `undefined` where it expected a\nvalue, and it would change whenever somebody adjusted the YAML for reasons\nthat have nothing to do with the surface. Every field here is always present\n(`A1-220`).",
       "properties": {
         "captured": {
-          "description": "ISO-8601 date the evidence was captured, `null` where there is none.\nRequired for `note`, because an undated note is a rumour.",
+          "description": "ISO-8601 date the inline assertion was made. Required for `note`, because\nan undated note is a rumour, and rejected on every machine-resolved kind:\nan author-entered date is not freshness proof (`APLAN055`).",
           "type": [
             "string",
             "null"
@@ -51,7 +142,8 @@
       },
       "required": [
         "kind",
-        "ref"
+        "ref",
+        "captured"
       ],
       "type": "object"
     },
@@ -95,6 +187,17 @@
           },
           "type": "array"
         },
+        "claim": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/ClaimRecord"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "description": "Who is working on it now, distinct from durable `owner` responsibility."
+        },
         "contains": {
           "description": "The checkpoints this one contains, whose work rolls up into it at any\ndepth (ADR-0042). Not a dependency either: a milestone in `blocked_by`\n*sequences* two cuts (ADR-0013), and the two meanings are what this\nseparates.",
           "items": {
@@ -123,6 +226,13 @@
             "$ref": "#/$defs/EvidenceRow"
           },
           "type": "array"
+        },
+        "evidence_fingerprints": {
+          "additionalProperties": {
+            "type": "string"
+          },
+          "description": "The mutable evidence referents a closed task stamped, which `APLAN054`\ncompares against their committed contents.",
+          "type": "object"
         },
         "id": {
           "type": "string"
@@ -247,22 +357,33 @@
         "title",
         "phase",
         "status",
+        "effort_days",
+        "owner",
+        "claim",
         "tags",
         "blocked_by",
+        "cut",
+        "milestone",
         "ready",
         "milestone_task",
+        "rank",
         "evidence",
         "paths",
         "traces",
         "prefer_after",
         "ratified_by",
         "contains",
-        "trace_fingerprints"
+        "trace_fingerprints",
+        "evidence_fingerprints",
+        "revisit_at",
+        "version_impact",
+        "version_impact_reason",
+        "version"
       ],
       "type": "object"
     },
     "VersionImpact": {
-      "description": "What a change did to the thing that ships (`A1-312`, ADR-0034).\n\nOrdered, and the order is the whole type: aggregation takes the strongest of\nwhat a level floors and what its members claim, so `None < Fix < Feature <\nBreaking` is what makes a `Breaking` task raise the cut above it.\n\nIt describes the **change**, and each scheme maps it to its own arithmetic:\nsemver at or past 1.0 sends `Breaking` to major, semver below 1.0 sends it to\nminor, and `CalVer` takes its number from the calendar and keeps only the\ncompatibility claim.",
+      "description": "What a change did to the thing that ships.\n\nOrdered, and the order is the whole type: aggregation takes the strongest of\nwhat a level floors and what its members claim, so `None < Fix < Feature <\nBreaking` is what makes a `Breaking` task raise the cut above it.\n\nIt describes the **change**, and each scheme maps it to its own arithmetic:\nsemver at or past 1.0 sends `Breaking` to major, semver below 1.0 sends it to\nminor, and `CalVer` takes its number from the calendar and keeps only the\ncompatibility claim.",
       "oneOf": [
         {
           "const": "none",
@@ -290,6 +411,15 @@
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "description": "The document `aplan tasks --format json` emits.",
   "properties": {
+    "claim_observed_at_epoch_seconds": {
+      "description": "Clock at which claim ages can be derived.",
+      "format": "int64",
+      "type": "integer"
+    },
+    "coordination": {
+      "$ref": "#/$defs/ClaimScope",
+      "description": "Local coordination boundary for every row's ephemeral claim."
+    },
     "schema": {
       "description": "The document's shape, so a consumer can pin it.",
       "type": "string"
@@ -303,6 +433,8 @@
   },
   "required": [
     "schema",
+    "coordination",
+    "claim_observed_at_epoch_seconds",
     "tasks"
   ],
   "title": "TaskExport",

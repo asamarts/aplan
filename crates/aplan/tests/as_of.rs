@@ -10,7 +10,7 @@
 use std::path::Path;
 use std::process::Command;
 
-mod common;
+use crate::common;
 use common::aplan;
 
 /// The case the pilot found: a repository whose history stopped, where the

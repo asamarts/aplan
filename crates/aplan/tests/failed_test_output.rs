@@ -15,7 +15,7 @@
 use std::path::Path;
 use std::process::Command;
 
-mod common;
+use crate::common;
 use common::aplan;
 
 fn git(dir: &Path, args: &[&str]) {
@@ -104,6 +104,64 @@ fn either_stream_reaches_the_reader_without_rerunning_the_command() {
     }
 }
 
+/// **The byte bound is on what the parent retains, not on what the child may
+/// print** (`A1-366`).
+///
+/// This drives the real command path past the bound. The last line proves the
+/// reader kept draining and retained the tail used by the failure excerpt; the
+/// counter proves it did not obtain that tail by running the test a second
+/// time. The diagnostic names the separate byte dial, so it cannot be mistaken
+/// for either the child's cgroup cap or `output_lines`' display bound.
+#[test]
+fn output_beyond_the_capture_bound_is_drained_once_and_reported() {
+    let dir = plan_with_failing_runner("exit 1");
+    let counter = dir.path().join("runs");
+    let script = dir.path().join("chatty.sh");
+    std::fs::write(
+        &script,
+        format!(
+            "echo run >> '{}'
+             echo 'first retained line' >&2
+             awk 'BEGIN {{ for (i = 0; i < 200000; i++) printf \"x\" }}' >&2
+             echo >&2
+             echo 'last retained line' >&2
+             exit 1
+             ",
+            counter.display()
+        ),
+    )
+    .expect("script");
+    std::fs::write(
+        dir.path().join(".aplan.yml"),
+        format!(
+            "test:\n  name: shell-shaped\n  list: [\"printf\", \"known\\\\n\"]\n  \
+             run: [\"sh\", \"{}\", \"{{test}}\"]\n  max_output: 1K\n",
+            script.display()
+        ),
+    )
+    .expect("config");
+
+    let (out, code) = aplan(dir.path(), &["verify", "--execute"]);
+    assert_ne!(code, 0, "{out}");
+    assert!(out.contains("APLAN014"), "{out}");
+    assert!(
+        out.contains("last retained line"),
+        "the tail an excerpt needs was discarded:\n{out}"
+    );
+    assert!(
+        out.contains("dropped") && out.contains("test.max_output"),
+        "capture truncation was silent or blamed the wrong bound:\n{out}"
+    );
+    assert_eq!(
+        std::fs::read_to_string(counter)
+            .expect("counter")
+            .lines()
+            .count(),
+        1,
+        "the command was rerun to recover its tail"
+    );
+}
+
 /// **Every surface carries it, or says why it carries less** (`A1-365`,
 /// criterion 4).
 ///
@@ -123,7 +181,13 @@ fn json_sarif_and_the_terminal_all_carry_the_captured_output() {
         "human:\n{human}"
     );
 
-    let (json, _) = aplan(dir.path(), &["verify", "--execute", "--format", "json"]);
+    let output = common::run(dir.path(), &["verify", "--execute", "--format", "json"]);
+    assert!(
+        output.stderr.is_empty(),
+        "machine output opted into progress implicitly: {}",
+        output.text()
+    );
+    let json = output.stdout;
     let doc: serde_json::Value = serde_json::from_str(&json).expect("json parses");
     let found = doc["diagnostics"]
         .as_array()
@@ -142,7 +206,13 @@ fn json_sarif_and_the_terminal_all_carry_the_captured_output() {
         "json carries no captured output: {found}"
     );
 
-    let (sarif, _) = aplan(dir.path(), &["verify", "--execute", "--format", "sarif"]);
+    let output = common::run(dir.path(), &["verify", "--execute", "--format", "sarif"]);
+    assert!(
+        output.stderr.is_empty(),
+        "SARIF output opted into progress implicitly: {}",
+        output.text()
+    );
+    let sarif = output.stdout;
     let doc: serde_json::Value = serde_json::from_str(&sarif).expect("sarif parses");
     let results = doc["runs"][0]["results"]
         .as_array()
@@ -340,7 +410,8 @@ fn a_runner_printing_hostile_bytes_cannot_break_the_machine_formats() {
     )
     .expect("config");
 
-    let (json, _) = aplan(dir.path(), &["verify", "--execute", "--format", "json"]);
+    let output = common::run(dir.path(), &["verify", "--execute", "--format", "json"]);
+    let json = output.stdout;
     let doc: serde_json::Value = serde_json::from_str(&json)
         .unwrap_or_else(|e| panic!("hostile output broke the json document: {e}\n{json}"));
     let found = doc["diagnostics"]
@@ -386,7 +457,8 @@ fn a_runner_printing_hostile_bytes_cannot_break_the_machine_formats() {
     );
 
     // And SARIF, which carries it inside `message.text`.
-    let (sarif, _) = aplan(dir.path(), &["verify", "--execute", "--format", "sarif"]);
+    let output = common::run(dir.path(), &["verify", "--execute", "--format", "sarif"]);
+    let sarif = output.stdout;
     let doc: serde_json::Value = serde_json::from_str(&sarif)
         .unwrap_or_else(|e| panic!("hostile output broke the sarif document: {e}\n{sarif}"));
     assert!(
@@ -420,7 +492,15 @@ fn the_captured_lines_fold_to_the_terminal_width() {
          exit 1",
     );
 
-    let Some(out) = common::on_a_terminal(dir.path(), COLS, &["verify", "--execute"]) else {
+    // This measures the completed report rather than the independently tested
+    // transient row. Keep live progress out of the captured transcript so a
+    // terminal recorder that does not emulate erase-in-line cannot turn prior
+    // frames into apparent report width.
+    let Some(out) = common::on_a_terminal(
+        dir.path(),
+        COLS,
+        &["--progress", "never", "verify", "--execute"],
+    ) else {
         // No pty available: the width question cannot be asked here, and
         // failing would report the environment rather than the renderer.
         return;

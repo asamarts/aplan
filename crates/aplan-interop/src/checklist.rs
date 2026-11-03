@@ -817,6 +817,7 @@ impl ProposalSource for Checklist {
                 paths: Vec::new(),
                 traces: Vec::new(),
                 trace_fingerprints: BTreeMap::new(),
+                evidence_fingerprints: std::collections::BTreeMap::new(),
                 tags,
                 // An importer never invents one: a revisit is a decision about
                 // work somebody parked, and no source format carries it.
@@ -903,6 +904,11 @@ const NOT_CARRIED: &[NotCarried] = &[
         "trace_fingerprints",
         |t| !t.trace_fingerprints.is_empty(),
         "the recorded shape of each traced anchor, which is what makes a moved heading a finding",
+    ),
+    NotCarried(
+        "evidence_fingerprints",
+        |t| !t.evidence_fingerprints.is_empty(),
+        "the recorded shape of mutable file proof, which is what makes changed evidence a finding",
     ),
     NotCarried(
         "revisit_at",
@@ -1210,19 +1216,43 @@ fn report_export_losses(grouped: &Grouped, to: &str, report: &mut Report) {
             ),
         );
     }
-    let phases: BTreeSet<u32> = written.iter().map(|t| t.phase).collect();
-    if phases.len() > 1 {
-        report.not_carried(
-            to,
-            "phase",
-            &format!(
-                "the work spans {} of them and a checklist is one list",
-                phases.len()
-            ),
-        );
-    }
+    report_phase_loss(&written, to, report);
     report_export_placement(grouped, to, report);
     report_text_fidelity(&written, grouped, to, report);
+}
+
+/// A checklist has no phase slot even when every row shares one value.
+fn report_phase_loss(written: &[&Task], to: &str, report: &mut Report) {
+    let phases: BTreeSet<u32> = written.iter().map(|t| t.phase).collect();
+    match phases.len() {
+        0 => {}
+        1 => {
+            let phase = phases.first().expect("one phase");
+            report.not_carried(
+                to,
+                "phase",
+                &format!(
+                    "all written tasks carry {phase}; preserve it when importing this checklist \
+                     again with `--phase {phase}`"
+                ),
+            );
+        }
+        count => {
+            report.not_carried(
+                to,
+                "phase",
+                &format!(
+                    "the work spans {count} values ({}) and a checklist is one list, so no \
+                     single import flag can restore them",
+                    phases
+                        .iter()
+                        .map(ToString::to_string)
+                        .collect::<Vec<_>>()
+                        .join(", ")
+                ),
+            );
+        }
+    }
 }
 
 /// Where the rows landed.
@@ -1915,6 +1945,7 @@ mod tests {
             paths: Vec::new(),
             traces: Vec::new(),
             trace_fingerprints: BTreeMap::new(),
+            evidence_fingerprints: std::collections::BTreeMap::new(),
             tags: Vec::new(),
             revisit_at: None,
             version_impact: None,
@@ -2248,6 +2279,9 @@ mod tests {
         rich.paths = vec!["src/**".to_string()];
         rich.traces = vec!["docs/x.md#y".to_string()];
         rich.trace_fingerprints = [("docs/x.md#y".to_string(), "abc".to_string())]
+            .into_iter()
+            .collect();
+        rich.evidence_fingerprints = [("file:docs/proof.md".to_string(), "def".to_string())]
             .into_iter()
             .collect();
         rich.tags = vec!["cross-cutting".to_string()];

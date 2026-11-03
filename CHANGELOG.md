@@ -6,6 +6,1690 @@ to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+### Added
+
+- **The TUI now owns quick capture and the complete retained Inbox workflow** (`A1-518`). `Ctrl-N`
+  opens a minimal typed capture form without changing the current destination, while destination
+  `6` lists and searches bounded open, deferred, promoted and discarded records with explicit
+  non-color state, absolute timestamps, configured profile/default context and source provenance.
+  Native amend, discard, restore and promote actions preserve form input across validation or
+  stale-input refusal and use the same application requests as the CLI. Promotion reuses the
+  ordinary Add placement vocabulary and one atomic task-plus-capture `ChangeSet`; successful
+  reload retains the capture, exposes its task link and proves the full inbox digest with the task
+  snapshot before displaying `COMMITTED`. Closed command/read censuses, reducer and responsive
+  snapshots, adapter parity and a real-PTY capture-to-promotion journey cover keyboard-only,
+  narrow, monochrome, Unicode/paste, large-inbox, concurrent-refresh and terminal-state refusal
+  paths. A selected-record form also binds the immutable retained id and record fingerprint outside
+  its editable fields, so an id redirect or amendment between form population and preview is refused
+  before stale defaults can overwrite a newer capture or create a task; require this boundary with
+  `--require tui.capture_forms_are_record_bound`.
+
+- **Capture promotion now creates planned work without splitting provenance from the task**
+  (`A1-516`, ADR-0063). `aplan inbox promote` overlays explicit task phase, cut, effort, owner,
+  paths and tags on the capture's snapshotted profile defaults, transfers the retained title/body,
+  and reuses the typed `add` constructor plus complete warning-policy post-state gate. Human, JSON
+  and agent results report both stable ids and every previewed task, cut and capture file. Task
+  creation and the capture's irreversible `promoted_to`, disposition time and canonical request
+  fingerprint publish under one plan/config/inbox identity; contention changes neither side, and a
+  late guarded-batch failure rolls back already-renamed members. Equivalent lost-response retries
+  return the original task id even after later task edits, while a conflicting retry, id collision,
+  malformed or terminal capture, and invalid task all refuse without a duplicate or partial write.
+  `--require capture.promotion_is_atomic` distinguishes the nested command and transaction contract.
+
+- **Quick capture and guarded inbox disposition are now first-class CLI workflows** (`A1-515`,
+  ADR-0063). `aplan capture TITLE` creates open intake without weakening task or graph rules and
+  accepts configured kinds/profiles, labels, retry-safe source identity, literal/file/stdin/editor
+  bodies, revisit intent and snapshotted promotion defaults. `aplan inbox` provides bounded,
+  deferred-aware human and JSON lists plus focused `show`, open-only `amend`, `discard` with an
+  injected disposition clock and optional reason, and discarded-only `restore`; promoted records
+  remain irreversible and V1 adds no purge. Human operations accept only an unambiguous canonical
+  id prefix while machine results carry full ids and exact input identity. Every mutation is a
+  previewable application `ChangeSet`; dry runs write nothing, editor commands run directly without
+  a shell, and one inbox-wide publication guard makes source uniqueness and prefix membership
+  atomic across distinct ULID files. Lists expose source namespace but never opaque keys; focused
+  results retain the complete record. `--require capture`, `--require inbox` and
+  `--require capture.inbox_lifecycle_commands` distinguish the delivered surfaces.
+
+- **Capture intake now has a strict versioned loader and deterministic read model** (`A1-514`,
+  ADR-0063). One `aplan/capture/v1` YAML record lives at
+  `<plan-root>/.inbox/I-<ULID>.yml`; the task loader prunes that reserved subtree, while `check`
+  and `verify` validate capture syntax, canonical identity, UTC whole-second timestamps, configured
+  kinds, closed lifecycle combinations and cross-record source uniqueness. New error `APLAN057`
+  reports malformed inbox data without printing opaque source keys, and guarded plan mutations
+  refuse to publish while that gate fails. Missing and empty inboxes remain valid. The
+  repository-only `capture` config block, including `capture.kinds` and `capture.profiles`, is
+  strict and schema-derived; profiles can prefill only capture kind, labels/body and inert
+  task-promotion defaults. The generated
+  `schemas/v1/capture.json` closes schema, origin and lifecycle vocabularies. The core read model
+  supplies focused show, bounded kind/state/label/revisit/search filters, injected-clock deferred
+  counts and newest-first deterministic ordering, plus source-retry equivalence over persisted
+  effective values. Captures remain absent from DAG, readiness, cuts, roadmap, effort and evidence
+  calculations by construction.
+
+- **Dependency rewrites now publish one complete final graph** (`A1-556`). Repeat `--after` on
+  `aplan dep add` or `dep rm`, or use `aplan dep apply --from edges.yml` to combine additions and
+  removals across targets. Validation, cycle detection, dry-run review and guarded publication see
+  the complete post-state, so a safe rewire is not rejected for an intermediate cycle and a
+  refusal or prepublication race changes no file. JSON and agent output identify every requested
+  operation, whether it changes state, and every affected file. `add --from` and Blueprint V1
+  entries also accept reverse `blocks` edges into existing or explicitly named same-batch tasks;
+  creation and those rewrites publish together through the shared source-preserving sequence
+  delta. Require the capability with `--require dep.atomic_batch_rewrites`.
+
+- **Surgical scalar edits now refuse multiline plain values before mutation** (`A1-725`).
+  `rekey`, parking-state edits and the shared scalar writers compare the complete parsed field
+  with the inline source token before replacing or clearing one physical line. A plain id, owner
+  or revisit value continued on an indented line now receives an actionable no-write usage
+  refusal instead of reaching an internal read-back failure after candidate construction. Batch
+  parking remains all-or-none; ordinary inline plain and quoted values retain their exact key
+  spacing, comments and line endings. Require this contract with
+  `--require mutation.refuses_multiline_plain_scalar_rewrites`.
+
+- **Release close now distinguishes an absent version field from an authored empty one**
+  (`A1-724`). Ordinary null values plus quoted, explicit, tagged, anchored and aliased top-level
+  keys which resolve to `version` are treated as an existing field. When a release derives a
+  number, `close` refuses that empty record as actionable usage and leaves the complete task
+  unchanged instead of appending a duplicate key and reaching internal exit `3`. Absent fields
+  still receive the derived record, and existing agreeing or disagreeing records retain their
+  established behavior. Require this contract with `--require close.refuses_empty_version_fields`.
+
+- **Initial close now recognizes alternate evidence-key spellings before mutation** (`A1-723`).
+  Quoted, explicit, tagged, anchored and aliased top-level YAML keys which resolve to `evidence`
+  are treated as an existing field rather than absence, so `close` refuses them as actionable
+  usage without constructing a duplicate-key candidate or changing the task. The live-task
+  refusal no longer recommends the done-only `amend` command; it asks the author to review and
+  reconcile the existing field before retrying. Require this contract with
+  `--require close.refuses_alternate_evidence_keys`.
+
+- **Evidence amendments now preserve each ordinary citation as a source delta** (`A1-722`).
+  Add, remove and replace retain every unaddressed mapping byte, including indentation, key
+  spacing, quote style, inline and standalone comments, field order and LF/CRLF convention.
+  Removal deletes only the addressed mapping, replacement edits only its changed semantic fields,
+  and addition inserts one deterministic mapping without moving boundary trivia. The structural
+  exact-no-write refusal from `A1-717` remains unchanged. Require the narrower write boundary with
+  `--require amend.preserves_evidence_sequence_source_deltas`.
+
+- **Parking mutations now refuse alternate optional-scalar key spellings before mutation**
+  (`A1-721`). `unpark` no longer mistakes a quoted `revisit_at` key for an absent field and reach
+  an internal read-back failure after preparing a status edit. Quoted or otherwise non-local
+  optional-scalar keys receive an actionable usage refusal before any target in the batch is
+  written; ordinary clears retain exact unrelated bytes and LF/CRLF convention. The shared guard
+  covers durable-owner scalar edits as well. Require this contract with
+  `--require portfolio.refuses_alternate_optional_scalar_keys`.
+
+- **Evidence citation rewrites now refuse non-local YAML structure before mutation** (`A1-717`).
+  Explicit add, remove and replace plus computed `verify --fix` repairs reconstruct only an
+  ordinary source-local block sequence of citation mappings which agrees with the loaded task.
+  Anchors, aliases, explicit tags, flow collections, multiline values and structural key spellings
+  receive an actionable usage refusal without changing exact task bytes or publishing a prefix of
+  a computed batch. Existing citations, unrelated freshness baselines, frontmatter and body bytes
+  remain unchanged outside the requested semantic delta. Resolution, mutation policy and freshness
+  consume the parsed rewrite candidate, so replacing a dated citation can no longer make a newly
+  written reference look like an empty delta and bypass resolution. Require these contracts with
+  `--require close.refuses_structural_evidence_sequences` and
+  `--require amend.policy_reads_rewritten_evidence_candidate`.
+
+- **Portfolio mutations preserve typed rewrite failures through CLI exit routing** (`A1-720`).
+  `aplan park` and `unpark` no longer flatten an application rewrite failure to usage merely
+  because the operation crosses the portfolio adapter. Plan-input and state refusals remain exit
+  `2`; a writer self-check remains the published internal exit `3`, matching its message and the
+  dependency adapter. Require this correction with
+  `--require portfolio.preserves_rewrite_error_category`.
+
+- **Fingerprint baseline rewrites now retain authored mapping-boundary trivia** (`A1-719`).
+  Ordinary trace and evidence fingerprint replacement preserves the literal top-level key,
+  whitespace around its colon and a comment attached to that boundary while replacing only the
+  derived values. Clearing the final baseline removes the field but keeps its note as a standalone
+  comment. LF/CRLF and block/one-line-flow forms share the contract; the structural forms refused
+  by `A1-716` remain refused. Require it with
+  `--require close.preserves_fingerprint_mapping_boundary_trivia`.
+
+- **Fingerprint baseline rewrites now refuse non-local YAML structure before mutation**
+  (`A1-716`). `aplan close`, `close --restamp`, explicit evidence amendment and computed evidence
+  repair continue to replace or clear ordinary block and one-line flow string mappings in place,
+  preserving unrelated frontmatter and the Markdown body. Anchored, aliased, explicitly tagged,
+  multiline and structurally keyed fingerprint mappings now receive an actionable no-write input
+  refusal instead of having one half reconstructed, orphaning another node and reaching the
+  internal round-trip error. Require this boundary with
+  `--require close.refuses_structural_fingerprint_mappings`.
+
+- **Tag edits now preserve ordinary scalar-sequence source and refuse structural aliases**
+  (`A1-715`). `aplan tag add`, `tag rm` and plan-wide `tag rename` retain every surviving
+  member's indentation, quoting and comment plus standalone comments, key comments, block or flow
+  form and the file's newline convention. New values are quoted in place when flow punctuation
+  requires it. Anchored, aliased, tagged, multiline and otherwise structural tag sequences now
+  receive an actionable no-write refusal instead of reaching the internal round-trip error or
+  changing a second field through an alias. Multi-file rename remains one guarded all-or-none
+  mutation. Require this widened command contract with
+  `--require tag.preserves_scalar_sequence_source_deltas`.
+
+- **Dependency and preference edge edits now preserve the source form of existing scalar
+  sequences** (`A1-655`). `aplan dep add` and `dep rm` retain every surviving member's exact
+  indentation, quoting and inline comment plus standalone comments, key comments and the file's
+  newline convention. Importer-style column-zero blocks, indented blocks and one-line flow
+  sequences all receive the same checked delta; a missing field still uses the documented
+  canonical block form. Duplicate members, structural YAML and any disagreement between parsed
+  values and source are refused without a write instead of falling back to a whole-list cosmetic
+  rewrite. The same primitive drives `blocked_by` and `prefer_after`, ready for the later batch
+  dependency transaction. Require this widened command contract with
+  `--require dep.preserves_scalar_sequence_source_deltas`.
+
+- **One explicit blueprint file can now be previewed or applied as one guarded action**
+  (`A1-389`). `aplan blueprint apply --file <path> --cut <cut>` captures the selected bytes once,
+  binds repeated `--set NAME=VALUE` parameters, resolves and mints the complete sibling graph, and
+  publishes it through the ordinary atomic post-state gate. `--dry-run` writes nothing and labels
+  ids as predictions for an exact plan snapshot; apply re-previews the whole captured request after
+  stale contention and reports only the exact ids it published. Human, JSON and agent output all
+  carry the selected path, SHA-256 digest, plan identity, canonical cut, tasks, affected files and
+  findings. V1 deliberately has no discovery, `list` or `show`. MCP is deferred until its stdio
+  transport has an attachment or caller-relative local-path trust boundary; the CLI agent format is
+  the explicit agent workflow in the meantime. The generated agent contract now tells an authoring
+  agent when recurring fields or sibling topology warrant this surface, gives the explicit-file dry
+  run, distinguishes plan-authoring data from executable code without treating it as trusted, and
+  requires review of the reported source identity and whole predicted graph before apply
+  (`A1-393`). Require that guidance with
+  `--require agent_contract.guides_explicit_blueprint_application`.
+
+- **Blueprint sibling references now resolve to freshly minted ids as one guarded graph**
+  (`A1-387`). The four task relationship fields accept only explicit `local:<key>` or
+  `task:<id>` references; local keys are validated and unique, missing siblings and existing tasks
+  are refused, and bare strings never change meaning because a plan later gains a colliding id.
+  Blueprint entries cannot fix their ids or carry per-entry cuts: one required existing cut receives
+  the complete application. All ids are minted against one scratch post-state, the resolved entries
+  pass through ordinary manifest authoring and the complete mutation gate, and a denied or stale
+  result publishes no partial graph. Re-preview after concurrent contention re-mints the complete
+  request, so two successful applications have disjoint ids. Require this widened format contract
+  with `--require blueprint.references_resolve_atomically`.
+
+- **Blueprint parameter binding is total, typed and non-recursive** (`A1-386`). Every V1
+  declaration is required and must be used; missing, duplicate, undeclared, unknown and unused
+  names are refused before a plan mutation can be proposed. `{{name}}` substitution runs over
+  already-deserialised string slots, so hostile punctuation or newlines remain one value and
+  cannot inject YAML structure, tasks or relationships. `{{{{` and `}}}}` are the explicit
+  literal-delimiter escapes, malformed delimiters are refusals, and placeholder-looking text in a
+  supplied value is never evaluated again. Blueprint names, parameter declarations and task-local
+  keys stay structural. Require this widened blueprint-format contract with
+  `--require blueprint.parameters_bind_totally_after_parsing`.
+
+- **Task creation now covers the model's live-state, scheduling, version and relationship fields,
+  and historical ledger correction has a guarded route** (`A1-343`). Single-task `add`, the typed
+  application adapters and `aplan_add` accept `todo`, `in_progress` or `blocked` plus
+  `prefer_after`, `ratified_by`, `contains`, `revisit_at` and version impact metadata. `add --from`
+  accepts the same fields and forward references; a `done` entry must carry evidence which resolves
+  before any file is published, can extend a `done` cut without reopening it, and receives the same
+  trace and mutable-evidence baselines as closure. `dropped` remains a later disposition, not a
+  creation state. `supersede` can replace or clear inherited paths and traces and accept an exact
+  successor body while omission preserves inheritance. New atomic `park` and `unpark` commands
+  move unclaimed todo tasks or milestones into and out of `blocked`, record the parking reason and
+  optional RFC 3339 revisit instant, preserve history and tags, and refuse active, already parked,
+  terminal, claimed or partially valid batches. Require the widened contracts with
+  `--require add.accepts_creation_time_model_fields`,
+  `--require add_from.resolves_terminal_ledger_entries_atomically`,
+  `--require supersede.controls_inherited_successor_content`, and
+  `--require authoring.refuses_visually_empty_creation_values`.
+
+- **A task can now close on focused, current L3 test proof without replaying the plan's historical
+  citations** (`A1-705`, ADR-0061). `aplan close ID --evidence test:NAME --execute` is explicit and
+  off by default, deduplicates exact runner/name identities from the proposed post-close task, and
+  publishes only when every typed outcome is an unconditional L3 pass. Failed, skipped, missing,
+  ambiguous, non-selecting, timed-out, output-limited and unlaunchable work causes aplan to
+  publish no plan mutation. Configured test commands are trusted code whose own effects are not
+  rolled back. The guarded preview binds plan and proposed bytes, exact changed worktree
+  material, selected configuration, and selected provider definition/environment/toolchain and
+  executable bytes; movement is stale rather than fresh proof on changed inputs. The TUI names the
+  `test.run`/`test.batch` boundary before Preview; ordinary close and MCP `aplan_close` remain
+  L2-only. Require the contract with
+  `--require close.focused_l3_is_explicit_scoped_and_stale_safe`.
+
+- **A new cut can now be created around work already owned by another cut as one checked
+  mutation** (`A1-704`). `aplan add --member <ID>` requires the destination milestone's explicit
+  id, phase and tag, moves one or more live tasks from exactly one source cut each, preserves
+  milestone-to-milestone sequencing in `--blocked-by`, and publishes the new file plus every
+  source removal through one locked compare-and-swap batch. Duplicate, unknown, terminal,
+  milestone, cross-cutting, unowned and multiply-owned work, source-emptying moves, invalid
+  destination metadata and unsafe source rewrites are refused before writing. Dry-run and human
+  output name every file and transition; application and TUI previews carry the exact file/effect
+  set, while `aplan_add` returns a `v1` file and membership-transition payload. The A1-706 audit
+  excludes a retained `cross-cutting` task from the live-work safeguard, makes MCP member mode's
+  conditional id/phase/tag contract machine-readable, and names ordinary MCP explicit identity as
+  `mcp.add_accepts_explicit_identity`. Require cut creation with
+  `--require add.creates_cut_around_existing_members` and require that ordinary agent-authoring
+  widening separately when a client relies on it.
+
+- **The complete interactive work loop now has one public guide, an executable generated action
+  reference and a reproducible real-session demonstration** (`A1-451`). `docs/tui.md` covers the
+  default-on package shape, launch and missing-plan onboarding, loading and progress, all five
+  destinations, diagnostics and verification, guarded mutations, responsive layouts, terminal
+  recovery and the honest accessibility/portability boundary. Its graph guidance distinguishes
+  viewport pan, semantic hierarchy/relation navigation, bounded continuation traversal and
+  complete CLI/export formats. `docs/tui-reference.md` is generated from the same closed action,
+  mutation and CLI-disposition catalogues as dispatch/help and is rejected by the specification
+  gate if stale. The safe VHS fixture demonstrates a real check-to-fix and evidence-gated close;
+  it contains no configured program or network operation. Existing keys, behavior and runtime
+  dependencies do not change.
+
+- **An attended bare `aplan graph` now opens the layered spatial view, while redirected bare
+  output remains Mermaid** (`A1-696`). An explicit `--format` remains authoritative in either
+  environment, so scripts and document generation keep their existing bytes and terminal users no
+  longer need to discover `--format text`. The same correction repairs orthogonal routes which
+  become coincident with an unrelated card border only after conversion to terminal cells. The
+  current v0.13 milestone now produces complete geometry in both orientations instead of replacing
+  the TUI graph with its fallback list. Unrepairable geometry still fails closed with exact
+  omissions. Require the two boundaries with
+  `--require graph.attended_default_is_layered_and_redirected_default_is_mermaid` and
+  `--require graph.cell_routes_repair_terminal_border_collisions`.
+
+- **The TUI Graph context now names what its active scope actually traversed and what a
+  dependency-only view omitted** (`A1-689`). The always-visible `g` control distinguishes
+  dependency, membership, all-`blocked_by`, and critical dependency-plus-containment traversal,
+  and counts active task filters. The context line reports exact omitted cut-membership-edge (`M`)
+  and grouping-only-task (`G`) counts at both normal and 48x14 layouts, including explicit zeros
+  after membership is enabled. This corrects the misleading combination where `unreachable` could
+  appear beside a dependency-only presentation even though that scope is defined over cut
+  containment. Require the corrected surface with
+  `--require tui.graph_context_discloses_scope_and_grouping_omissions`.
+
+- **Layered is now the default layout for `aplan graph --format text` after passing its frozen
+  release gate** (`A1-683`). Human text now uses the
+  same bounded multiscale scene as the TUI, with exact omission accounting and width-aware Auto
+  direction; a redirected document must pass `--width`. Its notes retain exact cut-membership
+  omission counts and say whether a reach query walked dependency-only or all `blocked_by` edges,
+  so narrowing cannot look more complete than it is. Existing consumers and snapshots can
+  retain the prior bytes with explicit `--layout lanes`, which remains a supported compatibility
+  surface. Mermaid, DOT, JSON and explicit Lanes digests are unchanged. The complete matrix,
+  five-repeat stability checks, matched geometry comparison, clean-release p95 measurements and
+  blinded formative actor results are recorded in
+  `pre-public technical evaluation`. Require the default boundary with
+  `--require graph.text_defaults_to_layered_with_explicit_lane_compatibility`.
+
+- **Layered routing now chooses any valid node-boundary port to avoid unnecessary bends while
+  retaining the crossing budget** (`A1-688`). The first matched A1-683 measurement found 14
+  left-to-right bends against Lanes' 10, over the frozen 125 percent limit. The final same-graph
+  results are 3 crossings/10 bends left-to-right and 2/7 top-to-bottom, against Lanes' 6/10.
+  Typed provenance, monotonicity, orthogonality, boundary ports, node avoidance, arrows and scene
+  completeness remain enforced. The comparison is executable rather than a visual assertion.
+  Require it with
+  `--require graph.layered_routes_choose_low_bend_ports_within_crossing_budget`.
+
+- **Static layered Auto orientation now chooses from the complete scenes which fit the exact
+  document width** (`A1-687`). The CLI retains both validated left-to-right and top-to-bottom
+  candidates until the width-constrained painter has accepted them, then applies the existing
+  deterministic quality ordering only to candidates which fit. If neither fits, the refusal
+  reports the smallest required width. Explicit orientations remain forced and the TUI's
+  viewport-independent Auto policy is unchanged. This fixes 80- and 120-column aggregate views
+  which previously refused the preferred left-to-right scene even though top-to-bottom fit.
+  Require the boundary with
+  `--require graph.auto_text_orientation_prefers_a_scene_which_fits`.
+
+- **Layered plan and phase overviews are now bounded semantic windows rather than layout-limit
+  failures** (`A1-686`). Aggregate levels admit at most 10 cards and 20 visible aggregate edges
+  before geometry, honor a tighter caller budget, anchor on the contextual or work-aware subject,
+  and carry exact raw-task/dependency omissions plus source-bound continuations. This fixes the
+  68-card aplan overview which previously exceeded the 64-node cell-scene ceiling in both TUI and
+  static text. The TUI now paints a real traversable layered window; redirected text reports the
+  same window and never calls it the complete source. Milestone/task detail and the 64/96
+  cell-scene limits are unchanged, and invalid geometry still uses the complete selectable
+  fallback. The semantic-only graph read also publishes its parsed-artifact cache immediately,
+  so an identical next process reuses the first graph invocation instead of waiting for an
+  unrelated structural report to publish it. Require the boundary with
+  `--require graph.aggregate_levels_are_bounded_and_continuable`.
+
+- **The layered graph now has an executable adversarial hardening contract** (`A1-682`). One
+  discoverable corpus covers chains, diamonds, repeated fan-in/out, crossings, long edges,
+  disconnected components, hostile Unicode, canonical cycles, self and parallel edges, empty
+  groups, cross-phase/cross-cut dependencies and aggregate quotient feedback. It checks both
+  orientations plus every four-node DAG for deterministic geometry, exact provenance and total
+  accounting, phase containment, valid ports and orthogonal routes, typed feedback and no node or
+  route collisions. A separate release-profile gate measures bounded sparse, fan-in and crossing
+  layouts plus actual semantic hit testing, so an unrelated 10,000-task browser failure cannot
+  hide graph measurements. Require the corpus with
+  `--require graph.layered_hardening_corpus_is_executable`.
+
+- **`aplan graph` now exposes the shared layered scene as deterministic terminal text**
+  (`A1-681`). `--format text --layout layered` uses the same multiscale application projection,
+  card measurement, peer ordering and validated cell geometry as the TUI. It adds explicit
+  `--level`, `--focus`, `--orientation`, `--order`, `--detail`, `--width`, `--ascii` and color
+  policies; redirected layered output requires an exact width and never clips a viewport into a
+  complete-looking graph. Phase groups, aggregate provenance, dependency direction, critical and
+  focus cues, typed feedback, boundary/window omissions and exact accounting survive static
+  rendering. Invalid text-only combinations fail before plan loading, while Mermaid, DOT and JSON
+  remain byte-stable. This increment initially retained `lanes` as the text default; `A1-683`
+  later promoted Layered while preserving explicit Lanes bytes. The audit also corrected horizontal
+  phase labels in top-to-bottom cell scenes so they no longer overwrite the band edge or first
+  card. Require these contracts with
+  `--require graph.layered_text_uses_the_shared_semantic_scene` and
+  `--require graph.layered_phase_labels_are_horizontal_and_non_occluding`.
+
+- **The layered TUI graph is now a reversible semantic explorer** (`A1-680`). Arrow keys follow
+  actual scene geometry and dependency direction; relation keys cycle all direct siblings with an
+  exact position; dedicated commands jump by layer, source, sink, critical route, milestone,
+  ordered phase and diagnostic-bearing node. Enter and Escape traverse Overview, phase, milestone
+  and task levels with exact breadcrumbs and bounded selection/viewport/continuation history.
+  Direct revisits restore the last valid session, while "show in Graph" opens the exact raw
+  identity with a return breadcrumb and temporarily widens an excluding scope without destroying
+  the saved session. Readability, plan-priority, id, title, status/readiness and criticality peer
+  orders, Auto or pinned direction, compact fit, density, relation-only paint and manual pan/focus
+  are visibly separate policies. Refresh and resize retain them, and unavoidable relayout reports
+  its cause and displacement. Oversized and fallback scenes keep the same typed navigation instead
+  of reverting to lane or formatted-row order. Reducer, fixed-buffer and real-PTY journeys cover
+  layer-by-layer and node-by-node movement, off-view relations, resize and exact return. Require
+  this behavior with
+  `--require tui.layered_graph_navigation_is_semantic_and_reversible`.
+
+- **The TUI Graph destination now paints the layered scene as a real Ratatui widget** (`A1-679`).
+  Ordered phase bands contain adaptive semantic cards instead of Paragraph lane rows; routed edges
+  run beneath cards and retain ports, arrowheads, feedback/bundle glyphs, crossings, junctions and
+  clipped continuation cues. Auto density uses a stable transition band, while session-level
+  Compact and Comfortable pins, Relations Only, exact viewport extents, directional off-screen
+  counts and persistent selection context remain presentation-only. Node, edge, phase, port and
+  scrollbar hit regions use the same cell transform as paint. Wide, combining, ASCII, Unicode,
+  theme, reduced-motion, normal, narrow and clipped buffers are covered directly. Over-budget or
+  rejected geometry becomes a complete scrollable/selectable fallback list rather than a refusal
+  paragraph. The painter expands only viewport-intersecting cell segments and never performs
+  layout or graph traversal. Ratatui Canvas remains deliberately unused: sub-cell markers would
+  weaken exact labels, non-color edge meaning and pointer identity without improving this
+  orthogonal cell scene. Require this behavior with
+  `--require tui.layered_graph_is_a_semantic_ratatui_widget`.
+
+- **The multiscale graph now has a bounded deterministic terminal-cell scene** (`A1-678`). A
+  private adapter around exact `graphlay` 0.3.1 turns the coordinate-free semantic projection into
+  integer card boxes, dependency ranks, phase bands, ports, orthogonal routes, arrowheads and
+  quality/stability metrics without exposing kernel types. Default features are disabled; the
+  normal dependency edge adds only `libm` and reuses `serde`. Left-to-right, top-to-bottom and
+  deterministic Auto orientation share fixed effort and 64-node/96-edge limits. Auto compares
+  crossings, unsafe routes, bends, displacement and area, then keeps the prior direction within a
+  12 percent hysteresis band. Exact provenance follows aggregate, parallel, shared, crossing,
+  junction, self-loop and feedback geometry; quotient feedback remains distinct from canonical
+  task cycles. One checked display-cell pass refuses overlapping nodes and removes unsafe edge
+  geometry while retaining typed degradation. Unicode card measurement uses display columns and
+  grapheme clusters. Status-only refresh reuses geometry; structural relayout reports displacement
+  and typed causes; over-budget or failed work retains the prior scene with exact omissions.
+  Layout work is an owned generation-tagged job, so a client can run it off the input/paint path
+  and discard stale completion. The old lane scene remains unchanged until its scheduled
+  compatibility disposition. Require this boundary with
+  `--require tui.layered_cell_scene_is_bounded_and_deterministic`.
+
+- **The application graph now has a truthful multiscale semantic projection** (`A1-677`). Plan
+  overview groups admitted work into ordered phase bands and milestone aggregates without turning
+  phase or membership into dependency edges. Every aggregate relationship carries its exact
+  contributing task dependencies; cycles created only by aggregation are typed layout feedback,
+  while canonical task cycles remain invalid-plan state. Phase focus reports exact adjacent bands,
+  omitted identities and crossing relationships. Milestone and task detail reuse the bounded graph
+  window with exact continuations and accounting. Raw selection survives collapse and expansion,
+  contextual, remembered and work-aware entry reasons stay explicit, search locates admitted raw
+  ids without changing scope, and every reversible transition is bound to the immutable input that
+  emitted it. Duplicate and otherwise invalid source edges remain visible rather than being
+  normalized away. This is a coordinate-free application contract; the layered geometry and
+  Ratatui painter land separately. Require it with
+  `--require tui.graph_explorer_projects_multiscale_semantics`.
+
+- **TUI terminal portability, recovery and live external editing now have an executable contract**
+  (`A1-448`). A portable real-PTY module in the consolidated integration binary runs without the
+  Unix-only fixtures or a second heavyweight test target. It covers focus, resize bursts, the
+  minimum-size boundary, recovery, ordinary and interrupt exit,
+  full mode restoration, and editor release/reacquisition. A weekly/manual workflow runs it with
+  the platform-neutral reducer and fault suite on Linux and, once the repository is public,
+  standard hosted macOS and Windows; private CI still allocates no hosted minutes and unavailable
+  platforms are not called passing. The Add form's Ctrl-E action restores the terminal before
+  launching parsed `VISUAL`/`EDITOR` argv directly, accepts one private bounded Markdown draft only
+  through the normal preview/confirmation path, and re-observes plan/configuration/repository
+  identity before certifying the resumed interface. The documented evidence matrix keeps compile,
+  PTY and manual tmux/SSH/emulator observations distinct. The delivery audit also found that an
+  attended CLI interrupted during a slow provider could leave its transient progress row behind;
+  Unix now synchronously clears it before re-raising the signal, while Windows installs a small
+  target-only console handler that clears it and returns the conventional interrupt status.
+  Require the new boundaries with
+  `--require tui.terminal_portability_is_explicit` and
+  `--require tui.external_editor_handoff_is_safe_and_identity_bound`.
+
+- **Slow CLI work now has one identity-safe, terminal-safe command-lifetime progress renderer**
+  (`A1-667`). The 120 ms grace now spans plan loading, repository observation, concurrent
+  configured providers, validation and final projection instead of ending with each child
+  operation. Each typed stream is admitted only from sequence-zero `queued`, then checked for
+  operation kind, order, lifecycle and monotonic measure; late, duplicate, prior-generation and
+  post-terminal events cannot redraw the row. Concurrent providers render one bounded aggregate
+  without configured labels, child ids or output. Capable attended terminals receive one
+  width-fitted animated row which is erased around ordinary output and on completion without ever
+  hiding the cursor. Redirected, `TERM=dumb` and other portable paths use rate-limited ASCII lines
+  with an explicit terminal state. `auto`, `always` and `never` retain their stream/CI/format
+  contract, `--color` reaches only human progress, machine stdout remains byte-identical, and the
+  disabled path constructs neither a channel nor a worker. PTY, redirected-byte, concurrent,
+  failure and signal-cancellation tests cover the restoration boundary. A target-only Windows
+  console-handler dependency was added by the `A1-448` portability audit; Unix linked output is
+  unchanged.
+  Require this adapter with
+  `--require progress.cli_renderer_is_identity_safe_and_terminal_safe`.
+
+- **The TUI shell now adapts by route, width and height instead of merely avoiding overlap**
+  (`A1-671`). Short terminals collapse decorative header, navigation and footer borders before
+  route content; the supported 48x14 floor retains eight inner work rows, high-priority Back,
+  command-palette and help hints, and an explicit route/subject breadcrumb in narrow detail.
+  Overview, Tasks, Diagnostics, Graph and Reports each retain their useful answer, while loading,
+  onboarding, forms, previews and result/error overlays use their own bounded short composition.
+  Form viewports follow the exact wrapped cursor row and manual scrolling starts from the painted
+  offset. Resize keeps selection, inspector/back-stack state, graph pan/window state and uncommitted
+  form input rather than rewriting semantic state. Fixed buffers cover the measured support matrix,
+  and a real terminal journey crosses wide, short split, narrow and minimum layouts before proving
+  clean restoration. Require the contract with
+  `--require tui.shell_adapts_by_route_and_available_rows`.
+
+- **Task summaries and every inspector section now carry semantic information hierarchy**
+  (`A1-670`). Identity, status/readiness, durable owner, ephemeral claim, placement, planning facts,
+  counts, warnings and destinations are typed as grouped labelled values, badges, metrics, callouts
+  and links rather than flattened `label: value` strings. Work, Relationships, Paths, Traces,
+  Evidence and Findings use the same vocabulary. Roomy panes align values; narrow panes stack long
+  labels and exact values instead of truncating their meaning. Brackets, labels and callout cues
+  preserve status in monochrome and ASCII, while hostile controls and grapheme clusters remain
+  inert and cell-safe. Selection, links, scroll state and the inspector back stack survive resize
+  because reflow changes presentation rather than identity. Require the contract with
+  `--require tui.inspectors_use_semantic_information_hierarchy`.
+
+- **An eligible TUI now paints truthful startup state before reading configuration or plan input**
+  (`A1-666`). The first frame uses stable shell geometry and names the current build-identification,
+  configuration, cache/source, repository, verification-preparation, validation or projection
+  phase. Exact source counts receive a bounded gauge; indeterminate work never invents a percentage
+  or ETA. Build-facts construction and the running-executable digest also moved behind the frame, so
+  cold identity I/O cannot recreate the original silent interval. The observed launch path is an
+  adapter over the same resolver used by retry and refresh rather than a second policy implementation.
+  Resize, focus, suspend and reduced-motion behavior remain live during loading; `q`, `Esc` and
+  `Ctrl-C` request cooperative cancellation. Success replaces the placeholder exactly once with an
+  identified snapshot or typed onboarding state. Quit and fatal failure restore terminal modes and
+  the cursor before joining or reporting. `--progress never` still silences stream output but cannot
+  suppress the interactive frame. No async runtime or new dependency was added. Require the contract
+  with `--require tui.startup_feedback_precedes_plan_io`.
+
+- **TUI overlays now have complete semantic pointer activation** (`A1-672`). Modal rows,
+  labelled accept/cancel, clear, retry and navigation controls, mutation fields and repeated items,
+  form review/recompute/confirm controls, quick review and result actions all derive their hit
+  targets from the same typed scrolling, wrapping and clipping geometry that paints them. One
+  unmodified left-button press performs the keyboard-equivalent action; release, movement,
+  non-left, modified and drag activation remain inert, and the top layer blocks click-through.
+  Wheels apply only inside its scrollable content. Loading and publishing expose only actions legal
+  in that state, while pointer confirmation retains fresh-press, pending-work and two-step
+  broad-change guards. Modal-list double-clicks remain selection-only, and after arming a broad
+  change an inert guard covers the old Arm coordinates so the same rapid press sequence cannot
+  confirm it. Fixed-buffer tests cover minimum and resized geometry and a real PTY journey covers
+  search, list, form, review, confirmation, result and cancellation. Require the contract with
+  `--require tui.overlay_pointer_activation_is_semantic_and_guarded`.
+
+- **The TUI now opens and traverses oversized dependency graphs instead of refusing them**
+  (`A1-669`). A fitting projection remains `COMPLETE`; an oversized projection is visibly
+  `WINDOWED` with exact visible/source and omitted node and edge counts. Keyboard and semantic
+  pointer controls choose and open incoming, outgoing, membership, component and high-degree page
+  continuations, change finite neighbourhood depth and return through bounded window history.
+  Direct relationship following and node search recenter identities outside the current window;
+  pan and resize retain presentation semantics. Selected, blocker, dependent, membership and
+  critical roles remain distinct in monochrome and ASCII. A refresh with a different input drops
+  stale cursors/history before anchoring the new view, while missing or excluded anchors are
+  explained. Painting and navigation lay out only the bounded scene, not the complete oversized
+  graph. Require the live-client contract with
+  `--require tui.graph_explorer_windows_oversized_inputs`; the two A1-668 engine requirements
+  remain independently assertable.
+
+- **Oversized interactive graphs now have a deterministic, fully accounted window contract**
+  (`A1-668`). `GraphWorkspace` can preserve or truthfully replace an anchor while independently
+  bounding nodes, edges and the canonical scene's actual peak lanes. Complete, windowed, empty,
+  cyclic and failed states remain typed; exact source/visible/omitted totals cannot be mistaken for
+  clipping. Incoming, outgoing, membership and disconnected-component continuations carry stable
+  raw identities and non-overlapping high-degree page cursors, so every admitted relationship
+  remains reachable. Cursors are bound to the immutable input identity that emitted them, so a
+  refresh cannot silently retarget an ordinal range to different relationships. Complete CLI text
+  keeps its honest complete-or-refuse behavior and Mermaid/DOT remain complete. The TUI adopts and
+  presents this engine in `A1-669`. Staged consumers can require
+  `tui.graph_windows_are_bounded_and_accounted` and
+  `tui.graph_window_cursors_are_source_bound`.
+
+- **Plan loads and configured evidence discovery now expose one generation-safe progress
+  contract** (`A1-665`). Typed queued, started, bounded/indeterminate, completed, failed and
+  cancelled events carry ordered operation and child identities; consumers reject late,
+  duplicate, cross-operation and regressing updates. `--progress auto|always|never` is global:
+  auto requires an attended human-format CLI outside `CI`, always is an explicit stderr-only
+  override, and never emits no stream-progress bytes. Machine stdout is byte-identical, short work
+  is hidden behind a 120 ms grace, the portable fallback is static ASCII, and the joined renderer
+  cannot outlive the result or terminal. TUI verification progress remains in-frame at every
+  stream setting. No new runtime dependency was added. Require the semantic contracts with
+  `--require progress.events_are_generation_safe` and
+  `--require progress.stream_output_is_automation_safe`.
+
+- **TUI keyboard, pointer, help and accessibility behavior now form one fail-closed input
+  contract** (`A1-446`). Key labels, accepted chords and repeat policy come from one binding
+  catalogue consumed by dispatch, the footer, complete help and the palette. Modified arrows,
+  releases and repeats of activation or structural-form controls are inert; paste remains scoped
+  to the focused editor; terminal focus changes preserve interaction focus. Modal and mutation
+  layers restore the exact prior focus and block pointer input from reaching obscured controls.
+  Click and left-drag select only painted rows, button release cannot duplicate a click, and wheel
+  input follows the pointed topmost region with clamped Overview, list, report-detail, inspector
+  and overlay bounds. Long rule explanations now scroll by keyboard or wheel. The design documents
+  the alternate-screen screen-reader limitation and the sequential no-color CLI fallback without
+  claiming either as universal assistive-technology certification. Require the contract with
+  `--require tui.input_accessibility_is_safe_and_discoverable`.
+
+- **The third v0.12 operations audit closes two asynchronous input-boundary gaps** (`A1-663`).
+  Claim previews now derive their action and visible review from the immutable application request
+  and must match the
+  unchanged form's request token, selected task and identified plan input before replacing editable
+  state; an old or corrupt worker handoff leaves the current form intact. Manifest and import
+  capture now rejects non-regular input before opening it, verifies the opened descriptor again,
+  and uses a non-blocking open on Unix so a FIFO or path-replacement race cannot occupy the mutation
+  worker. A dismissed running mutation must finish before another mutation layer opens, so its late
+  answer cannot populate a reopened copy of the same action. Stage these corrections with
+  `--require tui.work_preview_responses_are_request_bound` and
+  `--require tui.authoring_capture_refuses_non_regular_before_blocking` plus
+  `--require tui.mutation_layers_do_not_adopt_prior_effects`.
+
+- **The TUI now has one capability-aware visual language and compact Overview meters**
+  (`A1-445`). Low-color is the background-neutral default; explicit
+  `tui --theme dark|light|low-color|monochrome`, `--ascii` and `--reduced-motion` choices are fixed
+  before the first frame. A non-empty `NO_COLOR` forces monochrome, and a terminal reporting fewer
+  than 256 colors safely maps dark/light to low-color instead of guessing its background. Focus,
+  selection, ready/dependent, blocker/due, critical and error roles retain text or modifier cues in
+  every theme and Graph uses the same roles as lists and inspectors. Overview adds bounded meters
+  for cut progress, ready work, findings and critical work only when they fit after the exact
+  values. The all-theme, all-layout, Unicode/ASCII review matrix and reduced-motion tests are
+  assertable with `--require tui.visual_language_is_semantic_and_deterministic`.
+
+- **Configured-test evidence search is now reachable from the production TUI** (`A1-662`). The
+  `test list` palette action runs the shared configured-runner catalogue on the bounded worker,
+  keeps navigation responsive, preserves partial-runner findings and ambiguous-name refusals, and
+  filters the typed answer locally. Enter inserts only an unambiguous exact reference into Close
+  for live work or Amend Add for terminal work; the ordinary preview resolves it again before any
+  write. The closed discovery audit now requires this concrete action instead of treating the
+  presence of free-text evidence forms as proof that configured-test search is reachable. Require
+  the repaired boundary with `--require tui.configured_test_selector_is_reachable`.
+  The same audit found dependency and tag catalogues reachable only from tests. Their live forms
+  now render complete typed endpoint context, existing-edge state, tag-family scope and observed
+  arbitrary tags before review; require that correction with
+  `--require tui.planning_forms_render_typed_choice_context`.
+
+- **TUI action discovery is now one closed, contextual product contract** (`A1-444`). Palette,
+  full help and footer consume the same availability-aware catalogue across shell controls and all
+  25 native mutations. Search recognizes CLI names and human-facing boundary titles, while
+  guided setup/About, six deliberate batch or transport boundaries, nested test-receipt production
+  and the `tui` entry point stay explicit. CLI-only rows show exact copyable commands and cannot
+  launch a shell or child process.
+  The same visible boundary contract now covers alternate check/verification roots and policy,
+  receipt import/refresh modes and capability assertions; these options can no longer pass the
+  audit merely because a test-only enum called them CLI-only. Verification results route exact
+  repairs to the guarded palette action instead of retaining the obsolete claim that applying a
+  repair is unavailable.
+  The executable audit compares the catalogue with both clap leaves and the commands serialized by
+  `aplan facts`, drives every native read surface, binds every native mutation to the parity union,
+  and refuses undisposed nested or behavior-bearing options. Require this with
+  `--require tui.action_discovery_is_closed_and_contextual`.
+
+- **The native TUI mutation surface now reaches the guarded publisher through one closed-world
+  contract** (`A1-443`). The command palette enumerates claim/release/start/stop, dependency and
+  preference edits, tag maintenance, moves and drops, task creation/import/supersession/rekey,
+  close/amend/restamp and exact verification repairs. Forms and zero-input actions preview on the
+  bounded worker, confirmation consumes the exact reviewed value, and a write is never called
+  committed until a fresh identity-confirmed snapshot observes its result. Every task/plan
+  mutation mode is derived from clap and classified as native, session-bound,
+  preview/output-only or an explicit CLI-only boundary shown in the interaction; the same audit
+  classifies every other CLI leaf outside that catalogue. A closed-world driver audit fails if
+  any action disappears; full-state CLI/TUI and applicable MCP parity plus real-PTY claim, start,
+  dependency, add and evidence-gated close journeys exercise the composition. Require this with
+  `--require tui.mutation_surface_has_cross_adapter_parity`.
+
+- **Broad interactive mutations now retain an exact recovery state** (`A1-442`). Every affected
+  task and file is enumerated before confirmation, and a broad change requires an explicit arm,
+  refocus and second fresh key press. The guarded input includes identified task bytes, exact
+  selected-configuration bytes and semantics, and repository HEAD/status rather than HEAD alone;
+  semantic-only embedders fail closed instead of publishing from an incomplete snapshot.
+  Denied, stale and failed attempts preserve safe form input. A late multi-file failure reports
+  each path as unchanged, complete or diverged with state-specific recovery guidance; even a
+  successful publisher return remains `RELOAD REQUIRED` until a fresh load observes every
+  reviewed after-state. Require this contract with
+  `--require tui.broad_mutations_are_recoverable`.
+
+- **Interactive completion and evidence repair now have one typed guarded mutation boundary**
+  (`A1-441`). Close projects the effective minimum-strength and exemption policy, materializes a
+  default `commit:HEAD`, searches the shared configured-test catalogue and retains exact resolver
+  observations and unresolved citations. Add, replace and remove amendment modes remain distinct
+  from deliberate trace/evidence restamping. Every evidence kind has executable input, help and
+  result handling; dated notes require user-authored provenance and remain explicitly
+  non-resolving, while unchecked recording is a visible trust-bearing choice. Exact repairs from
+  verification stage as one guarded `ChangeSet`: the whole proposed post-state is validated before
+  publication, and the shared publisher retains its typed complete, partial and diverged outcomes
+  if several files cannot all be replaced. Allowed, denied, empty and stale previews remain
+  distinct. Publication now re-observes plan bytes, repository HEAD/status and selected
+  configuration semantics. Require that widened stale boundary with
+  `--require tui.evidence_mutation_previews_bind_identified_inputs`.
+
+- **The fast evidence path now carries a completed adversarial rollout audit** (`A1-647`). A
+  25-revision production shadow matrix covers plan, source, test, fixture, generated, policy,
+  runner, toolchain, lockfile, CI, deletion and rename boundaries. Mutation-tested execution-mode
+  parity and hostile receipt controls fail closed on changed verdicts, exits, identities, missing
+  or duplicated results, stale material and trust downgrade. A daily/manual producer-consumer
+  workflow fingerprints source, binary, protocol, policy, runner and environment, reconstructs
+  same-workflow trust outside the artifact, and retains a one-value direct rollback. Its final
+  private-runner run matched the direct verdict with zero provider starts, 186 ms receipt p95 and
+  3.975 seconds from pre-download to five completed samples. The workflow honors external Cargo
+  target directories, uses a bounded Python-version-portable archive extractor and pins current
+  Node 24 artifact actions.
+
+- **Incremental provider refresh now remains a whole-plan evidence verdict** (`A1-646`, ADR-0058).
+  `aplan verify --refresh-test-receipts <set>` requires an explicit base plus clean head or dirty
+  worktree boundary, derives additions/modifications/deletions/renames through Git, selectively
+  refreshes invalid provider outcomes, manifest-last publishes a complete current receipt set, then
+  re-runs the ordinary resolver over every current task and citation. The safe default executes a
+  complete invalidated provider. Optional `test.inputs_by_test` is a distinct exhaustive
+  invalidation declaration, not proof coverage: missing or overlapping test/path owners, new
+  tests/paths, config/provider/material/environment/toolchain movement and outside-material edges
+  visibly widen. Selected identities retain one batch per provider. Plan-only edits and no-change
+  boundaries can reuse outcomes with zero test execution. Human and machine output carry the Git
+  boundary plus reused, refreshed, widened, unavailable and selected-test counts. Repository or
+  material movement and malformed or incomplete observations publish nothing; externally
+  authenticated and signed receipts cannot be silently downgraded to local trust. Optional
+  `--refresh-shadow` refuses diagnostic or citation-outcome disagreement with full direct execution
+  without claiming direct or release provenance. Require the contract with
+  `--require evidence.incremental_receipt_refresh`.
+
+- **Whole-plan L1/L2/L3 can be re-derived from exact current provider receipts without starting a
+  provider** (`A1-645`, ADR-0057). `aplan verify --test-receipts <set>` validates one bounded
+  current observation or typed rejection for every configured runner, recomputes current
+  provider/material/tool/repository identities, preserves complete catalogues and ambiguity, and
+  runs every ordinary task-local and per-citation rule over the exact current plan. It never starts
+  catalogue, skip, probe, batch or exact-test commands and never silently falls back; missing,
+  stale, partial, untrusted, incompatible and faulty rows remain findings. Human, JSON, MCP and TUI
+  aggregate results independently report scope, provider source, freshness and completeness. The
+  import-set schema is derived and committed; its authentication fields are trusted-orchestrator
+  inputs, not self-authenticating claims from repository code. A successful runner invocation that
+  is indistinguishable from its exact-name miss sentinel stays a typed `unproven_selection`, so
+  direct and receipt-backed verification produce the same `APLAN037` refusal. Require these semantics with
+  `--require evidence.receipt_backed_whole_plan_resolution` and
+  `--require evidence.verification_reports_provider_provenance`.
+
+- **Complete configured test executions can be exported as portable provider receipts**
+  (`A1-644`, ADR-0056). `aplan test receipt <runner>` writes a canonical in-toto Statement v1 to
+  a file or stdout, with a derived committed schema and no embedded plan verdict. Each statement
+  binds the exact runner/adapter, complete catalogue and request/result set, material declaration
+  and matched bytes/modes, inherited environment, toolchain/executable/wrapper bytes, aplan build,
+  repository audit context, producer and timestamps. The shared batch outcome model now keeps
+  expected failures, unproven exact selection,
+  unexpected passes, retries, flakes, cancellation, timeout, resource breach, framework crash and
+  incomplete output distinct; a retry-created green cannot be called an unconditional pass.
+  Material or repository movement during execution, missing/duplicate results and partial provider
+  failure publish nothing. Import validates canonical bytes and derived subject/material identities,
+  then applies separate local-file, authenticated same-workflow artifact or externally authenticated
+  DSSE trust policies; artifact digest and producer authentication are never conflated. Require the
+  receipt boundary with `--require evidence.portable_provider_receipts` and the widened existing
+  batch semantics with `--require evidence.batch_outcomes_preserve_terminal_semantics`.
+
+- **Bounded provider failures retain their configured runner identity** (`A1-658`). Scheduled
+  catalogue discovery no longer attributes a later unnamed runner's diagnostic and cost to
+  `runner 1`. Require the corrected boundary with
+  `--require evidence.scheduled_runner_identity_is_configured`.
+
+- **Independent evidence providers can run under one explicit weighted/resource schedule**
+  (`A1-643`, ADR-0055). The opt-in `test.schedule` / `test.runners` form gives an invocation a
+  positive aggregate `capacity`; each runner consumes `weight` units (one by default) and may name
+  capacity-one `exclusive` resources acquired as one set. Catalogue discovery and independent
+  runners' skipped-list/batch stages overlap without changing per-command memory/process caps,
+  configured-order diagnostics, machine output or cost ownership. Legacy mapping and sequence
+  forms remain serial. Termination closes the start boundary, cancels queued work, reaps every
+  active process group and cannot publish a partial catalogue as clean. The executable performance
+  corpus now distinguishes 215-process legacy replay, eight-batch serial execution and the same
+  eight batches under bounded concurrency.
+
+- **Configured test runners can execute every cited identity in one attributable batch**
+  (`A1-642`, ADR-0054). Optional `test.batch` protocol 1 passes private manifest/result paths as
+  whole argv elements, never test names, and binds the complete typed result to one nonce and
+  runner. Missing, duplicate, extra, malformed, replayed, replaced or non-passing rows fail closed;
+  nonzero exit cannot be overruled by claimed passes, diagnostics retain the existing bounds and
+  redaction, and every citation still receives its task-specific finding. Aplan launches at most
+  one adapter per runner: the executable eight-runner/199-test/241-citation fixture uses eight
+  batches instead of 199 exact-test processes. Legacy `run: ... {test}` remains required and is
+  unchanged when `batch` is absent.
+
+- **Task inspection is now provider-free, freshness-typed and bounded** (`A1-590`, ADR-0053).
+  Plain `aplan show` and `aplan_show` recompute repository-backed evidence but never start a
+  configured test or network provider. They reuse only a complete test catalogue whose declared
+  `evidence.observation_inputs`, provider configuration, executable bytes, applicable Rustup
+  toolchain manifests and inherited environment are unchanged, then rederive ambiguity, locality
+  and findings against the current plan. Human and
+  `aplan/show/v3` JSON output expose `current`, `stale`, `not_observed`, `refresh_failed` or
+  `unsupported` on each citation and in aggregate; the compatibility `resolved` boolean is true
+  only for `current`. `aplan show --refresh-evidence` explicitly performs slow discovery under the
+  configured provider schedule; eligible progress follows the global stderr policy, while
+  `--require-current-evidence` renders the task
+  and exits 1 when any observation is non-current. Whole-plan `verify` and interactive verification
+  remain authoritative refresh paths; the TUI reports the privacy-safe active phase/provider
+  ordinal and completed/remaining work when known without inventing a percentage. Provider and
+  plan-resolution identities are distinct, cache publication is private/checksummed/atomic, and incomplete,
+  cancelled, mutated-input or late older results cannot become current. Require the contract with
+  `--require show.evidence_observations_are_nonblocking`.
+
+- **Configured test evidence now has a first-class discovery command** (`A1-478`).
+  `aplan test list [query]` uses the evidence resolver's own runner directories, wrappers,
+  limits, capture and name normalization, then returns deterministic human, JSON or agent output
+  with runner identity and copyable `test:` citations. No runners, an empty runner, a failed
+  runner, a complete no-match and a name shared by several runners remain distinct; provider
+  failure is partial and blocks under the same verdict policy as `verify` rather than becoming a
+  false absence. `APLAN013` now points at this command instead of asking the reader to replay the
+  `test.list` protocol key by hand.
+
+- **Ordinary pre-push validation is now change-aware, explicit and fail-closed** (`A1-613`). The
+  hook unions every non-deletion Git ref update with staged, unstaged and untracked work, then uses
+  the audited validation inventory to run always-on format/style/structural checks and package-
+  scoped Clippy, rustdoc and tests plus affected generators. Unknown, global, missing-history and
+  mismatched-head inputs widen to the complete development set and workspace scope. A versioned NUL
+  record boundary keeps selector output out of the shell parser; classifier failure produces no
+  verdict. Summaries distinguish selected, widened and deferred gates, so omitted coverage, MSRV or
+  whole-plan evidence can never read as passed. Deletion-only and no-input hooks are distinct, and
+  `ci/scripts/preflight.sh --full` remains the exact non-subtractive integration/release command.
+
+- **Build source identity now follows the active checkout under inherited Git context and disabled
+  reflogs** (`A1-638`). Build-time Git probes discard every caller-supplied `GIT_` variable rather
+  than a version-bound subset, so hook context, discovery ceilings and injected configuration
+  cannot silently erase or redirect the embedded commit. Loose and normally packed refs retain
+  exact-file watchers; only a packed or unborn branch with no reflog temporarily watches its nearest
+  existing ref directory, then returns to the exact loose ref after the transition. That exceptional
+  fallback can observe a sibling ref once in repositories that disable reflogs. Require the complete
+  contract with `--require facts.source_identity_tracks_active_checkout`.
+
+- **The TUI now previews and guards task creation, manifest import, supersession and rekeying**
+  (`A1-440`). Typed forms preserve repeated fields, cut-derived phases, import loss reports,
+  inherited successor data and possible prose references, then publish the reviewed post-state as
+  one compare-and-swap batch. Stale input, policy drift, claims, invalid fields, unsafe paths and
+  partial relocation failures remain distinct typed outcomes. The typed authoring boundary
+  includes a private 4 MiB external-editor handoff utility for long Markdown bodies; it reads a
+  verified regular-file handle with a hard byte bound,
+  rechecks its identity after the read, refuses symlink or concurrent regular-file replacement,
+  and cleans up on success, cancellation and failure. Launching an editor from the live terminal,
+  restoring its modes and reloading changed identity remain explicitly owned by `A1-448`;
+  destinations outside the identified plan and full cross-surface driving are also later
+  boundaries.
+
+- **In-plan task creation no longer lets a task id take over an existing cut label** (`A1-606`).
+  Single add, manifest add, imports, rekey and typed TUI authoring now refuse the collision before
+  publishing any file, while imports explicitly written outside the selected plan remain
+  independent and a cut may still use its own id as its label. Require the boundary with
+  `--require authoring.task_ids_preserve_cut_labels`.
+
+- **An explicit MCP root now selects one complete repository context** (`A1-604`). Every plan
+  tool accepts either a repository containing `.aplan.yml` or its configured task directory and
+  resolves the plan, configuration, trace roots, warning/vocabulary policy, evidence providers,
+  ID strategy, cache identity and Git worktree together. Missing, non-directory, partial and
+  ambiguous config-free roots fail closed without borrowing the server launch context; canonical
+  `..`, symlink, nested-repository and linked-worktree cases have deterministic semantics.
+  Explicit-root replies are wrapped as `{context, result}` with bounded repository-relative
+  provenance, while omitted-root replies keep their existing shape. The selected configuration is
+  a trust choice and its non-test-execution evidence providers may run during resolution. Require
+  the behavior with `--require mcp.explicit_root_resolves_one_repository_context`. The launch
+  context now also honours configured `traces_root` and `no_traces` instead of replacing either
+  with its repository fallback (`--require mcp.launch_context_honours_trace_selection`), and CLI
+  `verify`, CLI `show` and MCP `show` make configured absolute task paths repository-relative and
+  resolve historical trace findings in that configured frame
+  (`--require evidence.stale_premise_uses_configured_roots`).
+- **Active claims are now private local coordination, not task ownership** (`A1-531`, ADR-0051).
+  `claim` and `release` no longer rewrite task Markdown or its durable `owner`; every linked
+  worktree of one local Git repository instead contends on a guarded record beneath Git's common
+  directory. Records carry an unauthenticated holder label, identity source, time and local origin,
+  and persist until explicit release or a checked takeover. `ready`, `show`, `stale`, task JSON,
+  selectors, MCP and the TUI now distinguish stable responsibility from active work and expose an
+  explicit coordination scope. Corrupt, unsafe and orphaned state fails closed; non-Git plans stay
+  readable but cannot claim work or prove `--unclaimed`; `release` can recover a claim whose task
+  is no longer visible. Existing owner values remain owners: the pre-release representation is not
+  guessed into claims. New and superseding tasks also refuse a durable owner made only of
+  whitespace or invisible formatting characters instead of recording responsibility nobody can
+  see. Because these commands no longer mutate the plan, `claim` and `release` no
+  longer accept plan-verdict overrides such as `--deny-warnings`. Machine consumers can require
+  the individual `claim.*`, `owner.*`,
+  `selection.*`, `ready.*`, `show.*`, `stale.*`, `tasks.*`, `tui.*`, `start.*` and `rekey.*`
+  behaviours.
+  Claim-origin attribution also skips blank, overlong or control-bearing primary host-label
+  values before considering a valid fallback, and malformed direct application identities are
+  refused before any private state path is created. Require the corrected fallback with
+  `--require claim.origin_fallback_skips_invalid_host_values`.
+- **Application mutations now have an immutable preview/commit contract** (`A1-436`). A typed
+  `ChangeSet` carries its complete input identity, exact before/after file content, semantic
+  effects, post-state findings, denial verdict and evidence-resolution state. The first extracted
+  operation is dependency editing: dry-run writes nothing, committing consumes the reviewed value,
+  rejects a stale snapshot before publication, and uses the existing locked compare-and-swap
+  writer. Applied, no-op, denied, stale and failed-publication outcomes remain distinct; a late
+  batch failure also reports whether observed files are unchanged, complete, partial or diverged.
+  The existing CLI and MCP dependency surfaces route through this service without changing output
+  or exit codes.
+- **Catchable termination now owns configured-command groups across the complete CLI** (`A1-592`).
+  On Unix, before any non-interactive dispatch can launch a repository-configured test, URL or
+  version command, one process-wide owner is listening for `SIGINT`, `SIGTERM`, `SIGHUP` and `SIGQUIT`.
+  Termination closes the spawn boundary, kills every active command group and preserves the exact
+  signal outcome instead of orphaning a runner. Normal stdout, stderr and terminal state are
+  unchanged; the TUI retains its earlier handler so it restores terminal modes before calling the
+  same cleanup. Require the boundary with
+  `--require cli.configured_commands_follow_termination_signals`.
+- **Read-only clients now share an exact, disposable persistent `PlanStore`** (`A1-589`). CLI, MCP
+  and TUI reuse typed task artifacts from a private checksummed per-user generation while Markdown
+  and configuration remain authoritative. Exact semantic builds may also reuse typed structural
+  reports, so an unchanged structural command parses zero YAML and zero trace documents; one task
+  edit reparses exactly that candidate. Candidate additions/removals, racy same-size writes,
+  symlink retargets, trace/config changes, corruption, build skew and concurrent writers all take a
+  conservative miss path. Global `--cache=off` bypasses persistent state and `--cache=refresh`
+  replaces it. `--timings` and the benchmark harness expose cache work and explicit clean/hit/one-
+  edit states. Require the canonical identity change with
+  `--require input_identity.uses_typed_canonical_bytes`.
+- **Trace validation now reads and parses each distinct document once per validation snapshot**
+  (`A1-322`). Markdown heading/table indexes and parsed YAML/JSON values are shared by address
+  resolution, stampability and drift checks, including failed structured parses and lexical aliases
+  of one file. Global `--timings` and the read-performance harness now report exact trace reads,
+  source bytes, Markdown parses and structured parses, so a repeated-parse regression fails a
+  deterministic work assertion rather than depending on wall-clock noise. Diagnostics, ordering,
+  fingerprints and legacy Markdown-stamp compatibility are unchanged.
+- **Read commands now expose an exact opt-in performance diagnostic and avoid known duplicate work**
+  (`A1-588`). Global `--timings` writes phase durations and non-sensitive load/graph counters to
+  stderr without changing stdout or exit status. Typed-only reads no longer retain every Markdown
+  source, `PlanContext` no longer clones bodies or searches every input per task, same-frame root and
+  command resolution share one configuration value, and inspection operations share one graph across
+  validation and projection. Development builds use modest optimization so their ordinary reads remain
+  interactive. The on-demand benchmark harness publishes process startup, min/p50/p95/max wall, CPU, first-byte,
+  output-size and deterministic-work observations without turning busy-runner wall time into a flaky
+  gate. It refuses error-path samples and mixed source/binary states, and kills a timed-out sample's
+  complete process group.
+- **The TUI now opens first-use and broken-launch states instead of failing before the terminal**
+  (`A1-453`). Missing plans, explicitly selected configuration files, configured roots,
+  unreadable configuration and invalid configuration each have a distinct read-only screen. It
+  names the root and configuration selection, shows inert shell-safe repair commands, states that
+  `aplan init` only writes `.aplan.yml` into an existing directory, and uses `r` to retry the same
+  loader in place. Loaded sessions retain whether root and policy came from flags, discovery or
+  `--no-config`. `i` opens a scrollable About view built from the same typed version, identity,
+  command, format, rule, evidence-kind, behaviour, MCP, configuration-key and build-capability
+  facts as `aplan facts`; an executable inventory audit fails when a facts collection has no view
+  disposition. Neither onboarding nor About writes or runs setup commands. Require the complete
+  contract with `--require tui.onboarding_and_capabilities_are_typed`.
+- **The TUI now makes `ready`, `why` and `due` one navigable work-discovery flow**
+  (`A1-429`). Every task inspector has a Work section carrying the exact ready position and its
+  release, critical-path, downstream-depth and effort factors, plus every declared ordering
+  preference. Blocking explanations are cut-bounded by default, state each folded count, label
+  missing and unloadable blockers, and switch to the complete closure with `w`. Loaded blockers
+  and dependents open in place and `Esc` returns to the exact prior inspector item. Revisit rows
+  and task detail share an explicit `d` as-of control accepting RFC 3339 or epoch seconds; a due
+  revisit says that it is time to re-read and explicitly does not claim the external condition is
+  satisfied. Require it with `--require tui.work_discovery_is_one_typed_flow`.
+- **Every TUI continue now establishes a freshness boundary** (`A1-579`). A standalone
+  `SIGCONT`, including the only observable edge after uncatchable `SIGSTOP`, marks retained bytes
+  unconfirmed and requests a current-epoch observation before certifying them again. The same
+  protocol covers a continue that cancels the post-teardown suspend handoff, while an ordinary
+  handled `SIGTSTP`/`SIGCONT` cycle advances its epoch only once. This cannot restore terminal
+  modes before an uncatchable stop; it does prevent stale repository state from being certified
+  after resume. Require it with `--require tui.continue_establishes_freshness_boundary`.
+- **Commit evidence must now belong to the tree being verified** (`A1-572`). `APLAN011`
+  distinguishes a missing object from a SHA that resolves locally but is not reachable from
+  `HEAD`, and recommends the reachable merge, squash or integration commit. `HEAD` itself and its
+  ancestors remain valid; only after that check may relevance and the secondary commit-quality
+  rules inspect the object. Linked-worktree, unmerged-branch, abandoned-object, mutation and
+  attestation paths share the same gate. Shallow history that cannot establish ancestry remains
+  one checkout-scoped failure rather than false task blame. This is a local membership guarantee,
+  not proof of remote presence. Require it with
+  `--require evidence.commit_requires_head_reachability`.
+- **A continue delivered during the TUI suspension handoff can no longer be consumed before the
+  process stops** (`A1-578`). If `SIGCONT` arrives after the screen has elected to suspend and
+  restored terminal state but before the default `SIGTSTP` handler runs, it cancels that stale stop
+  decision. Termination and a separately observed suspend retain priority. Require the corrected
+  handoff with `--require tui.continue_cancels_pending_suspend_handoff`.
+- **TUI process suspension is now an external-observation boundary** (`A1-577`). Before
+  `SIGTSTP` stops the process, the retained snapshot becomes unconfirmed and its focus epoch
+  advances. `SIGCONT` repaints those retained bytes without certifying them and requests a
+  current-epoch observation immediately; when another operation owns the bounded worker, that
+  request remains due and starts as soon as capacity returns. Require this guarantee with
+  `--require tui.suspension_invalidates_snapshot_freshness`.
+- **TUI identity observation no longer performs and discards refresh-only work** (`A1-575`).
+  Periodic and focus-gain probes now use a production input-only loader, while refresh builds its
+  verification sheet and complete projection once and confirms them with the same input-only
+  observation. The corrected production-path harness includes resolved policy, configured
+  documents, Git identity, every report projection and the confirmation read. Require this
+  boundary with `--require tui.production_external_probe_avoids_refresh_work`.
+- **A delayed TUI identity probe no longer leaves an unobserved snapshot labelled current**
+  (`A1-574`). When verification or another operation owns the bounded worker at the five-second
+  deadline, freshness becomes unconfirmed without queueing over the user operation. The deadline
+  stays due and starts one probe immediately when capacity returns. Require this guarantee with
+  `--require tui.overdue_external_probe_is_fail_closed`.
+- **TUI external-change results are now bound to the terminal focus epoch that requested them**
+  (`A1-573`). A probe started before focus loss cannot certify the snapshot after focus returns;
+  it is replaced immediately with a current-epoch probe. A coherent refresh crossing the same
+  boundary may replace the displayed snapshot but remains explicitly unconfirmed until that
+  probe succeeds. Require the correction with
+  `--require tui.focus_epoch_invalidates_external_results`.
+- **The TUI now detects external plan, configuration, HEAD and worktree changes without racing
+  replacement state** (`A1-434`). The identity panel exposes each component, a measured
+  context-only probe runs every five seconds while active and immediately on an enabled focus-gain
+  event, and `r`
+  remains available. Changed inputs trigger a full refresh whose identity is checked again after
+  projection; a racing or unloadable edit keeps the prior complete snapshot visible. Stable
+  routes, filters, selections and scroll survive, while removals and dirty/load-state transitions
+  are explicit. This adds no runtime dependency. Require the contract with
+  `--require tui.external_refresh_is_identity_safe`.
+- **Report discovery now matches the TUI contract and preserves literal source identity**
+  (`A1-571`). `/` searches report names from the list and keys, labels and summaries from the
+  current result; visible/total counts and empty-match text keep filtering distinct from an empty
+  analysis. Stale work's as-of date has its own contextual `d` action, and Version renders
+  configured argv with argument boundaries rather than an ambiguous space-joined command.
+  Require the correction with
+  `--require tui.report_discovery_is_literal_and_parameter_safe`.
+- **The TUI Reports destination now provides seven typed, provenance-bearing analyses**
+  (`A1-433`). Roadmap, summary, version, paths, vacuity, stale work and deprecation runway views
+  retain the same domain values as their CLI JSON counterparts. Shared selectors narrow only the
+  reports whose CLI contract accepts selection; whole-plan reports say that filters do not change
+  their computation. Every aggregate row carries its exact contributor ids into the task browser,
+  while configuration-only version faults remain explicitly non-task facts. Path breadth keeps no
+  history, measured zero, missing paths and invalid patterns distinct; vacuity retains zero-subject
+  and switched-off meanings; stale work is labelled advisory and accepts an ISO as-of date without
+  running a configured process. Repository observations are captured once under an identified
+  repository-read snapshot, and hermetic or failed observations become typed unavailable states
+  rather than empty green reports. Require the contract with
+  `--require tui.report_hub_preserves_cli_report_semantics`.
+- **CLI text graphs can now focus a task and project the exact critical route** (`A1-456`).
+  `--focus <ID>` marks an already-visible task and its visible direct dependency blockers and
+  dependents without changing scope; `--critical` overlays core's deterministic whole-plan route,
+  including checkpoint passthroughs, and reports how much of it the current view contains. Exact
+  status labels, fixed role badges, edge cues and a compact legend keep every distinction after
+  colour is stripped. Terminals receive Unicode and the existing stream-resolved colour policy;
+  redirects remain deterministic ASCII. JSON, DOT and Mermaid are unchanged and refuse these
+  human-only flags. Require the contract with
+  `--require graph.text_focus_and_critical_overlay`.
+- **Critical-route visibility now counts route-step identities, not matching scene records**
+  (`A1-565`). A repeated public graph edge can no longer produce an impossible count such as two
+  of one exact steps visible, and an omitted edge with no connector is not called visible or marked
+  as entering its endpoint. Require the corrected contract with
+  `--require graph.critical_visibility_counts_step_identities`.
+- **The TUI Graph destination is now a complete interactive dependency and critical-path
+  explorer** (`A1-432`). It projects whole-plan, selected, upstream, downstream, between,
+  unreachable, neighbourhood and critical-path scopes through the same typed `GraphView`, core
+  traversals and semantic `GraphScene` used by the CLI. Search finds a visible node without
+  changing scope; task filters compose with it; cut membership is an explicit toggle; and the
+  selected task, direct blockers, direct dependents and critical route retain distinct text roles
+  in monochrome and ASCII modes. Keyboard and mouse can select, follow, pan and recenter through
+  scene identities. Exact row/column extents, grouping omissions and exclusion reasons replace a
+  decorative minimap, and narrow terminals keep the selected node visible without silently
+  clipping the graph. Shared adverse-shape fixtures compare the interactive projection and
+  painting with CLI JSON and text. Require the contract with
+  `--require tui.graph_explorer_uses_semantic_scene`.
+- **The TUI now opens on a typed plan-health and progress overview** (`A1-426`). One application
+  projection carries the identified plan/configuration input, running build identity, cut and
+  effort progress, canonical ready order, clock-labelled due work, structural findings and the
+  critical path. Each aggregate opens the exact tasks or findings behind it; a refresh recomputes
+  a retained scope instead of preserving obsolete member ids. Empty, malformed, partially
+  unloadable, all-done and unestimated plans remain distinct, and failed or refused refreshes keep
+  the last complete snapshot while labelling its freshness unconfirmed. Compact exact text works
+  without color at the normal layout, while the minimum layout exposes bounded overflow rather
+  than clipping it. Require this contract with
+  `--require tui.overview_is_one_typed_projection`.
+- **The TUI now has a complete diagnostic workbench** (`A1-430`). Structural `check` and
+  configured-document `check-docs` results retain distinct whole-run coverage, counts and
+  verdicts. Search, severity/rule/task/file filters and grouping preserve canonical finding order
+  and cannot turn a denied, partial, unavailable or vacuous run into a clean result. Finding
+  detail carries its exact subject/location, message, agent instruction, verdict contribution,
+  safe source context and typed rule explanation; a task subject opens the canonical inspector
+  and returns to the originating finding. Refresh follows stable finding identities and announces
+  added and removed findings. An advanced sheet exposes effective effort, trace and warning
+  policy, sends overrides on one request, labels a relaxed result, and resets to repository policy
+  for an ordinary refresh. Require these contracts with
+  `--require tui.diagnostic_workbench_retains_complete_runs --require
+  tui.check_overrides_are_one_run`.
+- **Evidence verification is now a typed, non-blocking TUI workflow** (`A1-431`). A pre-run sheet
+  exposes the identified repository, selected configuration, effective effort/trace/warning/drift
+  policy, configured test/URL/version providers and their trust boundary, all resolved from one
+  configuration read; it says that resolve-only may still run configured commands. Test execution
+  is a separate explicit trust choice. The bounded worker keeps task
+  browsing responsive, admits only one queued successor, cancels queued work without pretending
+  to interrupt a running provider, joins active work on shutdown and discards stale answers by
+  generation plus resolver-input identity. Results retain complete inspectable findings and
+  distinguish resolved, failed, refused, timed out, output-limited and unavailable citations;
+  show their resolver and actual evidence rung;
+  keep every shared provider cost independently inspectable without multiplying it per citation;
+  and expose exact proposed evidence replacements while keeping apply unavailable until `A1-441`.
+  Long details are scrollable at the minimum terminal size. Require the contract with
+  `--require tui.verification_is_typed_and_non_blocking`.
+- **Interactive verification now binds provider execution to the reviewed run sheet** (`A1-552`).
+  A plan or configuration edit between preview and execution is refused as stale before any
+  replacement test, URL or version command can run; discarding the later answer is no longer the
+  first protection. The typed application operation also derives the evidence repository from its
+  identified context instead of accepting a second path that could disagree. Require this
+  stronger boundary with `--require tui.verification_execution_is_preview_bound`.
+- **Every CLI command now has executable terminal-integrity coverage, and the TUI restores the
+  terminal across Unix process signals and job control** (`A1-548`). `SIGINT`, `SIGTERM`, `SIGHUP`
+  and `SIGQUIT` restore the cursor, exact termios and every acquired mode before the original
+  signal is re-raised; `SIGTSTP` restores before stopping and `SIGCONT` reacquires and repaints.
+  Termination kills registered configured-command groups without waiting on a blocked worker, so
+  prompt cleanup does not orphan the provider. `SIGKILL` and `SIGSTOP` remain inherently
+  uncatchable. Require the repaired boundary with
+  `--require tui.terminal_lifecycle_handles_signals`.
+- **Catchable termination now preempts the TUI's final worker wait** (`A1-560`). After `q` restores
+  the terminal, graceful shutdown continues polling lifecycle signals instead of blocking in a
+  worker join. SIGINT, SIGTERM, SIGHUP and SIGQUIT delivered in that interval kill registered
+  configured-command groups and preserve their signal exit; suspend/continue leaves the already
+  restored terminal alone and resumes the wait. Require the corrected boundary with
+  `--require tui.termination_preempts_worker_shutdown`.
+- **Arrow, `j`/`k`, Tab and Shift-Tab keys now navigate active TUI modals consistently** (`A1-553`).
+  Movement keys previously changed the obscured main selection while the modal stayed fixed, so
+  an advertised action such as `RUN VERIFY` could not be reached with down/`j`. Require the fix
+  with `--require tui.modal_navigation_is_consistent`.
+- **An empty narrowed diagnostic list no longer calls a denied run clean** (`A1-549`). Active
+  search and filters are disclosed even when they happen to match every finding, and `FILTERED`
+  plus `ONE-RUN RELAXED` now precede counts and paths that a narrow terminal may truncate. Require
+  the corrected rendering with `--require tui.narrowed_diagnostic_state_is_truthful`.
+- **The TUI now has a complete, linked task inspector** (`A1-428`). Summary, body,
+  relationships, paths, traces, evidence and findings are separately navigable; long values wrap
+  with explicit overflow and task/section links preserve a back stack. Missing and unloadable
+  relationship targets, orphaned or absent fingerprints, unresolved evidence and stale-trace
+  findings stay visible. The inspector consumes the same typed `Show` projection as CLI JSON and
+  MCP, assembled from one identified input rather than re-reading task bodies. That canonical
+  projection now includes every persisted relationship, trace/evidence fingerprints and version
+  claim, and task search includes body text with an explicit result marker. Require the contract
+  with `--require show.carries_complete_task_projection --require
+  tui.task_inspector_uses_show_projection`.
+- **The TUI task browser now searches and filters the whole plan** (`A1-427`). `/` incrementally
+  searches task ids and titles with Unicode-safe cursor editing and paste; `f` composes status,
+  cut, phase, owner, unclaimed and tag filters using the same selector semantics as the CLI; `s`
+  cycles stable sorts; and `x` clears all narrowing. The view exposes matched/total counts, active
+  constraints, exact match emphasis and distinct empty/filter/search/contradiction explanations.
+  Its default order is the canonical `ready` rank followed by non-ready ids, with the rank reason
+  in task detail. Selection follows task identity across filters and refreshes, and a hidden or
+  removed selection is said rather than silently replaced. A 10,000-row generated debug corpus
+  completed the measured search/filter baseline in 11.4 ms, so no fuzzy-search dependency was
+  admitted. Staged builds can require the contract with
+  `--require tui.task_browser_preserves_selector_semantics`.
+- **Terminal graph layout is now a reusable semantic scene** (`A1-455`). `aplan-output` exposes
+  deterministic node, edge, connector-cell and omission-note identities with terminal-cell bounds,
+  viewport iteration and hit testing; CLI Unicode and ASCII output paint that scene without
+  parsing glyphs or walking the graph again. Shuffled input and status-only changes preserve
+  placement, duplicate edges remain distinct, cyclic back-edges and missing endpoints are reported
+  structurally, and grapheme-aware geometry keeps raw semantic ids separate from sanitized display
+  text. Duplicate node ids in a malformed public view are reported as typed scene issues, and
+  fan-in joins no longer draw or expose false edge identities across unrelated lanes on their left.
+  No Ratatui, terminal backend or external graph-layout dependency enters `aplan-output`.
+- **`aplan tui` now ships its terminal-safe foundation in the standard binary** (`A1-421`). The
+  new internal `aplan-tui` crate consumes the same identified `aplan-app` context as the CLI and
+  paints only sanitized plan text. The terminal session acquires raw mode, the alternate screen,
+  mouse capture and bracketed paste, while Ratatui owns cursor visibility; each owner releases its
+  state on normal quit, partial initialization failure, drawing or input failure, and panic
+  unwinding.
+  Redirected input or output is refused before repository-controlled inputs are opened, with the
+  non-interactive commands to use instead.
+
+  The `tui` Cargo feature is on by default and release builds enable it explicitly. An intentional
+  `--no-default-features` source build omits `aplan-tui`, Ratatui and Crossterm while preserving an
+  actionable `aplan tui` stub. `aplan facts` reports the `build.tui` state, and
+  `aplan facts --require build.tui` distinguishes a usable interactive build from that stub
+  (`--require facts.reports_build_capabilities`).
+- **The TUI no longer gives cursor visibility two competing owners** (`A1-538`). Ratatui now owns
+  the cursor it hides while drawing and restores it once on exit; the surrounding mode guard owns
+  raw mode, alternate screen, mouse capture and bracketed paste. A staged build can require the
+  correction with `--require tui.cursor_restoration_is_singular`.
+- **The TUI now has a deterministic model/update/effect loop** (`A1-422`). Crossterm polling and
+  reading have one synchronous owner; terminal events decode into semantic actions before the
+  reducer changes state, and rendering runs only after a state change. Repository refreshes run on
+  one background worker with one bounded queued successor, carry both generation and input digest,
+  coalesce duplicate requests, and cannot replace the last complete snapshot after becoming stale
+  or failing. Long work leaves navigation responsive, transient ticks stop when nothing visible
+  needs them, and terminal modes restore before shutdown waits for a running worker. A staged build
+  can require this foundation with `--require tui.event_loop_is_generation_safe`. Headless builds
+  no longer advertise `tui.*` behaviors for code they did not compile; assert that cross-build
+  guarantee with `--require facts.omits_disabled_feature_behaviours`.
+- **TUI unwinding can no longer detach an active background operation** (`A1-425`). The normal
+  exit path already restored terminal modes before joining its one worker, but an unwind bypassed
+  explicit shutdown and dropping the worker handle detached the repository read. Runtime drop now
+  cancels its queued successor and joins the active operation after terminal guards have unwound.
+  Require the correction with `--require tui.worker_cleanup_is_unwind_safe`.
+- **Caught TUI worker panics no longer write raw diagnostics through the alternate screen**
+  (`A1-539`). A one-time panic-hook dispatcher suppresses output only on the marked effect thread,
+  where the panic becomes the existing typed recoverable failure; every other thread continues to
+  use the host's previous panic hook. A staged build can require the correction with
+  `--require tui.caught_worker_panics_do_not_write_terminal`.
+- **The TUI now has a responsive, keyboard-complete application shell** (`A1-423`). Overview,
+  Tasks, Diagnostics, Graph and Reports share selection across wide, normal and narrow layouts;
+  below 48 by 14 cells the interface shows a stable resize/quit refusal instead of clipped
+  controls. Dispatch, the contextual footer, help and the searchable action palette use one
+  availability-aware catalogue, including reasons for disabled actions. Focus and severity remain
+  visible without color, dark/light/monochrome themes and Unicode/ASCII tokens are switchable, and
+  grapheme-aware fitting keeps sanitized controls, wide text, the palette cursor and mouse targets
+  on the same cell geometry. Require it with `--require tui.shell_is_responsive_and_contextual`.
+- **Responsive TUI selection and input now remain reachable and bounded** (`A1-540`). A selected
+  row follows keyboard movement at every supported size, one viewport now drives painting and
+  pointer targets, borders cannot select tasks, and wheel input cannot mutate a list hidden behind
+  narrow detail. Oversized row, header and status fields carry explicit continuation markers; the
+  palette keeps its editable tail visible and bounds zero-width input by graphemes and bytes as
+  well as cells. The below-minimum refusal accepts `q` even when resize hid an open modal. Require
+  the correction with `--require tui.selection_is_visible_and_pointer_safe`.
+- **Every responsive TUI surface now makes truncation explicit** (`A1-541`). Route explanations,
+  help and palette rows, and repository-controlled detail fields fit their actual pane rather than
+  relying on terminal clipping or unbounded wrapping. Exact layout-boundary tests cover hostile
+  combining, wide, control and zero-width text in both glyph modes; pointer targets remain inside
+  their painted cells, and wheel navigation stops at list ends instead of wrapping to unrelated
+  work. Require the correction with `--require tui.shell_content_is_explicitly_bounded`.
+
+- **CLI, MCP and interactive clients now share a typed application boundary** (`A1-420`). The
+  new `aplan-app` crate owns an identified plan context plus concrete `check` and dependency-edit
+  request/response types. It reuses the core plan and diagnostics directly: there is no generic
+  command map, JSON round trip, subprocess protocol or second plan model. `check` carries ordered
+  diagnostics, the repository verdict and unresolved-evidence counts; dependency edits carry the
+  proposed post-state findings and publish through the existing compare-and-swap writer.
+
+  The extraction also closes a concurrent lost-update window in `dep` (assert with
+  `aplan facts --require dep.rebases_on_current_target`). An edit used to read current task bytes
+  for its write guard but derive `blocked_by` from an older plan snapshot, so a valid edge added
+  between those reads could be silently removed. It now reloads and gates the current target,
+  preserves that edge, and still refuses if the guarded bytes move again before publication.
+
+  A post-delivery audit (`A1-537`, assert with
+  `aplan facts --require application.input_identity_matches_loaded_inputs`) fixed the input
+  identity itself. The first implementation parsed a plan and then reopened its task paths for
+  hashing, so a concurrent edit could attach new-byte identity to an old result; it also omitted
+  Markdown candidates that were not tasks yet. The loader now reads each candidate once and
+  returns those exact inputs with the parsed plan. Resolved operation policy is hashed without a
+  second configuration-file read, and dependency edits derive their refreshed input, task and
+  write guard from the same identified load.
+
+- **`owners` makes task ownership an opt-in checked vocabulary** (`A1-190`). With no key,
+  `owner` remains free text and existing plans are unchanged. Once declared, `APLAN056` warns on
+  every present task owner outside the list and suggests declared spellings one edit away;
+  unassigned tasks remain valid. Empty, blank and duplicate declarations are refused, as is a
+  `policy[].when.owner` value outside the declared vocabulary, so one configuration cannot call a
+  spelling non-canonical and also use it as a policy boundary. This is owner-specific rather than a
+  generic string-field mechanism because `owner` is the only free-text categorical scalar in the
+  task model today.
+  **Upgrade the binary before adding the key**: older builds reject unknown configuration.
+
+- **`docs.paths` declares the default `aplan check-docs` input once** (`A1-203`). Values are
+  literals or globs; relative values resolve from the selected configuration file. `*` stays in
+  one segment and `**` crosses directories. Running `check-docs` with no paths expands them in stable
+  order, while explicit paths override it for a narrow one-off run. Every literal must be a file
+  and every glob must match at least one file, so a misspelling or an emptied directory is a
+  refusal rather than a vacuous pass. Each `docs.membership[].doc` joins the implicit set
+  automatically and need not be repeated. This repository now drives both its shipped command and
+  its repository-specific documentation audit from that declaration; the hard-coded Rust and CI
+  document lists are gone. **Upgrade the binary before adding the key**: an older build rejects
+  unknown configuration.
+
+- **`aplan explain rule <APLANxxx>` gives a diagnostic code its stable human meaning**
+  (`A1-198`). The answer is the code, severity, and invariant from the same `Rule` row that
+  generates the matching heading in `docs/rule-catalogue.md`, rather than a second description.
+  It does not replay the catalogue's normalised fixture examples: the finding already carries the
+  real message and repair instruction for the reader's plan. The vocabulary is a required argument,
+  so a task, tag, and rule may share a name without hidden precedence. Explanation loads no plan,
+  repository, or configuration, while `aplan show <task>` keeps its existing task-only meaning.
+
+- **`aplan summary --at <REV>` reads a committed plan without a checkout** (`A1-194`,
+  `--require summary.revision_selects_committed_inputs`). The revision resolves once to a full
+  commit id, named on stderr, while stdout keeps the ordinary human or JSON schema. With ordinary
+  discovery, both task files and the nearest `.aplan.yml` come from that commit, including its
+  historical plan root, grouping, and throughput; today's broken config or absent old directory
+  cannot make a hybrid answer. `--config` remains the caller-selected current policy and
+  `--no-config` still reads none. An unknown revision, missing plan root, invalid committed config,
+  or unloadable historical task is refused rather than reported as an empty rollup. `--at` selects
+  repository input and remains distinct from `--as-of`, which selects an evaluation clock. Git
+  tree reads preserve non-UTF-8 host paths on Unix and follow the symlinks committed at the
+  selected revision, never today's worktree targets. An implicitly discovered config above the
+  repository is refused until the caller selects it with `--config` (or rejects it with
+  `--no-config`), because it has no state at the named commit.
+
+- **`APLAN055` rejects `captured` dates on evidence kinds where a date proves nothing**
+  (`A1-197`). `captured` remains required, and keeps exactly its existing meaning, for a human
+  `note`: the author or importer records when the inline assertion was made. It is rejected on
+  `commit`, `file`, `url`, and `test` evidence instead of being accepted and ignored. A commit's
+  identity is immutable; mutable file proof is bound to reviewed content by `APLAN054`; URL and
+  test resolvers report what they observed in the current run. A historical test report will need
+  a digest, subject, producer, execution identity, and freshness policy rather than an editable
+  date beside a test name. The exhaustive evidence-capability model now records and drives that
+  decision for every kind. The authored-task and `aplan tasks` data schemas now carry the same
+  note-only description; the first A1-197 increment left the latter calling `captured` a generic
+  evidence timestamp even though the validator rejected that meaning (`A1-493`). The task-data
+  schema also now requires its always-emitted nullable keys; its first version permitted those
+  properties to disappear even though runtime rows have always serialized them as `null`.
+
+- **`APLAN054` reports mutable file evidence that changed under the same citation** (`A1-196`).
+  `APLAN015` already catches a path, revision, or anchor that no longer resolves; this closes the
+  other failure mode, where a mutable `file` reference still resolves but now names different
+  proof. With `detect_drift: true`, `close` and resolved `amend` operations record
+  `evidence_fingerprints`, and `verify` compares them against committed content. Whole-file
+  citations hash exact blob bytes, including binary files; anchored citations hash only the
+  addressed section. A dirty worktree edit is silent until committed. `close --restamp` refuses
+  while `detect_drift` is disabled instead of reporting success while deleting baselines it cannot
+  refresh; with detection enabled, it refreshes both trace and evidence stamps after review.
+
+  The evidence-kind audit now states the boundary instead of extrapolating from the implemented
+  kind. A commit, or a file citation whose `@rev` resolves as the object id it spells, is
+  content-addressed and immutable. `@HEAD`, branch and tag revisions are stamped because they can
+  move; that includes a hex-named ref such as `deadbeef`, whose shape alone does not make it a
+  commit id. URL reachability cannot reveal changed content, a listed or passing test cannot reveal
+  weakened assertions, and a note has no independent referent. Those limitations are recorded
+  rather than presented as freshness checks. Drift detection remains opt-in, and a historical task
+  with no evidence stamp stays silent: enabling it produces no retrospective findings without a
+  baseline.
+  Once any evidence stamp exists, a mutable citation missing its own is reported, so a partial
+  baseline cannot silently present itself as complete.
+  Turning drift detection off suppresses comparison and new capture without erasing baselines for
+  unchanged citations during `amend` or `verify --fix`; removal still drops the orphaned key.
+  The task-file field is optional; `aplan tasks` rows expose it as an always-present mapping, and
+  checklist export names it as loss.
+
+- **The new `summary` config block lets `aplan summary` roll up by a declared tag family with
+  `summary.group_by`** (`A1-186`). It parallels `roadmap.group_by` without coupling the two views:
+  each names a family from `tag_families`, and an undeclared name is refused at config load. With no
+  block, the phase table and `aplan/summary/v2` JSON remain byte-for-byte unchanged.
+
+  Grouped human output adds readiness to every family row. Grouped JSON uses
+  `aplan/summary-grouped/v1` and carries `group_by`, `groups`, and `groups_overlap`, plus the same
+  unique plan totals and derived durations as the phase report. A task may carry several family
+  members: it appears in every matching row, while totals count it once and the human report says
+  when rows overlap. Tasks carrying none land in `(no group)`. This is deliberate: `APLAN026`
+  validates the vocabulary but imposes no cardinality; only an explicit `APLAN030` policy does.
+
+- **Diagnostics can carry exact, machine-applicable repairs, and `aplan verify --fix` applies
+  them as one guarded batch** (`A1-199`, `--require diagnostics.machine_applicable_repairs`). A
+  normal human report presents every computed edit for review, and JSON, agent output, `show
+  --format json`, and MCP `show` carry a typed `repair` object distinct from prose advice. The
+  initial repairs cover a test citation with one candidate listed by exactly one runner and an
+  anchor on a binary file, where the exact safe edit is to cite the whole file. Removing that anchor
+  preserves an explicit `@rev`; it never silently retargets proof to `HEAD`.
+
+  `--fix` is explicit, human-format only, incompatible with `--execute`, and reruns `verify` on
+  the written state. Every replacement passes the same evidence-resolution gate as `aplan amend`,
+  the combined post-state passes the shared mutation gate, and compare-and-swap publishes every
+  task or none. A computed edit that is invalid in its task's context refuses the whole batch.
+  Ambiguous remedies remain prose: duplicate ids need a new id chosen, a missing anchor may mean
+  correcting the section or citing the whole document, and trace restamping requires a human to
+  re-review the changed premise. A duplicated source, an existing or shared replacement target,
+  and several plausible near matches likewise remain advice rather than an edit. `amend` now calls
+  the typed repair primitive; `supersede` and `close --restamp` deliberately do not manufacture one
+  for those judgement calls.
+
+- **`aplan rekey OLD NEW` repairs a collided stable id as one guarded migration** (`A1-409`). It
+  changes the task's frontmatter id, a conventional filename, every structured task reference
+  (`blocked_by`, `prefer_after`, `ratified_by`, and `contains`), and a milestone policy that names
+  the old id. Custom filenames stay custom, cut labels stay labels, and the result is checked before
+  compare-and-swap writes publish it. Missing, invalid, occupied, externally configured, stale, or
+  policy-invalid migrations write nothing; terminal work requires `--allow-terminal`.
+
+  Prose is intentionally not a structured reference: the old spelling may correctly name the
+  other branch's task. Human and JSON output therefore report exact-token occurrences by path and
+  line without rewriting them or claiming what they mean. Git history, published links, external
+  documents and other repositories remain outside the operation. This automates the bounded part
+  of the branch-collision runbook while preserving Git's add/add conflict as the detection point.
+
+- **Configured command output is bounded in aplan's own process** (`A1-366`). Every test runner,
+  url checker and declared version command now takes `max_output`, default `1M` for each of stdout
+  and stderr. This is the bound the other two layers did not provide: `max_memory` and
+  `max_processes` constrain the child through cgroups, while `test.output_lines` constrains only
+  the excerpt shown after aplan had already captured everything. A command printing without end
+  could therefore grow the parent without bound even under a tight child memory cap.
+
+  Both pipes are still drained to completion, so reaching the byte bound cannot deadlock the child
+  on a full pipe or change its exit status. The first and last halves are retained; a failed test
+  therefore keeps the failure tail `A1-365` shows, and its diagnostic says how many bytes were
+  dropped at `test.max_output`. A real-runner regression prints far past the limit, proves exactly
+  the declared bytes were retained, checks both the first and last lines, and proves the command ran
+  once. Commands whose stdout *is* their answer (`test.list`, `test.skipped` and
+  `version.current`) reject truncation as an incomplete configured command rather than parsing a
+  partial test catalogue or version. Status-only `url.check` and `version.check` keep their answer,
+  because their exit status is complete even when unused output is not.
+
+### Changed
+
+- **The archived YAML engine is no longer in aplan's dependency graph** (`A1-702`). Every product,
+  tooling and test caller now uses one logical `yaml_compat` boundary backed by the YAML organization's
+  maintained `yaml_serde` 0.10.7 and `libyaml-rs` 0.3.0 releases. The complete compatibility suite
+  and new adversarial parser contracts preserve duplicate-key refusal, locations, aliases,
+  anchors, tags, literal merge keys, scalar resolution, single-document input, UTF-8 boundaries,
+  depth, alias stress and deterministic output. The `RUSTSEC-2024-0449` waiver is gone. This
+  maintained C2Rust bridge is explicitly temporary; `A1-703` owns the safe-Rust `d0026` cutover
+  before the public milestone, with measured publication, API, resource and performance gates in
+  `docs/design/yaml-parser.md`.
+
+- **Layered graph geometry is now complete or explicitly a fallback** (`A1-682`). A degraded
+  route or invalid non-empty phase band can no longer survive inside a scene that either painter
+  presents as complete. Static text refuses an incomplete edge; the TUI explains the typed reason
+  and shows the complete selectable fallback list. Geometry retained after a failed relayout is
+  available only to seed recovery and is never painted, hit-tested or navigated as current state.
+  Require this contract with `--require graph.layered_scene_is_complete_or_fallback`.
+
+- **External TUI observations now cooperate with graceful shutdown** (`A1-682`). Periodic and
+  focus-gain identity probes receive the worker cancellation token, stop at identified loading
+  boundaries and no longer rebuild refresh-only verification inputs. Quitting after an overdue
+  probe starts therefore restores the terminal and cancels the probe instead of waiting for a
+  complete repository reload. Require the boundary with
+  `--require tui.external_observation_is_shutdown_cancellable`.
+
+- **TUI latency and memory now have enforced release budgets at representative scale** (`A1-447`).
+  A scheduled/manual release gate measures first feedback, first usable content, navigation,
+  search, refresh and resident memory with cold and warm cache states at 32, 700 and 10,000 tasks;
+  an in-process companion separates list/detail paint, responsive reflow, graph projection, scene
+  layout, viewport paint, pan, hit-test, focus, continuation traversal, status-only refresh and
+  progress overhead. The expensive gate remains outside development preflight. Its first run found
+  complete TUI snapshot construction rebuilding the same reverse dependency index for every task:
+  fixing that quadratic path reduced the measured 10,000-task cold launch from 26.35s to 1.74s
+  and refresh from 29.41s to 2.15s. Reduced-motion startup also no longer schedules elapsed-time
+  animation ticks; truthful progress events still repaint it.
+
+- **The deliberately bounded MCP surface now has an executable selection policy** (`A1-195`,
+  `A1-492`). Every CLI command is classified exactly once: as a mirrored operation, a bounded
+  projection, an alternate or broad read view (including every rollup), a consequential rewrite
+  requiring human judgement, or a host-owned repository operation. Every tool must also be named
+  by exactly one command row, and a projection records what remains CLI-only. This matters for
+  `aplan_identity`: it is the `facts --identity` projection, not a server-only exception, while the
+  rest of `facts` remains a host operation. The audit exercises missing, stale and duplicate rows
+  in both directions. No tool was added or removed.
+
+- **Phase remains a required v1 reporting coordinate, distinct from both cut membership and
+  declared tag families** (`A1-187`, ADR-0046). The default summary still groups by its ordered
+  numeric value, and new-id minting may use it as a convention hint, but phase creates no edge,
+  readiness condition, completion gate, or execution order. A cut remains the model's only
+  membership level; a family remains a repository-defined vocabulary for views such as epic,
+  kind, team, or stage. Moving a task between phases never changes its stable id.
+
+  This resolves ADR-0014's overbroad claim that cuts were the only grouping the model knew without
+  changing any task file or versioned JSON shape. All five import formats assign the explicit
+  destination `--phase`; a source hierarchy also called "phase" keeps its source-format meaning
+  instead of being silently treated as this coordinate. Nothing is deprecated and there are no
+  upgrade steps.
+
+- **Phase is now the fifth shared selector and scoped-policy dimension** (`A1-470`,
+  `--require selection.phase_coordinate`). `ready`, `tasks`, `summary`, `due`, `stale`, `vacuity`,
+  `paths`, and `graph` accept repeatable `--phase`; values within that dimension widen and it
+  narrows with cut, tag, owner and status. Selection still happens after the whole plan is derived,
+  so an out-of-phase blocker remains a blocker, and `check` and `verify` refuse phase-qualified
+  gates. `policy[].when.phase` uses the same core selector and participates in the same
+  narrowest-scope precedence. Phase remains only an ordered coordinate unless a reader explicitly
+  selects it or a repository explicitly scopes policy with it.
+
+### Fixed
+
+- **Every unsuccessful focused-L3 terminal path now keeps aplan's guarded publication separate
+  from configured-command effects** (`A1-708`). Provider movement during Preview, denied or stale
+  interactive review, and a late writer failure all say what aplan did not publish without
+  implying that trusted test-command effects were rolled back. Require the complete terminal
+  contract with `--require close.focused_l3_terminal_outcomes_name_external_effects`.
+
+- **Selected layered-graph cards now paint as one continuous surface** (`A1-697`). The live
+  Ratatui painter previously styled only the characters on each selected row, leaving the unused
+  suffix in the terminal's reset background. Dark-theme task and milestone cards therefore showed
+  black rectangles after their id, title and progress text. The selected style now fills every
+  visible interior cell before semantic labels are painted, including clipped and blank content,
+  without changing graph geometry or hit targets. A cell-level test covers task and aggregate
+  cards in every theme and both glyph modes. Require the correction with
+  `--require tui.selected_graph_card_is_one_continuous_surface`.
+
+- **A resize can no longer strand an already queued TUI key on Unix** (`A1-682`). Crossterm's
+  default edge-triggered event source could return a simultaneous `SIGWINCH` before consuming the
+  PTY input reported in the same readiness batch. No second edge then woke the loop, leaving an
+  idle final frame with `q` still queued. The TUI now selects Crossterm's level-triggered terminal
+  poller, which consumes input before resize notification. A deterministic stop/queue/resume PTY
+  test recreates that readiness collision, and the formerly intermittent longest graph journey is
+  stress-tested across resize and graceful restoration. Require the boundary with
+  `--require tui.simultaneous_resize_and_input_are_not_lost`.
+
+- **Resizing another TUI destination no longer rebuilds the hidden Graph view** (`A1-682`). A
+  density breakpoint now updates the presentation policy but defers complete-source graph
+  projection and bounded cell layout until Graph becomes visible again. This keeps Overview reflow
+  independent of a previously visited 10,000-task graph. Require the boundary with
+  `--require tui.hidden_graph_resize_defers_reprojection`.
+
+- **Graph fallback paint now visits only visible nodes** (`A1-682`). The fallback remains
+  scrollable over the complete source graph, but rendering translates the visible row interval
+  directly into a node slice and uses an extent cached when the projection changes instead of
+  formatting every node twice per frame and discarding the off-screen text. Require the
+  bounded-work contract with `--require tui.graph_fallback_paint_is_viewport_bounded`.
+
+- **Selecting an already represented aggregate graph subject no longer reprojects the complete
+  source graph** (`A1-682`). At plan and phase levels, pointer and keyboard focus update the
+  current semantic selection and its source-bound transition subjects in place, then reuse the
+  retained cell geometry. Bounded detail levels and omitted identities still perform the required
+  anchored projection or location transition. Require this with
+  `--require tui.graph_selection_reuses_current_projection`.
+
+- **TUI refresh now rebuilds only the visible source-sized destination** (`A1-682`). The coherent
+  snapshot, selection, work projection and inspector state are adopted immediately; hidden Tasks,
+  Graph and Reports projections are reconciled from that snapshot when entered instead of all
+  being rebuilt behind the current screen. Require this with
+  `--require tui.refresh_rebuilds_only_the_visible_projection`.
+
+- **Interrupted coverage runs no longer leak unbounded private build trees** (`A1-633`). Each
+  isolated allocation records the owner's boot/start identity, the cargo child and process group,
+  and an inherited lease. Catchable termination stops the child group, cleans promptly and
+  preserves the original signal; hard-killed runs are reclaimed by the next coverage invocation
+  or private-runner hook only after every recorded liveness signal is gone. Reused PIDs, malformed
+  or missing records, malformed or uninspectable host identities, symlinks and non-exact names are
+  retained rather than guessed stale. A measured stable-directory alternative was rejected after
+  it produced six impossible source mappings.
+  Upgrading a persistent private runner has a documented one-time, explicitly quiescent migration
+  for legacy allocations that predate owner records; ordinary live hooks never guess those stale.
+
+- **An idle TUI quit no longer starts a fresh external-identity probe** (`A1-634`). The event
+  loop still gives termination and suspension priority, treats a coalesced continue as inert, and
+  observes the reducer's quit state before draining a completion that could start queued work,
+  scheduling a probe, drawing another frame or polling for input (`A1-636`). This removes
+  scheduler-dependent exit latency while preserving graceful shutdown of work that was already
+  running and discarding work that never started. Require the boundary with
+  `--require tui.quit_starts_no_new_work`.
+
+- **ID-creating mutations now retry a plan snapshot changed by concurrent writers** (`A1-628`).
+  `add`, `add --from` and `supersede` already retried when another writer published the minted id
+  first, but could fail earlier while the store's candidate-file set was changing and bypass the
+  five-second retry entirely. That typed pre-write condition now shares the bounded policy without
+  conflating a file changed after it was read. A recovered command reports the actual contention;
+  one that exhausts the deadline states that nothing was written and tells the caller to run it
+  again. Require the wider boundary with
+  `--require ids.concurrent_snapshot_instability_is_retried`.
+
+- **The CLI snapshot corpus is isolated from live repository claims** (`A1-605`). Its committed
+  `.in` plans are copied beneath a unique test-scoped Git repository before any case runs, so
+  libgit2 cannot combine their task bytes with an enclosing checkout's private cross-worktree
+  claim store. The regression first proves that a deliberately incompatible enclosing claim is
+  visible without the boundary, then runs the complete corpus and verifies that the outer claim,
+  copied fixtures and committed sources are unchanged. This repairs only this repository's test
+  harness: production claim discovery, linked-worktree sharing, fail-closed orphan handling and
+  recovery semantics are unchanged.
+
+- **Concurrent-ID coverage now judges safety and completeness rather than host throughput**
+  (`A1-599`). Real multi-process `add`, `add --cut`, `add --from` and `supersede` races still run
+  through the production binary. Every writer must either publish unique exact-once work, with
+  batch and membership changes whole, or return an actionable refusal that says nothing was
+  written; every resulting plan must pass `check`. The retry loop's success and exact deadline
+  exhaustion use controlled time and backoff in unit tests instead of requiring every instrumented
+  process to beat a five-second wall clock on a loaded host. The production five-second deadline,
+  jittered backoff, coverage scope and coverage floors are unchanged.
+
+- **A failed `add --cut` no longer prints a doubled full stop before its cleanup result**
+  (`A1-600`). Placement failure composition preserves an existing sentence terminator or supplies
+  one when absent, then states either that the task file was removed or that cleanup also failed.
+  Exact tests retain both remedies and the complete message for both filesystem outcomes.
+
+- **A no-op `close --restamp` now refuses a task changed since its plan load** (`A1-583`).
+  The guarded write already caught edits after the command reread the task, but an all-current
+  result performs no write and bypassed that guard. Restamp now confirms that the reread task is
+  semantically the snapshot from which it computed baselines before it may report them current;
+  formatting-only and body-only edits remain safe because the command does not rewrite them.
+
+- **`close --restamp` now distinguishes changed baselines from ones it merely
+  reviewed** (`A1-582`). Its deterministic report gives changed and unchanged counts separately
+  for trace fingerprints and committed file-evidence fingerprints. When every baseline is already
+  current, it says so and does not replace the task file. A dirty file-evidence referent remains
+  outside the evidence boundary: the count changes only after that content is committed. A task
+  with no stampable subjects says that instead of inventing a current baseline. Require the
+  contract with `--require close.restamp_reports_baseline_changes`.
+
+- **A complete `why` walk now retains undefined blockers reached below loaded work** (`A1-581`).
+  CLI human and JSON output, MCP and the TUI now use one graph walk for unresolved ids. The
+  default cut-bounded answer still hides an undefined id behind its cut; `--all` exposes it rather
+  than calling a truncated answer complete. Require the correction with
+  `--require why.complete_retains_nested_undefined_blockers`.
+
+- **TUI work-discovery input and labels now preserve their exact subject** (`A1-581`). A
+  whitespace-only as-of value is canonical blank state, so it follows a refreshed snapshot clock
+  instead of silently pinning the prior instant. An explicit epoch or RFC 3339 value remains
+  pinned. An inactive preference now distinguishes a blocked subject from an unavailable
+  preferred task. The real-terminal proof exercises a folded cut, its expanded member, an exact
+  scheduled revisit, relation links and restored Back selection rather than only changing control
+  labels. Require these guarantees with
+  `--require tui.work_discovery_state_is_semantically_exact`.
+
+- **`check-docs` now enforces the same identifier word boundary on both sides** (`A1-562`). A
+  preceding underscore already kept a candidate inside its surrounding token, but a following
+  underscore did not, so `A1-557_suffix` was silently accepted as the known `A1-557`. Ordinary,
+  dotted, suffix-bearing and one-digit-prefix-typo scans now share the symmetric Unicode-aware
+  boundary. Punctuation, filenames and doubled hyphens retain their existing meaning. Require the
+  correction with `--require check_docs.identifier_boundaries_are_symmetric`.
+
+- **`check-docs` now applies longest-family matching to one-digit prefix typos** (`A1-561`).
+  Its primary plan-learned vocabulary already preferred a longer family, but the derived typo
+  vocabulary reverted to lexical order. With overlapping candidates such as `A1-` and `A11-`, an
+  `A11-999` reference could therefore be misreported as an invented shorter fragment with the
+  wrong suggested family. Require the correction with
+  `--require check_docs.near_prefixes_prefer_longest_family`.
+
+- **`check-docs` now keeps a numeric id family's complete hyphenated suffix** (`A1-557`). A plan
+  containing ids such as `M-p0-design`, `M-p0-build` and `M-p1-read` teaches that shape: known ids
+  resolve through punctuation and an unknown sibling such as `M-p0-review` is reported whole.
+  Older builds stopped at `M-p0`, naming a task the document never wrote. Dot-separated numeric
+  ids, ordinary terminal-number ids, ULIDs and word-only ids retain their existing boundaries.
+  Require the widened scanner with `--require check_docs.complete_multi_hyphen_ids`.
+
+- **The TUI Overview revisit drill now contains every task its row counts** (`A1-547`). The
+  projection retains timestamped identities separately for due and future revisits, and opening
+  `DUE n | LATER n` includes both exact sets rather than silently discarding the tasks behind the
+  second number. Refresh re-projects both sides from the new snapshot. Staged builds can require
+  the correction with `--require tui.overview_revisit_membership_is_exact`.
+
+- **Task-browser input and refreshed state no longer diverge at terminal edge cases** (`A1-546`).
+  Enhanced-keyboard repeat events now edit search text and move its cursor while modal acceptance
+  remains press-only. A refresh clamps an open filter menu to its new vocabulary, and preserving a
+  task hidden by narrowing no longer reuses its stale row as the render and mouse viewport anchor.
+  Staged builds can require the correction with
+  `--require tui.task_browser_state_is_refresh_and_repeat_safe`.
+
+- **Revision-qualified summaries no longer let today's repository boundaries rewrite history**
+  (`A1-498`, `--require summary.revision_uses_historical_repository_boundary`). An explicit plan
+  root inside the invocation repository now stays owned by that repository at the selected commit,
+  even if the path is a nested repository today. A root that is itself a gitlink, directly or
+  through a committed symlink, is refused as incomplete submodule input rather than described as
+  absent. A committed root link to `.` now selects the repository's top tree, while a broken root
+  link is named as invalid input. An explicit root in another repository, including one reached
+  through a symlink alias, still works after the caller selects current policy with `--config` or
+  declines it with `--no-config`; the refusal now gives those choices whether or not caller-side
+  discovery found a file.
+
+- **`aplan attest --attach-note` pins the note to the commit recorded in its document**
+  (`A1-496`, `--require attest.note_targets_attested_commit`). Attestation generation and note
+  attachment previously resolved `HEAD` independently. If another process committed between
+  those operations, the note landed on the later commit while its body and the success message
+  named the earlier one. The repository facade now requires an explicit note target, failures
+  name that target, and existing notes remain protected from overwrite.
+
+- **`APLAN019` no longer names invisible or whitespace-only references as evidence**
+  (`A1-491`, `--require paths.unmatched_ignores_vacuous_evidence`). Its diagnostic now uses the
+  same vacuous-reference predicate as the rule's scope, so a real citation beside a zero-width
+  `file` or `test` reference names only the real citation.
+
+- **A zero-width test reference no longer acquits diluted commit evidence**
+  (`A1-491`, `--require evidence.vacuous_test_does_not_acquit_dilution`). Resolver-side evidence
+  presence checks now share the core vacuous-reference predicate, so APLAN024 accepts only a
+  substantive test citation as independent proof.
+
+- **URL checks now keep one truthful terminal outcome per URL for the whole verification**
+  (`A1-473`, `--require verify.url_checker_outcomes_are_stable`). A checker killed by a signal is
+  a configuration fault rather than evidence that the URL did not answer. A timeout is cached, so
+  ten citations still receive ten contextual findings but cause one request and one wait. A fault
+  checking a different URL no longer erases an answer already established, and the configuration
+  finding no longer claims that nothing was checked when earlier checks completed.
+
+- **Checklist export no longer silently discards a plan's one phase value** (`A1-471`,
+  `--require export.checklist_names_single_phase_loss`). Every non-empty checklist export now names
+  `phase` as a field the shape cannot carry. When every written task shares one value, the report
+  names it and gives the exact `--phase N` flag that preserves it on re-import; when values differ,
+  it lists them and says one import flag cannot restore them. An empty plan remains a refusal and
+  invents no phase loss.
+
+- **Grouped human summaries no longer merge distinct family members or misalign wide text**
+  (`A1-467`, `--require summary.grouped_human_is_unambiguous`). The report now names the family,
+  quotes and escapes member values so a real `(no group)` or `total` cannot impersonate a
+  synthetic row, and pads the first column by terminal display width rather than UTF-8 bytes.
+  Grouped JSON is unchanged and continues to carry the raw family and member strings.
+
+- **Malformed `tag_families` declarations are no longer reported as invalid test runners**
+  (`A1-468`, `--require config.tag_family_error_names_its_key`). Blank family names, empty
+  families, blank members, and duplicate members now identify `tag_families` as the invalid
+  configuration block and retain the exact family or duplicate member in the explanation.
+
+- **An undeclared `roadmap.group_by` is no longer reported as an invalid test runner** (`A1-186`,
+  `--require config.grouping_error_names_its_view`). The shared grouping validator now reports an
+  invalid grouping and names `roadmap.group_by` or `summary.group_by`, whichever made the claim.
+
+- **A typed test-name repair no longer points at a name the evidence gate considers ambiguous**
+  (`A1-458`, `--require diagnostics.repair_requires_unique_resolver`). Two configured runners may
+  list the same near-match spelling. The diagnostic used to deduplicate that string, publish one
+  `replace_evidence` operation, and make `verify --fix` discover only while applying it that the
+  replacement still resolves to two runners. The suggestion remains in prose, but it is typed only
+  when exactly one runner resolves it; unrelated exact repairs in the same report remain applicable.
+
+- **`verify --fix` gates the complete plan state that exists after configured runners finish**
+  (`A1-459`, `--require verify_fix.post_runner_plan_is_gated`). It previously re-read each repaired
+  task but built the combined mutation from the plan loaded before `test.list` ran. A runner that
+  changed an unrepaired sibling could therefore introduce a finding the mutation gate did not see;
+  repairs were written and only the post-write verification reported the sibling. The command now
+  reloads the whole plan, refuses a new invalid or unloadable sibling before every repair write,
+  and preserves valid sibling edits as part of the candidate state.
+
+- **`verify --fix` resolves repairs under the configuration that exists after external resolvers
+  finish** (`A1-460`, `--require verify_fix.post_runner_config_is_gated`). A runner could replace
+  the discovered or explicitly selected configuration that made its suggestion resolvable. The
+  command then accepted the edit under the stale runner, wrote it, and reported `APLAN013` only in
+  post-verification. It now reloads the same selected source before resolving any replacement; an
+  invalid current config or a replacement its current runners reject prevents every task write.
+
+- **`verify --fix` keeps one configuration source through its mutation gate** (`A1-462`,
+  `--require verify_fix.one_post_runner_config_source`). `verify` discovers policy from the
+  repository named by `--repo`; the computed-repair path then used to rediscover policy from the
+  plan root while validating its mutation. When those were different trees, one invocation could
+  resolve under one policy and refuse under another. Replacement resolution, mutation validation,
+  and post-verification now use the same post-run repository policy and its relative-path base.
+
+- **Later resolver side effects can no longer bypass the `verify --fix` mutation gate** (`A1-463`,
+  `--require verify_fix.revalidation_side_effects_are_gated`). Validating a proposed replacement
+  invokes configured test listers again. The command used to build its candidate from snapshots
+  taken before those later invocations, so a lister could invalidate a sibling or replace its own
+  configuration and have the repair written before post-verification noticed. The candidate now
+  starts from the plan left by every resolver; an invalid or unloadable sibling refuses the batch,
+  a valid sibling edit is preserved, and a policy that changes during validation fails closed.
+
+- **Surgical block edits no longer mistake YAML trivia for the end of a value** (`A1-408`,
+  `--require mutation.block_replacements_cross_yaml_trivia`). A blank line or column-zero comment
+  may legally separate entries in an indented mapping or sequence. The shared editor stopped there,
+  left a later old entry behind and then safely refused its own invalid result. `close`, `restamp`,
+  evidence repair, and dependency/tag edits now replace every old entry while preserving the trivia,
+  following field and atomic round-trip guard. Core mapping and sequence coverage, the real CLI and
+  CLI/MCP file parity exercise the accepted shapes.
+
+- **`close` replaces an accepted live task's old trace stamps instead of duplicating them**
+  (`A1-358`, `--require close.replaces_live_trace_fingerprints`). A task may validly carry a
+  `trace_fingerprints:` mapping after a previous closure was returned to `todo` or `in_progress`.
+  `check` accepted that state, but `close` appended its new mapping, caught its own duplicate key,
+  called the result an internal bug, and wrote nothing. It now replaces the mapping in place with
+  the freshly resolved stamps (or removes it when there are none), preserving frontmatter order,
+  exact evidence, the body and the atomic round-trip guard. Real-command coverage resolves both a
+  file and a test citation, while the MCP parity audit proves both surfaces leave the same file.
+
+- **`add` no longer writes a milestone that `check` immediately reports** (`A1-369`,
+  `--require add.refuses_milestone_work_fields`). A milestone is a checkpoint, so explicit
+  `effort` or `paths` describes a shape `APLAN021` forbids. Plain `add` and `add --from` now
+  refuse that input with the rule's own message and remedy, regardless of whether warnings block,
+  and write nothing. This includes `effort: 0`: `require_effort` already exempts milestones, so a
+  zero placeholder is neither required nor accepted. The fields are not silently discarded. The
+  unconditional refusal is scoped to a milestone this invocation creates
+  (`A1-406`, `--require add.milestone_work_refusal_is_new_input_only`): adding valid work to an
+  existing malformed cut remains governed by warning policy, even when doing so shortens that
+  cut's APLAN021 message. MCP's `aplan_add` now uses the same shared refusal instead of writing the
+  invalid milestone and returning the finding only as a note
+  (`A1-407`, `--require mcp.add_refuses_milestone_work_fields`).
+
+- **A trusted config outside the reviewed checkout no longer makes every in-repository trace
+  external** (`A1-237`, `A1-404`, `--require traces.boundary_is_plan_repository`). `APLAN034` now
+  takes its repository boundary from the plan's Git worktree, including when the task root is
+  nested at a path such as `plans/tasks`, independently of the directory where `--config <file>`
+  lives. Relative config values, including `traces_root` and `traces_external`, still resolve from
+  the selected file's directory; an actual trace outside the plan repository still needs a
+  declaration. CLI and MCP use the same boundary, and evidence or config findings now point at the
+  selected file itself rather than an invented `.aplan.yml` beside it. Review automation can stop
+  copying trusted policy into a reserved path inside each disposable candidate checkout.
+
 ## [0.4.0] - 2026-10-06
 
 ### Fixed
@@ -274,22 +1958,26 @@ to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   replacement and said "which one to replace" to somebody who had asked to remove: one message
   serving two operations, which is the defect above in the words rather than in the code.
 
-- **The coverage gate credited a file with more coverable lines than it has** (`A1-352`, audit).
-  `cargo llvm-cov` keeps its instrumented objects in `llvm-cov-target`, and where that directory
-  is shared across commits -- this repository's CI mounts one `CARGO_TARGET_DIR` for every job --
-  builds of the same crate from several commits sit there together. Each carries its own coverage
-  mapping for the same source file; llvm-cov merges them into one entry per filename and **adds**
-  the counts.
+- **Coverage measurements now begin from exactly one instrumented build** (`A1-457`). `cargo
+  llvm-cov` keeps its objects in `llvm-cov-target`, and where that directory is shared across
+  commits it can merge several mappings for one source file and **add** their counts. The old
+  backstop caught only an impossible total larger than the physical file: ordinary coverable lines
+  are sparse enough that two mappings can fit below that ceiling, produce a believable wrong
+  percentage, and reach the coverage-floor comparison.
 
   So the percentage was wrong rather than missing, which is the failure a floor exists to prevent.
-  `aplan-evidence` read **64.5%** against 98.1% on the commit before, with every test passing and
-  the covered count unchanged to four lines. Four crates failed and the six nobody had edited
-  agreed exactly, because only a file whose content changed has two different mappings.
+  Dogfooding reproduced both shapes: the original impossible map made `aplan-evidence` read
+  **64.5%** against 98.1%, and a later merged map stayed smaller than its source while moving the
+  crate denominator from 8,193 to 8,440 lines. Every test passed in both cases.
 
-  The CI script now removes `llvm-cov-target` before measuring -- `cargo llvm-cov clean` cannot,
-  because it refuses a target directory outside the project, which is precisely this arrangement.
-  And `xtask` refuses any file credited with more coverable lines than the file has, which is
-  impossible and is what gave this away: `src/lib.rs` reporting 6,761 lines in a 5,594-line file.
+  `cargo xtask coverage` now asks Cargo for its resolved target and build directories, including an
+  external `CARGO_TARGET_DIR`, and atomically creates a private `llvm-cov-target` for each run.
+  Local and CI runs therefore have the same isolation, and overlapping local invocations cannot
+  delete or contribute objects to one another. Relative cargo-llvm-cov overrides use its
+  workspace-root semantics; broad and parent-traversing targets are refused before measurement,
+  and an allocation or cleanup error is fatal. Only a run-owned `llvm-cov-target` is removed
+  recursively; its exclusive parent is removed non-recursively. The physical-line check remains
+  as defense in depth, not as the single-build invariant.
 
 ### Added
 
@@ -1000,11 +2688,12 @@ to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   a destination; ADR-0032 records the split, and `export --format roadmap-json` refuses by pointing
   at the generator.
 
-- **New config key `policy`: evidence policy scoped to part of a plan** (`A1-183`). Every dial in
+- **New config key `policy`: evidence policy scoped to part of a plan** (`A1-183`, extended by
+  `A1-470`). Every dial in
   `.aplan.yml` was whole-plan, and the one exception -- `evidence.exempt_tags` -- is the degenerate
   case of scoping: "required strength is *none* for these tags". `policy` is the general form. Each
-  entry names a subset with the same four dimensions the command line takes (`cut`, `tag`, `owner`,
-  `status`, with the same reading: within a dimension any, across dimensions all) and sets
+  entry names a subset with the same five dimensions the command line takes (`cut`, `phase`, `tag`,
+  `owner`, `status`, with the same reading: within a dimension any, across dimensions all) and sets
   `evidence.require_min_strength` or `evidence.exempt_tags` for it.
 
   **The narrowest matching scope wins, and among equals the first entry in the file.** The
@@ -1332,8 +3021,9 @@ to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   names the condition instead of addressing a reader who may not exist.
 
 - **This repository now takes the advice above** (`A1-276`). `.aplan.yml` sets `deny_warnings`.
-  It switches `detect_drift` on deliberately, `ci/scripts/dogfood.sh` runs `aplan check` on every
-  push, and nothing reads a green log -- so until this, the drift detection it had turned on could
+  It switches `detect_drift` on deliberately, the repository's structural gate runs `aplan check`
+  on every push, and nothing reads a green log -- so until this, the drift detection it had turned
+  on could
   report a finding under a passing build, along with the sixteen other warning-tier rules. Measured
   before and after on the same tree and the same finding: `ok: 287 tasks, 1 warning(s)`, exit `0`,
   then `denied: 1 warning(s)`, exit `1`. Nothing an adopter consumes changed; a project that

@@ -175,15 +175,43 @@ fn tests_in(file: &str, text: &str) -> Vec<(String, Span)> {
     out
 }
 
+/// Cargo prefixes tests in a consolidated integration source with the module
+/// name declared by the one harness. The harness census requires that name to
+/// equal the source stem, so this derives the registered name without running a
+/// nested test build (`A1-630`).
+fn integration_module(file: &str) -> Option<String> {
+    let relative = Path::new(file);
+    let tests = relative.parent()?;
+    if tests.file_name()? != "tests" || relative.extension()? != "rs" {
+        return None;
+    }
+    let package = tests.parent()?;
+    let manifest =
+        std::fs::read_to_string(workspace_root().join(package).join("Cargo.toml")).ok()?;
+    if !manifest
+        .lines()
+        .any(|line| line.trim() == "autotests = false")
+    {
+        return None;
+    }
+    relative
+        .file_stem()
+        .map(|stem| stem.to_string_lossy().into_owned())
+}
+
 /// Every `#[test]` in the workspace, by name. A name defined in more than one
 /// file lands in the `Vec`, and a proof citing it is ambiguous rather than
 /// resolved.
 fn every_test() -> BTreeMap<String, Vec<(Span, String)>> {
     let mut out: BTreeMap<String, Vec<(Span, String)>> = BTreeMap::new();
     for (file, text) in sources() {
+        let module = integration_module(&file);
         for (name, span) in tests_in(&file, &text) {
             let body = text[span.start..span.end].to_string();
-            out.entry(name).or_default().push((span, body));
+            let registered = module
+                .as_ref()
+                .map_or(name.clone(), |module| format!("{module}::{name}"));
+            out.entry(registered).or_default().push((span, body));
         }
     }
     assert!(
@@ -193,6 +221,25 @@ fn every_test() -> BTreeMap<String, Vec<(Span, String)>> {
         out.len()
     );
     out
+}
+
+#[test]
+fn the_scan_uses_registered_module_names_for_consolidated_integration_tests() {
+    let tests = every_test();
+    assert!(tests.contains_key(
+        "behaviour_proof::the_scan_uses_registered_module_names_for_consolidated_integration_tests"
+    ));
+    assert!(
+        !tests.contains_key(
+            "the_scan_uses_registered_module_names_for_consolidated_integration_tests"
+        )
+    );
+    assert!(
+        tests.contains_key(
+            "tui_portability::external_editor_handoff_restores_modes_and_refreshes_identity"
+        ),
+        "the portable source must keep the module prefix of the consolidated target"
+    );
 }
 
 /// **Every behaviour names tests that exist, and they name it back.**

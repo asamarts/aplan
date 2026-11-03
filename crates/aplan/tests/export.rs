@@ -14,7 +14,7 @@
 
 use std::path::Path;
 
-mod common;
+use crate::common;
 use common::{aplan, run};
 
 /// A plan with a cut, a task outside it, and one closed task, which is the
@@ -182,6 +182,57 @@ fn what_the_shape_could_not_carry_is_named_with_a_count() {
         out.stderr.contains("in no cut"),
         "where the unfiled task landed is not said: {}",
         out.stderr
+    );
+}
+
+/// Checklist export cannot carry phase even when every row shares one value.
+/// This is the executable proof for
+/// `export.checklist_names_single_phase_loss`: the report names the exact value
+/// and the import flag that preserves it, while the several- and zero-phase
+/// neighbours remain truthful.
+#[test]
+fn a_single_phase_is_named_as_export_loss() {
+    let dir = tempfile::Builder::new()
+        .tempdir_in(aplan_core::fixture::fixture_root())
+        .expect("tempdir");
+    fixture(dir.path());
+
+    let one = run(dir.path(), &["export", "--format", "checklist"]);
+    assert_eq!(one.code, 0, "{}", one.text());
+    assert!(
+        one.stderr.contains("`phase` has no place in this shape")
+            && one.stderr.contains("all written tasks carry 1")
+            && one.stderr.contains("`--phase 1`"),
+        "one phase was lost without its value and recovery command:\n{}",
+        one.stderr
+    );
+
+    let task = dir.path().join("aplan/tasks/T-003.md");
+    let text = std::fs::read_to_string(&task).expect("task");
+    std::fs::write(&task, text.replacen("phase: 1", "phase: 2", 1)).expect("change phase");
+    let several = run(dir.path(), &["export", "--format", "checklist"]);
+    assert_eq!(several.code, 0, "{}", several.text());
+    assert!(
+        several.stderr.contains("spans 2 values (1, 2)")
+            && several
+                .stderr
+                .contains("no single import flag can restore them"),
+        "several phases were described as recoverable by one value:\n{}",
+        several.stderr
+    );
+
+    let empty = tempfile::Builder::new()
+        .tempdir_in(aplan_core::fixture::fixture_root())
+        .expect("tempdir");
+    std::fs::create_dir_all(empty.path().join("aplan/tasks")).expect("tasks");
+    std::fs::write(empty.path().join(".aplan.yml"), "root: aplan\n").expect("config");
+    let none = run(empty.path(), &["export", "--format", "checklist"]);
+    assert_ne!(none.code, 0, "an empty plan was rendered as a document");
+    assert!(none.stderr.contains("nothing to write"), "{}", none.text());
+    assert!(
+        !none.stderr.contains("`phase` has no place in this shape"),
+        "an empty export invented a phase value:\n{}",
+        none.stderr
     );
 }
 
@@ -509,6 +560,7 @@ fn every_field_the_schema_declares_is_carried_or_named() {
          effort_days: 1.0\nowner: bo\npaths:\n- src/**\ntraces:\n- docs/x.md#y\n\
          tags:\n- cross-cutting\nprefer_after:\n- T-003\nblocked_by:\n- T-003\n\
          revisit_at: '2026-12-01T00:00:00Z'\ntrace_fingerprints:\n  docs/x.md#y: abc\n\
+         evidence_fingerprints:\n  'file:docs/proof.md': def\n\
          version_impact: fix\nversion_impact_reason: a note, not a release\n\
          ratified_by:\n- T-003\n\
          ---\n\n## Why\n\nBecause.\n",

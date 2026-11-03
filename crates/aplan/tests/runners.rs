@@ -24,7 +24,7 @@
 use std::path::Path;
 use std::process::Command;
 
-mod common;
+use crate::common;
 use common::aplan;
 
 fn git(dir: &Path, args: &[&str]) {
@@ -246,6 +246,43 @@ fn a_pytest_shaped_run_is_executed_and_its_failure_is_reported() {
         assert_eq!(got, code, "{out}");
         assert!(out.contains(needle), "{out}");
     }
+}
+
+/// The public CLI, YAML loader, evidence engine and real adapter process agree
+/// on the v1 batch boundary. Unit tests cover every refusal; this pins the clean
+/// path through the binary an adopter actually invokes.
+#[test]
+fn verify_execute_uses_one_configured_batch_end_to_end() {
+    let config = "test:\n  name: batched\n  list: [printf, 'suite::passes\\n']\n  run: [sh, -c, 'echo legacy >> legacy.log; exit 1', sh, '{test}']\n  batch:\n    protocol: 1\n    run: [sh, batch.sh, '{manifest}', '{result}']\n";
+    let dir = repo(config, "suite::passes");
+    std::fs::write(
+        dir.path().join("batch.sh"),
+        r#"set -eu
+nonce=$(sed -n 's/.*"nonce":"\([^"]*\)".*/\1/p' "$1")
+provider=$(sed -n 's/.*"provider":"\([^"]*\)".*/\1/p' "$1")
+printf 'batch\n' >> batch.log
+printf '{"schema":"aplan/test-batch-result/v1","nonce":"%s","provider":"%s","complete":true,"tests":[{"test":"suite::passes","outcome":"passed"}]}\n' "$nonce" "$provider" > "$2"
+"#,
+    )
+    .expect("adapter");
+    git(dir.path(), &["add", "batch.sh"]);
+    git(dir.path(), &["commit", "-qm", "adapter"]);
+
+    let (out, code) = aplan(dir.path(), &["verify", "--execute"]);
+    assert_eq!(code, 0, "{out}");
+    assert!(out.contains("evidence resolved"), "{out}");
+    assert_eq!(
+        std::fs::read_to_string(dir.path().join("batch.log"))
+            .unwrap()
+            .lines()
+            .count(),
+        1,
+        "one adapter process was started: {out}"
+    );
+    assert!(
+        !dir.path().join("legacy.log").exists(),
+        "the per-name fallback ran: {out}"
+    );
 }
 
 /// **A runner that collects nothing looks like a runner with one test.**

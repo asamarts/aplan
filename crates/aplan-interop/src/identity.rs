@@ -61,8 +61,8 @@ pub enum IdentityError {
     Unknown,
     /// A name was offered that cannot be written or read back safely.
     #[error(
-        "`{shown}` cannot be used as a name: {why}. A name is written into the task file and \
-         printed back to whoever reads the plan"
+        "`{shown}` cannot be used as a name: {why}. A name is written into the local claim \
+         record and printed back to whoever reads the plan"
     )]
     Unusable {
         /// The name, with anything non-printing made visible.
@@ -70,6 +70,36 @@ pub enum IdentityError {
         /// What is wrong with it.
         why: &'static str,
     },
+}
+
+/// Which deterministic source supplied a holder label.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum IdentitySource {
+    Argument,
+    Environment,
+    UserConfig,
+    Git,
+    OperatingSystem,
+}
+
+impl IdentitySource {
+    #[must_use]
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::Argument => "argument",
+            Self::Environment => "environment",
+            Self::UserConfig => "user_config",
+            Self::Git => "git",
+            Self::OperatingSystem => "operating_system",
+        }
+    }
+}
+
+/// A resolved identity label with the source that won precedence.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ResolvedIdentity {
+    pub name: String,
+    pub source: IdentitySource,
 }
 
 /// The name to attribute this action to.
@@ -86,6 +116,15 @@ pub enum IdentityError {
 /// name the *caller* supplied, because a derived source that answers
 /// unusably is treated as not having answered.
 pub fn resolve(sources: &Sources) -> Result<String, IdentityError> {
+    resolve_detailed(sources).map(|resolved| resolved.name)
+}
+
+/// Resolve a holder label and retain which source supplied it.
+///
+/// The provenance is recorded with an ephemeral claim so a reader can tell an
+/// explicit actor label from a Git or operating-system fallback. It is still
+/// attribution only, never authentication.
+pub fn resolve_detailed(sources: &Sources) -> Result<ResolvedIdentity, IdentityError> {
     // **A supplied blank is refused, not skipped** (`A1-359`, audit). The
     // caller almost always wrote `--as "$SOMEVAR"` against an unset variable,
     // and falling through would attribute their claim to whatever this machine
@@ -99,10 +138,16 @@ pub fn resolve(sources: &Sources) -> Result<String, IdentityError> {
                 why: "it is blank, so it names nobody",
             });
         };
-        return check(name);
+        return check(name).map(|name| ResolvedIdentity {
+            name,
+            source: IdentitySource::Argument,
+        });
     }
     if let Some(name) = usable(sources.env.as_deref()) {
-        return check(name);
+        return check(name).map(|name| ResolvedIdentity {
+            name,
+            source: IdentitySource::Environment,
+        });
     }
     // The per-user file is explicit too -- somebody wrote it -- so an unusable
     // value in it is refused rather than skipped, for the reason `--as` is.
@@ -113,21 +158,46 @@ pub fn resolve(sources: &Sources) -> Result<String, IdentityError> {
                 why: "it is blank in the per-user file, so it names nobody",
             });
         };
-        return check(name);
+        return check(name).map(|name| ResolvedIdentity {
+            name,
+            source: IdentitySource::UserConfig,
+        });
     }
     // Derived sources are *skipped* when unusable rather than refused. A
     // `user.name` with a stray control character is not this caller's mistake
     // and not something they can fix from here, so falling through to the next
     // source is more useful than refusing; `--as` is always available to say
     // something else.
-    for derived in [sources.git.as_deref(), sources.os.as_deref()] {
+    for (source, derived) in [
+        (IdentitySource::Git, sources.git.as_deref()),
+        (IdentitySource::OperatingSystem, sources.os.as_deref()),
+    ] {
         if let Some(name) = usable(derived)
             && let Ok(name) = check(name)
         {
-            return Ok(name);
+            return Ok(ResolvedIdentity { name, source });
         }
     }
     Err(IdentityError::Unknown)
+}
+
+/// Actionable warning for labels commonly left by test or machine setup.
+#[must_use]
+pub fn placeholder_warning(identity: &ResolvedIdentity) -> Option<String> {
+    let folded = identity.name.trim().to_ascii_lowercase();
+    let placeholder = matches!(
+        folded.as_str(),
+        "t" | "test" | "user" | "username" | "your name" | "unknown" | "root" | "runner"
+    );
+    placeholder.then(|| {
+        format!(
+            "identity label `{}` from {} looks like a machine or test placeholder. Use `--as \
+             <name>`, set `APLAN_OWNER`, or write `me: <name>` in \
+             `~/.config/aplan/config.yml` before other actors rely on it",
+            aplan_output::sanitize::visible(&identity.name),
+            identity.source.as_str()
+        )
+    })
 }
 
 /// The name a source offers, trimmed, or `None` when it offers nothing.
@@ -136,10 +206,11 @@ pub fn resolve(sources: &Sources) -> Result<String, IdentityError> {
 /// thing to whoever set it, and `git config user.name` on a fresh machine
 /// prints an empty line rather than failing.
 fn usable(raw: Option<&str>) -> Option<&str> {
-    raw.map(str::trim).filter(|name| !name.is_empty())
+    raw.map(str::trim)
+        .filter(|name| !aplan_core::task::is_vacuous_ref(name))
 }
 
-/// A name that can be written into a task file and printed back.
+/// A name that can be written into a local claim record and printed back.
 fn check(name: &str) -> Result<String, IdentityError> {
     let unusable = |why| {
         Err(IdentityError::Unusable {
@@ -382,6 +453,11 @@ mod tests {
             resolve(&sources(None, None, Some("\n"), None)).is_err(),
             "nothing usable was offered, so this must refuse"
         );
+        assert_eq!(
+            resolve(&sources(None, Some("\u{200b}"), None, Some("real"))).as_deref(),
+            Ok("real"),
+            "a zero-width source was taken as an answer"
+        );
         // And a name that is merely padded is used, trimmed.
         assert_eq!(
             resolve(&sources(Some("  ada  "), None, None, None)).as_deref(),
@@ -409,6 +485,10 @@ mod tests {
         assert!(
             resolve(&sources(Some("   "), None, None, Some("machine"))).is_err(),
             "whitespace is blank too"
+        );
+        assert!(
+            resolve(&sources(Some("\u{200b}"), None, None, Some("machine"))).is_err(),
+            "zero-width text is blank too"
         );
         // The same emptiness, from a source rather than from the caller.
         assert_eq!(

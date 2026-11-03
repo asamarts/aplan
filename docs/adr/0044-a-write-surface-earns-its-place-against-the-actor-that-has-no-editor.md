@@ -1,7 +1,7 @@
 # ADR-0044: A write surface earns its place against the actor that has no editor
 
 Date: 2026-10-01
-Status: Accepted
+Status: Superseded in part by ADR-0051
 Tasks: `A1-359`
 Extends ADR-0020 (a closed task is not reopened) and `A1-077`'s test for a mutation. Supersedes
 nothing: `A1-077`'s reasoning was right about the actor it had in mind, and this names a second one.

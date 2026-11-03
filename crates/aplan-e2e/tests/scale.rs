@@ -9,7 +9,7 @@
 //! hook on the strength of `check` running in 70ms) and no gate.
 //!
 //! **This asserts a shape, not a budget.** A millisecond floor on a shared
-//! self-hosted runner is a flaky test, and `A1-228` proved the point the
+//! CI runner is a flaky test, and `A1-228` proved the point the
 //! expensive way: it published an 11% difference between two plan shapes that
 //! was CI contention on the same box, and re-measuring with the runner idle
 //! reversed the sign. What survives a busy machine is the *ratio* between shapes

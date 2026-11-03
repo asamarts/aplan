@@ -1,0 +1,26 @@
+# An illustrative starting point, not a claim that every pilot owns these paths.
+schema: aplan/blueprint/v1
+name: adoption-pilot
+title: Adoption pilot
+description: Create one task to adopt aplan in a repository and record observed friction.
+parameters:
+  - name: repository
+    description: Repository name used in the task title, pilot log path and body.
+tasks:
+  - key: pilot
+    title: Pilot aplan in {{repository}} and record adoption friction
+    effort: 2
+    tags: [adoption, pilot]
+    paths:
+      - docs/pilots/{{repository}}.md
+      - "aplan/**"
+      - .aplan.yml
+    body: |
+      ## Why
+
+      Adopt aplan in `{{repository}}` and record observations rather than status.
+
+      ## Acceptance criteria
+
+      - [ ] the plan exists and passes `aplan check`
+      - [ ] every pilot finding is dispositioned to a task or a recorded non-finding

@@ -9,8 +9,74 @@
 use std::path::Path;
 use std::process::Command;
 
-mod common;
+use crate::common;
 use common::aplan;
+
+/// The production portions of `aplan-attest`, excluding both inline test
+/// modules. The first production prefix alone is not the surface: identity and
+/// hashing deliberately follow the repository fixture tests (`A1-497`).
+fn attest_production_source(source: &str) -> String {
+    let (before_tests, from_tests) = source
+        .split_once("#[cfg(test)]\nmod tests {")
+        .expect("repository fixture test module");
+    let (_, after_tests) = from_tests
+        .split_once("\n}\n\n/// This build's identity")
+        .expect("production identity code after repository fixture tests");
+    let after_tests = format!("/// This build's identity{after_tests}");
+    let (identity_code, _) = after_tests
+        .split_once("#[cfg(test)]\nmod identity_tests {")
+        .expect("identity test module after production identity code");
+    format!("{before_tests}{identity_code}")
+}
+
+/// The attestation crate must not acquire a second production route to Git.
+/// The behavioral tests below prove the facade's answers; this pins the
+/// dependency boundary that makes those answers shared (`A1-201`).
+#[test]
+fn attest_has_one_production_repository_seam() {
+    let workspace = Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
+    let manifest = std::fs::read_to_string(workspace.join("crates/aplan-attest/Cargo.toml"))
+        .expect("attest manifest");
+    let dependencies = manifest
+        .split_once("[dependencies]")
+        .and_then(|(_, rest)| rest.split_once("[dev-dependencies]"))
+        .map(|(dependencies, _)| dependencies)
+        .expect("separate production and test dependencies");
+    assert!(
+        dependencies.contains("aplan-evidence.workspace = true"),
+        "the repository facade is a production dependency: {dependencies}"
+    );
+    assert!(
+        !dependencies.contains("git2"),
+        "production must not bypass the facade: {dependencies}"
+    );
+
+    let source = std::fs::read_to_string(workspace.join("crates/aplan-attest/src/lib.rs"))
+        .expect("attest source");
+    let production = attest_production_source(&source);
+    assert!(
+        !production.contains("git2::") && !production.contains("use git2"),
+        "production repository calls belong behind aplan_evidence::Repo"
+    );
+}
+
+/// Held case for the scan itself: a prefix-only implementation passes the
+/// seam assertion while overlooking this known production suffix (`A1-497`).
+#[test]
+fn attest_repository_seam_includes_production_after_tests() {
+    let workspace = Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
+    let source = std::fs::read_to_string(workspace.join("crates/aplan-attest/src/lib.rs"))
+        .expect("attest source");
+    let production = attest_production_source(&source);
+    assert!(
+        production.contains("pub fn identify") && production.contains("pub fn sha256_hex"),
+        "the audit must include production declarations after the first test module"
+    );
+    assert!(
+        !production.contains("fn commit_all") && !production.contains("mod identity_tests"),
+        "test-only git fixtures must stay outside the production scan"
+    );
+}
 
 #[test]
 fn the_document_is_stamped_with_the_commit_and_records_what_resolved() {
@@ -124,6 +190,40 @@ fn a_plan_that_does_not_verify_is_refused() {
     assert!(!out.contains("aplan/attestation/v1"), "no document: {out}");
 }
 
+/// Attestation is the deepest verification consumer, so an evidence-freshness
+/// finding that blocks `verify` must also block a document claiming the plan
+/// verified (`A1-196`).
+#[test]
+fn evidence_drift_that_blocks_verify_also_blocks_attestation() {
+    let dir = tempfile::Builder::new()
+        .tempdir_in(aplan_core::fixture::fixture_root())
+        .expect("tempdir");
+    fixture(dir.path());
+    std::fs::write(
+        dir.path().join(".aplan.yml"),
+        "root: aplan\ndetect_drift: true\ndeny_warnings: true\n",
+    )
+    .expect("config");
+    git(dir.path(), &["add", "-A"]);
+    git(dir.path(), &["commit", "-q", "-m", "enable drift"]);
+
+    let (restamped, code) = aplan(dir.path(), &["close", "A-01", "--restamp"]);
+    assert_eq!(code, 0, "{restamped}");
+    git(dir.path(), &["add", "-A"]);
+    git(dir.path(), &["commit", "-q", "-m", "record baseline"]);
+    std::fs::write(dir.path().join("src/lib.rs"), "// different proof\n").expect("rewrite");
+    git(dir.path(), &["add", "-A"]);
+    git(dir.path(), &["commit", "-q", "-m", "rewrite proof"]);
+
+    let (verified, code) = aplan(dir.path(), &["verify"]);
+    assert_eq!(code, 1, "{verified}");
+    assert!(verified.contains("APLAN054"), "{verified}");
+    let (attested, code) = aplan(dir.path(), &["attest"]);
+    assert_eq!(code, 1, "{attested}");
+    assert!(attested.contains("does not verify"), "{attested}");
+    assert!(!attested.contains("aplan/attestation/v1"), "{attested}");
+}
+
 /// A dirty tree names a state nobody else can reproduce.
 #[test]
 fn an_uncommitted_change_is_refused() {
@@ -189,9 +289,11 @@ fn an_untracked_file_is_refused_because_it_is_not_in_the_tree() {
     assert_eq!(code, 0, "an ignored file is not a dirty tree: {after}");
 }
 
-/// A `commit` citation says whether the attested commit can reach it.
+/// An attestation cannot certify a plan whose commit evidence is outside the
+/// attested tree (`A1-572`). The resolver must reject it before document
+/// assembly can record a locally present object as if it were reproducible.
 #[test]
-fn a_citation_on_an_unmerged_branch_is_recorded_as_unreachable() {
+fn an_unmerged_commit_citation_is_refused_before_attestation() {
     let dir = tempfile::Builder::new()
         .tempdir_in(aplan_core::fixture::fixture_root())
         .expect("tempdir");
@@ -217,31 +319,26 @@ fn a_citation_on_an_unmerged_branch_is_recorded_as_unreachable() {
     git(dir.path(), &["add", "-A"]);
     git(dir.path(), &["commit", "-q", "-m", "cite the side commit"]);
 
-    // `verify` is happy: the cited commit's diff touched the declared paths.
+    // Both command paths share the evidence resolver: local object presence is
+    // not enough when the attested tree cannot reach the work.
     let (verified, code) = aplan(dir.path(), &["verify"]);
-    assert_eq!(code, 0, "{verified}");
+    assert_eq!(code, 1, "{verified}");
+    assert!(
+        verified.contains("APLAN011")
+            && verified.contains("resolves locally")
+            && verified.contains("not reachable"),
+        "{verified}"
+    );
 
     let (out, code) = aplan(dir.path(), &["attest"]);
-    assert_eq!(code, 0, "{out}");
-    let doc: serde_json::Value = serde_json::from_str(&out).expect("json");
-    let tasks = doc["tasks"].as_array().expect("tasks");
-    let find = |id: &str| {
-        tasks
-            .iter()
-            .find(|t| t["id"] == id)
-            .expect("the task")
-            .clone()
-    };
-    let merged = find("A-01");
-    assert_eq!(merged["evidence"][0]["reachable"], true);
-    let unmerged = find("A-03");
-    assert_eq!(
-        unmerged["evidence"][0]["reachable"], false,
-        "a reader checking out this commit will not find that work: {out}"
+    assert_eq!(code, 1, "{out}");
+    assert!(
+        out.contains("does not verify") && out.contains("1 finding(s) block"),
+        "{out}"
     );
-    assert_eq!(
-        unmerged["evidence"][0]["resolved"], side,
-        "recorded rather than refused: the citation is not a lie"
+    assert!(
+        serde_json::from_str::<serde_json::Value>(&out).is_err(),
+        "a failed verification emitted an attestation document: {out}"
     );
 }
 
@@ -284,6 +381,11 @@ fn the_note_is_optional_and_the_document_stands_without_it() {
 
     let (out, code) = aplan(dir.path(), &["attest", "--attach-note", "aplan-attest"]);
     assert_eq!(code, 0, "{out}");
+    let (head, _) = git(dir.path(), &["rev-parse", "HEAD"]);
+    assert!(
+        out.contains(head.trim()),
+        "success names the commit that received the note: {out}"
+    );
     let (shown, _) = git(dir.path(), &["notes", "--ref=aplan-attest", "show"]);
     assert_eq!(
         shown.trim(),
@@ -295,6 +397,10 @@ fn the_note_is_optional_and_the_document_stands_without_it() {
     // command's decision.
     let (again, code) = aplan(dir.path(), &["attest", "--attach-note", "aplan-attest"]);
     assert_ne!(code, 0, "a second attach must refuse: {again}");
+    assert!(
+        again.contains(head.trim()),
+        "failure names the commit whose existing note was preserved: {again}"
+    );
 }
 
 /// A repository with a commit, a plan, and one closed task whose evidence

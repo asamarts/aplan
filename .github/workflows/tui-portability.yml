@@ -1,0 +1,59 @@
+name: TUI portability
+
+on:
+  schedule:
+    # Weekly, away from the top of the hour and the complete nightly gate.
+    - cron: "19 6 * * 3"
+  workflow_dispatch:
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: false
+
+env:
+  CARGO_TERM_COLOR: always
+  CARGO_BUILD_WARNINGS: deny
+
+permissions:
+  contents: read
+
+jobs:
+  linux:
+    name: Linux lifecycle and PTY
+    runs-on: ${{ (github.event.repository.private && fromJSON('["self-hosted","linux","aplan"]')) || fromJSON('["ubuntu-latest"]') }}
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - name: prepare a GitHub-hosted runner
+        if: runner.environment == 'github-hosted'
+        shell: bash
+        run: ci/scripts/prepare-hosted.sh portability
+      - name: run the shared lifecycle and real-PTY suite
+        shell: bash
+        run: ci/scripts/tui-portability.sh
+
+  public-platforms:
+    name: ${{ matrix.name }} lifecycle and PTY
+    # Private macOS and Windows hosted minutes are deliberately unavailable.
+    # A job-level guard is evaluated before runner allocation, so the private
+    # workflow records skipped jobs without consuming either class of runner.
+    if: github.event.repository.private == false
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - name: macOS
+            runner: macos-latest
+          - name: Windows
+            runner: windows-latest
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - name: prepare a GitHub-hosted runner
+        if: runner.environment == 'github-hosted'
+        shell: bash
+        run: ci/scripts/prepare-hosted.sh portability
+      - name: run the shared lifecycle and real-PTY suite
+        shell: bash
+        run: ci/scripts/tui-portability.sh

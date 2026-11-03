@@ -18,7 +18,7 @@
 
 use std::path::Path;
 
-mod common;
+use crate::common;
 
 /// Kinds `close` can record, as `kind:ref`.
 const WRITABLE: &[(&str, &str)] = &[

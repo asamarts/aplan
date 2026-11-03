@@ -1,0 +1,33 @@
++phase 0--------+
+|+--------------+
+||G-1           |
+||DONE          |
+|+--------------+
+|        o      |
+|        |      |
+|        |      |
+|        |      |
+|        |      |
+|        |      |
+| +------v-----+|
+| |G-2         ||
+| |TODO        ||
+| +------------+|
+|        o      |
+|        |      |
+|        |      |
+|        |      |
+|        |      |
+|        |      |
+|+-------v------+
+||G-3           |
+||TODO          |
+++--------------+
+
+legend: > selected; + related; C critical; o source port; >/<^v target arrow; : feedback; = bundled; * junction; + crossing
+level: milestone:M-a; direction: top-to-bottom; order: status/readiness peers; detail: compact; width: 400; 3 node(s), 2 edge(s)
+scope: whole plan
+accounting: 3/3 level task(s) visible; 2/2 admitted dependency edge(s) represented; 0 boundary edge(s)
+3 cut-membership edge(s) and 2 task(s) with no dependency are not drawn: a cut listing its members is grouping, which `aplan roadmap` prints as a heading. `--membership` draws them.
+level omissions (2): M-a, M-b
+condition: 1 cross-cut dependency edge(s)

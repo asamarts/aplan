@@ -14,7 +14,7 @@
 
 use std::path::Path;
 
-mod common;
+use crate::common;
 use common::aplan;
 
 fn write_task(root: &Path, id: &str, title: &str, status: &str, extra: &str) {
@@ -144,6 +144,40 @@ fn a_task_cannot_come_after_itself() {
     assert!(out.contains("cannot come after itself"), "{out}");
 }
 
+/// The application boundary is not a way around the command's existing clean
+/// load gate: a mutation against an unloadable plan returns the validation
+/// verdict and leaves the target byte-identical (`A1-420`, audit).
+#[test]
+fn a_dependency_edit_refuses_an_unloadable_plan_without_writing() {
+    let dir = repo();
+    let path = dir.path().join("aplan/tasks/A-2.md");
+    let before = std::fs::read_to_string(&path).expect("read");
+    std::fs::write(
+        dir.path().join("aplan/tasks/broken.md"),
+        "---\nid: BROKEN\ntitle: broken\nstatus: not-a-status\n---\n",
+    )
+    .expect("broken task");
+
+    let (out, code) = aplan(
+        dir.path(),
+        &["dep", "add", "A-2", "--after", "A-1", "--root", "aplan"],
+    );
+
+    assert_eq!(
+        code, 1,
+        "an unloadable plan was not a validation failure:\n{out}"
+    );
+    assert!(
+        out.contains("broken.md"),
+        "the load failure was hidden:\n{out}"
+    );
+    assert_eq!(
+        std::fs::read_to_string(path).expect("read after refusal"),
+        before,
+        "the target changed despite the load failure"
+    );
+}
+
 /// Saying twice what is already true changes nothing and says so, rather than
 /// writing the file again or reporting a change that did not happen.
 #[test]
@@ -259,7 +293,7 @@ fn a_cuts_membership_is_not_its_ordering() {
 }
 
 /// The written file is the author's, not the tool's idea of one: line endings
-/// survive, an inline list becomes the block form without losing an entry, and
+/// survive, an inline list keeps its surviving member source, and
 /// nothing outside the frontmatter is touched.
 #[test]
 fn the_rest_of_the_file_is_left_alone() {
@@ -285,10 +319,10 @@ fn the_rest_of_the_file_is_left_alone() {
         "a CRLF file gained a bare LF:\n{text:?}"
     );
     // Inline in, inline out: `A1-179` stopped `dep` reformatting a list `mv`
-    // would have left alone. The quotes go, because the ids are re-emitted from
-    // the parsed list rather than copied as written -- and an id that *needs*
-    // quoting is refused by the round-trip guard rather than written bare.
-    assert!(text.contains("blocked_by: [A-2]\r\n"), "{text:?}");
+    // would have left alone. `A1-655` makes the stronger promise that the
+    // surviving member's own leading space and quote style are copied rather
+    // than re-emitted from the parsed value.
+    assert!(text.contains("blocked_by: [ 'A-2']\r\n"), "{text:?}");
     assert!(
         !text.contains("A-1"),
         "the remaining entry was lost or kept wrong:\n{text:?}"
@@ -300,6 +334,308 @@ fn the_rest_of_the_file_is_left_alone() {
 
     let (check, code) = aplan(root, &["check", "--root", "aplan"]);
     assert_eq!(code, 0, "{check}");
+}
+
+/// Proves `dep.preserves_scalar_sequence_source_deltas` through the command:
+/// the importer-style column-zero form, member quotes, comments and CRLF bytes
+/// survive while a new last edge is inserted and a non-first edge is removed.
+#[test]
+fn dependency_edits_preserve_source_sequence_members_and_comments() {
+    let dir = repo();
+    let root = dir.path();
+    write_task(root, "A-6", "Six", "todo", "");
+    write_task(root, "A-7", "Seven", "todo", "");
+    let path = root.join("aplan/tasks/A-5.md");
+    let source = "---\nid: A-5\ntitle: Five\nphase: 1\nstatus: todo\neffort_days: 1\nblocked_by:\n- 'A-1' # first\n# retained explanation\n- \"A-2\" # remove\n- A-4 # already done\n- A-6 # last retained\n---\n\n## Why\n\nSomething.\n".replace('\n', "\r\n");
+    std::fs::write(&path, &source).expect("task");
+
+    let (out, code) = aplan(
+        root,
+        &["dep", "add", "A-5", "--after", "A-7", "--root", "aplan"],
+    );
+    assert_eq!(code, 0, "{out}");
+    let added = source.replace(
+        "- A-6 # last retained\r\n",
+        "- A-6 # last retained\r\n- A-7\r\n",
+    );
+    assert_eq!(std::fs::read_to_string(&path).expect("added"), added);
+
+    let (out, code) = aplan(
+        root,
+        &["dep", "rm", "A-5", "--after", "A-2", "--root", "aplan"],
+    );
+    assert_eq!(code, 0, "{out}");
+    let expected = added.replace("- \"A-2\" # remove\r\n", "");
+    assert_eq!(std::fs::read_to_string(&path).expect("removed"), expected);
+
+    let (check, code) = aplan(root, &["check", "--root", "aplan"]);
+    assert_eq!(code, 0, "{check}");
+    let (shown, code) = aplan(
+        root,
+        &[
+            "show",
+            "A-5",
+            "--format",
+            "json",
+            "--no-resolve",
+            "--root",
+            "aplan",
+        ],
+    );
+    assert_eq!(code, 0, "{shown}");
+    let shown: serde_json::Value = serde_json::from_str(&shown).expect("show JSON");
+    let waits_on: Vec<_> = shown["waits_on"]
+        .as_array()
+        .expect("waits_on array")
+        .iter()
+        .map(|related| related["id"].as_str().expect("related id"))
+        .collect();
+    assert_eq!(waits_on, ["A-1", "A-4", "A-6", "A-7"]);
+}
+
+/// Proves `dep.atomic_batch_rewrites`: the requested final graph is the only
+/// graph judged, so operation order cannot turn a safe rewire into a refusal.
+#[test]
+fn batch_dependency_rewrites_apply_one_final_acyclic_graph_atomically() {
+    let dir = repo();
+    let root = dir.path();
+    let first = root.join("aplan/tasks/A-1.md");
+    let second = root.join("aplan/tasks/A-2.md");
+    let first_source = std::fs::read_to_string(&first).expect("first").replace(
+        "effort_days: 1\n",
+        "effort_days: 1\nblocked_by: [ 'A-4'] # keep source\n",
+    );
+    let second_source = std::fs::read_to_string(&second).expect("second").replace(
+        "effort_days: 1\n",
+        "effort_days: 1\nblocked_by:\n- A-1 # old direction\n",
+    );
+    std::fs::write(&first, &first_source).expect("seed first");
+    std::fs::write(&second, &second_source).expect("seed second");
+    std::fs::write(
+        root.join("edges.yml"),
+        "- id: A-1\n  add: [A-2]\n- id: A-2\n  remove: [A-1]\n",
+    )
+    .expect("batch");
+
+    let preview = common::run(
+        root,
+        &[
+            "dep",
+            "apply",
+            "--from",
+            "edges.yml",
+            "--dry-run",
+            "--deny-warnings",
+            "--format",
+            "json",
+            "--root",
+            "aplan",
+        ],
+    );
+    assert_eq!(preview.code, 0, "{}", preview.text());
+    let report: serde_json::Value =
+        serde_json::from_str(&preview.stdout).expect("dependency preview JSON");
+    assert_eq!(report["schema"], "aplan/dependency-batch/v1");
+    assert_eq!(report["outcome"], "predicted");
+    assert_eq!(report["operations"].as_array().unwrap().len(), 2);
+    assert_eq!(report["files"].as_array().unwrap().len(), 2);
+    assert_eq!(std::fs::read_to_string(&first).unwrap(), first_source);
+    assert_eq!(std::fs::read_to_string(&second).unwrap(), second_source);
+
+    let applied = common::run(
+        root,
+        &[
+            "dep",
+            "apply",
+            "--from",
+            "edges.yml",
+            "--no-deny-warnings",
+            "--format",
+            "agent",
+            "--root",
+            "aplan",
+        ],
+    );
+    assert_eq!(applied.code, 0, "{}", applied.text());
+    let report: serde_json::Value =
+        serde_json::from_str(&applied.stdout).expect("dependency application JSON");
+    assert_eq!(report["schema"], "aplan/agent-dependency-batch/v1");
+    assert_eq!(report["outcome"], "applied");
+    assert_eq!(report["source_sha256"].as_str().unwrap().len(), 64);
+    let first_after = std::fs::read_to_string(&first).expect("first after");
+    assert!(
+        first_after.contains("blocked_by: [ 'A-4', 'A-2'] # keep source"),
+        "{first_after}"
+    );
+    let second_after = std::fs::read_to_string(&second).expect("second after");
+    assert!(
+        !second_after.contains("A-1 # old direction"),
+        "{second_after}"
+    );
+
+    let unchanged = common::run(
+        root,
+        &[
+            "dep",
+            "apply",
+            "--from",
+            "edges.yml",
+            "--format",
+            "agent",
+            "--root",
+            "aplan",
+        ],
+    );
+    assert_eq!(unchanged.code, 0, "{}", unchanged.text());
+    let unchanged: serde_json::Value =
+        serde_json::from_str(&unchanged.stdout).expect("unchanged dependency JSON");
+    assert_eq!(unchanged["outcome"], "unchanged");
+    assert_eq!(unchanged["files"].as_array().unwrap().len(), 0);
+
+    let (check, code) = aplan(root, &["check", "--root", "aplan"]);
+    assert_eq!(code, 0, "{check}");
+}
+
+#[test]
+fn repeatable_after_and_idempotent_machine_output_name_exact_changes() {
+    let dir = repo();
+    write_task(dir.path(), "A-5", "Fifth", "todo", "");
+    let out = common::run(
+        dir.path(),
+        &[
+            "dep", "add", "A-5", "--after", "A-1", "--after", "A-2", "--format", "json", "--root",
+            "aplan",
+        ],
+    );
+    assert_eq!(out.code, 0, "{}", out.text());
+    let report: serde_json::Value = serde_json::from_str(&out.stdout).expect("batch JSON");
+    assert_eq!(report["operations"].as_array().unwrap().len(), 2);
+    assert!(
+        report["operations"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .all(|operation| operation["changes_state"] == true)
+    );
+
+    let no_op = common::run(
+        dir.path(),
+        &[
+            "dep",
+            "add",
+            "A-5",
+            "--after",
+            "A-2",
+            "--after",
+            "A-1",
+            "--dry-run",
+            "--format",
+            "agent",
+            "--root",
+            "aplan",
+        ],
+    );
+    assert_eq!(no_op.code, 0, "{}", no_op.text());
+    let report: serde_json::Value = serde_json::from_str(&no_op.stdout).expect("agent JSON");
+    assert_eq!(report["schema"], "aplan/agent-dependency-batch/v1");
+    assert_eq!(report["outcome"], "unchanged");
+    assert_eq!(report["files"].as_array().unwrap().len(), 0);
+    assert!(
+        report["operations"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .all(|operation| operation["changes_state"] == false)
+    );
+}
+
+#[test]
+fn every_batch_request_refusal_leaves_all_targets_byte_identical() {
+    let cases = [
+        ("- id: A-1\n  add: [NOPE]\n", "no task `NOPE`"),
+        (
+            "- id: A-1\n  add: [A-2, A-2]\n",
+            "duplicate dependency operations",
+        ),
+        (
+            "- id: A-1\n  add: [A-2]\n  remove: [A-2]\n",
+            "conflicting dependency operations",
+        ),
+        ("- id: A-1\n  add: [A-3]\n", "cancelled task"),
+        ("- id: A-4\n  add: [A-1]\n", "settled task"),
+    ];
+    for (batch, expected) in cases {
+        let dir = repo();
+        std::fs::write(dir.path().join("edges.yml"), batch).expect("batch");
+        let before = tasks_snapshot(dir.path());
+        let out = common::run(
+            dir.path(),
+            &["dep", "apply", "--from", "edges.yml", "--root", "aplan"],
+        );
+        assert_ne!(out.code, 0, "{batch:?}: {}", out.text());
+        assert!(out.text().contains(expected), "{batch:?}: {}", out.text());
+        assert_eq!(tasks_snapshot(dir.path()), before, "{batch:?} wrote a file");
+    }
+
+    let cycle = repo();
+    write_task(cycle.path(), "A-5", "Fifth", "todo", "blocked_by: [A-1]\n");
+    std::fs::write(cycle.path().join("edges.yml"), "- id: A-1\n  add: [A-5]\n")
+        .expect("cycle batch");
+    let before = tasks_snapshot(cycle.path());
+    let out = common::run(
+        cycle.path(),
+        &[
+            "dep",
+            "apply",
+            "--from",
+            "edges.yml",
+            "--format",
+            "agent",
+            "--root",
+            "aplan",
+        ],
+    );
+    assert_eq!(out.code, 1, "{}", out.text());
+    assert!(out.text().contains("APLAN004"), "{}", out.text());
+    assert!(out.text().contains("Nothing was written"), "{}", out.text());
+    assert_eq!(tasks_snapshot(cycle.path()), before);
+
+    let membership = repo();
+    write_task(
+        membership.path(),
+        "M-cut",
+        "Cut",
+        "todo",
+        "tags: [milestone]\n",
+    );
+    std::fs::write(
+        membership.path().join("edges.yml"),
+        "- id: M-cut\n  add: [A-1]\n",
+    )
+    .expect("membership batch");
+    let before = tasks_snapshot(membership.path());
+    let out = common::run(
+        membership.path(),
+        &["dep", "apply", "--from", "edges.yml", "--root", "aplan"],
+    );
+    assert_ne!(out.code, 0, "{}", out.text());
+    assert!(out.text().contains("aplan mv"), "{}", out.text());
+    assert_eq!(tasks_snapshot(membership.path()), before);
+}
+
+fn tasks_snapshot(root: &Path) -> Vec<(String, String)> {
+    let mut files = std::fs::read_dir(root.join("aplan/tasks"))
+        .expect("tasks")
+        .map(|entry| {
+            let entry = entry.expect("entry");
+            (
+                entry.file_name().to_string_lossy().into_owned(),
+                std::fs::read_to_string(entry.path()).expect("task bytes"),
+            )
+        })
+        .collect::<Vec<_>>();
+    files.sort_by(|a, b| a.0.cmp(&b.0));
+    files
 }
 
 /// The edge survives a round trip through the loader, which is what makes it a
@@ -364,6 +700,39 @@ fn a_preference_orders_the_offer_and_blocks_nothing() {
         explain.contains("prefers to follow A-2"),
         "the reason is not explained, so an order looks arbitrary:\n{explain}"
     );
+}
+
+#[test]
+fn preference_mode_refuses_dependency_batch_controls_before_writing() {
+    for arguments in [
+        vec![
+            "dep", "add", "A-1", "--after", "A-2", "--after", "A-3", "--prefer",
+        ],
+        vec![
+            "dep",
+            "add",
+            "A-1",
+            "--after",
+            "A-2",
+            "--prefer",
+            "--dry-run",
+        ],
+        vec![
+            "dep", "add", "A-1", "--after", "A-2", "--prefer", "--format", "json",
+        ],
+    ] {
+        let dir = repo();
+        let before = tasks_snapshot(dir.path());
+
+        let (out, code) = aplan(dir.path(), &arguments);
+
+        assert_ne!(code, 0, "{arguments:?} was accepted:\n{out}");
+        assert!(
+            out.contains("`--prefer` accepts one `--after` with human applied output"),
+            "{arguments:?}: {out}"
+        );
+        assert_eq!(tasks_snapshot(dir.path()), before);
+    }
 }
 
 /// The refusals: a preference nobody could act on is `APLAN033`, and the

@@ -1,0 +1,14 @@
++phase 0--------------------------------------+
+|+------------------+      +------------------+
+||M-a               |      |M-b               |
+||TODO cut a        |      |TODO cut b        |
+||1/2 done | 1 ready|o----->0/1 done | 0 ready|
+++------------------+------+------------------+
+
+legend: > selected; + related; C critical; o source port; >/<^v target arrow; : feedback; = bundled; * junction; + crossing
+level: plan; direction: left-to-right; order: readability (crossing-minimized); detail: comfortable; width: 240; 2 node(s), 1 edge(s)
+scope: whole plan
+accounting: 5/5 level task(s) visible; 2/2 admitted dependency edge(s) represented; 0 boundary edge(s)
+3 cut-membership edge(s) and 2 task(s) with no dependency are not drawn: a cut listing its members is grouping, which `aplan roadmap` prints as a heading. `--membership` draws them.
+dependencies represented inside aggregate card(s): M-a=1
+condition: 1 cross-cut dependency edge(s)

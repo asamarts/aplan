@@ -13,7 +13,7 @@
 
 use std::path::Path;
 
-mod common;
+use crate::common;
 
 fn tmp() -> tempfile::TempDir {
     tempfile::Builder::new()
@@ -179,6 +179,117 @@ fn a_release_recording_a_different_number_is_refused_with_both_named() {
         Some("1.5.0"),
         "a refused closure writes nothing"
     );
+}
+
+/// Proves `close.refuses_empty_version_fields` through the public command.
+/// Presence belongs to the source mapping rather than to `Option<String>`: an
+/// authored null cannot be mistaken for permission to append another key.
+#[test]
+fn empty_version_fields_are_refused_without_writing() {
+    for (name, field) in [
+        ("bare", "version:\n"),
+        ("null", "version: null\n"),
+        ("tilde", "version: ~\n"),
+        ("single quoted key", "'version': null\n"),
+        ("double quoted key", "\"version\": null\n"),
+        ("escaped key", "\"vers\\u0069on\": null\n"),
+        ("explicit key", "? version\n: null\n"),
+        ("tagged key", "!!str version: null\n"),
+        ("anchored key", "&version_key version: null\n"),
+        (
+            "aliased key",
+            "owner: &version_key version\n*version_key: null\n",
+        ),
+    ] {
+        let dir = tmp();
+        fixture(dir.path(), WITH_READER);
+        let release = dir.path().join("aplan/tasks/M-r.md");
+        let source = std::fs::read_to_string(&release).expect("release");
+        let source = source.replace("status: todo\n", &format!("status: todo\n{field}"));
+        std::fs::write(&release, &source).expect("empty version field");
+
+        let out = common::run(
+            dir.path(),
+            &[
+                "close",
+                "M-r",
+                "--evidence",
+                "file:.aplan.yml",
+                "--no-resolve",
+            ],
+        );
+        assert_eq!(out.code, 2, "{name} reached the wrong exit: {out:?}");
+        assert!(
+            out.text().contains("no value")
+                && out.text().contains("2.0.0")
+                && out.text().contains("remove the empty field"),
+            "{name} was not actionable: {out:?}"
+        );
+        assert!(!out.text().contains("bug in aplan"), "{name}: {out:?}");
+        assert_eq!(
+            std::fs::read_to_string(&release).expect("release after refusal"),
+            source,
+            "{name} changed the release before refusing"
+        );
+    }
+}
+
+#[test]
+fn agreeing_version_records_keep_their_exact_source_on_close() {
+    for (name, field) in [
+        ("ordinary", "version : 2.0.0 # authored record\n"),
+        ("quoted key", "\"version\": 2.0.0 # authored record\n"),
+    ] {
+        let dir = tmp();
+        fixture(dir.path(), WITH_READER);
+        let release = dir.path().join("aplan/tasks/M-r.md");
+        let source = std::fs::read_to_string(&release).expect("release");
+        let source = source.replace("status: todo\n", &format!("status: todo\n{field}"));
+        std::fs::write(&release, source).expect("agreeing version record");
+
+        let out = common::run(
+            dir.path(),
+            &[
+                "close",
+                "M-r",
+                "--evidence",
+                "file:.aplan.yml",
+                "--no-resolve",
+            ],
+        );
+        assert_eq!(out.code, 0, "{name} did not close: {out:?}");
+        let updated = std::fs::read_to_string(&release).expect("closed release");
+        assert!(updated.contains(field), "{name} record moved: {updated}");
+        let (frontmatter, _) = aplan_core::load::split_frontmatter(&updated).expect("frontmatter");
+        let task: aplan_core::Task = yaml_compat::from_str(frontmatter).expect("one valid record");
+        assert_eq!(task.version.as_deref(), Some("2.0.0"), "{name}");
+        assert_eq!(task.status, aplan_core::Status::Done, "{name}");
+    }
+}
+
+#[test]
+fn an_empty_version_field_does_not_block_close_without_a_derivation() {
+    let dir = tmp();
+    let sha = fixture(dir.path(), "root: aplan\n");
+    let release = dir.path().join("aplan/tasks/M-r.md");
+    let source = std::fs::read_to_string(&release).expect("release");
+    let source = source.replace("status: todo\n", "status: todo\nversion: null\n");
+    std::fs::write(&release, source).expect("empty version record");
+
+    let out = common::run(
+        dir.path(),
+        &["close", "M-r", "--evidence", &format!("commit:{sha}")],
+    );
+    assert_eq!(
+        out.code, 0,
+        "an optional record became a closure gate: {out:?}"
+    );
+    let updated = std::fs::read_to_string(&release).expect("closed release");
+    assert!(
+        updated.contains("status: done\nversion: null\n"),
+        "{updated}"
+    );
+    assert_eq!(updated.matches("version: null").count(), 1, "{updated}");
 }
 
 /// **A window that declined to be measured records nothing** (`A1-339`, audit).

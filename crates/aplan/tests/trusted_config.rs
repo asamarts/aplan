@@ -14,7 +14,7 @@
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
-mod common;
+use crate::common;
 use common::aplan;
 
 #[test]
@@ -96,7 +96,7 @@ fn a_named_config_that_is_missing_is_an_error_not_a_fallback() {
 fn every_command_that_can_run_a_program_is_stopped_by_the_selection() {
     for args in [
         vec!["verify"],
-        vec!["show", "C-01"],
+        vec!["show", "C-01", "--refresh-evidence"],
         vec!["close", "C-02", "--evidence", "test:it_ran"],
         vec!["attest"],
     ] {
@@ -204,7 +204,7 @@ fn a_selected_configs_relative_values_resolve_from_its_own_directory() {
     .expect("doc");
     std::fs::write(
         outside.path().join("trusted.yml"),
-        "root: aplan\ntraces_root: .\n",
+        "root: aplan\ntraces_root: .\ntraces_external: ['.']\n",
     )
     .expect("config");
 
@@ -226,6 +226,267 @@ fn a_selected_configs_relative_values_resolve_from_its_own_directory() {
         "the trace resolved against the trusted tree: {out}"
     );
     assert!(!out.contains("APLAN008"), "{out}");
+    assert!(!out.contains("APLAN034"), "{out}");
+}
+
+/// Proves the named behaviour `traces.boundary_is_plan_repository`.
+#[test]
+fn an_external_selected_config_keeps_in_repository_traces_internal() {
+    let (dir, marker) = hostile(None);
+    write_in_repository_trace(&dir);
+    // If selection leaks even at a nested config, this file is closer to the
+    // plan than the candidate root's executable config and stops the command.
+    std::fs::write(dir.join("aplan/.aplan.yml"), "not_a_key: true\n")
+        .expect("hostile nested config");
+
+    let outside = tempfile::Builder::new()
+        .tempdir_in(aplan_core::fixture::fixture_root())
+        .expect("tempdir");
+    let trusted = outside.path().join("trusted.yml");
+    std::fs::write(&trusted, "root: aplan\n").expect("trusted config");
+    let selected = trusted.display().to_string();
+    let root = dir.join("aplan").display().to_string();
+    let traces_root = dir.display().to_string();
+
+    for command in ["check", "verify"] {
+        let (out, code) = aplan(
+            &dir,
+            &[
+                "--root",
+                &root,
+                "--config",
+                &selected,
+                command,
+                "--traces-root",
+                &traces_root,
+            ],
+        );
+        assert_eq!(code, 0, "{command} refused an in-repository trace: {out}");
+        assert!(!out.contains("APLAN034"), "{command}: {out}");
+        assert!(
+            !marker.exists(),
+            "{command} consulted the candidate config: {out}"
+        );
+    }
+}
+
+/// The repository boundary cannot be inferred from one `parent()` call: plan
+/// roots may be nested. Proves the named behaviour
+/// `traces.boundary_is_plan_repository` for the layout that escaped `A1-237`.
+#[test]
+fn a_nested_plan_root_keeps_the_whole_git_repository_inside_the_trace_boundary() {
+    let (dir, marker) = hostile(Some("NESTED-TRACE-MARKER"));
+    let nested = dir.join("plans/tasks");
+    std::fs::create_dir_all(dir.join("plans")).expect("plans");
+    std::fs::rename(dir.join("aplan/tasks"), &nested).expect("nest the plan root");
+    std::fs::remove_dir(dir.join("aplan")).expect("remove old plan root");
+    std::fs::write(dir.join("README.md"), "# Readme\n\n## One\n\ninside\n").expect("doc");
+    std::fs::write(
+        nested.join("C-02.md"),
+        "---\nid: C-02\ntitle: traced\nphase: 1\nstatus: todo\neffort_days: 1\n\
+         traces:\n- README.md#one\n---\n\nbody\n",
+    )
+    .expect("task");
+    // Neither candidate policy may be consulted, even though one is at the
+    // repository root and one is closer to the nested plan.
+    std::fs::write(dir.join("plans/.aplan.yml"), "not_a_key: true\n")
+        .expect("hostile nested config");
+
+    let outside = tempfile::Builder::new()
+        .tempdir_in(aplan_core::fixture::fixture_root())
+        .expect("tempdir");
+    let trusted = outside.path().join("policy.yml");
+    std::fs::write(&trusted, "root: plans/tasks\n").expect("trusted config");
+    let selected = trusted.display().to_string();
+    let root = nested.display().to_string();
+    let traces_root = dir.display().to_string();
+
+    for command in ["check", "verify"] {
+        let (out, code) = aplan(
+            &dir,
+            &[
+                "--root",
+                &root,
+                "--config",
+                &selected,
+                command,
+                "--traces-root",
+                &traces_root,
+            ],
+        );
+        assert_eq!(code, 0, "{command} shrank the repository boundary: {out}");
+        assert!(!out.contains("APLAN034"), "{command}: {out}");
+    }
+
+    let init = r#"{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2024-11-05","capabilities":{},"clientInfo":{"name":"t","version":"1"}}}"#;
+    let call = r#"{"jsonrpc":"2.0","id":2,"method":"tools/call","params":{"name":"aplan_check","arguments":{}}}"#;
+    let out = mcp(
+        &dir,
+        &["--root", &root, "--config", &selected, "mcp"],
+        &format!("{init}\n{call}\n"),
+    );
+    assert!(!out.contains("APLAN034"), "MCP: {out}");
+    assert!(out.contains("tasks_checked"), "MCP did not answer: {out}");
+    assert!(!marker.exists(), "candidate policy ran: {out}");
+
+    // The fix must not turn an ancestor wider than the Git worktree into the
+    // boundary. A real sibling remains external under the same selected policy.
+    let sibling = outside.path().join("outside.md");
+    std::fs::write(&sibling, "# Outside\n\n## One\n\nexternal\n").expect("external doc");
+    std::fs::write(
+        nested.join("C-02.md"),
+        format!(
+            "---\nid: C-02\ntitle: traced\nphase: 1\nstatus: todo\neffort_days: 1\n\
+             traces:\n- {}#one\n---\n\nbody\n",
+            sibling.display()
+        ),
+    )
+    .expect("external task");
+    let (out, code) = aplan(
+        &dir,
+        &[
+            "--root",
+            &root,
+            "--config",
+            &selected,
+            "check",
+            "--traces-root",
+            &traces_root,
+        ],
+    );
+    assert_eq!(code, 1, "a sibling escaped APLAN034: {out}");
+    assert!(out.contains("APLAN034"), "{out}");
+}
+
+/// Proves both sides of `traces.boundary_is_plan_repository`: changing where
+/// policy lives does not enlarge the repository, while a declaration in that
+/// policy is still resolved relative to the selected file.
+#[test]
+fn an_external_trace_still_needs_a_config_relative_declaration() {
+    let (dir, _) = hostile(None);
+    let outside = tempfile::Builder::new()
+        .tempdir_in(aplan_core::fixture::fixture_root())
+        .expect("tempdir");
+    let trusted_dir = outside.path().join("trusted");
+    let external = outside.path().join("external");
+    std::fs::create_dir_all(&trusted_dir).expect("trusted dir");
+    std::fs::create_dir_all(&external).expect("external dir");
+    std::fs::write(external.join("spec.md"), "# Spec\n\n## One\n\nx\n").expect("doc");
+    std::fs::write(
+        dir.join("aplan/tasks/C-02.md"),
+        format!(
+            "---\nid: C-02\ntitle: traced\nphase: 1\nstatus: todo\neffort_days: 1\n\
+             traces:\n- {}#one\n---\n\nbody\n",
+            external.join("spec.md").display()
+        ),
+    )
+    .expect("task");
+
+    let trusted = trusted_dir.join("policy.yml");
+    std::fs::write(&trusted, "root: aplan\n").expect("trusted config");
+    let selected = trusted.display().to_string();
+    let (out, code) = aplan(&dir, &["--root", "aplan", "--config", &selected, "check"]);
+    assert_eq!(code, 1, "an undeclared external trace passed: {out}");
+    assert!(out.contains("APLAN034"), "{out}");
+
+    std::fs::write(&trusted, "root: aplan\ntraces_external: [../external]\n")
+        .expect("trusted config");
+    let (out, code) = aplan(&dir, &["--root", "aplan", "--config", &selected, "check"]);
+    assert_eq!(code, 0, "a declared external trace was refused: {out}");
+    assert!(!out.contains("APLAN034"), "{out}");
+    assert!(!out.contains("APLAN008"), "{out}");
+}
+
+/// The file a caller selected is also where findings about that configuration
+/// belong. Proves the location half of `traces.boundary_is_plan_repository`:
+/// separating the repository boundary must not move config or evidence
+/// diagnostics to an invented `.aplan.yml`.
+#[test]
+fn selected_config_diagnostics_name_the_file_that_was_read() {
+    let (dir, _) = hostile(None);
+    let outside = tempfile::Builder::new()
+        .tempdir_in(aplan_core::fixture::fixture_root())
+        .expect("tempdir");
+    let trusted = outside.path().join("policy.yml");
+    std::fs::write(
+        &trusted,
+        "root: aplan\n\
+         tag_families:\n  kind: [kind-one]\n\
+         test:\n  - name: broken\n    list: [sh, -c, 'echo broken >&2; exit 1']\n    \
+         run: [sh, -c, 'exit 1', '{test}']\n",
+    )
+    .expect("trusted config");
+    let selected = trusted.display().to_string();
+
+    let (out, code) = aplan(&dir, &["--root", "aplan", "--config", &selected, "verify"]);
+    assert_eq!(
+        code, 1,
+        "the deliberately broken runner must be reported: {out}"
+    );
+    assert!(out.contains("APLAN013"), "{out}");
+    assert!(out.contains("APLAN029"), "{out}");
+    assert!(
+        out.matches(&selected).count() >= 2,
+        "both evidence and structural diagnostics must name `{selected}`: {out}"
+    );
+    let invented = outside.path().join(".aplan.yml").display().to_string();
+    assert!(!out.contains(&invented), "no such file was read: {out}");
+}
+
+#[test]
+fn config_help_states_the_three_distinct_path_frames() {
+    let dir = tempfile::Builder::new()
+        .tempdir_in(aplan_core::fixture::fixture_root())
+        .expect("tempdir");
+    let (out, code) = aplan(dir.path(), &["--help"]);
+    assert_eq!(code, 0, "{out}");
+    let words = out.split_whitespace().collect::<Vec<_>>().join(" ");
+    assert!(
+        words.contains("`root` and `traces_root` inside it resolve against *its* directory"),
+        "{out}"
+    );
+    assert!(
+        words.contains(
+            "A test runner's `dir` instead resolves against the selected repository root"
+        ),
+        "{out}"
+    );
+    assert!(
+        words.contains("findings about configuration name this selected file"),
+        "{out}"
+    );
+}
+
+/// Proves the agent half of `traces.boundary_is_plan_repository`.
+#[test]
+fn the_mcp_surface_keeps_in_repository_traces_inside_the_plan_repository() {
+    let (dir, marker) = hostile(Some("MCP-TRACE-MARKER"));
+    write_in_repository_trace(&dir);
+    std::fs::write(dir.join("aplan/.aplan.yml"), "not_a_key: true\n")
+        .expect("hostile nested config");
+    let outside = tempfile::Builder::new()
+        .tempdir_in(aplan_core::fixture::fixture_root())
+        .expect("tempdir");
+    let trusted = outside.path().join("trusted.yml");
+    std::fs::write(&trusted, "root: aplan\n").expect("config");
+    let selected = trusted.display().to_string();
+
+    let init = r#"{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2024-11-05","capabilities":{},"clientInfo":{"name":"t","version":"1"}}}"#;
+    let call = r#"{"jsonrpc":"2.0","id":2,"method":"tools/call","params":{"name":"aplan_check","arguments":{}}}"#;
+    let out = mcp(
+        &dir,
+        &["--root", "aplan", "--config", &selected, "mcp"],
+        &format!("{init}\n{call}\n"),
+    );
+    assert!(!out.contains("APLAN034"), "{out}");
+    assert!(
+        out.contains("tasks_checked"),
+        "the tool did not answer: {out}"
+    );
+    assert!(
+        !marker.exists(),
+        "the candidate config ran a program: {out}"
+    );
 }
 
 /// The agent surface is the other half of "every CLI or MCP path", and it also
@@ -335,6 +596,17 @@ fn hostile(marker_name: Option<&str>) -> (PathBuf, PathBuf) {
     git(&dir, &["add", "-A"]);
     git(&dir, &["commit", "-q", "-m", "candidate"]);
     (dir, marker)
+}
+
+fn write_in_repository_trace(dir: &Path) {
+    std::fs::create_dir_all(dir.join("docs")).expect("docs");
+    std::fs::write(dir.join("docs/spec.md"), "# Spec\n\n## One\n\nx\n").expect("doc");
+    std::fs::write(
+        dir.join("aplan/tasks/C-02.md"),
+        "---\nid: C-02\ntitle: traced\nphase: 1\nstatus: todo\neffort_days: 1\n\
+         traces:\n- docs/spec.md#one\n---\n\nbody\n",
+    )
+    .expect("task");
 }
 
 fn git(dir: &Path, args: &[&str]) {

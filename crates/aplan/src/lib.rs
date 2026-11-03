@@ -19,13 +19,16 @@ use std::path::PathBuf;
 use std::process::ExitCode;
 
 use anyhow::{Context, Result};
-use aplan_core::{Graph, Options, load_plan, validate};
+use aplan_core::{Graph, Options, load_plan_files, validate};
 use aplan_output::{
-    Format, Surface, render, render_critical_path, render_partial, render_proposed, render_roadmap,
-    render_roadmap_markdown, render_summary, render_tasks, render_verified,
-    render_verified_partial,
+    BlueprintApplicationReport, BlueprintFile, BlueprintFileKind, BlueprintOutcome, BlueprintTask,
+    DependencyBatchOperation, DependencyBatchOutcome, DependencyBatchReport, Format, Surface,
+    render, render_blueprint_application, render_critical_path, render_dependency_batch,
+    render_grouped_summary, render_partial, render_proposed, render_roadmap,
+    render_roadmap_markdown, render_summary, render_tasks, render_verified_inbox_invalid,
+    render_verified_observed, render_verified_partial,
 };
-use clap::{CommandFactory, Parser, Subcommand};
+use clap::{CommandFactory, Parser, Subcommand, ValueEnum};
 
 /// `eprintln!`, on the stream that knows the colour choice (`A1-286`).
 ///
@@ -41,6 +44,7 @@ use clap::{CommandFactory, Parser, Subcommand};
 macro_rules! errln {
     ($($arg:tt)*) => {{
         use std::io::Write as _;
+        let _progress_write = $crate::ProgressWriteGuard::new();
         let _ = writeln!(::anstream::stderr().lock(), $($arg)*);
     }};
 }
@@ -49,6 +53,7 @@ macro_rules! errln {
 macro_rules! err {
     ($($arg:tt)*) => {{
         use std::io::Write as _;
+        let _progress_write = $crate::ProgressWriteGuard::new();
         let _ = write!(::anstream::stderr().lock(), $($arg)*);
     }};
 }
@@ -62,6 +67,253 @@ const EXIT_USAGE: u8 = 2;
 /// own self-check). Reserved for errors tagged [`Bug`]; a consumer can treat this
 /// as "file a bug", distinct from `2` ("fix your input").
 const EXIT_INTERNAL: u8 = 3;
+
+#[derive(Debug, Default)]
+struct ReadWork {
+    config_loads: usize,
+    plan_loads: usize,
+    candidate_files: usize,
+    readable_files: usize,
+    bytes_read: u64,
+    task_files_parsed: usize,
+    retained_files: usize,
+    retained_bytes: u64,
+    cache_generation_hits: usize,
+    cache_artifacts_reused: usize,
+    cache_artifacts_parsed: usize,
+    cache_bytes_read: u64,
+    cache_bytes_written: u64,
+    receipt_accepted: usize,
+    receipt_rejected: usize,
+    receipt_mode: bool,
+}
+
+#[derive(Debug)]
+struct TimingState {
+    started: std::time::Instant,
+    graph_constructions_at_start: usize,
+    trace_document_work_at_start: aplan_core::TraceDocumentWork,
+    phases: std::collections::BTreeMap<&'static str, std::time::Duration>,
+    work: ReadWork,
+}
+
+static TIMING_STATE: std::sync::OnceLock<std::sync::Mutex<Option<TimingState>>> =
+    std::sync::OnceLock::new();
+
+fn timing_slot() -> &'static std::sync::Mutex<Option<TimingState>> {
+    TIMING_STATE.get_or_init(|| std::sync::Mutex::new(None))
+}
+
+fn start_timings(enabled: bool, started: std::time::Instant) {
+    if enabled {
+        *timing_slot()
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner) = Some(TimingState {
+            started,
+            graph_constructions_at_start: aplan_core::graph_constructions(),
+            trace_document_work_at_start: aplan_core::trace_document_work(),
+            phases: std::collections::BTreeMap::new(),
+            work: ReadWork::default(),
+        });
+    }
+}
+
+fn timings_active() -> bool {
+    TIMING_STATE.get().is_some_and(|slot| {
+        slot.lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .is_some()
+    })
+}
+
+fn timed<T>(phase: &'static str, operation: impl FnOnce() -> T) -> T {
+    if !timings_active() {
+        return operation();
+    }
+    let started = std::time::Instant::now();
+    let result = operation();
+    let elapsed = started.elapsed();
+    if let Some(state) = timing_slot()
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+        .as_mut()
+    {
+        *state.phases.entry(phase).or_default() += elapsed;
+    }
+    result
+}
+
+fn record_load_work(stats: aplan_core::LoadStats) {
+    let Some(slot) = TIMING_STATE.get() else {
+        return;
+    };
+    let mut timing = slot
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    let Some(timing) = timing.as_mut() else {
+        return;
+    };
+    timing.work.plan_loads += 1;
+    timing.work.candidate_files += stats.candidate_files;
+    timing.work.readable_files += stats.readable_files;
+    timing.work.bytes_read = timing.work.bytes_read.saturating_add(stats.bytes_read);
+    timing.work.task_files_parsed += stats.task_files_parsed;
+    timing.work.retained_files += stats.retained_files;
+    timing.work.retained_bytes = timing
+        .work
+        .retained_bytes
+        .saturating_add(stats.retained_bytes);
+}
+
+fn record_store_work(stats: aplan_app::PlanStoreStats) {
+    record_load_work(stats.load);
+    let Some(slot) = TIMING_STATE.get() else {
+        return;
+    };
+    let mut timing = slot
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    let Some(timing) = timing.as_mut() else {
+        return;
+    };
+    timing.work.cache_generation_hits += usize::from(stats.cache_generation_hit);
+    timing.work.cache_artifacts_reused += stats.artifacts_reused;
+    timing.work.cache_artifacts_parsed += stats.artifacts_parsed;
+    timing.work.cache_bytes_read = timing
+        .work
+        .cache_bytes_read
+        .saturating_add(stats.cache_bytes_read);
+    timing.work.cache_bytes_written = timing
+        .work
+        .cache_bytes_written
+        .saturating_add(stats.cache_bytes_written);
+}
+
+fn record_cache_publication(bytes: u64) {
+    let mut slot = timing_slot()
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    if let Some(timing) = slot.as_mut() {
+        timing.work.cache_bytes_written = timing.work.cache_bytes_written.saturating_add(bytes);
+    }
+}
+
+fn record_receipt_work(receipts: &aplan_app::ImportedTestReceipts) {
+    if !timings_active() {
+        return;
+    }
+    let micros =
+        |value: u128| std::time::Duration::from_micros(u64::try_from(value).unwrap_or(u64::MAX));
+    let mut slot = timing_slot()
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    let Some(state) = slot.as_mut() else { return };
+    for (name, value) in [
+        ("receipt_manifest", receipts.cost.manifest_micros),
+        ("receipt_material", receipts.cost.material_micros),
+        ("receipt_parse", receipts.cost.receipt_parsing_micros),
+        ("receipt_identity", receipts.cost.receipt_identity_micros),
+        (
+            "receipt_authentication",
+            receipts.cost.receipt_authentication_micros,
+        ),
+        (
+            "receipt_catalogue",
+            receipts.cost.catalogue_projection_micros,
+        ),
+    ] {
+        *state.phases.entry(name).or_default() += micros(value);
+    }
+    state.work.receipt_accepted += receipts.accepted;
+    state.work.receipt_rejected += receipts.rejected;
+    state.work.receipt_mode = true;
+}
+
+fn record_config_load() {
+    if let Some(slot) = TIMING_STATE.get()
+        && let Some(state) = slot
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .as_mut()
+    {
+        state.work.config_loads += 1;
+    }
+}
+
+fn build_graph<'a>(tasks: impl IntoIterator<Item = &'a aplan_core::Task>) -> Graph<'a> {
+    Graph::new(tasks)
+}
+
+fn finish_timings() {
+    let Some(slot) = TIMING_STATE.get() else {
+        return;
+    };
+    let Some(state) = slot
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+        .take()
+    else {
+        return;
+    };
+    let milliseconds = |duration: std::time::Duration| duration.as_secs_f64() * 1_000.0;
+    let phase = |name| state.phases.get(name).copied().unwrap_or_default();
+    let trace_now = aplan_core::trace_document_work();
+    let trace_start = state.trace_document_work_at_start;
+    let receipt = if state.work.receipt_mode {
+        format!(
+            " receipt_manifest_ms={:.3} receipt_material_ms={:.3} receipt_parse_ms={:.3} \
+             receipt_identity_ms={:.3} receipt_authentication_ms={:.3} \
+             receipt_catalogue_ms={:.3} receipt_accepted={} receipt_rejected={} \
+             receipt_test_provider_spawns=0",
+            milliseconds(phase("receipt_manifest")),
+            milliseconds(phase("receipt_material")),
+            milliseconds(phase("receipt_parse")),
+            milliseconds(phase("receipt_identity")),
+            milliseconds(phase("receipt_authentication")),
+            milliseconds(phase("receipt_catalogue")),
+            state.work.receipt_accepted,
+            state.work.receipt_rejected,
+        )
+    } else {
+        String::new()
+    };
+    errln!(
+        "aplan: timings total_ms={:.3} config_ms={:.3} load_ms={:.3} validate_ms={:.3} \
+         project_ms={:.3} render_ms={:.3} config_loads={} plan_loads={} candidates={} readable={} \
+         bytes_read={} tasks_parsed={} retained_files={} retained_bytes={} graph_builds={} \
+         cache_hits={} cache_reused={} cache_parsed={} cache_bytes_read={} cache_bytes_written={} \
+         trace_reads={} trace_bytes_read={} markdown_parses={} structured_parses={}{}",
+        milliseconds(state.started.elapsed()),
+        milliseconds(phase("config")),
+        milliseconds(phase("load")),
+        milliseconds(phase("validate")),
+        milliseconds(phase("project")),
+        milliseconds(phase("render")),
+        state.work.config_loads,
+        state.work.plan_loads,
+        state.work.candidate_files,
+        state.work.readable_files,
+        state.work.bytes_read,
+        state.work.task_files_parsed,
+        state.work.retained_files,
+        state.work.retained_bytes,
+        aplan_core::graph_constructions().saturating_sub(state.graph_constructions_at_start),
+        state.work.cache_generation_hits,
+        state.work.cache_artifacts_reused,
+        state.work.cache_artifacts_parsed,
+        state.work.cache_bytes_read,
+        state.work.cache_bytes_written,
+        trace_now.reads.saturating_sub(trace_start.reads),
+        trace_now.bytes_read.saturating_sub(trace_start.bytes_read),
+        trace_now
+            .markdown_parses
+            .saturating_sub(trace_start.markdown_parses),
+        trace_now
+            .structured_parses
+            .saturating_sub(trace_start.structured_parses),
+        receipt,
+    );
+}
 
 /// The default plan directory when neither `--root` nor `.aplan.yml`'s `root` key
 /// sets one. Namespaced and visible (ADR-0010): the plan is durable, hand-edited,
@@ -90,6 +342,28 @@ impl std::fmt::Display for Bug {
 
 impl std::error::Error for Bug {}
 
+/// One exact, private fault used by the executable exit-code census (`A1-726`).
+///
+/// Internal exit `3` is reachable only when aplan detects its own broken
+/// invariant. Keeping one accepted-input defect unfixed so an integration test
+/// can reach that branch turns the gate into an incentive to retain a bug. An
+/// environment token plus the existing integration-harness ledger marker is
+/// narrower than a hidden command or flag: it adds no CLI surface, the near
+/// misses and a token outside the harness are ordinary runs, and the injected
+/// error still crosses the real renderer and classifier. The deliberately
+/// conspicuous names and value are private test protocol, not configuration.
+fn internal_exit_test_fault() -> Option<anyhow::Error> {
+    const NAME: &str = "APLAN_TEST_ONLY_FAULT";
+    const VALUE: &str = "internal-exit-census-v1";
+    const HARNESS_RECORD: &str = "APLAN_TEST_INVOCATIONS";
+
+    let under_harness = std::env::var_os(HARNESS_RECORD)
+        .filter(|path| !path.is_empty())
+        .is_some_and(|path| std::path::Path::new(&path).is_file());
+    (under_harness && std::env::var_os(NAME).as_deref() == Some(std::ffi::OsStr::new(VALUE)))
+        .then(|| anyhow::anyhow!("deliberate internal-exit test fault").context(Bug))
+}
+
 #[derive(Parser, Debug)]
 #[command(name = "aplan", version, about, long_about = None)]
 struct Cli {
@@ -115,6 +389,23 @@ struct Cli {
     )]
     color: String,
 
+    /// When to show live operation progress.
+    ///
+    /// `auto`, the default, writes progress only for a human-format command
+    /// when both standard streams are terminals and the conventional `CI`
+    /// environment signal is not active. `always` explicitly writes progress
+    /// to stderr, including beside structured stdout. `never` writes no stream
+    /// progress. The TUI owns the same state in-frame, so this flag never adds
+    /// output outside its terminal frame.
+    #[arg(
+        long,
+        global = true,
+        value_name = "WHEN",
+        default_value = "auto",
+        value_parser = clap::builder::PossibleValuesParser::new(aplan_output::progress::ProgressChoice::NAMES),
+    )]
+    progress: String,
+
     // `A1-155`, pre-public adoption evidence. The pilot stays in this comment
     // (`A1-044`).
     /// Read exactly this configuration file, and discover none.
@@ -122,13 +413,19 @@ struct Cli {
     /// `.aplan.yml` names the programs a `test` or `url` citation runs, and it is
     /// normally discovered by walking up from the plan root or the repository --
     /// which is right for your own repository and wrong when you are reviewing
-    /// somebody else's checkout with a trusted binary. Naming a file here means
-    /// nothing in the tree under review is consulted, and a file that is missing
-    /// is an error rather than a quiet return to discovery.
+    /// somebody else's checkout with a trusted binary. For a command that reads
+    /// configuration, naming a file here means nothing in the tree under review
+    /// is consulted, and a missing file is an error rather than a quiet return
+    /// to discovery. Commands that need no configuration (`schema`, `facts`,
+    /// `explain`, and `init`) do not open the selected file.
     ///
-    /// Relative values inside it (`root`, `traces_root`, a runner's `dir`)
-    /// resolve against *its* directory, so a trusted policy can live outside the
-    /// tree it judges.
+    /// `root` and `traces_root` inside it resolve against *its* directory, so a
+    /// trusted policy can live outside the tree it judges. A test runner's `dir`
+    /// instead resolves against the selected repository root: runner commands
+    /// inspect the reviewed tree, never siblings of the trusted policy file.
+    /// That policy directory does not become the plan's repository: `APLAN034`
+    /// judges traces against the repository containing the plan, and findings
+    /// about configuration name this selected file.
     #[arg(long, global = true, value_name = "FILE", conflicts_with = "no_config")]
     config: Option<PathBuf>,
 
@@ -151,21 +448,308 @@ struct Cli {
     #[arg(long, global = true)]
     no_config: bool,
 
+    /// Report phase timings and deterministic read-work counters on stderr.
+    ///
+    /// This never changes stdout, the selected inputs or the command's exit
+    /// status. Paths, task contents and configured-command output are omitted.
+    #[arg(long, global = true)]
+    timings: bool,
+
+    /// Control the disposable per-user parsed-plan cache.
+    ///
+    /// `auto` validates current source bytes and reuses matching parsed
+    /// artifacts. `off` reads and writes no cache. `refresh` ignores an old
+    /// generation and publishes the newly parsed one.
+    #[arg(
+        long,
+        global = true,
+        value_name = "MODE",
+        default_value = "auto",
+        value_parser = clap::builder::PossibleValuesParser::new(aplan_app::CacheMode::NAMES),
+    )]
+    cache: String,
+
     #[command(subcommand)]
     command: Command,
 }
 
+#[derive(Debug, Clone, Copy, ValueEnum)]
+enum TuiTheme {
+    Dark,
+    Light,
+    LowColor,
+    Monochrome,
+}
+
+#[derive(Debug, Default, clap::Args)]
+struct TuiArgs {
+    /// Select a built-in theme without guessing the terminal background.
+    ///
+    /// `NO_COLOR` takes precedence and a terminal reporting fewer than 256
+    /// colors safely maps dark or light to the background-neutral low-color
+    /// theme.
+    #[arg(long, value_enum)]
+    theme: Option<TuiTheme>,
+
+    /// Use ASCII presentation tokens and borders from the first frame.
+    #[arg(long)]
+    ascii: bool,
+
+    /// Keep progress state visible without animating its activity marker.
+    #[arg(long)]
+    reduced_motion: bool,
+}
+
+#[derive(Debug, Default, clap::Args)]
+struct CapturePromotionArgs {
+    /// Default task phase to use if this capture is promoted later.
+    #[arg(long = "promotion-phase")]
+    phase: Option<u32>,
+    /// Default cut to use if this capture is promoted later.
+    #[arg(long = "promotion-cut")]
+    cut: Option<String>,
+    /// Default task effort to use if this capture is promoted later.
+    #[arg(long = "promotion-effort")]
+    effort: Option<f64>,
+    /// Default task owner to use if this capture is promoted later.
+    #[arg(long = "promotion-owner")]
+    owner: Option<String>,
+    /// Default task path to use if this capture is promoted later. Repeatable.
+    #[arg(long = "promotion-path")]
+    paths: Vec<String>,
+    /// Default task tag to use if this capture is promoted later. Repeatable.
+    #[arg(long = "promotion-tag")]
+    tags: Vec<String>,
+}
+
+impl CapturePromotionArgs {
+    fn value(&self) -> Option<aplan_core::capture::PromotionDefaults> {
+        let value = aplan_core::capture::PromotionDefaults {
+            phase: self.phase,
+            cut: self.cut.clone(),
+            effort_days: self.effort,
+            owner: self.owner.clone(),
+            paths: self.paths.clone(),
+            tags: self.tags.clone(),
+        };
+        (!value.is_empty()).then_some(value)
+    }
+
+    fn is_empty(&self) -> bool {
+        self.value().is_none()
+    }
+}
+
+#[derive(Debug, clap::Args)]
+struct CaptureArgs {
+    /// Short non-vacuous intake title. Use `--` before a title beginning `-`.
+    title: String,
+    /// Built-in or repository-configured capture kind.
+    #[arg(long)]
+    kind: Option<String>,
+    /// Intake label. Repeatable; values are sorted and deduplicated.
+    #[arg(long)]
+    label: Vec<String>,
+    /// Repository profile whose effective defaults are snapshotted.
+    #[arg(long)]
+    profile: Option<String>,
+    /// Retry identity as `namespace:opaque-key`.
+    #[arg(long)]
+    source: Option<String>,
+    /// Literal capture body.
+    #[arg(long, conflicts_with_all = ["body_file", "edit"])]
+    body: Option<String>,
+    /// Read the capture body from a UTF-8 file, or `-` for standard input.
+    #[arg(long, value_name = "FILE", conflicts_with_all = ["body", "edit"])]
+    body_file: Option<String>,
+    /// Open `$VISUAL`, then `$EDITOR`, directly on a safe temporary body file.
+    #[arg(long, conflicts_with_all = ["body", "body_file"])]
+    edit: bool,
+    /// Defer the default inbox view until this UTC whole-second instant.
+    #[arg(long)]
+    revisit_at: Option<String>,
+    /// Preview the exact record and file without publishing it.
+    #[arg(long)]
+    dry_run: bool,
+    /// Output format: human, json, or agent.
+    #[arg(long, default_value = "human")]
+    format: String,
+    #[command(flatten)]
+    promotion: CapturePromotionArgs,
+}
+
+#[derive(Debug, clap::Args)]
+struct InboxArgs {
+    #[command(subcommand)]
+    command: Option<InboxCommand>,
+    /// Capture kind to include.
+    #[arg(long)]
+    kind: Option<String>,
+    /// Lifecycle state to include: open, promoted, discarded, or all.
+    #[arg(long, default_value = "open")]
+    state: String,
+    /// Intake label to include.
+    #[arg(long)]
+    label: Option<String>,
+    /// Revisit eligibility: actionable, deferred, or all.
+    #[arg(long, default_value = "actionable")]
+    revisit: String,
+    /// Bounded case-insensitive title/body search.
+    #[arg(long)]
+    search: Option<String>,
+    /// Maximum rows, between 1 and 100.
+    #[arg(long, default_value_t = 50)]
+    limit: usize,
+    /// Output format: human or json; `promote` also accepts agent.
+    #[arg(long, global = true, default_value = "human")]
+    format: String,
+}
+
+#[derive(Debug, Subcommand)]
+enum InboxCommand {
+    /// Show one complete capture, including its focused source key.
+    Show {
+        /// Full id or unambiguous human prefix.
+        id: String,
+    },
+    /// Amend mutable fields on one open capture.
+    Amend(Box<CaptureAmendArgs>),
+    /// Retain one open capture as discarded.
+    Discard(CaptureDiscardArgs),
+    /// Restore one discarded capture to open, clearing its disposition.
+    Restore(CaptureRestoreArgs),
+    /// Create one ordinary validated task and retain the capture as its origin.
+    Promote(CapturePromoteArgs),
+}
+
+#[derive(Debug, clap::Args)]
+struct CapturePromoteArgs {
+    /// Full id or unambiguous human prefix.
+    id: String,
+    /// Explicit task id. Omit to use the plan's configured id strategy.
+    #[arg(long = "task-id")]
+    task_id: Option<String>,
+    /// Task phase. Overrides the capture's snapshotted default.
+    #[arg(long)]
+    phase: Option<u32>,
+    /// Cut id or label. Overrides the capture's snapshotted default.
+    #[arg(long)]
+    cut: Option<String>,
+    /// Positive task effort in days. Overrides the snapshotted default.
+    #[arg(long)]
+    effort: Option<f64>,
+    /// Durable task owner. Overrides the snapshotted default.
+    #[arg(long)]
+    owner: Option<String>,
+    /// Task path. Repeatable; any occurrence replaces snapshotted paths.
+    #[arg(long = "path", conflicts_with = "clear_paths")]
+    paths: Vec<String>,
+    /// Explicitly clear snapshotted task paths.
+    #[arg(long)]
+    clear_paths: bool,
+    /// Task tag. Repeatable; any occurrence replaces snapshotted tags.
+    #[arg(long = "tag", conflicts_with = "clear_tags")]
+    tags: Vec<String>,
+    /// Explicitly clear snapshotted task tags.
+    #[arg(long)]
+    clear_tags: bool,
+    /// Optional reason retained on the promoted capture.
+    #[arg(long)]
+    reason: Option<String>,
+    /// Preview the task, cut and capture writes without publishing them.
+    #[arg(long)]
+    dry_run: bool,
+    /// Whether a warning blocks this write, as `check` and `verify` take it.
+    #[command(flatten)]
+    verdict: VerdictFlags,
+}
+
+// These booleans are independent command-line switches. Combining clear,
+// editor and dry-run intent into one enum would make valid flag combinations
+// mutually exclusive merely to shrink clap's typed input record.
+#[allow(clippy::struct_excessive_bools)]
+#[derive(Debug, clap::Args)]
+struct CaptureAmendArgs {
+    /// Full id or unambiguous human prefix.
+    id: String,
+    /// Replace the capture title.
+    #[arg(long)]
+    title: Option<String>,
+    /// Replace the organizational capture kind.
+    #[arg(long)]
+    kind: Option<String>,
+    /// Replace the body with this literal text.
+    #[arg(long, conflicts_with_all = ["body_file", "edit", "clear_body"])]
+    body: Option<String>,
+    /// Replace the body from a UTF-8 file, or `-` for standard input.
+    #[arg(long, value_name = "FILE", conflicts_with_all = ["body", "edit", "clear_body"])]
+    body_file: Option<String>,
+    /// Edit the current body through `$VISUAL`, then `$EDITOR`.
+    #[arg(long, conflicts_with_all = ["body", "body_file", "clear_body"])]
+    edit: bool,
+    /// Remove the optional body.
+    #[arg(long, conflicts_with_all = ["body", "body_file", "edit"])]
+    clear_body: bool,
+    /// Replace all labels. Repeat to retain several; `--clear-labels` removes all.
+    #[arg(long, conflicts_with = "clear_labels")]
+    label: Vec<String>,
+    /// Remove every intake label.
+    #[arg(long)]
+    clear_labels: bool,
+    /// Replace the deferred-review instant with this UTC whole-second instant.
+    #[arg(long, conflicts_with = "clear_revisit")]
+    revisit_at: Option<String>,
+    /// Make the capture immediately eligible for the default inbox.
+    #[arg(long)]
+    clear_revisit: bool,
+    /// Clear every snapshotted promotion default.
+    #[arg(long)]
+    clear_promotion: bool,
+    /// Preview the exact replacement without publishing it.
+    #[arg(long)]
+    dry_run: bool,
+    #[command(flatten)]
+    promotion: CapturePromotionArgs,
+}
+
+#[derive(Debug, clap::Args)]
+struct CaptureDiscardArgs {
+    /// Full id or unambiguous human prefix.
+    id: String,
+    /// Optional retained explanation for the disposition.
+    #[arg(long)]
+    reason: Option<String>,
+    /// Preview the discarded record without publishing it.
+    #[arg(long)]
+    dry_run: bool,
+}
+
+#[derive(Debug, clap::Args)]
+struct CaptureRestoreArgs {
+    /// Full id or unambiguous human prefix.
+    id: String,
+    /// Preview the restored record without publishing it.
+    #[arg(long)]
+    dry_run: bool,
+}
+
 /// **Changing what an existing command *does* earns a `Behaviour`** (`A1-142`).
 ///
-/// Adding a subcommand or a flag is already visible: `aplan facts` lists the
-/// command, and a build without it fails loudly. Changing what one of these
-/// *answers* is not. `--require ready` passes on the build that went silent at a
+/// Adding a top-level command or a flag is already visible: `aplan facts` lists
+/// the command, and a build without it fails loudly. Nested command additions
+/// need a `Behaviour` because the command facts currently stop at this enum.
+/// Changing what one of these *answers* is is likewise not visible.
+/// `--require ready` passes on the build that went silent at a
 /// cut boundary and on the build that names it; `--require add` passes on the
 /// build that writes a plan `check` would reject and on the build that refuses
 /// it. Both shipped unnamed, and `A1-142`'s audit found them by asking this
 /// question here, which is why the reminder is here.
 #[derive(Subcommand, Debug)]
 enum Command {
+    /// Capture a thought quickly without creating a task or graph node.
+    Capture(CaptureArgs),
+    /// Review, amend, discard or restore versioned capture intake.
+    Inbox(InboxArgs),
     /// Validate the plan. Fails on any error. Reads `.aplan.yml` if present;
     /// flags below override it.
     Check(CheckArgs),
@@ -174,6 +758,17 @@ enum Command {
     /// and touch the task's `paths`, a `file` must exist at the cited rev, a
     /// `test` must be one the configured runner lists.
     Verify(VerifyArgs),
+    /// Inspect the exact evidence names configured test runners report.
+    ///
+    /// This executes each trusted `test.list` command once. It never runs a
+    /// test, and a task file cannot choose the command.
+    Test {
+        #[command(subcommand)]
+        command: TestCommand,
+        /// Output format for `test list`: human, json, or agent.
+        #[arg(long, global = true)]
+        format: Option<String>,
+    },
     /// List tasks whose blockers are all `done`, best first.
     Ready(ReadyArgs),
     /// Parked tasks whose `revisit_at` has arrived: a hand-off to a scheduler.
@@ -212,11 +807,23 @@ enum Command {
     /// `breaking` claim on one task therefore raises the cut that holds it and
     /// the release that closes the cut.
     Version(VersionArgs),
-    /// Print the dependency graph as Mermaid, whole or scoped.
+    /// Explore the dependency graph as layered terminal text, or export it.
     Graph(GraphArgs),
+    /// Open the interactive terminal interface.
+    ///
+    /// Both stdin and stdout must be terminals. A build made with
+    /// `--no-default-features` keeps this command as an enablement stub; use
+    /// `aplan facts --require build.tui` to assert that the interface is
+    /// compiled in before launching it from automation.
+    Tui(TuiArgs),
     /// Show one task whole: its fields, what it waits on and releases, and the
     /// findings currently attached to it.
     Show(ShowArgs),
+    /// Explain one name from an explicit vocabulary.
+    ///
+    /// The vocabulary is required (`rule`, not an inferred kind), so a task,
+    /// tag and rule may share a name without precedence changing its meaning.
+    Explain(ExplainArgs),
     // The announced default change is `A1-235`, and `A1-236` is the removal half
     // of the runway. The number stays here rather than in the help: help is read
     // beside the consumer's own `docs/adr/`, where this project's ids resolve to
@@ -482,16 +1089,16 @@ enum Command {
     /// is a release: a release holds cuts rather than work, so a cut's task list
     /// is not where its membership lives.
     CheckDocs {
-        /// The documents to read. Directories are not walked: name the files, so
-        /// what is gated is a decision rather than whatever happened to be on
-        /// disk.
-        #[arg(required = true)]
+        /// The documents to read. These override `docs.paths` for a one-off
+        /// check. With none, read the config declaration, including every
+        /// `docs.membership[].doc`. Directories are not walked: use a
+        /// `docs.paths` glob when a declared set is meant.
         paths: Vec<std::path::PathBuf>,
         /// Output format: human (one line per finding) or json.
         #[arg(long, default_value = "human")]
         format: String,
     },
-    /// Roll the plan up by phase: tasks, effort, and how many are ready.
+    /// Roll the plan up by phase, or by `summary.group_by`: tasks, effort, and readiness.
     ///
     /// A plan with an unreadable task file is refused rather than rolled up: this
     /// document is a rollup and not a report, so carrying diagnostics would make
@@ -502,6 +1109,11 @@ enum Command {
         /// Output format: human (a table) or json.
         #[arg(long, default_value = "human")]
         format: String,
+        /// Read the committed plan at this Git revision. Under config
+        /// discovery, reads the `.aplan.yml` committed beside it too. The
+        /// report stays on stdout; stderr names the resolved commit.
+        #[arg(long, value_name = "REV")]
+        at: Option<String>,
         /// Narrow to a subset of the plan. Selection changes what is shown,
         /// never what is computed: a task whose blocker is outside the subset
         /// is still blocked.
@@ -522,13 +1134,45 @@ enum Command {
         #[command(flatten)]
         verdict: VerdictFlags,
     },
+    /// Park existing todo work as one validated change. Records the reason in
+    /// every task body; elapsed revisit time never authorizes an automatic
+    /// unpark.
+    Park {
+        /// Task or milestone ids to park. Every target changes, or none do.
+        #[arg(required = true, num_args = 1..)]
+        ids: Vec<String>,
+        /// Why this work is parked, recorded under `## Parked` in each body.
+        #[arg(long)]
+        reason: String,
+        /// RFC 3339 instant at which a human should review the parking reason.
+        #[arg(long, value_name = "RFC3339")]
+        revisit_at: Option<String>,
+        /// Classification tag to add while parking. Repeatable.
+        #[arg(long = "tag")]
+        tags: Vec<String>,
+        /// Whether a warning blocks this write, as `check` and `verify` take it.
+        #[command(flatten)]
+        verdict: VerdictFlags,
+    },
+    /// Return parked work to `todo` as one validated change. Clears
+    /// `revisit_at`, preserves body history and tags, and never bypasses graph
+    /// blockers.
+    Unpark {
+        /// Task or milestone ids to unpark. Every target changes, or none do.
+        #[arg(required = true, num_args = 1..)]
+        ids: Vec<String>,
+        /// Whether a warning blocks this write, as `check` and `verify` take it.
+        #[command(flatten)]
+        verdict: VerdictFlags,
+    },
     /// Record who is working on a task, so two actors sharing a repository can
-    /// see it. Refuses to take a task somebody else holds unless `--from` names
-    /// them, and refuses to overwrite a claim made between reading and writing.
+    /// see it. Linked worktrees contend on one private record in Git's common
+    /// directory. Refuses to take a task somebody else holds unless `--from`
+    /// names them.
     Claim {
         /// The task to claim.
         id: String,
-        /// The name to record. Otherwise `APLAN_OWNER`, then
+        /// The name to record. Otherwise `APLAN_OWNER`, per-user `me`,
         /// `git config user.name`, then the operating system's user. Never read
         /// from `.aplan.yml`: several actors share one repository, so a name
         /// recorded there would be the wrong one.
@@ -538,22 +1182,17 @@ enum Command {
         /// so a takeover names both sides and the diff shows what it displaced.
         #[arg(long, value_name = "HOLDER")]
         from: Option<String>,
-        /// Whether a warning blocks this write, as `check` and `verify` take it.
-        #[command(flatten)]
-        verdict: VerdictFlags,
     },
-    /// Drop a claim, naming whose it was. Anybody may run it, so a claim nobody
-    /// released can always be cleared; the record of who held it is in the diff.
+    /// Drop a local claim, naming its holder, time and origin. Anybody may run
+    /// it, including for an id absent from this worktree, so an orphaned claim
+    /// always has an explicit recovery path.
     Release {
         /// The task to release.
         id: String,
-        /// Whether a warning blocks this write, as `check` and `verify` take it.
-        #[command(flatten)]
-        verdict: VerdictFlags,
     },
-    /// Record that work on a task has started. The claim is checked against the
-    /// repository afterwards, so this is a statement `verify` can contradict
-    /// rather than one it takes on trust.
+    /// Record that work on a task has started. The status is checked against
+    /// the repository afterwards, so this is a statement `verify` can
+    /// contradict rather than one it takes on trust.
     Start {
         /// The task to start.
         id: String,
@@ -595,6 +1234,15 @@ enum Command {
         #[command(flatten)]
         verdict: VerdictFlags,
     },
+    /// Change a task's stable id and every structured reference to it as one
+    /// guarded edit.
+    ///
+    /// Free prose is reported, never rewritten: the same spelling can describe
+    /// another branch's task. Git history, published links, external documents
+    /// and other repositories also keep the old id and must be adjudicated by a
+    /// person. A terminal task requires `--allow-terminal` because its id may
+    /// already be a durable citation.
+    Rekey(RekeyArgs),
     /// Emit the plan's tasks as data, so a rollup this tool does not have is a
     /// `jq` line rather than a feature request. Carries what a rollup needs
     /// resolved: the cut a task belongs to, and whether it is ready.
@@ -656,8 +1304,8 @@ enum Command {
         /// Repository to read `HEAD` from (default: the current directory).
         #[arg(long, default_value = ".")]
         repo: PathBuf,
-        /// Re-stamp a `done` task's `traces` fingerprints (`APLAN018`), after
-        /// re-reviewing a section that drifted. Does not change status or evidence.
+        /// Re-stamp a `done` task's trace and evidence fingerprints after
+        /// re-reviewing what drifted. Does not change status or citations.
         #[arg(long, conflicts_with = "evidence")]
         restamp: bool,
         /// Record the evidence without resolving it against the repository.
@@ -667,6 +1315,11 @@ enum Command {
         /// closure that skipped its checks must not read like one that passed.
         #[arg(long)]
         no_resolve: bool,
+        /// Run exactly this proposed closure's configured test citations and
+        /// require each to pass at L3 before writing. Starts trusted commands;
+        /// off by default and unavailable through MCP.
+        #[arg(long, conflicts_with_all = ["no_resolve", "restamp"])]
+        execute: bool,
         /// Whether a warning blocks this write, as `check` and `verify` take it.
         #[command(flatten)]
         verdict: VerdictFlags,
@@ -705,15 +1358,20 @@ enum Command {
     // The reasoning is ADR-0020's. The number stays in this comment: help is read
     // beside the consumer's own `docs/adr/`, where ours do not resolve (`A1-044`).
     Supersede(SupersedeArgs),
-    /// Add or remove a dependency edge: `dep add A --after B` means A comes after
-    /// B, and `dep rm` takes it back.
+    /// Add or remove dependency edges: repeat `--after`, or use `dep apply` for
+    /// mixed multi-target additions and removals against one final graph.
     ///
     /// `blocked_by` is the only per-task ordering the model has, and it was
     /// written at creation and never again, so re-sequencing work meant editing
     /// frontmatter by hand. Whether the result is legal is decided by the same
     /// post-state check every other mutation runs.
-    #[command(subcommand)]
-    Dep(DepCommand),
+    Dep {
+        #[command(subcommand)]
+        command: DepCommand,
+        /// Output format: human, json, or agent.
+        #[arg(long, global = true, default_value = "human")]
+        format: String,
+    },
     /// Add, remove or rename a tag: `tag add A cli`, `tag rm A cli`, and `tag
     /// rename epic-a epic-b` across every task that carries it.
     ///
@@ -732,6 +1390,19 @@ enum Command {
     /// Import proposals from another tool's format into `aplan` tasks. Lossy by
     /// design, and says so: every field the task model cannot hold is reported.
     Import(ImportArgs),
+    /// Preview or apply one explicit blueprint file as one guarded graph.
+    ///
+    /// V1 deliberately has no discovery, `list`, or `show`: the selected file
+    /// is the inspection surface. Its path and SHA-256 digest are reported in
+    /// every output format, and a dry run labels IDs as predictions for the
+    /// reported plan snapshot.
+    Blueprint {
+        #[command(subcommand)]
+        command: BlueprintCommand,
+        /// Output format: human, json, or agent.
+        #[arg(long, global = true, default_value = "human")]
+        format: String,
+    },
     /// Scaffold a new task file: the next id in this plan's own convention, the
     /// fields `check` needs, and a body to fill in. It fills in nothing it cannot
     /// know, so a new task carries no estimate and no evidence unless you give
@@ -759,8 +1430,8 @@ enum Command {
         /// a rule code (`APLAN024`), a command (`tasks`), an output format
         /// (`sarif`), an evidence kind (`commit`), a named behaviour
         /// (`traces.table_rows`), which is how a change that widens an existing
-        /// rule is asserted, or an MCP tool (`aplan_verify`), so the agent
-        /// surface is assertable and not only the CLI. Repeatable. With any
+        /// rule is asserted, an MCP tool (`aplan_verify`), or an enabled build
+        /// capability (`build.tui`). Repeatable. With any
         /// `--require`, the JSON is replaced by a one-line verdict, which is
         /// what a container build wants in its log.
         #[arg(long, value_name = "CAPABILITY")]
@@ -782,6 +1453,233 @@ enum Command {
     },
     /// Print the JSON Schema derived from the Rust types.
     Schema,
+}
+
+/// Native source of truthful progress for one command invocation.
+///
+/// This match is the command/mode census: adding an enum member fails to
+/// compile until its work and output ownership receive a disposition. Formats
+/// are read from the parsed mode rather than guessed from whether stdout is a
+/// terminal, so structured bytes stay structured even at an attended shell.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ProgressSource {
+    PlanLoad,
+    PlanAndRepository,
+    PlanAndProviders,
+    ProvidersOnly,
+    Inapplicable,
+    InteractiveFrame,
+    LongLivedProtocol,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct CommandProgressProfile {
+    surface: aplan_output::progress::ProgressSurface,
+    source: ProgressSource,
+}
+
+fn progress_surface_for_format(format: &str) -> aplan_output::progress::ProgressSurface {
+    if format
+        .parse::<aplan_output::Format>()
+        .is_ok_and(aplan_output::Format::supports_terminal_styling)
+    {
+        aplan_output::progress::ProgressSurface::Human
+    } else {
+        aplan_output::progress::ProgressSurface::Machine
+    }
+}
+
+fn progress_profile(format: &str, source: ProgressSource) -> CommandProgressProfile {
+    CommandProgressProfile {
+        surface: progress_surface_for_format(format),
+        source,
+    }
+}
+
+fn command_progress_profile(command: &Command) -> CommandProgressProfile {
+    use aplan_output::progress::ProgressSurface::{Human, Interactive, Machine};
+    match command {
+        Command::Capture(args) => progress_profile(&args.format, ProgressSource::PlanLoad),
+        Command::Inbox(args) => progress_profile(&args.format, ProgressSource::PlanLoad),
+        Command::Check(args) => progress_profile(&args.format, ProgressSource::PlanLoad),
+        Command::Verify(args) => progress_profile(&args.format, ProgressSource::PlanAndProviders),
+        Command::Test { command, format } => match command {
+            TestCommand::List { .. } => progress_profile(
+                format
+                    .as_deref()
+                    .unwrap_or(aplan_output::Format::Human.as_str()),
+                ProgressSource::ProvidersOnly,
+            ),
+            TestCommand::Receipt(_) => CommandProgressProfile {
+                surface: Machine,
+                source: ProgressSource::ProvidersOnly,
+            },
+        },
+        Command::Ready(args) => progress_profile(&args.format, ProgressSource::PlanLoad),
+        Command::Due(args) => progress_profile(&args.format, ProgressSource::PlanLoad),
+        Command::Why { format, .. }
+        | Command::Deprecations { format }
+        | Command::Vacuity { format, .. }
+        | Command::Tasks { format, .. }
+        | Command::CheckDocs { format, .. }
+        | Command::Summary { format, .. }
+        | Command::Blueprint { format, .. }
+        | Command::Dep { format, .. } => progress_profile(format, ProgressSource::PlanLoad),
+        Command::Version(args) => progress_profile(
+            &args.format,
+            if args.id.is_some() {
+                ProgressSource::PlanLoad
+            } else {
+                ProgressSource::PlanAndProviders
+            },
+        ),
+        Command::Graph(args) => progress_profile(graph_format(args), ProgressSource::PlanLoad),
+        Command::Tui(_) => CommandProgressProfile {
+            surface: Interactive,
+            source: ProgressSource::InteractiveFrame,
+        },
+        Command::Show(args) => {
+            if args.evidence.refresh_evidence {
+                progress_profile(&args.format, ProgressSource::PlanAndProviders)
+            } else if args.evidence.no_resolve {
+                progress_profile(&args.format, ProgressSource::PlanLoad)
+            } else {
+                progress_profile(&args.format, ProgressSource::PlanAndRepository)
+            }
+        }
+        Command::Explain(_) | Command::Init { .. } => CommandProgressProfile {
+            surface: Human,
+            source: ProgressSource::Inapplicable,
+        },
+        Command::Paths { format, .. } | Command::Stale { format, .. } => {
+            progress_profile(format, ProgressSource::PlanAndRepository)
+        }
+        Command::Tree { .. }
+        | Command::Drop { .. }
+        | Command::Park { .. }
+        | Command::Unpark { .. }
+        | Command::Mv { .. }
+        | Command::Claim { .. }
+        | Command::Release { .. }
+        | Command::Start { .. }
+        | Command::Stop { .. }
+        | Command::Add(_)
+        | Command::Supersede(_)
+        | Command::Tag(_)
+        | Command::Import(_) => CommandProgressProfile {
+            surface: Human,
+            source: ProgressSource::PlanLoad,
+        },
+        Command::Close { .. } | Command::Amend(_) => CommandProgressProfile {
+            surface: Human,
+            source: ProgressSource::PlanAndProviders,
+        },
+        Command::CriticalPath(args) => progress_profile(&args.format, ProgressSource::PlanLoad),
+        Command::Roadmap(args) => progress_profile(&args.format, ProgressSource::PlanLoad),
+        Command::Rekey(args) => progress_profile(&args.format, ProgressSource::PlanLoad),
+        Command::Attest { .. } => CommandProgressProfile {
+            surface: Machine,
+            source: ProgressSource::PlanAndProviders,
+        },
+        Command::ExportRoadmapJson { .. } | Command::Export(_) | Command::ExportAgentsMd { .. } => {
+            CommandProgressProfile {
+                surface: Machine,
+                source: ProgressSource::PlanLoad,
+            }
+        }
+        Command::Mcp => CommandProgressProfile {
+            surface: Machine,
+            source: ProgressSource::LongLivedProtocol,
+        },
+        Command::Facts { .. } | Command::Schema => CommandProgressProfile {
+            surface: Machine,
+            source: ProgressSource::Inapplicable,
+        },
+    }
+}
+
+fn progress_environment() -> aplan_output::progress::ProgressEnvironment {
+    aplan_output::progress::ProgressEnvironment {
+        streams: aplan_output::progress::ProgressStreams::from_terminals(
+            std::io::IsTerminal::is_terminal(&std::io::stdout()),
+            std::io::IsTerminal::is_terminal(&std::io::stderr()),
+        ),
+        ci: aplan_output::progress::ci_signal(std::env::var_os("CI").as_deref()),
+        no_color: std::env::var_os("NO_COLOR").is_some_and(|value| !value.is_empty()),
+        static_only: std::env::var_os("TERM").is_some_and(|term| term == "dumb"),
+        // Interactive reduced motion remains an explicit TUI appearance
+        // setting rather than an undocumented process-global environment
+        // contract.
+    }
+}
+
+fn progress_color_choice(
+    presentation: aplan_output::progress::ProgressPresentation,
+    surface: aplan_output::progress::ProgressSurface,
+    choice: aplan_output::color::ColorChoice,
+) -> aplan_output::progress::ProgressPresentation {
+    use aplan_output::progress::ProgressPresentation;
+    match presentation {
+        ProgressPresentation::Stderr { animated, color } => ProgressPresentation::Stderr {
+            animated,
+            // Machine output remains unstyled at every setting. For a human
+            // command, the explicit global color choice reaches progress just
+            // as it reaches diagnostics; Auto keeps the environment decision.
+            color: matches!(surface, aplan_output::progress::ProgressSurface::Human)
+                && match choice {
+                    aplan_output::color::ColorChoice::Auto => color,
+                    aplan_output::color::ColorChoice::Always => true,
+                    aplan_output::color::ColorChoice::Never => false,
+                },
+        },
+        other => other,
+    }
+}
+
+#[derive(Subcommand, Debug)]
+enum TestCommand {
+    /// List exact `test:` evidence names, optionally searching them.
+    List {
+        /// Case-insensitive substring to search for. Omit it to list all names.
+        query: Option<String>,
+    },
+    /// Execute one complete provider namespace and export a portable receipt.
+    #[command(
+        override_usage = "aplan test receipt <RUNNER> --producer-repository <REPOSITORY>\n       --producer-workflow <WORKFLOW> --producer-run-id <RUN_ID>\n       --producer-event <EVENT> --producer-privilege <PRIVILEGE> [OPTIONS]"
+    )]
+    Receipt(TestReceiptArgs),
+}
+
+#[derive(Debug, Clone, Copy, ValueEnum)]
+enum ReceiptPrivilege {
+    /// The authenticated workflow is allowed to publish privileged evidence.
+    Trusted,
+    /// Pull-request or other restricted context; consumers must not promote it.
+    Untrusted,
+}
+
+#[derive(Debug, clap::Args)]
+struct TestReceiptArgs {
+    /// One-based runner index or exact configured runner label.
+    runner: String,
+    /// Receipt destination, or `-` for canonical JSON on stdout.
+    #[arg(long, default_value = "-")]
+    output: String,
+    /// Producer repository identity authenticated by the artifact transport.
+    #[arg(long, value_name = "REPOSITORY")]
+    producer_repository: String,
+    /// Producer workflow and job identity authenticated by the transport.
+    #[arg(long, value_name = "WORKFLOW")]
+    producer_workflow: String,
+    /// Unique producer run identifier authenticated by the transport.
+    #[arg(long, value_name = "RUN_ID")]
+    producer_run_id: String,
+    /// Trigger class, such as `push`, `merge_request`, or `pull_request`.
+    #[arg(long, value_name = "EVENT")]
+    producer_event: String,
+    /// Whether this producer context may publish privileged evidence.
+    #[arg(long, value_enum, value_name = "PRIVILEGE")]
+    producer_privilege: ReceiptPrivilege,
 }
 
 /// The clap command tree, for tests that need to inspect what the CLI *says*
@@ -821,17 +1719,20 @@ enum Command {
 /// because `std::env::set_var` is `unsafe` in this edition and the workspace
 /// forbids that. The cost, stated here and in ADR-0033 rather than buried:
 /// `deny_warnings` does not turn an unenforced limit into a blocked build.
-fn note_what_could_not_be_held(spend: &[(String, aplan_evidence::Cost)]) {
-    let named = |why: aplan_evidence::Unenforced| -> String {
-        spend
-            .iter()
-            .filter(|(_, c)| c.unenforced == Some(why))
-            .map(|(subject, _)| subject.clone())
-            .collect::<Vec<_>>()
-            .join(", ")
-    };
+fn named_unenforced(
+    spend: &[(String, aplan_evidence::Cost)],
+    why: aplan_evidence::Unenforced,
+) -> String {
+    spend
+        .iter()
+        .filter(|(_, cost)| cost.unenforced == Some(why))
+        .map(|(subject, _)| subject.clone())
+        .collect::<Vec<_>>()
+        .join(", ")
+}
 
-    let absent = named(aplan_evidence::Unenforced::NoCgroups);
+fn note_what_could_not_be_held(spend: &[(String, aplan_evidence::Cost)]) {
+    let absent = named_unenforced(spend, aplan_evidence::Unenforced::NoCgroups);
     if !absent.is_empty() {
         errln!(
             "note: this platform has no cgroup v2, so the resource limits declared by {absent} \
@@ -840,7 +1741,7 @@ fn note_what_could_not_be_held(spend: &[(String, aplan_evidence::Cost)]) {
              own flags reach it through the environment."
         );
     }
-    let undelegated = named(aplan_evidence::Unenforced::NotDelegated);
+    let undelegated = named_unenforced(spend, aplan_evidence::Unenforced::NotDelegated);
     if !undelegated.is_empty() {
         errln!(
             "note: this process may not create a cgroup of its own, which is what a container \
@@ -913,8 +1814,97 @@ pub fn cli_command() -> clap::Command {
     }
 }
 
+/// Own catchable termination signals while a non-interactive command can run
+/// repository-configured processes.
+///
+/// Configured children lead process groups so a timeout can stop their whole
+/// tree. That also removes them from the terminal's foreground process group:
+/// without this owner, a signal delivered to `aplan` exits the parent and
+/// leaves the configured group behind. The dedicated thread consumes the
+/// signal outside the async handler, closes the shared spawn registry, and
+/// then restores the signal's default action so the caller observes the real
+/// cause rather than a fabricated exit code.
+#[cfg(unix)]
+#[derive(Debug)]
+struct ConfiguredCommandSignalOwner {
+    handle: signal_hook::iterator::Handle,
+    thread: Option<std::thread::JoinHandle<()>>,
+}
+
+#[cfg(unix)]
+impl ConfiguredCommandSignalOwner {
+    fn install() -> std::io::Result<Self> {
+        use signal_hook::consts::signal::{SIGHUP, SIGINT, SIGQUIT, SIGTERM};
+
+        let mut signals = signal_hook::iterator::Signals::new([SIGHUP, SIGINT, SIGQUIT, SIGTERM])?;
+        let handle = signals.handle();
+        let thread = std::thread::Builder::new()
+            .name("aplan-termination".to_string())
+            .spawn(move || {
+                if let Some(signal) = signals.forever().next() {
+                    aplan_app::terminate_verification_commands();
+                    stop_cli_progress_for_signal();
+                    // `emulate_default_handler` resets and re-raises the exact
+                    // signal. For these four signals it does not return; the
+                    // explicit exit is only a last-resort fallback if the host
+                    // rejects that handoff.
+                    let _ = signal_hook::low_level::emulate_default_handler(signal);
+                    signal_hook::low_level::exit(128_i32.saturating_add(signal));
+                }
+            })?;
+        Ok(Self {
+            handle,
+            thread: Some(thread),
+        })
+    }
+}
+
+#[cfg(unix)]
+impl Drop for ConfiguredCommandSignalOwner {
+    fn drop(&mut self) {
+        self.handle.close();
+        if let Some(thread) = self.thread.take() {
+            let _ = thread.join();
+        }
+    }
+}
+
+#[cfg(windows)]
+#[derive(Debug)]
+struct ConfiguredCommandSignalOwner;
+
+#[cfg(windows)]
+impl ConfiguredCommandSignalOwner {
+    fn install() -> std::io::Result<Self> {
+        ctrlc::try_set_handler(|| {
+            aplan_app::terminate_verification_commands();
+            stop_cli_progress_for_signal();
+            // Windows has no signal exit status to re-raise. Preserve the
+            // conventional shell-visible interrupt status after the console
+            // handler has restored output and stopped configured children.
+            std::process::exit(130);
+        })
+        .map_err(std::io::Error::other)?;
+        Ok(Self)
+    }
+}
+
+#[cfg(all(not(unix), not(windows)))]
+#[derive(Debug)]
+struct ConfiguredCommandSignalOwner;
+
+#[cfg(all(not(unix), not(windows)))]
+impl ConfiguredCommandSignalOwner {
+    fn install() -> std::io::Result<Self> {
+        Ok(Self)
+    }
+}
+
 /// The CLI entry point. `src/main.rs` is a thin shim over this.
 pub fn run_cli() -> ExitCode {
+    let process_started = std::time::Instant::now();
+    let timings = timings_from_argv(std::env::args_os().skip(1));
+    start_timings(timings, process_started);
     // Before `clap` sees the arguments, and that ordering is the point. `clap`
     // renders its own usage errors and `--help` through an `anstream` stream
     // built with `Auto`, which resolves against the same process-global this
@@ -923,7 +1913,11 @@ pub fn run_cli() -> ExitCode {
     // into a pipe. Setting it after parsing would have covered every renderer
     // and left the one output a reader meets *before* any command runs.
     color_from_argv(std::env::args_os().skip(1)).apply();
-    match run() {
+    let result = match internal_exit_test_fault() {
+        Some(error) => Err(error),
+        None => run(),
+    };
+    let exit = match result {
         Ok(code) => ExitCode::from(code),
         Err(e) => {
             // Every error the tool reports leaves through here, so folding once
@@ -956,7 +1950,9 @@ pub fn run_cli() -> ExitCode {
             );
             ExitCode::from(exit_code_for(&e))
         }
-    }
+    };
+    finish_timings();
+    exit
 }
 
 /// The exit code for a surfaced error: [`EXIT_INTERNAL`] (3) if the chain carries
@@ -1044,6 +2040,16 @@ fn color_from_argv(
     ColorChoice::default()
 }
 
+/// Whether raw argv enables the global timing diagnostic.
+///
+/// Read before clap so `total_ms` includes argument parsing. Clap remains the
+/// authority and rejects invalid/repeated uses; this pre-scan recognizes only
+/// the one valueless spelling it accepts and never reads operands after `--`.
+fn timings_from_argv(args: impl Iterator<Item = std::ffi::OsString>) -> bool {
+    args.take_while(|arg| arg != "--")
+        .any(|arg| arg == "--timings")
+}
+
 /// Write `s` to stdout, treating a closed downstream pipe (e.g. `aplan ready |
 /// head`) as a clean exit rather than the panic `println!` would raise.
 ///
@@ -1054,6 +2060,7 @@ fn color_from_argv(
 /// same writer as `render_human`" was about the *fold* helper, not the stream.
 fn write_stdout(s: &str) -> Result<()> {
     use std::io::Write as _;
+    let _progress_write = ProgressWriteGuard::new();
     match anstream::stdout().write_all(s.as_bytes()) {
         Ok(()) => Ok(()),
         Err(e) if e.kind() == std::io::ErrorKind::BrokenPipe => Ok(()),
@@ -1068,6 +2075,771 @@ fn write_stdout(s: &str) -> Result<()> {
 /// green forever while validating nothing. A gate that silently disables itself
 /// is worse than no gate, so this is a usage error (exit 2).
 fn load_checked(root: &std::path::Path) -> Result<aplan_core::load::Plan> {
+    Ok(load_store_snapshot(root, false, false)?.plan)
+}
+
+/// Load for a bulk creation mutation that may establish an absent plan root.
+///
+/// This exception belongs to `add --from` and `import`, whose established
+/// bootstrap contract is to create their destination. Read commands must keep
+/// using [`load_checked`] so a missing root can never look like a clean plan.
+fn load_for_bootstrap(root: &std::path::Path) -> Result<aplan_core::load::Plan> {
+    if root.is_dir() {
+        load_checked(root)
+    } else {
+        Ok(aplan_core::Plan::default())
+    }
+}
+
+fn load_semantic_checked(root: &std::path::Path) -> Result<aplan_core::load::Plan> {
+    Ok(load_store_snapshot(root, false, true)?.plan)
+}
+
+/// The checked-root form used where an application response must retain the
+/// exact candidate bytes from which its plan was parsed.
+fn load_identified_checked(root: &std::path::Path) -> Result<aplan_core::IdentifiedPlan> {
+    load_store_snapshot(root, true, true)
+}
+
+type PlanStoreKey = (PathBuf, bool, bool);
+type PlanStores = std::collections::BTreeMap<PlanStoreKey, aplan_app::PlanStore>;
+static PLAN_STORES: std::sync::OnceLock<std::sync::Mutex<PlanStores>> = std::sync::OnceLock::new();
+static NEXT_PROGRESS_OPERATION: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(1);
+
+fn next_progress_operation() -> aplan_app::OperationId {
+    aplan_app::OperationId::new(
+        NEXT_PROGRESS_OPERATION.fetch_add(1, std::sync::atomic::Ordering::Relaxed),
+    )
+}
+
+enum ProgressMessage {
+    Event(aplan_app::ProgressEvent, Option<ProgressAck>),
+    Pause(ProgressAck),
+    Resume,
+    Stop(Option<ProgressAck>),
+}
+
+type ProgressAck = std::sync::mpsc::SyncSender<()>;
+
+static SIGNAL_CLI_PROGRESS: std::sync::Mutex<Option<std::sync::mpsc::Sender<ProgressMessage>>> =
+    std::sync::Mutex::new(None);
+
+fn stop_cli_progress_for_signal() {
+    let sender = SIGNAL_CLI_PROGRESS
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+        .clone();
+    let Some(sender) = sender else {
+        return;
+    };
+    let (acknowledge, acknowledged) = std::sync::mpsc::sync_channel(0);
+    if sender
+        .send(ProgressMessage::Stop(Some(acknowledge)))
+        .is_ok()
+    {
+        let _ = acknowledged.recv_timeout(std::time::Duration::from_secs(1));
+    }
+}
+
+thread_local! {
+    /// The command's one renderer, visible to synchronous application adapters.
+    /// A thread-local keeps library tests and embedded invocations isolated and
+    /// cannot accidentally turn provider worker output into terminal writes.
+    static CURRENT_CLI_PROGRESS: std::cell::RefCell<Option<std::sync::mpsc::Sender<ProgressMessage>>> =
+        const { std::cell::RefCell::new(None) };
+}
+
+/// One delayed stderr renderer. It owns no application work, serializes itself
+/// around result writes and joins before dispatch returns, so progress cannot
+/// outlive a verdict or escape an ordinary panic path.
+struct CliProgress {
+    sender: Option<std::sync::mpsc::Sender<ProgressMessage>>,
+    worker: Option<std::thread::JoinHandle<()>>,
+    command_operation: aplan_app::OperationId,
+}
+
+impl CliProgress {
+    fn for_current_invocation(source: ProgressSource) -> Self {
+        let presentation = PROGRESS_PRESENTATION.get().copied();
+        let eligible = !matches!(
+            source,
+            ProgressSource::Inapplicable
+                | ProgressSource::InteractiveFrame
+                | ProgressSource::LongLivedProtocol
+        );
+        let Some(aplan_output::progress::ProgressPresentation::Stderr { animated, color }) =
+            presentation.filter(|_| eligible)
+        else {
+            return Self {
+                sender: None,
+                worker: None,
+                command_operation: aplan_app::OperationId::new(0),
+            };
+        };
+        let command_operation = next_progress_operation();
+        let (sender, receiver) = std::sync::mpsc::channel();
+        // Start the grace clock before the thread is scheduled. A saturated
+        // host must not add worker-scheduling latency to the promised feedback
+        // threshold.
+        let started = std::time::Instant::now();
+        let worker = std::thread::spawn(move || {
+            run_progress_renderer(&receiver, started, command_operation, animated, color);
+        });
+        Self {
+            sender: Some(sender),
+            worker: Some(worker),
+            command_operation,
+        }
+    }
+
+    fn enabled(&self) -> bool {
+        self.sender.is_some()
+    }
+
+    fn install(&self) {
+        let sender = self.sender.clone();
+        SIGNAL_CLI_PROGRESS
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .clone_from(&sender);
+        CURRENT_CLI_PROGRESS.with(|slot| {
+            debug_assert!(slot.borrow().is_none());
+            *slot.borrow_mut() = sender;
+        });
+    }
+
+    fn event(&mut self, event: aplan_app::ProgressEvent) {
+        let Some(sender) = &self.sender else {
+            return;
+        };
+        let terminal = event.operation == self.command_operation
+            && event.subject == aplan_app::ProgressSubject::Operation
+            && matches!(
+                event.lifecycle,
+                aplan_app::ProgressLifecycle::Completed
+                    | aplan_app::ProgressLifecycle::Failed
+                    | aplan_app::ProgressLifecycle::Cancelled
+            );
+        if terminal {
+            let (acknowledge, acknowledged) = std::sync::mpsc::sync_channel(0);
+            if sender
+                .send(ProgressMessage::Event(event, Some(acknowledge)))
+                .is_ok()
+            {
+                let _ = acknowledged.recv_timeout(std::time::Duration::from_secs(1));
+            }
+        } else {
+            let _ = sender.send(ProgressMessage::Event(event, None));
+        }
+    }
+}
+
+impl Drop for CliProgress {
+    fn drop(&mut self) {
+        CURRENT_CLI_PROGRESS.with(|slot| *slot.borrow_mut() = None);
+        if let Some(sender) = self.sender.take() {
+            let _ = sender.send(ProgressMessage::Stop(None));
+        }
+        if let Some(worker) = self.worker.take() {
+            let _ = worker.join();
+        }
+        // Keep the signal-visible sender installed until the renderer has
+        // stopped. Clearing it first leaves a narrow interval where an
+        // interrupt can re-raise while the transient row is still painted.
+        *SIGNAL_CLI_PROGRESS
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner) = None;
+    }
+}
+
+fn cli_progress_enabled() -> bool {
+    CURRENT_CLI_PROGRESS.with(|slot| slot.borrow().is_some())
+}
+
+fn send_cli_progress(event: aplan_app::ProgressEvent) {
+    CURRENT_CLI_PROGRESS.with(|slot| {
+        if let Some(sender) = slot.borrow().as_ref() {
+            let _ = sender.send(ProgressMessage::Event(event, None));
+        }
+    });
+}
+
+/// Serialize an ordinary stdout/stderr write with the live transient row.
+/// Animated progress is cleared first and redrawn afterwards; the portable
+/// newline form needs no cursor repair but still crosses the same ordering
+/// boundary. A lost renderer is treated as presentation loss, never as a
+/// command failure.
+struct ProgressWriteGuard {
+    sender: Option<std::sync::mpsc::Sender<ProgressMessage>>,
+}
+
+impl ProgressWriteGuard {
+    fn new() -> Self {
+        let sender = CURRENT_CLI_PROGRESS.with(|slot| slot.borrow().clone());
+        if let Some(sender) = &sender {
+            let (acknowledge, acknowledged) = std::sync::mpsc::sync_channel(0);
+            if sender.send(ProgressMessage::Pause(acknowledge)).is_ok() {
+                let _ = acknowledged.recv_timeout(std::time::Duration::from_secs(1));
+            }
+        }
+        Self { sender }
+    }
+}
+
+impl Drop for ProgressWriteGuard {
+    fn drop(&mut self) {
+        if let Some(sender) = self.sender.take() {
+            let _ = sender.send(ProgressMessage::Resume);
+        }
+    }
+}
+
+#[derive(Debug)]
+struct RenderedOperation {
+    state: aplan_app::ProgressState,
+    active: std::collections::BTreeMap<aplan_app::ProgressSubject, (u64, aplan_app::ProgressEvent)>,
+}
+
+#[derive(Debug)]
+struct ProgressViewState {
+    command_operation: aplan_app::OperationId,
+    operations: std::collections::BTreeMap<aplan_app::OperationId, RenderedOperation>,
+    accepted: u64,
+    command_terminal: Option<aplan_app::ProgressLifecycle>,
+}
+
+impl ProgressViewState {
+    fn new(command_operation: aplan_app::OperationId) -> Self {
+        Self {
+            command_operation,
+            operations: std::collections::BTreeMap::new(),
+            accepted: 0,
+            command_terminal: None,
+        }
+    }
+
+    fn accept(&mut self, event: aplan_app::ProgressEvent) -> bool {
+        if !self.operations.contains_key(&event.operation)
+            && (event.sequence != 0
+                || event.subject != aplan_app::ProgressSubject::Operation
+                || event.lifecycle != aplan_app::ProgressLifecycle::Queued)
+        {
+            return false;
+        }
+        let operation =
+            self.operations
+                .entry(event.operation)
+                .or_insert_with(|| RenderedOperation {
+                    state: aplan_app::ProgressState::new(event.operation, event.kind),
+                    active: std::collections::BTreeMap::new(),
+                });
+        if operation.state.accept(event).is_err() {
+            return false;
+        }
+        self.accepted = self.accepted.saturating_add(1);
+        match event.subject {
+            subject @ aplan_app::ProgressSubject::Phase { .. } => match event.lifecycle {
+                aplan_app::ProgressLifecycle::Started | aplan_app::ProgressLifecycle::Advanced => {
+                    operation.active.insert(subject, (self.accepted, event));
+                }
+                aplan_app::ProgressLifecycle::Completed
+                | aplan_app::ProgressLifecycle::Failed
+                | aplan_app::ProgressLifecycle::Cancelled => {
+                    operation.active.remove(&subject);
+                }
+                aplan_app::ProgressLifecycle::Queued => {}
+            },
+            aplan_app::ProgressSubject::Operation => {
+                if matches!(
+                    event.lifecycle,
+                    aplan_app::ProgressLifecycle::Completed
+                        | aplan_app::ProgressLifecycle::Failed
+                        | aplan_app::ProgressLifecycle::Cancelled
+                ) {
+                    operation.active.clear();
+                    if event.operation == self.command_operation {
+                        self.command_terminal = Some(event.lifecycle);
+                    }
+                }
+            }
+        }
+        true
+    }
+
+    fn detail(&self) -> String {
+        let preferred = self
+            .operations
+            .iter()
+            .filter(|(id, _)| **id != self.command_operation)
+            .flat_map(|(_, operation)| operation.active.values())
+            // Aggregate phases deliberately outrank their private child rows.
+            .max_by_key(|(order, event)| {
+                let aggregate = matches!(
+                    event.subject,
+                    aplan_app::ProgressSubject::Phase { child: None, .. }
+                );
+                (aggregate, *order)
+            })
+            .or_else(|| {
+                self.operations
+                    .get(&self.command_operation)
+                    .and_then(|operation| operation.active.values().max_by_key(|(order, _)| *order))
+            });
+        let Some((_, event)) = preferred else {
+            return "running command".to_string();
+        };
+        let aplan_app::ProgressSubject::Phase { phase, .. } = event.subject else {
+            return event.kind.label().to_string();
+        };
+        match event.measure {
+            aplan_app::ProgressMeasure::Indeterminate => phase.label().to_string(),
+            aplan_app::ProgressMeasure::Bounded {
+                completed,
+                total,
+                unit,
+            } => {
+                let unit = match unit {
+                    aplan_app::ProgressUnit::Sources => "sources",
+                    aplan_app::ProgressUnit::Providers => "providers",
+                    aplan_app::ProgressUnit::Items => "items",
+                };
+                format!("{} ({completed}/{total} {unit})", phase.label())
+            }
+        }
+    }
+}
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum ProgressRowState {
+    Hidden,
+    Suppressed,
+    Painted,
+}
+
+struct CliProgressRenderer {
+    epoch: std::time::Instant,
+    gate: aplan_output::progress::ProgressGate,
+    state: ProgressViewState,
+    row: ProgressRowState,
+    pause_depth: usize,
+    frame: usize,
+    deadline: Option<std::time::Instant>,
+    animated: bool,
+    color: bool,
+}
+
+impl CliProgressRenderer {
+    fn new(
+        epoch: std::time::Instant,
+        command_operation: aplan_app::OperationId,
+        animated: bool,
+        color: bool,
+    ) -> Self {
+        Self {
+            epoch,
+            gate: aplan_output::progress::ProgressGate::new(
+                std::time::Duration::ZERO,
+                aplan_output::progress::ProgressTiming::default(),
+            ),
+            state: ProgressViewState::new(command_operation),
+            row: ProgressRowState::Hidden,
+            pause_depth: 0,
+            frame: 0,
+            deadline: None,
+            animated,
+            color,
+        }
+    }
+
+    fn schedule_animation(&mut self) {
+        self.deadline = self.animated.then(|| {
+            std::time::Instant::now()
+                + aplan_output::progress::ProgressTiming::default().minimum_update_interval
+        });
+    }
+
+    fn draw_active(&mut self) {
+        if self.pause_depth == 0 {
+            write_progress_line(
+                &self.state.detail(),
+                "active",
+                self.animated,
+                self.color,
+                self.frame,
+            );
+            self.row = ProgressRowState::Painted;
+            self.frame = self.frame.wrapping_add(1);
+        } else {
+            self.row = ProgressRowState::Suppressed;
+        }
+        self.schedule_animation();
+    }
+
+    fn timeout(&mut self) {
+        match self.gate.due(self.epoch.elapsed()) {
+            aplan_output::progress::ProgressDraw::Reveal
+            | aplan_output::progress::ProgressDraw::Update => self.draw_active(),
+            _ => self.deadline = None,
+        }
+    }
+
+    fn finish(&mut self) {
+        let lifecycle = self
+            .state
+            .command_terminal
+            .expect("terminal draw follows a terminal command event");
+        if self.animated {
+            if self.row == ProgressRowState::Painted {
+                clear_progress_line();
+            }
+        } else {
+            write_progress_line(
+                "command",
+                progress_lifecycle_label(lifecycle),
+                false,
+                self.color,
+                self.frame,
+            );
+        }
+        self.row = ProgressRowState::Hidden;
+        self.deadline = None;
+    }
+
+    /// Apply one message; false means the renderer has reached its terminal.
+    fn message(&mut self, message: ProgressMessage) -> bool {
+        match message {
+            ProgressMessage::Stop(acknowledge) => {
+                if self.row != ProgressRowState::Hidden {
+                    if self.animated {
+                        if self.row == ProgressRowState::Painted {
+                            clear_progress_line();
+                        }
+                    } else {
+                        write_progress_line(
+                            "command",
+                            "interrupted",
+                            false,
+                            self.color,
+                            self.frame,
+                        );
+                    }
+                }
+                if let Some(acknowledge) = acknowledge {
+                    let _ = acknowledge.send(());
+                }
+                false
+            }
+            ProgressMessage::Pause(acknowledge) => {
+                self.pause_depth = self.pause_depth.saturating_add(1);
+                if self.pause_depth == 1 && self.animated && self.row == ProgressRowState::Painted {
+                    clear_progress_line();
+                    self.row = ProgressRowState::Suppressed;
+                }
+                let _ = acknowledge.send(());
+                true
+            }
+            ProgressMessage::Resume => {
+                self.pause_depth = self.pause_depth.saturating_sub(1);
+                if self.pause_depth == 0 && self.animated && self.row != ProgressRowState::Hidden {
+                    self.draw_active();
+                }
+                true
+            }
+            ProgressMessage::Event(event, acknowledge) => {
+                let accepted = self.state.accept(event);
+                let terminal = accepted && self.state.command_terminal.is_some();
+                if accepted {
+                    match self.gate.changed(self.epoch.elapsed(), terminal) {
+                        aplan_output::progress::ProgressDraw::WaitUntil(at) => {
+                            self.deadline = Some(self.epoch + at);
+                        }
+                        aplan_output::progress::ProgressDraw::Reveal
+                        | aplan_output::progress::ProgressDraw::Update => self.draw_active(),
+                        aplan_output::progress::ProgressDraw::FinishVisible => self.finish(),
+                        aplan_output::progress::ProgressDraw::FinishHidden => {
+                            self.deadline = None;
+                        }
+                    }
+                }
+                if let Some(acknowledge) = acknowledge {
+                    let _ = acknowledge.send(());
+                }
+                !terminal
+            }
+        }
+    }
+}
+
+fn run_progress_renderer(
+    receiver: &std::sync::mpsc::Receiver<ProgressMessage>,
+    epoch: std::time::Instant,
+    command_operation: aplan_app::OperationId,
+    animated: bool,
+    color: bool,
+) {
+    use std::sync::mpsc::RecvTimeoutError;
+
+    let mut renderer = CliProgressRenderer::new(epoch, command_operation, animated, color);
+    loop {
+        let message = match renderer.deadline {
+            Some(at) => match receiver
+                .recv_timeout(at.saturating_duration_since(std::time::Instant::now()))
+            {
+                Ok(message) => Some(message),
+                Err(RecvTimeoutError::Timeout) => None,
+                Err(RecvTimeoutError::Disconnected) => break,
+            },
+            None => match receiver.recv() {
+                Ok(message) => Some(message),
+                Err(_) => break,
+            },
+        };
+        match message {
+            Some(message) => {
+                if !renderer.message(message) {
+                    break;
+                }
+            }
+            None => renderer.timeout(),
+        }
+    }
+}
+
+fn progress_lifecycle_label(lifecycle: aplan_app::ProgressLifecycle) -> &'static str {
+    match lifecycle {
+        aplan_app::ProgressLifecycle::Queued => "queued",
+        aplan_app::ProgressLifecycle::Started | aplan_app::ProgressLifecycle::Advanced => "active",
+        aplan_app::ProgressLifecycle::Completed => "complete",
+        aplan_app::ProgressLifecycle::Failed => "failed",
+        aplan_app::ProgressLifecycle::Cancelled => "cancelled",
+    }
+}
+
+fn write_progress_line(detail: &str, state: &str, animated: bool, color: bool, frame: usize) {
+    let marker = if animated {
+        [
+            "\u{280b}", "\u{2819}", "\u{2839}", "\u{2838}", "\u{283c}", "\u{2834}", "\u{2826}",
+            "\u{2827}", "\u{2807}", "\u{280f}",
+        ][frame % 10]
+    } else {
+        "progress:"
+    };
+    let plain = if animated {
+        format!("{marker} progress: {detail}")
+    } else {
+        format!("{marker} {detail}: {state}")
+    };
+    let fitted = aplan_output::progress::fit_line(&plain, aplan_output::fold::err_width());
+    let rendered = if color {
+        format!(
+            "{style}{fitted}{style:#}",
+            style = aplan_output::style::ATTENTION
+        )
+    } else {
+        fitted
+    };
+    let _ = aplan_output::progress::write_row(&rendered, animated);
+}
+
+fn clear_progress_line() {
+    let _ = aplan_output::progress::clear_row();
+}
+
+fn load_store_snapshot(
+    root: &std::path::Path,
+    retain_inputs: bool,
+    semantic_cache: bool,
+) -> Result<aplan_core::IdentifiedPlan> {
+    refuse_missing_root(root)?;
+    let identity_root = std::path::absolute(root).unwrap_or_else(|_| root.to_path_buf());
+    let stores =
+        PLAN_STORES.get_or_init(|| std::sync::Mutex::new(std::collections::BTreeMap::new()));
+    let mut stores = stores
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    let operation = next_progress_operation();
+    let store = match stores.entry((identity_root.clone(), retain_inputs, semantic_cache)) {
+        std::collections::btree_map::Entry::Occupied(mut entry) => {
+            if cli_progress_enabled() {
+                timed("load", || {
+                    entry
+                        .get_mut()
+                        .refresh_with_progress(operation, &mut send_cli_progress)
+                })?;
+            } else {
+                timed("load", || entry.get_mut().refresh())?;
+            }
+            entry.into_mut()
+        }
+        std::collections::btree_map::Entry::Vacant(entry) => {
+            let store = timed("load", || {
+                let options = store_options(&identity_root, retain_inputs, semantic_cache);
+                if cli_progress_enabled() {
+                    aplan_app::PlanStore::open_with_progress(
+                        root,
+                        &options,
+                        operation,
+                        &mut send_cli_progress,
+                    )
+                } else {
+                    aplan_app::PlanStore::open(root, &options)
+                }
+            })?;
+            entry.insert(store)
+        }
+    };
+    record_store_work(store.stats());
+    Ok(store.snapshot().clone())
+}
+
+#[cfg(feature = "tui")]
+fn load_store_snapshot_observed(
+    root: &std::path::Path,
+    retain_inputs: bool,
+    semantic_cache: bool,
+    progress: &mut aplan_app::ProgressEmitter<'_>,
+    cancellation: &aplan_app::CancellationToken,
+) -> Result<aplan_core::IdentifiedPlan> {
+    cancellation.check()?;
+    refuse_missing_root(root)?;
+    let identity_root = std::path::absolute(root).unwrap_or_else(|_| root.to_path_buf());
+    let stores =
+        PLAN_STORES.get_or_init(|| std::sync::Mutex::new(std::collections::BTreeMap::new()));
+    let mut stores = stores
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    let store = match stores.entry((identity_root.clone(), retain_inputs, semantic_cache)) {
+        std::collections::btree_map::Entry::Occupied(mut entry) => {
+            timed("load", || {
+                entry.get_mut().refresh_observed(progress, cancellation)
+            })?;
+            entry.into_mut()
+        }
+        std::collections::btree_map::Entry::Vacant(entry) => {
+            let options = store_options(&identity_root, retain_inputs, semantic_cache);
+            let store = timed("load", || {
+                aplan_app::PlanStore::open_observed(root, &options, progress, cancellation)
+            })?;
+            entry.insert(store)
+        }
+    };
+    record_store_work(store.stats());
+    Ok(store.snapshot().clone())
+}
+
+fn store_options(
+    root: &std::path::Path,
+    retain_inputs: bool,
+    semantic_cache: bool,
+) -> aplan_app::PlanStoreOptions {
+    let configuration_file = match CONFIG_SOURCE.get() {
+        Some(aplan_config::ConfigSource::File(path)) => Some(path.clone()),
+        Some(aplan_config::ConfigSource::None) => None,
+        Some(aplan_config::ConfigSource::Discover) | None => aplan_config::discovered_config(root),
+    };
+    aplan_app::PlanStoreOptions {
+        mode: CACHE_MODE.get().copied().unwrap_or_default(),
+        configuration_file,
+        cache_root: None,
+        // Parsed artifacts and reports may be reused only by this exact build.
+        // The derived schema alone cannot identify changes to criterion scans,
+        // source locations or parser behaviour that do not alter Task's shape.
+        writer_identity: Some(cache_writer_identity()),
+        retain_inputs,
+        defer_publication: semantic_cache,
+    }
+}
+
+fn structural_report_cache(
+    root: &std::path::Path,
+    retain_inputs: bool,
+    defer_cache_publication: bool,
+    options: &Options,
+) -> Option<aplan_app::StructuralReportCache> {
+    let root = std::path::absolute(root).unwrap_or_else(|_| root.to_path_buf());
+    let stores = PLAN_STORES.get()?;
+    let mut stores = stores
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    let store = stores.get_mut(&(root.clone(), retain_inputs, defer_cache_publication))?;
+    let key = store.structural_report_key(options)?;
+    let cached = store.cached_structural_report(&key);
+    if let Some(report) = &cached
+        && store.stats().artifacts_parsed > 0
+    {
+        let before = store.stats().cache_bytes_written;
+        store.remember_structural_report(&key, options, report);
+        record_cache_publication(store.stats().cache_bytes_written.saturating_sub(before));
+    }
+    let options = options.clone();
+    Some(aplan_app::StructuralReportCache::new(
+        cached,
+        move |report| {
+            let Some(stores) = PLAN_STORES.get() else {
+                return;
+            };
+            let mut stores = stores
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            if let Some(store) =
+                stores.get_mut(&(root.clone(), retain_inputs, defer_cache_publication))
+            {
+                let before = store.stats().cache_bytes_written;
+                store.remember_structural_report(&key, &options, report);
+                record_cache_publication(store.stats().cache_bytes_written.saturating_sub(before));
+            }
+        },
+    ))
+}
+
+fn validate_with_store_graph(
+    root: &std::path::Path,
+    retain_inputs: bool,
+    plan: &aplan_core::Plan,
+    options: &Options,
+    graph: &Graph<'_>,
+) -> aplan_core::Report {
+    let root = std::path::absolute(root).unwrap_or_else(|_| root.to_path_buf());
+    let key_and_cached = PLAN_STORES.get().and_then(|stores| {
+        let mut stores = stores
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let store = stores.get_mut(&(root.clone(), retain_inputs, true))?;
+        let key = store.structural_report_key(options)?;
+        let cached = store.cached_structural_report(&key);
+        if let Some(report) = &cached
+            && store.stats().artifacts_parsed > 0
+        {
+            let before = store.stats().cache_bytes_written;
+            store.remember_structural_report(&key, options, report);
+            record_cache_publication(store.stats().cache_bytes_written.saturating_sub(before));
+        }
+        Some((key, cached))
+    });
+    if let Some((_, Some(report))) = &key_and_cached {
+        return report.clone();
+    }
+    let report = aplan_core::validate_with_graph(plan, options, graph);
+    if let Some((key, None)) = key_and_cached
+        && let Some(stores) = PLAN_STORES.get()
+    {
+        let mut stores = stores
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        if let Some(store) = stores.get_mut(&(root, retain_inputs, true)) {
+            let before = store.stats().cache_bytes_written;
+            store.remember_structural_report(&key, options, &report);
+            record_cache_publication(store.stats().cache_bytes_written.saturating_sub(before));
+        }
+    }
+    report
+}
+
+fn cache_writer_identity() -> String {
+    env!("APLAN_CACHE_WRITER_IDENTITY").to_string()
+}
+
+fn refuse_missing_root(root: &std::path::Path) -> Result<()> {
     if !root.is_dir() {
         anyhow::bail!(
             "plan root `{}` is not a directory, nothing would be checked. \
@@ -1075,7 +2847,7 @@ fn load_checked(root: &std::path::Path) -> Result<aplan_core::load::Plan> {
             root.display()
         );
     }
-    Ok(load_plan(root))
+    Ok(())
 }
 
 /// Resolve the plan root. Precedence: the `--root` flag, then the `root` key in
@@ -1092,6 +2864,7 @@ fn resolve_root(cli_root: Option<PathBuf>) -> Result<PathBuf> {
     // names for a plan that did not load, one input over: the same run without
     // `--root` fails, so the flag was deciding the verdict (`A1-068`).
     let (config, config_dir) = config_at(std::path::Path::new("."))?;
+    remember_initial_config(&config, config_dir.as_deref());
     if let Some(r) = cli_root {
         return Ok(r);
     }
@@ -1176,6 +2949,7 @@ fn loaded_cleanly(plan: &aplan_core::load::Plan) -> bool {
 /// Run a renderer, treating a closed downstream pipe (`aplan check | head`) as
 /// success rather than an exit-2 "internal failure".
 fn render_tolerant(render: impl FnOnce() -> std::io::Result<()>) -> Result<()> {
+    let _progress_write = ProgressWriteGuard::new();
     match render() {
         Ok(()) => Ok(()),
         Err(e) if e.kind() == std::io::ErrorKind::BrokenPipe => Ok(()),
@@ -1220,6 +2994,24 @@ pub struct VerdictFlags {
     /// Do not fail on warnings, whatever `.aplan.yml` says.
     #[arg(long, conflicts_with = "deny_warnings")]
     no_deny_warnings: bool,
+}
+
+#[derive(Debug, clap::Args)]
+pub struct RekeyArgs {
+    /// The task id that exists now.
+    old: String,
+    /// The free task id to use instead.
+    new: String,
+    /// Permit changing a `done` or `dropped` task. This does not rewrite Git
+    /// history, external links, external documents or other repositories.
+    #[arg(long)]
+    allow_terminal: bool,
+    /// Output format: human (the edits and review list) or json.
+    #[arg(long, default_value = "human")]
+    format: String,
+    /// Whether a warning blocks this write, as `check` and `verify` take it.
+    #[command(flatten)]
+    verdict: VerdictFlags,
 }
 
 /// The repository's verdict policy: whether a warning blocks, and which rules it
@@ -1299,24 +3091,26 @@ fn note_denied_warnings(report: &aplan_core::Report, policy: &aplan_core::Verdic
 /// rather than report a clean run it cannot back. A gate that cannot fire has to
 /// say so.
 fn note_unresolved_evidence(plan: &aplan_core::Plan) {
-    let left = aplan_core::unresolved_by_check(plan);
+    let left = timed("project", || aplan_core::unresolved_by_check(plan));
     if !left.any() {
         return;
     }
     let (citations, tasks) = (left.citations, left.tasks);
-    errln!(
-        "{}",
-        aplan_output::fold::fold(
-            &format!(
-                "note: `check` is structural and did not open the repository, so {citations} \
-                 citation(s) on {tasks} task(s) are unchecked rather than passing -- a cited \
-                 commit or test that has rotted passes here. `aplan verify` is the half that \
-                 resolves them; run it in the same gate."
-            ),
-            aplan_output::fold::err_width(),
-            0,
-        )
-    );
+    timed("render", || {
+        errln!(
+            "{}",
+            aplan_output::fold::fold(
+                &format!(
+                    "note: `check` is structural and did not open the repository, so {citations} \
+                     citation(s) on {tasks} task(s) are unchecked rather than passing -- a cited \
+                     commit or test that has rotted passes here. `aplan verify` is the half that \
+                     resolves them; run it in the same gate."
+                ),
+                aplan_output::fold::err_width(),
+                0,
+            )
+        );
+    });
 }
 
 /// **What `verify` could not open, said once, against the configuration.**
@@ -1356,57 +3150,6 @@ fn note_unopened_evidence(unopened: &aplan_evidence::Unopened) {
     );
 }
 
-/// The declared vocabularies as the rules see them.
-///
-/// The config's two shapes collapse here: a bare list is a family with no
-/// cardinality, which is exactly what it has always meant, so an existing
-/// `.aplan.yml` produces the same `Options` it did before `A1-133`.
-fn tag_families_of(
-    config: &aplan_config::Config,
-) -> std::collections::BTreeMap<String, aplan_core::TagFamily> {
-    let Some(families) = &config.tag_families else {
-        return std::collections::BTreeMap::new();
-    };
-    families
-        .iter()
-        .map(|(name, family)| {
-            let (status, milestones) = family.scope();
-            (
-                name.clone(),
-                aplan_core::TagFamily {
-                    members: family.members().to_vec(),
-                    require: match family.require() {
-                        aplan_config::Cardinality::Optional => aplan_core::Cardinality::Optional,
-                        aplan_config::Cardinality::AtMostOne => aplan_core::Cardinality::AtMostOne,
-                        aplan_config::Cardinality::AtLeastOne => {
-                            aplan_core::Cardinality::AtLeastOne
-                        }
-                        aplan_config::Cardinality::ExactlyOne => {
-                            aplan_core::Cardinality::ExactlyOne
-                        }
-                    },
-                    status: match status {
-                        aplan_config::StatusScope::Any => aplan_core::StatusScope::Any,
-                        aplan_config::StatusScope::Live => aplan_core::StatusScope::Live,
-                        aplan_config::StatusScope::Done => aplan_core::StatusScope::Done,
-                        aplan_config::StatusScope::Dropped => aplan_core::StatusScope::Dropped,
-                        aplan_config::StatusScope::Terminal => aplan_core::StatusScope::Terminal,
-                    },
-                    milestones: match milestones {
-                        aplan_config::MilestoneScope::Include => {
-                            aplan_core::MilestoneScope::Include
-                        }
-                        aplan_config::MilestoneScope::Exclude => {
-                            aplan_core::MilestoneScope::Exclude
-                        }
-                        aplan_config::MilestoneScope::Only => aplan_core::MilestoneScope::Only,
-                    },
-                },
-            )
-        })
-        .collect()
-}
-
 /// Merge `.aplan.yml` with the check flags into the validator options.
 /// Precedence: an explicit flag wins over the file, which wins over the built-in
 /// default. `traces` defaults to on, rooted at the current directory.
@@ -1416,110 +3159,20 @@ fn resolve_check_options(
     no_require_effort: bool,
     traces_root: Option<PathBuf>,
     no_traces: bool,
+    traces_repository: Option<PathBuf>,
 ) -> Options {
-    let require_effort = if no_require_effort {
-        false
-    } else {
-        config.require_effort.unwrap_or(true)
-    };
-
-    let traces_root = if no_traces {
-        None
-    } else if let Some(p) = traces_root {
-        Some(p)
-    } else if config.no_traces == Some(true) {
-        None
-    } else if let Some(p) = &config.traces_root {
-        // A relative `traces_root` from the file is resolved against the
-        // `.aplan.yml` directory, so `traces_root: docs` means the same thing
-        // whatever directory the command is invoked from.
-        let p = PathBuf::from(p);
-        match config_dir {
-            Some(dir) if p.is_relative() => Some(dir.join(p)),
-            _ => Some(p),
-        }
-    } else {
-        Some(PathBuf::from("."))
-    };
-
-    // APLAN017 is config-only (no flag): the runner and the strength policy are
-    // repo policy, not per-run knobs.
-    let (require_min_strength, exempt_tags) = match &config.evidence {
-        Some(ev) => (
-            ev.require_min_strength.clone(),
-            ev.exempt_tags.clone().unwrap_or_default(),
-        ),
-        None => (None, Vec::new()),
-    };
-
-    // Resolved against the *config file's* directory, not against `traces_root`:
-    // a declaration is the repository's stated position and must mean the same
-    // thing however a run is invoked. Resolving it against the root was the first
-    // attempt, and `--traces-root docs` then silently redefined `../sibling` as
-    // `<repo>/sibling`, so a flag changed what a config key meant (`A1-143`,
-    // found by its audit). The comparison itself is done in absolute terms, so
-    // the two frames still meet.
-    let external = config
-        .traces_external
-        .clone()
-        .unwrap_or_default()
-        .into_iter()
-        .map(|d| config_dir.map_or_else(|| PathBuf::from(&d), |base| base.join(&d)))
-        .collect();
-
-    // `.aplan.yml`'s `policy` list, in file order so the documented tie rule
-    // (narrowest wins, then the earlier entry) is the one that applies (`A1-183`).
-    let evidence_scopes: Vec<aplan_core::validate::EvidenceScope> = config
-        .policy
-        .as_deref()
-        .unwrap_or_default()
-        .iter()
-        .map(|p| aplan_core::validate::EvidenceScope {
-            // One parser, shared with `Scope::validate`, which the loader has
-            // already run: an unparseable status is refused before it reaches
-            // here rather than dropped into a scope that then matches everything.
-            selector: p.when.selector().unwrap_or_default(),
-            named_dimensions: p.when.named_dimensions(),
-            require_min_strength: p
-                .evidence
-                .as_ref()
-                .and_then(|e| e.require_min_strength.clone()),
-            exempt_tags: p.evidence.as_ref().and_then(|e| e.exempt_tags.clone()),
-        })
-        .collect();
-
-    Options {
-        require_effort,
-        // `None` unless the plan asked: a repository that has never heard of
-        // version discipline meets none of it (`A1-312`, ADR-0034).
-        require_impact: config
-            .version
-            .as_ref()
-            .filter(|v| v.requires_impact())
-            .map(aplan_config::VersionPolicy::floors),
-        traces_root,
-        // Resolved against `traces_root`, exactly as a trace target is: the two
-        // are compared with each other, so they have to be in one frame, and the
-        // frame that needs no absolute paths is the one traces already live in.
-        // Absolutising the root instead was the first attempt, and it changed the
-        // path `APLAN018`'s fix line tells a reader to paste (`A1-143`).
-        traces_external: external,
-        require_min_strength,
-        evidence_scopes,
-        exempt_tags,
-        // APLAN041's comparison needs the plan, which is not read yet: filled in
-        // by `with_agents_block` once it is.
-        agents_block: None,
-        // APLAN018 is config-only (repo policy, not a per-run knob), like APLAN017.
-        detect_drift: config.detect_drift.unwrap_or(false),
-        // APLAN022 is config-only too: membership totality is a repo policy.
-        require_cut_membership: config.require_cut_membership.unwrap_or(false),
-        // APLAN026 likewise: a tag vocabulary is something a repository declares
-        // once, not something a run turns on.
-        tag_families: tag_families_of(config),
-        // So `APLAN029` can point at the declaration it is about.
-        config_file: config_dir.map(|d| d.join(aplan_config::CONFIG_FILE)),
-    }
+    aplan_app::configured_options(
+        config,
+        aplan_app::ConfigurationInputs {
+            directory: config_dir,
+            file: selected_config_file(config_dir),
+            no_require_effort,
+            traces_root,
+            no_traces,
+            default_traces: Some(PathBuf::from(".")),
+            traces_repository,
+        },
+    )
 }
 
 /// Refuse a run whose declared external traces roots are not there (`A1-143`).
@@ -1561,34 +3214,1057 @@ fn refuse_absent_external_roots(opts: &Options) -> Result<()> {
 fn cmd_check(root: &std::path::Path, args: &CheckArgs) -> Result<u8> {
     refuse_selection_on_a_gate("check", &args.select)?;
     let format = format_for("check", &args.format)?;
-    let plan = load_checked(root)?;
-    // `.aplan.yml` is found by walking up from the plan directory, so `check` and
-    // `verify` converge on the same top-level file. Absent is fine; an unknown key
-    // in it is an error, never silently ignored.
-    let (config, config_dir) = config_at(root)?;
-    let opts = resolve_check_options(
-        &config,
-        config_dir.as_deref(),
-        args.no_require_effort,
-        args.traces_root.clone(),
-        args.no_traces,
+    let context = hermetic_application_context(
+        root,
+        HermeticContextOptions {
+            no_require_effort: args.no_require_effort,
+            traces: if args.no_traces {
+                TraceSelection::Disabled
+            } else {
+                TraceSelection::Resolve(args.traces_root.clone())
+            },
+            verdict: VerdictFlags {
+                deny_warnings: args.deny_warnings,
+                no_deny_warnings: args.no_deny_warnings,
+            },
+            include_documents: false,
+            retain_sources: false,
+            cache_publication: CachePublication::WithStructuralReport,
+            trust: aplan_app::Trust::Hermetic,
+        },
+    )?;
+    let response = timed("validate", || {
+        aplan_app::check(&context, aplan_app::CheckRequest)
+    });
+    let mut report = response.report;
+    append_capture_diagnostics(
+        &mut report,
+        root,
+        context
+            .report_config()
+            .expect("the CLI context captures resolved configuration"),
     );
-    refuse_absent_external_roots(&opts)?;
-    let opts = with_agents_block(opts, root, config_dir.as_deref(), &config, &plan);
-    let report = validate(&plan, &opts);
-    let policy = verdict_policy(&config, args.deny_warnings, args.no_deny_warnings);
+    let policy = context.verdict();
     // A plan that did not load is refused whatever the policy says, so that the
     // four commands that read a plan give one answer about it: `ready`, `why` and
     // `verify` all already stop here (`A1-112`).
-    let unloadable = load_errors(&plan).len();
+    let unloadable = load_errors(context.plan()).len();
     if unloadable > 0 {
-        render_tolerant(|| render_partial(&report, format, &policy, unloadable))?;
+        timed("render", || {
+            render_tolerant(|| render_partial(&report, format, policy, unloadable))
+        })?;
         return Ok(EXIT_VIOLATIONS);
     }
-    render_tolerant(|| render(&report, format, &policy))?;
-    note_denied_warnings(&report, &policy);
-    note_unresolved_evidence(&plan);
-    Ok(verdict(&report, &policy))
+    timed("render", || {
+        render_tolerant(|| render(&report, format, policy))
+    })?;
+    note_denied_warnings(&report, policy);
+    note_unresolved_evidence(context.plan());
+    Ok(if report.denied_by(policy) {
+        EXIT_VIOLATIONS
+    } else {
+        EXIT_OK
+    })
+}
+
+/// Layer capture validation onto the structural task report without admitting
+/// inbox YAML to task discovery or graph identity (ADR-0063).
+fn append_capture_diagnostics(
+    report: &mut aplan_core::Report,
+    root: &std::path::Path,
+    config: &aplan_config::Config,
+) {
+    let inbox = aplan_core::capture::load_inbox(
+        root,
+        &config.capture_policy(),
+        &aplan_core::capture::SystemClock,
+    );
+    report.diagnostics.extend(inbox.diagnostics);
+    report.diagnostics.sort_by(|left, right| {
+        left.code
+            .cmp(right.code)
+            .then(left.task.cmp(&right.task))
+            .then(left.file.cmp(&right.file))
+            .then(left.message.cmp(&right.message))
+    });
+}
+
+/// Load one hermetic application context through the same root, configuration,
+/// trace and verdict resolution used by `check` and the interactive adapter.
+#[derive(Debug)]
+enum TraceSelection {
+    Resolve(Option<PathBuf>),
+    Disabled,
+}
+
+#[derive(Clone, Copy, Debug)]
+enum CachePublication {
+    WithStructuralReport,
+    Immediate,
+}
+
+impl CachePublication {
+    const fn defers(self) -> bool {
+        matches!(self, Self::WithStructuralReport)
+    }
+}
+
+#[derive(Debug)]
+struct HermeticContextOptions {
+    no_require_effort: bool,
+    traces: TraceSelection,
+    verdict: VerdictFlags,
+    include_documents: bool,
+    retain_sources: bool,
+    cache_publication: CachePublication,
+    trust: aplan_app::Trust,
+}
+
+impl Default for HermeticContextOptions {
+    fn default() -> Self {
+        Self {
+            no_require_effort: false,
+            traces: TraceSelection::Resolve(None),
+            verdict: VerdictFlags {
+                deny_warnings: false,
+                no_deny_warnings: false,
+            },
+            include_documents: false,
+            retain_sources: true,
+            cache_publication: CachePublication::WithStructuralReport,
+            trust: aplan_app::Trust::Hermetic,
+        }
+    }
+}
+
+fn hermetic_application_context(
+    root: &std::path::Path,
+    context_options: HermeticContextOptions,
+) -> Result<aplan_app::PlanContext> {
+    hermetic_application_context_with_config(root, context_options).map(|(context, _, _)| context)
+}
+
+/// Resolve one context and retain the exact configuration value that produced
+/// it. An operation that also needs non-hermetic provider policy must not read
+/// `.aplan.yml` a second time and combine two revisions into one run sheet.
+fn hermetic_application_context_with_config(
+    root: &std::path::Path,
+    context_options: HermeticContextOptions,
+) -> Result<(
+    aplan_app::PlanContext,
+    aplan_config::Config,
+    Option<PathBuf>,
+)> {
+    let (config, config_dir) = config_at(root)?;
+    let config_file = selected_config_file(config_dir.as_deref());
+    let context = hermetic_application_context_from_config(
+        root,
+        context_options,
+        &config,
+        config_dir.as_deref(),
+        config_file,
+    )?;
+    Ok((context, config, config_dir))
+}
+
+/// Build one context from configuration bytes the caller already selected.
+///
+/// Interactive launch classifies configuration failures before a plan exists,
+/// then enters the exact same policy/document resolution path without reading
+/// a newer configuration revision into the same snapshot.
+fn hermetic_application_context_from_config(
+    root: &std::path::Path,
+    context_options: HermeticContextOptions,
+    config: &aplan_config::Config,
+    config_dir: Option<&std::path::Path>,
+    config_file: Option<PathBuf>,
+) -> Result<aplan_app::PlanContext> {
+    let (traces_root, no_traces) = match context_options.traces {
+        TraceSelection::Resolve(root) => (root, false),
+        TraceSelection::Disabled => (None, true),
+    };
+    let defer_cache_publication = context_options.cache_publication.defers();
+    let plan = load_store_snapshot(
+        root,
+        context_options.retain_sources,
+        defer_cache_publication,
+    )?;
+    let opts = resolve_check_options(
+        config,
+        config_dir,
+        context_options.no_require_effort,
+        traces_root,
+        no_traces,
+        Some(plan_repository(root)),
+    );
+    refuse_absent_external_roots(&opts)?;
+    let opts = timed("project", || {
+        with_agents_block(opts, root, config_dir, config, &plan.plan)
+    });
+    let report_cache = timed("load", || {
+        structural_report_cache(
+            root,
+            context_options.retain_sources,
+            defer_cache_publication,
+            &opts,
+        )
+    });
+    let policy = verdict_policy(
+        config,
+        context_options.verdict.deny_warnings,
+        context_options.verdict.no_deny_warnings,
+    );
+    let context = timed("project", || -> Result<aplan_app::PlanContext> {
+        let context = aplan_app::PlanContext::new(
+            plan,
+            aplan_app::ContextInputs {
+                repository_root: plan_repository(root),
+                configuration_file: config_file,
+                trust: context_options.trust,
+                options: opts,
+                verdict: policy,
+            },
+        );
+        let mut context = context.with_captured_report_config(config.clone())?;
+        if let Some(cache) = report_cache {
+            context = context.with_structural_report_cache(cache);
+        }
+        if context_options.include_documents {
+            Ok(context.with_documents(configured_document_inputs(config, config_dir)))
+        } else {
+            Ok(context)
+        }
+    })?;
+    Ok(context)
+}
+
+#[cfg(feature = "tui")]
+fn hermetic_application_context_from_config_observed(
+    root: &std::path::Path,
+    context_options: HermeticContextOptions,
+    config: &aplan_config::Config,
+    config_dir: Option<&std::path::Path>,
+    config_file: Option<PathBuf>,
+    progress: &mut aplan_app::ProgressEmitter<'_>,
+    cancellation: &aplan_app::CancellationToken,
+) -> Result<aplan_app::PlanContext> {
+    cancellation.check()?;
+    let (traces_root, no_traces) = match context_options.traces {
+        TraceSelection::Resolve(root) => (root, false),
+        TraceSelection::Disabled => (None, true),
+    };
+    let defer_cache_publication = context_options.cache_publication.defers();
+    let plan = load_store_snapshot_observed(
+        root,
+        context_options.retain_sources,
+        defer_cache_publication,
+        progress,
+        cancellation,
+    )?;
+    let opts = resolve_check_options(
+        config,
+        config_dir,
+        context_options.no_require_effort,
+        traces_root,
+        no_traces,
+        Some(plan_repository(root)),
+    );
+    refuse_absent_external_roots(&opts)?;
+    let opts = timed("project", || {
+        with_agents_block(opts, root, config_dir, config, &plan.plan)
+    });
+    let report_cache = timed("load", || {
+        structural_report_cache(
+            root,
+            context_options.retain_sources,
+            defer_cache_publication,
+            &opts,
+        )
+    });
+    let policy = verdict_policy(
+        config,
+        context_options.verdict.deny_warnings,
+        context_options.verdict.no_deny_warnings,
+    );
+    cancellation.check()?;
+    progress.phase_started(
+        aplan_app::ProgressPhase::RepositoryObservation,
+        None,
+        aplan_app::ProgressMeasure::Indeterminate,
+    );
+    let context = timed("project", || -> Result<aplan_app::PlanContext> {
+        let context = aplan_app::PlanContext::new(
+            plan,
+            aplan_app::ContextInputs {
+                repository_root: plan_repository(root),
+                configuration_file: config_file,
+                trust: context_options.trust,
+                options: opts,
+                verdict: policy,
+            },
+        );
+        let mut context = context.with_captured_report_config(config.clone())?;
+        if let Some(cache) = report_cache {
+            context = context.with_structural_report_cache(cache);
+        }
+        if context_options.include_documents {
+            Ok(context.with_documents(configured_document_inputs(config, config_dir)))
+        } else {
+            Ok(context)
+        }
+    })?;
+    progress.phase_completed(
+        aplan_app::ProgressPhase::RepositoryObservation,
+        None,
+        aplan_app::ProgressMeasure::Indeterminate,
+    );
+    cancellation.check()?;
+    Ok(context)
+}
+
+#[cfg(feature = "tui")]
+fn cmd_tui(args: &TuiArgs, cli_root: Option<PathBuf>) -> Result<u8> {
+    // Refuse before opening repository-controlled inputs or acquiring a mode.
+    // A redirected invocation cannot use the interface, whatever the plan says.
+    aplan_tui::require_terminal()?;
+    cmd_tui_in_terminal(args, cli_root, aplan_tui::run_loading)
+}
+
+#[cfg(all(feature = "tui", test))]
+fn tui_context_and_verification(
+    root: &std::path::Path,
+    execute: bool,
+) -> Result<(aplan_app::PlanContext, aplan_evidence::VerifyOptions)> {
+    let source = CONFIG_SOURCE
+        .get()
+        .cloned()
+        .unwrap_or(aplan_config::ConfigSource::Discover);
+    let (launch, options) = tui_launch_and_options_at(
+        std::path::Path::new("."),
+        Some(root.to_path_buf()),
+        &source,
+        execute,
+        None,
+    )?;
+    let aplan_tui::Launch::Loaded(loaded) = launch else {
+        anyhow::bail!("the selected plan is not currently loadable")
+    };
+    Ok((
+        loaded.context,
+        options.expect("a loaded TUI launch carries verification options"),
+    ))
+}
+
+#[cfg(feature = "tui")]
+fn config_file_for_source(
+    source: &aplan_config::ConfigSource,
+    config_dir: Option<&std::path::Path>,
+) -> Option<PathBuf> {
+    match source {
+        aplan_config::ConfigSource::File(path) => Some(path.clone()),
+        aplan_config::ConfigSource::None => None,
+        aplan_config::ConfigSource::Discover => {
+            config_dir.map(|directory| directory.join(aplan_config::CONFIG_FILE))
+        }
+    }
+}
+
+#[cfg(feature = "tui")]
+fn tui_configuration_selection(
+    start: &std::path::Path,
+    source: &aplan_config::ConfigSource,
+) -> aplan_app::ConfigurationSelection {
+    match source {
+        aplan_config::ConfigSource::Discover => aplan_app::ConfigurationSelection::Discover {
+            start: start.to_path_buf(),
+            searched: aplan_config::config_search_paths(start),
+            found: aplan_config::discovered_config(start),
+        },
+        aplan_config::ConfigSource::File(path) => {
+            aplan_app::ConfigurationSelection::Explicit { path: path.clone() }
+        }
+        aplan_config::ConfigSource::None => aplan_app::ConfigurationSelection::None,
+    }
+}
+
+#[cfg(feature = "tui")]
+fn tui_configuration_error_cause(
+    selection: &aplan_app::ConfigurationSelection,
+    error: &aplan_config::Error,
+) -> aplan_app::OnboardingCause {
+    let selected = match selection {
+        aplan_app::ConfigurationSelection::Discover { found, .. } => found.as_deref(),
+        aplan_app::ConfigurationSelection::Explicit { path } => Some(path.as_path()),
+        aplan_app::ConfigurationSelection::None => None,
+    };
+    // Inspect the directory entry rather than following it. A dangling symlink
+    // is an existing selected input: calling it absent would advertise `init`,
+    // which correctly refuses to overwrite the link and cannot repair it.
+    let missing = selected.is_some_and(|path| {
+        matches!(std::fs::symlink_metadata(path), Err(io) if io.kind() == std::io::ErrorKind::NotFound)
+    });
+    if missing {
+        aplan_app::OnboardingCause::MissingConfiguration
+    } else if matches!(error, aplan_config::Error::Io(_)) {
+        aplan_app::OnboardingCause::UnreadableConfiguration
+    } else {
+        aplan_app::OnboardingCause::InvalidConfiguration
+    }
+}
+
+#[cfg(feature = "tui")]
+fn tui_load_configuration(
+    start: &std::path::Path,
+    selection: &aplan_app::ConfigurationSelection,
+) -> std::result::Result<(aplan_config::Config, Option<PathBuf>), aplan_config::Error> {
+    // Freeze discovery to the path already named in `selection`. Calling the
+    // discovery loader again could select a file created between classification
+    // and loading, leaving the screen's provenance different from the policy it
+    // actually applied.
+    let source = match selection {
+        aplan_app::ConfigurationSelection::Discover {
+            found: Some(path), ..
+        }
+        | aplan_app::ConfigurationSelection::Explicit { path } => {
+            aplan_config::ConfigSource::File(path.clone())
+        }
+        aplan_app::ConfigurationSelection::Discover { found: None, .. }
+        | aplan_app::ConfigurationSelection::None => aplan_config::ConfigSource::None,
+    };
+    aplan_config::load_from(&source, start)
+}
+
+#[cfg(feature = "tui")]
+fn shell_word(value: &std::path::Path) -> String {
+    let value = value.to_string_lossy();
+    format!("'{}'", value.replace('\'', "'\"'\"'"))
+}
+
+#[cfg(feature = "tui")]
+fn tui_onboarding(
+    cause: aplan_app::OnboardingCause,
+    start: &std::path::Path,
+    plan_root: PathBuf,
+    root_selection: aplan_app::RootSelection,
+    configuration: aplan_app::ConfigurationSelection,
+    detail: String,
+) -> aplan_tui::Launch {
+    let mut guidance = Vec::new();
+    let mut commands = Vec::new();
+    match cause {
+        aplan_app::OnboardingCause::MissingPlan => {
+            guidance.push(
+                "`aplan init` writes only `.aplan.yml` into an existing directory; it does not create a task root or tasks."
+                    .to_string(),
+            );
+            guidance.push(
+                "Create the plan's task directory separately, then add or import the first task."
+                    .to_string(),
+            );
+            commands.push(aplan_app::GuidedCommand {
+                purpose: "create the conventional task directory".to_string(),
+                display: format!("mkdir -p -- {}", shell_word(&plan_root.join("tasks"))),
+            });
+            commands.push(aplan_app::GuidedCommand {
+                purpose: "write a starter .aplan.yml without overwriting one".to_string(),
+                display: format!("aplan init -- {}", shell_word(start)),
+            });
+        }
+        aplan_app::OnboardingCause::MissingConfiguration => {
+            guidance.push(
+                "The explicitly selected file is not present. Selection never falls back to repository discovery."
+                    .to_string(),
+            );
+            guidance.push(
+                "`aplan init` writes only `.aplan.yml` and refuses to overwrite it; it cannot create an arbitrary selected filename."
+                    .to_string(),
+            );
+            if let aplan_app::ConfigurationSelection::Explicit { path } = &configuration
+                && path
+                    .file_name()
+                    .is_some_and(|name| name == aplan_config::CONFIG_FILE)
+                && let Some(parent) = path.parent()
+            {
+                let parent = if parent.as_os_str().is_empty() {
+                    std::path::Path::new(".")
+                } else {
+                    parent
+                };
+                if parent.is_dir() {
+                    commands.push(aplan_app::GuidedCommand {
+                        purpose: "write a starter .aplan.yml in the selected directory"
+                            .to_string(),
+                        display: format!("aplan init -- {}", shell_word(parent)),
+                    });
+                } else {
+                    guidance.push(format!(
+                        "Create the selected configuration directory `{}` first; only then can `aplan init` write its `.aplan.yml`.",
+                        parent.display()
+                    ));
+                }
+            } else if let aplan_app::ConfigurationSelection::Explicit { path } = &configuration {
+                guidance.push(format!(
+                    "Create the selected file `{}` explicitly, or relaunch with `--config` naming a conventional `.aplan.yml`; `aplan init` cannot repair this filename.",
+                    path.display()
+                ));
+            }
+        }
+        aplan_app::OnboardingCause::MissingRoot => {
+            guidance.push(
+                "Configuration is valid, but its selected plan root does not exist. `aplan init` does not create this directory."
+                    .to_string(),
+            );
+            commands.push(aplan_app::GuidedCommand {
+                purpose: "create the selected plan's conventional task directory".to_string(),
+                display: format!("mkdir -p -- {}", shell_word(&plan_root.join("tasks"))),
+            });
+        }
+        aplan_app::OnboardingCause::UnreadableConfiguration => guidance.push(
+            "Repair permissions, file type, encoding, or the selected path. The existing input is never overwritten."
+                .to_string(),
+        ),
+        aplan_app::OnboardingCause::InvalidConfiguration => guidance.push(
+            "Edit the existing configuration using the reported parse or policy error. The existing input is never overwritten."
+                .to_string(),
+        ),
+    }
+    aplan_tui::Launch::Onboarding(aplan_app::Onboarding {
+        cause,
+        plan_root,
+        root_selection,
+        configuration,
+        detail,
+        guidance,
+        commands,
+    })
+}
+
+#[cfg(feature = "tui")]
+fn tui_launch_at(
+    start: &std::path::Path,
+    cli_root: Option<PathBuf>,
+    source: &aplan_config::ConfigSource,
+    execute: bool,
+) -> Result<aplan_tui::Launch> {
+    tui_launch_and_options_at(start, cli_root, source, execute, None).map(|(launch, _)| launch)
+}
+
+#[cfg(feature = "tui")]
+struct TuiLaunchObserver<'a, 'progress> {
+    progress: &'a mut aplan_app::ProgressEmitter<'progress>,
+    cancellation: &'a aplan_app::CancellationToken,
+}
+
+#[cfg(feature = "tui")]
+impl TuiLaunchObserver<'_, '_> {
+    fn check(&self) -> Result<()> {
+        self.cancellation.check()?;
+        Ok(())
+    }
+
+    fn started(&mut self, phase: aplan_app::ProgressPhase) {
+        self.progress
+            .phase_started(phase, None, aplan_app::ProgressMeasure::Indeterminate);
+    }
+
+    fn completed(&mut self, phase: aplan_app::ProgressPhase) {
+        self.progress
+            .phase_completed(phase, None, aplan_app::ProgressMeasure::Indeterminate);
+    }
+}
+
+#[cfg(feature = "tui")]
+fn tui_launch_and_options_at(
+    start: &std::path::Path,
+    cli_root: Option<PathBuf>,
+    source: &aplan_config::ConfigSource,
+    execute: bool,
+    observer: Option<TuiLaunchObserver<'_, '_>>,
+) -> Result<(aplan_tui::Launch, Option<aplan_evidence::VerifyOptions>)> {
+    match tui_resolve_at(
+        start,
+        cli_root,
+        source,
+        TuiLoadPurpose::Launch { execute },
+        observer,
+    )? {
+        TuiLoadOutcome::Launch(launch) => Ok(*launch),
+        TuiLoadOutcome::Observation(_) => {
+            unreachable!("launch resolution returned an identity-only observation")
+        }
+    }
+}
+
+#[cfg(feature = "tui")]
+#[derive(Clone, Copy)]
+enum TuiLoadPurpose {
+    Launch { execute: bool },
+    Observation,
+}
+
+#[cfg(feature = "tui")]
+enum TuiLoadOutcome {
+    Launch(Box<(aplan_tui::Launch, Option<aplan_evidence::VerifyOptions>)>),
+    Observation(Box<aplan_app::PlanContext>),
+}
+
+#[cfg(feature = "tui")]
+impl TuiLoadPurpose {
+    fn onboarding(self, launch: aplan_tui::Launch) -> Result<TuiLoadOutcome> {
+        match self {
+            Self::Launch { .. } => Ok(TuiLoadOutcome::Launch(Box::new((launch, None)))),
+            Self::Observation => match launch {
+                aplan_tui::Launch::Onboarding(state) => anyhow::bail!(state.detail),
+                aplan_tui::Launch::Loaded(_) => {
+                    unreachable!("an onboarding result cannot contain a loaded context")
+                }
+            },
+        }
+    }
+}
+
+#[cfg(feature = "tui")]
+fn tui_resolve_at(
+    start: &std::path::Path,
+    cli_root: Option<PathBuf>,
+    source: &aplan_config::ConfigSource,
+    purpose: TuiLoadPurpose,
+    mut observer: Option<TuiLaunchObserver<'_, '_>>,
+) -> Result<TuiLoadOutcome> {
+    if let Some(observer) = observer.as_mut() {
+        observer.check()?;
+        observer.started(aplan_app::ProgressPhase::ConfigurationDiscovery);
+    }
+    let configuration = tui_configuration_selection(start, source);
+    let loaded = tui_load_configuration(start, &configuration);
+    let (config, config_dir) = match loaded {
+        Ok(loaded) => loaded,
+        Err(error) => {
+            if let Some(observer) = observer.as_mut() {
+                observer.completed(aplan_app::ProgressPhase::ConfigurationDiscovery);
+            }
+            let cause = tui_configuration_error_cause(&configuration, &error);
+            let explicit_root = cli_root.is_some();
+            let plan_root = cli_root.unwrap_or_else(|| PathBuf::from(DEFAULT_ROOT));
+            let root_selection = if explicit_root {
+                aplan_app::RootSelection::Explicit
+            } else {
+                aplan_app::RootSelection::Default
+            };
+            return purpose.onboarding(tui_onboarding(
+                cause,
+                start,
+                plan_root,
+                root_selection,
+                configuration,
+                error.to_string(),
+            ));
+        }
+    };
+    let selected_file = config_file_for_source(source, config_dir.as_deref());
+    let root_selection = if cli_root.is_some() {
+        aplan_app::RootSelection::Explicit
+    } else if config.root.is_some() {
+        aplan_app::RootSelection::Configuration {
+            file: selected_file
+                .clone()
+                .unwrap_or_else(|| start.join(aplan_config::CONFIG_FILE)),
+        }
+    } else {
+        aplan_app::RootSelection::Default
+    };
+    let mut root =
+        cli_root.unwrap_or_else(|| root_from_config(config.root.clone(), config_dir.as_deref()));
+    if root.is_relative() {
+        root = start.join(root);
+    }
+    if !root.is_dir() {
+        if let Some(observer) = observer.as_mut() {
+            observer.completed(aplan_app::ProgressPhase::ConfigurationDiscovery);
+        }
+        let no_discovered_config = matches!(
+            &configuration,
+            aplan_app::ConfigurationSelection::Discover { found: None, .. }
+        );
+        let cause = if no_discovered_config
+            && matches!(root_selection, aplan_app::RootSelection::Default)
+        {
+            aplan_app::OnboardingCause::MissingPlan
+        } else {
+            aplan_app::OnboardingCause::MissingRoot
+        };
+        return purpose.onboarding(tui_onboarding(
+            cause,
+            start,
+            root.clone(),
+            root_selection,
+            configuration,
+            format!(
+                "plan root `{}` is not a directory, so no plan was loaded",
+                root.display()
+            ),
+        ));
+    }
+    tui_loaded_launch_at(
+        start,
+        source,
+        TuiLaunchSelection {
+            root,
+            root_selection,
+            config,
+            config_dir,
+            configuration,
+        },
+        purpose,
+        observer,
+    )
+}
+
+#[cfg(feature = "tui")]
+struct TuiLaunchSelection {
+    root: PathBuf,
+    root_selection: aplan_app::RootSelection,
+    config: aplan_config::Config,
+    config_dir: Option<PathBuf>,
+    configuration: aplan_app::ConfigurationSelection,
+}
+
+#[cfg(feature = "tui")]
+fn tui_verification_options(
+    context: &aplan_app::PlanContext,
+    config: aplan_config::Config,
+    selected_file: Option<PathBuf>,
+    execute: bool,
+) -> aplan_evidence::VerifyOptions {
+    aplan_evidence::VerifyOptions {
+        traces_root: context.options().traces_root.clone(),
+        detect_drift: context.options().detect_drift,
+        execute,
+        test_runner: config.test,
+        max_unrelated_files: config
+            .evidence
+            .as_ref()
+            .and_then(|value| value.max_unrelated_files),
+        observation_inputs: config
+            .evidence
+            .as_ref()
+            .and_then(|value| value.observation_inputs.clone()),
+        url_check: config.url,
+        config_file: selected_file,
+        version: config.version,
+    }
+}
+
+#[cfg(feature = "tui")]
+fn tui_loaded_launch_at(
+    start: &std::path::Path,
+    source: &aplan_config::ConfigSource,
+    selected: TuiLaunchSelection,
+    purpose: TuiLoadPurpose,
+    mut observer: Option<TuiLaunchObserver<'_, '_>>,
+) -> Result<TuiLoadOutcome> {
+    let TuiLaunchSelection {
+        config,
+        config_dir,
+        configuration,
+        root,
+        root_selection,
+    } = selected;
+    // Preserve the CLI's two-stage discovery semantics: configuration found
+    // from the invocation directory chooses the root, then discovery from that
+    // root chooses the repository policy applied to the loaded plan. An
+    // explicit file or `--no-config` is the same source at both stages.
+    let initial_file = config_file_for_source(source, config_dir.as_deref());
+    let (config, config_dir, configuration) =
+        if matches!(source, aplan_config::ConfigSource::Discover) {
+            let plan_configuration = tui_configuration_selection(&root, source);
+            let plan_selected = match &plan_configuration {
+                aplan_app::ConfigurationSelection::Discover { found, .. } => found.as_ref(),
+                _ => None,
+            };
+            if plan_selected == initial_file.as_ref() {
+                (config, config_dir, plan_configuration)
+            } else {
+                match tui_load_configuration(&root, &plan_configuration) {
+                    Ok((config, config_dir)) => (config, config_dir, plan_configuration),
+                    Err(error) => {
+                        if let Some(observer) = observer.as_mut() {
+                            observer.completed(aplan_app::ProgressPhase::ConfigurationDiscovery);
+                        }
+                        let cause = tui_configuration_error_cause(&plan_configuration, &error);
+                        return purpose.onboarding(tui_onboarding(
+                            cause,
+                            start,
+                            root,
+                            root_selection,
+                            plan_configuration,
+                            error.to_string(),
+                        ));
+                    }
+                }
+            }
+        } else {
+            (config, config_dir, configuration)
+        };
+    if let Some(observer) = observer.as_mut() {
+        observer.completed(aplan_app::ProgressPhase::ConfigurationDiscovery);
+        observer.check()?;
+    }
+    let selected_file = config_file_for_source(source, config_dir.as_deref());
+    let context_options = HermeticContextOptions {
+        include_documents: true,
+        // The interactive surface offers explicit provider-backed previews.
+        // Individual forms remain inert until the user asks, while the
+        // retained context names the capability those actions may exercise.
+        trust: aplan_app::Trust::ConfiguredProcesses,
+        ..HermeticContextOptions::default()
+    };
+    let context = if let Some(observer) = observer.as_mut() {
+        hermetic_application_context_from_config_observed(
+            &root,
+            context_options,
+            &config,
+            config_dir.as_deref(),
+            selected_file.clone(),
+            &mut *observer.progress,
+            observer.cancellation,
+        )?
+    } else {
+        hermetic_application_context_from_config(
+            &root,
+            context_options,
+            &config,
+            config_dir.as_deref(),
+            selected_file.clone(),
+        )?
+    };
+    if matches!(purpose, TuiLoadPurpose::Observation) {
+        if let Some(observer) = observer.as_ref() {
+            observer.check()?;
+        }
+        return Ok(TuiLoadOutcome::Observation(Box::new(context)));
+    }
+    let TuiLoadPurpose::Launch { execute } = purpose else {
+        unreachable!("identity observation returned before verification preparation")
+    };
+    let options = tui_verification_options(&context, config, selected_file, execute);
+    if let Some(observer) = observer.as_mut() {
+        observer.started(aplan_app::ProgressPhase::VerificationPreparation);
+    }
+    let verification_sheet = aplan_app::verification_run_sheet(&context, &options);
+    if let Some(observer) = observer.as_mut() {
+        observer.completed(aplan_app::ProgressPhase::VerificationPreparation);
+        observer.check()?;
+    }
+    Ok(TuiLoadOutcome::Launch(Box::new((
+        aplan_tui::Launch::Loaded(Box::new(aplan_tui::LoadedLaunch {
+            context,
+            verification_sheet,
+            resolution: aplan_app::LaunchResolution {
+                plan_root: root,
+                root_selection,
+                configuration,
+            },
+        })),
+        Some(options),
+    ))))
+}
+
+#[cfg(feature = "tui")]
+fn tui_observe_context_at(
+    start: &std::path::Path,
+    cli_root: Option<PathBuf>,
+    source: &aplan_config::ConfigSource,
+    progress: &mut aplan_app::ProgressEmitter<'_>,
+    cancellation: &aplan_app::CancellationToken,
+) -> Result<aplan_app::PlanContext> {
+    match tui_resolve_at(
+        start,
+        cli_root,
+        source,
+        TuiLoadPurpose::Observation,
+        Some(TuiLaunchObserver {
+            progress,
+            cancellation,
+        }),
+    )? {
+        TuiLoadOutcome::Observation(context) => Ok(*context),
+        TuiLoadOutcome::Launch(_) => {
+            unreachable!("identity observation prepared a complete launch")
+        }
+    }
+}
+
+#[cfg(feature = "tui")]
+fn tui_launch_observed_at(
+    start: &std::path::Path,
+    cli_root: Option<PathBuf>,
+    source: &aplan_config::ConfigSource,
+    progress: &mut aplan_app::ProgressEmitter<'_>,
+    cancellation: &aplan_app::CancellationToken,
+) -> Result<aplan_tui::Launch> {
+    tui_launch_and_options_at(
+        start,
+        cli_root,
+        source,
+        false,
+        Some(TuiLaunchObserver {
+            progress,
+            cancellation,
+        }),
+    )
+    .map(|(launch, _)| launch)
+}
+#[cfg(feature = "tui")]
+fn tui_appearance(args: &TuiArgs) -> aplan_tui::AppearanceOptions {
+    aplan_tui::AppearanceOptions {
+        theme: args.theme.map(|theme| match theme {
+            TuiTheme::Dark => aplan_tui::ThemeOverride::Dark,
+            TuiTheme::Light => aplan_tui::ThemeOverride::Light,
+            TuiTheme::LowColor => aplan_tui::ThemeOverride::LowColor,
+            TuiTheme::Monochrome => aplan_tui::ThemeOverride::Monochrome,
+        }),
+        ascii: args.ascii,
+        reduced_motion: args.reduced_motion,
+    }
+}
+
+#[cfg(feature = "tui")]
+fn tui_initial_load(
+    start: PathBuf,
+    cli_root: Option<PathBuf>,
+    source: aplan_config::ConfigSource,
+) -> aplan_tui::InitialLoad {
+    Box::new(move |progress, cancellation| {
+        cancellation.check().map_err(|error| error.to_string())?;
+        progress.phase_started(
+            aplan_app::ProgressPhase::BuildIdentification,
+            None,
+            aplan_app::ProgressMeasure::Indeterminate,
+        );
+        let facts = build_facts();
+        let identity = tool_identity_for_facts(&facts);
+        progress.phase_completed(
+            aplan_app::ProgressPhase::BuildIdentification,
+            None,
+            aplan_app::ProgressMeasure::Indeterminate,
+        );
+        cancellation.check().map_err(|error| error.to_string())?;
+        let launch = tui_launch_observed_at(&start, cli_root, &source, progress, cancellation)
+            .map_err(|error| error.to_string())?;
+        Ok(aplan_tui::InitialLaunch {
+            launch,
+            build: aplan_app::BuildIdentity {
+                version: identity.version,
+                source: identity.source,
+                facts_sha256: identity.facts_sha256,
+                binary_sha256: identity.binary_sha256,
+            },
+            facts,
+        })
+    })
+}
+
+#[cfg(feature = "tui")]
+fn cmd_tui_in_terminal(
+    args: &TuiArgs,
+    cli_root: Option<PathBuf>,
+    run: impl FnOnce(aplan_tui::InitialLoad, aplan_tui::Session) -> Result<(), aplan_tui::Error>,
+) -> Result<u8> {
+    note_config_refused();
+    let source = CONFIG_SOURCE
+        .get()
+        .cloned()
+        .unwrap_or(aplan_config::ConfigSource::Discover);
+    let start = PathBuf::from(".");
+    let load = tui_initial_load(start.clone(), cli_root.clone(), source.clone());
+    let observe_start = start.clone();
+    let observe_root = cli_root.clone();
+    let observe_source = source.clone();
+    let observe: aplan_tui::Observe = Box::new(move |cancellation| {
+        let mut discard = |_| {};
+        let mut progress = aplan_app::ProgressEmitter::begin(
+            aplan_app::OperationId::new(0),
+            aplan_app::OperationKind::PlanLoad,
+            &mut discard,
+        );
+        tui_observe_context_at(
+            &observe_start,
+            observe_root.clone(),
+            &observe_source,
+            &mut progress,
+            cancellation,
+        )
+        .map_err(|error| error.to_string())
+    });
+    let reload_start = start.clone();
+    let reload_root = cli_root.clone();
+    let reload_source = source.clone();
+    let reload: aplan_tui::Reload = Box::new(move || {
+        match tui_launch_at(&reload_start, reload_root.clone(), &reload_source, false)
+            .map_err(|error| error.to_string())?
+        {
+            aplan_tui::Launch::Loaded(loaded) => Ok((loaded.context, loaded.verification_sheet)),
+            aplan_tui::Launch::Onboarding(state) => Err(state.detail),
+        }
+    });
+    let retry_start = start.clone();
+    let retry_root = cli_root.clone();
+    let retry_source = source.clone();
+    let retry: aplan_tui::Retry = Box::new(move || {
+        tui_launch_at(&retry_start, retry_root.clone(), &retry_source, false)
+            .map_err(|error| error.to_string())
+    });
+    let verify_root = cli_root;
+    let verify_source = source;
+    let verify: aplan_tui::Verify =
+        Box::new(move |expected_input, execute, operation, progress| {
+            let (launch, options) = tui_launch_and_options_at(
+                std::path::Path::new("."),
+                verify_root.clone(),
+                &verify_source,
+                execute,
+                None,
+            )
+            .map_err(|error| aplan_app::VerificationError::Unavailable(error.to_string()))?;
+            let loaded = match launch {
+                aplan_tui::Launch::Loaded(loaded) => loaded,
+                aplan_tui::Launch::Onboarding(state) => {
+                    return Err(aplan_app::VerificationError::Unavailable(state.detail));
+                }
+            };
+            let context = loaded.context;
+            let options = options.expect("a loaded TUI launch carries verification options");
+            let actual = loaded.verification_sheet.input_sha256;
+            if actual != expected_input {
+                return Err(aplan_app::VerificationError::Stale {
+                    expected: expected_input.to_string(),
+                    actual,
+                });
+            }
+            aplan_app::verify_context_with_progress(&context, &options, operation, progress)
+        });
+    let appearance = tui_appearance(args);
+    run(
+        load,
+        aplan_tui::Session {
+            appearance,
+            observe,
+            reload,
+            retry,
+            verify,
+        },
+    )?;
+    Ok(EXIT_OK)
+}
+
+#[cfg(not(feature = "tui"))]
+fn cmd_tui(_args: &TuiArgs, _cli_root: Option<PathBuf>) -> Result<u8> {
+    anyhow::bail!(
+        "this `aplan` build does not include the terminal interface. Rebuild without \
+         `--no-default-features`, or enable it explicitly with `--features tui`. Use \
+         `aplan facts --require build.tui` to check this capability."
+    )
 }
 
 /// The plan `add` would produce: the new task, and the cut that would list it.
@@ -1596,6 +4272,7 @@ fn post_state_for_add(
     plan: &aplan_core::load::Plan,
     task: &aplan_core::Task,
     cut: Option<&str>,
+    moving: Option<&aplan_interop::cut::NewCutMove>,
 ) -> aplan_core::load::Plan {
     let mut after = aplan_core::mutation::with_added(
         plan,
@@ -1606,6 +4283,19 @@ fn post_state_for_add(
         && let Some(slot) = after.tasks.iter_mut().find(|lt| lt.task.id == cut_id)
     {
         slot.task.blocked_by.push(task.id.clone());
+    }
+    if let Some(moving) = moving {
+        for (source, removal) in moving.removals() {
+            if let Some(slot) = after
+                .tasks
+                .iter_mut()
+                .find(|loaded| loaded.task.id == *source)
+            {
+                slot.task
+                    .blocked_by
+                    .retain(|id| !removal.removed().contains(id));
+            }
+        }
     }
     after
 }
@@ -1669,6 +4359,7 @@ fn task_of(content: &str, id: &str) -> Result<aplan_core::Task> {
 /// advice and a second paragraph would be noise.
 fn no_cut_to_join(
     before: &aplan_core::load::Plan,
+    after: &aplan_core::load::Plan,
     delta: &aplan_core::mutation::Delta,
     policy: &aplan_core::Verdict,
 ) -> String {
@@ -1677,7 +4368,7 @@ fn no_cut_to_join(
     // Which half of the deadlock this is, asked of the crate that owns the
     // rules: whether an empty cut blocks is a fact about `APLAN021` and this
     // repository's policy, and the wording is all that belongs here.
-    match delta.bootstrap(before, policy) {
+    match delta.bootstrap(before, after, policy) {
         Bootstrap::No => String::new(),
         // Reached only when the empty cut was refused, so there is no policy
         // question left to ask.
@@ -1725,7 +4416,27 @@ fn refuse_bad_mutation(
     after: &aplan_core::load::Plan,
     verdict: VerdictFlags,
 ) -> Result<()> {
-    refuse_bad_mutation_unless(root, what, before, after, false, verdict)
+    refuse_bad_mutation_with(root, what, before, after, false, false, verdict)
+}
+
+/// The mutation gate for `add`, where two warning-shaped inputs are not an
+/// intermediate plan state but fields the caller explicitly asked to write.
+///
+/// `APLAN021` is a warning because moving work between cuts may temporarily
+/// empty one, and that two-step repair has to remain possible. An `add` whose
+/// new task is tagged `milestone` while carrying `effort_days` or `paths` has no
+/// corresponding repair step: those fields describe work, a checkpoint cannot
+/// carry them, and the command already has the complete input before it writes.
+/// Refuse that diagnostic regardless of the warning policy while leaving every
+/// other warning under the repository's policy (`A1-369`).
+fn refuse_bad_add_mutation(
+    root: &std::path::Path,
+    what: &str,
+    before: &aplan_core::load::Plan,
+    after: &aplan_core::load::Plan,
+    verdict: VerdictFlags,
+) -> Result<()> {
+    refuse_bad_mutation_with(root, what, before, after, false, true, verdict)
 }
 
 /// The same, with the escape an author repairing a broken plan needs.
@@ -1742,11 +4453,80 @@ fn refuse_bad_mutation_unless(
     skip: bool,
     verdict: VerdictFlags,
 ) -> Result<()> {
+    refuse_bad_mutation_with(root, what, before, after, skip, false, verdict)
+}
+
+fn refuse_bad_mutation_with(
+    root: &std::path::Path,
+    what: &str,
+    before: &aplan_core::load::Plan,
+    after: &aplan_core::load::Plan,
+    skip: bool,
+    refuse_milestone_work_fields: bool,
+    verdict: VerdictFlags,
+) -> Result<()> {
     let (config, config_dir) = config_at(root)?;
-    let opts = resolve_check_options(&config, config_dir.as_deref(), false, None, false);
+    refuse_bad_mutation_with_config(
+        root,
+        what,
+        before,
+        after,
+        skip,
+        refuse_milestone_work_fields,
+        verdict,
+        &config,
+        config_dir.as_deref(),
+    )
+}
+
+/// The mutation gate with the configuration the post-state will have.
+///
+/// `rekey` is the one mutation that can edit `.aplan.yml` in the same batch as
+/// the plan. Judging its renamed cut against the old `policy[].when.cut` would
+/// silently drop that scope during the preview, so it supplies the already
+/// parsed post-state configuration here. Every other caller goes through
+/// [`refuse_bad_mutation_with`] and the selected file as before.
+#[allow(clippy::too_many_arguments)]
+fn refuse_bad_mutation_with_config(
+    root: &std::path::Path,
+    what: &str,
+    before: &aplan_core::load::Plan,
+    after: &aplan_core::load::Plan,
+    skip: bool,
+    refuse_milestone_work_fields: bool,
+    verdict: VerdictFlags,
+    config: &aplan_config::Config,
+    config_dir: Option<&std::path::Path>,
+) -> Result<()> {
+    let inbox = aplan_core::capture::load_inbox(
+        root,
+        &config.capture_policy(),
+        &aplan_core::capture::SystemClock,
+    );
+    if !inbox.diagnostics.is_empty() {
+        let first = &inbox.diagnostics[0];
+        anyhow::bail!(
+            "refusing to {what}: the capture inbox has {} `APLAN057` finding(s), beginning at `{}`: {}. Run `aplan check` for the complete report.",
+            inbox.diagnostics.len(),
+            first
+                .file
+                .as_deref()
+                .unwrap_or_else(|| std::path::Path::new(".inbox"))
+                .display(),
+            first.message
+        );
+    }
+    let opts = resolve_check_options(
+        config,
+        config_dir,
+        false,
+        None,
+        false,
+        Some(plan_repository(root)),
+    );
     // The flags, not just the config key: a repository whose CI is
     // `check --deny-warnings` was refused less here than there (`A1-266`).
-    let policy = verdict_policy(&config, verdict.deny_warnings, verdict.no_deny_warnings);
+    let policy = verdict_policy(config, verdict.deny_warnings, verdict.no_deny_warnings);
     let delta = aplan_core::mutation::delta(before, after, &opts);
     if delta.added.is_empty() {
         return Ok(());
@@ -1766,12 +4546,17 @@ fn refuse_bad_mutation_unless(
         ))?;
         return Ok(());
     }
-    if delta.refuses(&policy) {
+    let refuses = if refuse_milestone_work_fields {
+        delta.refuses_add(before, after, &policy)
+    } else {
+        delta.refuses(&policy)
+    };
+    if refuses {
         anyhow::bail!(
             "refusing to {what}: it would add {} finding(s) `check` reports:\n  {}{}",
             delta.added.len(),
             delta.lines().join("\n  "),
-            no_cut_to_join(before, &delta, &policy)
+            no_cut_to_join(before, after, &delta, &policy)
         );
     }
     // Reported, not refused: the mutation goes ahead and the author is told what
@@ -1822,11 +4607,118 @@ fn config_err(e: aplan_config::Error) -> anyhow::Error {
     }
 }
 
+fn inspect_evidence_with_cli_progress(
+    plan: &aplan_core::Plan,
+    repo: &std::path::Path,
+    options: &aplan_evidence::VerifyOptions,
+    mode: aplan_app::EvidenceInspectionMode,
+) -> Result<aplan_app::EvidenceInspection, aplan_evidence::Error> {
+    if cli_progress_enabled() {
+        aplan_app::inspect_evidence_with_progress(
+            plan,
+            repo,
+            options,
+            mode,
+            &aplan_app::EvidenceObservationOptions::default(),
+            next_progress_operation(),
+            &mut send_cli_progress,
+        )
+    } else {
+        aplan_app::inspect_evidence(
+            plan,
+            repo,
+            options,
+            mode,
+            &aplan_app::EvidenceObservationOptions::default(),
+            |_| {},
+        )
+    }
+}
+
+fn inspect_verify_evidence(
+    plan: &aplan_core::Plan,
+    repo: &std::path::Path,
+    options: &aplan_evidence::VerifyOptions,
+    args: &VerifyArgs,
+) -> Result<aplan_app::EvidenceInspection> {
+    let mut evidence = if let Some(import_set) = &args.refresh_test_receipts {
+        let base = args
+            .refresh_base
+            .clone()
+            .context("`--refresh-test-receipts` requires `--refresh-base <rev>`")?;
+        let boundary = match (&args.refresh_head, args.refresh_working_tree) {
+            (Some(head), false) => aplan_app::ReceiptRefreshBoundary::Revisions {
+                base,
+                head: head.clone(),
+            },
+            (None, true) => aplan_app::ReceiptRefreshBoundary::WorkingTree { base },
+            (None, false) => anyhow::bail!(
+                "`--refresh-test-receipts` requires exactly one of `--refresh-head <rev>` or `--refresh-working-tree`"
+            ),
+            (Some(_), true) => unreachable!("clap refuses both refresh boundaries"),
+        };
+        let refreshed = aplan_app::refresh_test_receipts(
+            plan,
+            repo,
+            options,
+            &tool_identity(),
+            import_set,
+            &boundary,
+            args.refresh_shadow,
+        )
+        .context("incrementally refreshing current test receipts")?;
+        errln!(
+            "evidence incremental refresh: reused {} [{}]; refreshed {} [{}]; widened {} [{}]; selected {} exact test(s); unavailable 0; shadow={}",
+            refreshed.summary.reused_providers,
+            refreshed.summary.reused.join(", "),
+            refreshed.summary.refreshed_providers,
+            refreshed.summary.refreshed.join(", "),
+            refreshed.summary.widened_providers,
+            refreshed.summary.widened.join(", "),
+            refreshed.summary.selected_tests,
+            if refreshed.summary.shadow_compared {
+                "compared"
+            } else {
+                "not-run"
+            },
+        );
+        refreshed.evidence
+    } else if let Some(import_set) = &args.test_receipts {
+        let receipt =
+            aplan_app::inspect_receipt_evidence(plan, repo, options, &tool_identity(), import_set)
+                .context("resolving evidence from current test receipts")?;
+        record_receipt_work(&receipt.import);
+        errln!(
+            "evidence receipts: {} accepted, {} rejected, 0 test-provider spawns; fallback=current-only",
+            receipt.import.accepted,
+            receipt.import.rejected,
+        );
+        receipt.evidence
+    } else {
+        inspect_evidence_with_cli_progress(
+            plan,
+            repo,
+            options,
+            aplan_app::EvidenceInspectionMode::Refresh,
+        )
+        .context("resolving evidence against the repository")?
+    };
+    evidence.observation.scope = aplan_app::EvidenceObservationScope::WholePlan;
+    Ok(evidence)
+}
+
 /// `aplan verify`, resolve evidence against the repository (rungs L1/L2, and L3
 /// with `--execute`).
 fn cmd_verify(root: &std::path::Path, args: &VerifyArgs) -> Result<u8> {
     refuse_selection_on_a_gate("verify", &args.select)?;
     let format = format_for("verify", &args.format)?;
+    if args.fix && format != Format::Human {
+        anyhow::bail!(
+            "`aplan verify --fix` writes task files and supports only `--format human`; run \
+             `aplan verify --format {}` to review the typed repairs without applying them",
+            format.as_str()
+        );
+    }
     let repo = args.repo.as_path();
     let execute = args.execute;
     let plan = load_checked(root)?;
@@ -1873,19 +4765,22 @@ fn cmd_verify(root: &std::path::Path, args: &VerifyArgs) -> Result<u8> {
     // that did not *load*, because it "cannot speak honestly about" one. A plan
     // that loads but does not validate is the same sentence.
     let mut opts = aplan_evidence::VerifyOptions {
+        detect_drift: false,
         traces_root: None,
         execute,
         test_runner: config.test.clone(),
         max_unrelated_files: config.evidence.as_ref().and_then(|e| e.max_unrelated_files),
+        observation_inputs: config
+            .evidence
+            .as_ref()
+            .and_then(|e| e.observation_inputs.clone()),
         url_check: config.url.clone(),
         // `APLAN048`'s half of the ladder: what the plan requires of the
         // version, against what the repository says it ships (`A1-313`).
         version: config.version.clone(),
         // So a finding about a runner or the url checker lands on the file that
         // configured it (`A1-066`).
-        config_file: config_dir
-            .as_deref()
-            .map(|d| d.join(aplan_config::CONFIG_FILE)),
+        config_file: selected_config_file(config_dir.as_deref()),
     };
     let check_opts = resolve_check_options(
         &config,
@@ -1893,6 +4788,7 @@ fn cmd_verify(root: &std::path::Path, args: &VerifyArgs) -> Result<u8> {
         args.no_require_effort,
         args.traces_root.clone(),
         args.no_traces,
+        Some(plan_repository(root)),
     );
     // The same refusal `check` makes: `verify` is a superset of it, so a
     // configuration it cannot honour must stop both commands the same way
@@ -1901,11 +4797,13 @@ fn cmd_verify(root: &std::path::Path, args: &VerifyArgs) -> Result<u8> {
     // document git actually has rather than looking for it at the repository
     // root and quietly finding nothing (`A1-301`, audit).
     opts.traces_root.clone_from(&check_opts.traces_root);
+    opts.detect_drift = check_opts.detect_drift;
     refuse_absent_external_roots(&check_opts)?;
     // `verify` is a superset of `check` (`A1-058`), so it reports `APLAN041` too:
     // an adopter who wires one command into CI reaches for this one.
     let check_opts = with_agents_block(check_opts, root, config_dir.as_deref(), &config, &plan);
-    let mut report = validate(&plan, &check_opts);
+    let mut report = timed("validate", || validate(&plan, &check_opts));
+    append_capture_diagnostics(&mut report, root, &config);
     // A plan that did not load whole is reported and not resolved. `verify`
     // renders a report, the same document `check` renders, and `check` already
     // hands a machine consumer `APLAN001` with the file and the parse error. Only
@@ -1925,10 +4823,24 @@ fn cmd_verify(root: &std::path::Path, args: &VerifyArgs) -> Result<u8> {
         render_tolerant(|| render_verified_partial(&report, format, &policy, unloadable))?;
         return Ok(EXIT_VIOLATIONS);
     }
-    let (evidence, spend) = aplan_evidence::verify_measured(&plan, repo, &opts)
-        .context("resolving evidence against the repository")?;
-    note_what_the_run_cost(&spend, opts.execute);
-    report.diagnostics.extend(evidence.diagnostics);
+    // A malformed inbox is not partial task evidence, but it is still a failed
+    // structural gate. Resolve no providers until the complete repository
+    // structure is trustworthy, matching the task-load refusal above.
+    let invalid_captures = report
+        .diagnostics
+        .iter()
+        .filter(|diagnostic| diagnostic.code == aplan_core::code::CAPTURE_INVALID)
+        .count();
+    if invalid_captures > 0 {
+        render_tolerant(|| {
+            render_verified_inbox_invalid(&report, format, &policy, invalid_captures)
+        })?;
+        note_denied_warnings(&report, &policy);
+        return Ok(EXIT_VIOLATIONS);
+    }
+    let evidence = inspect_verify_evidence(&plan, repo, &opts, args)?;
+    note_what_the_run_cost(&evidence.spend, args.execute);
+    report.diagnostics.extend(evidence.report.diagnostics);
     report.diagnostics.sort_by(|a, b| {
         a.code
             .cmp(b.code)
@@ -1937,13 +4849,275 @@ fn cmd_verify(root: &std::path::Path, args: &VerifyArgs) -> Result<u8> {
             .then(a.message.cmp(&b.message))
     });
 
+    if args.fix && report.diagnostics.iter().any(|d| d.repair.is_some()) {
+        if !apply_computed_repairs(root, repo, &plan, &report, args)? {
+            return Ok(EXIT_VIOLATIONS);
+        }
+        // Render the state that now exists, not the stale pre-write findings.
+        // The normal verify path is the postcondition and keeps this command
+        // from growing a second renderer or a weaker notion of success.
+        let mut review = args.clone();
+        review.fix = false;
+        return cmd_verify(root, &review);
+    }
+
     // What this configuration had no resolver for, computed from the same list
     // `verify` ran, so the summary and the note cannot disagree with the run.
     let unopened = aplan_evidence::unresolved_by_verify(&plan, repo, &opts);
-    render_tolerant(|| render_verified(&report, format, &policy, &unopened))?;
+    render_tolerant(|| {
+        render_verified_observed(&report, format, &policy, &unopened, &evidence.observation)
+    })?;
     note_unopened_evidence(&unopened);
     note_denied_warnings(&report, &policy);
     Ok(verdict(&report, &policy))
+}
+
+/// The exact writes, parsed post-state tasks, and human report for one batch.
+struct ComputedRepairBatch {
+    writes: Vec<aplan_core::save::Replacement>,
+    updated_tasks: Vec<(String, aplan_core::Task)>,
+    applied: Vec<(String, aplan_core::Repair)>,
+}
+
+/// Maintain freshness baselines across an evidence edit.
+///
+/// Disabling drift detection suppresses comparison and capture; it does not
+/// authorize an unrelated mutation to erase baselines already recorded. The
+/// no-resolution path has the same boundary: keep stamps for citations that
+/// survive, remove orphaned keys, and never mint a claim about content that was
+/// not read.
+fn maintained_evidence_fingerprints(
+    detect_drift: bool,
+    no_resolve: bool,
+    before: &[aplan_core::Evidence],
+    existing: &std::collections::BTreeMap<String, String>,
+    after: &[aplan_core::Evidence],
+    repo: &std::path::Path,
+) -> Result<std::collections::BTreeMap<String, String>, aplan_evidence::Error> {
+    if detect_drift && !no_resolve {
+        aplan_evidence::update_evidence_fingerprints(before, existing, after, repo, false)
+    } else {
+        Ok(aplan_evidence::retained_evidence_fingerprints(
+            existing, after,
+        ))
+    }
+}
+
+fn selected_config_bytes(dir: Option<&std::path::Path>) -> Result<Option<(PathBuf, Vec<u8>)>> {
+    selected_config_file(dir)
+        .map(|path| {
+            let bytes = std::fs::read(&path)
+                .with_context(|| format!("reading configuration snapshot {}", path.display()))?;
+            Ok((path, bytes))
+        })
+        .transpose()
+}
+
+fn prepare_computed_repair_batch(
+    plan: &aplan_core::Plan,
+    repairs_by_task: std::collections::BTreeMap<String, Vec<aplan_core::Repair>>,
+    repo: &std::path::Path,
+    config: &aplan_config::Config,
+) -> Result<Option<ComputedRepairBatch>> {
+    let mut writes = Vec::new();
+    let mut updated_tasks = Vec::new();
+    let mut applied = Vec::new();
+    for (id, repairs) in repairs_by_task {
+        let lt = locate(plan, &id)?;
+        let original = std::fs::read_to_string(&lt.path)
+            .with_context(|| format!("reading {}", lt.path.display()))?;
+        let current_task = task_of(&original, &id)?;
+        let mut updated = original.clone();
+        for repair in &repairs {
+            updated = aplan_core::apply_repair(&updated, repair)
+                .map_err(|e| close_err("verify --fix", &id, &e))?;
+            applied.push((id.clone(), repair.clone()));
+        }
+        let updated_task = task_of(&updated, &id)?;
+        let target = RepairTarget {
+            id: &id,
+            task: &current_task,
+            path: &lt.path,
+        };
+        if !replacement_resolves(
+            &target,
+            &current_task.evidence,
+            &updated_task.evidence,
+            repo,
+            config,
+            RepairOperation::Computed,
+        )? {
+            return Ok(None);
+        }
+        let evidence_fingerprints = maintained_evidence_fingerprints(
+            config.detect_drift.unwrap_or(false),
+            false,
+            &current_task.evidence,
+            &current_task.evidence_fingerprints,
+            &updated_task.evidence,
+            repo,
+        )?;
+        updated = aplan_core::set_evidence_fingerprints(&updated, &evidence_fingerprints)
+            .map_err(|e| close_err("verify --fix", &id, &e))?;
+        let updated_task = task_of(&updated, &id)?;
+        updated_tasks.push((id, updated_task));
+        writes.push(aplan_core::save::Replacement {
+            path: lt.path.clone(),
+            expected: original,
+            updated,
+        });
+    }
+    Ok(Some(ComputedRepairBatch {
+        writes,
+        updated_tasks,
+        applied,
+    }))
+}
+
+fn post_resolution_repair_state(
+    root: &std::path::Path,
+    repo: &std::path::Path,
+    expected_config: Option<&(PathBuf, Vec<u8>)>,
+    batch: &ComputedRepairBatch,
+) -> Result<Option<(aplan_core::Plan, aplan_config::Config, Option<PathBuf>)>> {
+    let (config, config_dir) = config_at(repo)?;
+    if selected_config_bytes(config_dir.as_deref())?.as_ref() != expected_config {
+        write_stdout(
+            "aplan: refusing to apply repairs: configuration changed while the proposed repairs \
+             were being resolved; nothing was written. Run `aplan verify --fix` again to review \
+             the current policy.\n",
+        )?;
+        return Ok(None);
+    }
+    let plan = load_checked(root)?;
+    let unloadable = load_errors(&plan).len();
+    if unloadable > 0 {
+        write_stdout(&format!(
+            "aplan: refusing to apply repairs: {unloadable} task file(s) changed while the proposed \
+             repairs were being resolved and no longer load; nothing was written. Run `aplan \
+             verify --fix` again to review the current plan.\n"
+        ))?;
+        return Ok(None);
+    }
+    let mut after = plan;
+    for ((id, updated_task), replacement) in batch.updated_tasks.iter().zip(&batch.writes) {
+        let current = locate(&after, id)?;
+        let unchanged = current.path == replacement.path
+            && std::fs::read_to_string(&current.path)
+                .is_ok_and(|source| source == replacement.expected);
+        if !unchanged {
+            write_stdout(&format!(
+                "aplan: refusing to apply repairs: task `{id}` changed while its proposed repair \
+                 was being resolved; nothing was written. Run `aplan verify --fix` again to review \
+                 the current task.\n"
+            ))?;
+            return Ok(None);
+        }
+        after = aplan_core::mutation::with_replaced(&after, id, updated_task.clone());
+    }
+    Ok(Some((after, config, config_dir)))
+}
+
+/// Apply every exact repair in one report as one guarded, prevalidated mutation.
+///
+/// Returns `false` only when the evidence-resolution gate refused a proposed
+/// replacement. Structural or mutation-gate failures remain errors, exactly as
+/// they are for an explicit `aplan amend` invocation.
+fn apply_computed_repairs(
+    root: &std::path::Path,
+    repo: &std::path::Path,
+    plan: &aplan_core::Plan,
+    report: &aplan_core::Report,
+    args: &VerifyArgs,
+) -> Result<bool> {
+    let mut by_task: std::collections::BTreeMap<String, Vec<aplan_core::Repair>> =
+        std::collections::BTreeMap::new();
+    for diagnostic in &report.diagnostics {
+        let Some(repair) = &diagnostic.repair else {
+            continue;
+        };
+        let task = diagnostic.task.clone().ok_or_else(|| {
+            anyhow::anyhow!("a machine-applicable repair has no task").context(Bug)
+        })?;
+        let repairs = by_task.entry(task).or_default();
+        if !repairs.contains(repair) {
+            repairs.push(repair.clone());
+        }
+    }
+
+    // Configured resolvers are external commands. They may have changed any
+    // task while producing `report`, so the candidate must start from the plan
+    // that exists after they finish, not only re-read the files carrying a
+    // repair. The original `plan` remains the delta's before-state: a finding a
+    // runner introduced during this invocation is new and must refuse the write
+    // (`A1-459`).
+    let current_plan = load_checked(root)?;
+    // Configuration is another input an external resolver may have changed.
+    // Resolve every proposed citation under what a subsequent `verify` will
+    // actually load, not the runner definition that produced the stale report
+    // (`A1-460`). `CONFIG_SOURCE` keeps an explicit `--config` or `--no-config`
+    // selection identical across both reads.
+    let (current_config, current_config_dir) = config_at(repo)?;
+    let current_config_bytes = selected_config_bytes(current_config_dir.as_deref())?;
+    let unloadable = load_errors(&current_plan).len();
+    if unloadable > 0 {
+        write_stdout(&format!(
+            "aplan: refusing to apply repairs: {unloadable} task file(s) changed while `verify` ran and \
+             no longer load; nothing was written. Run `aplan verify` again to review the current \
+             plan.\n"
+        ))?;
+        return Ok(false);
+    }
+
+    let Some(batch) = prepare_computed_repair_batch(&current_plan, by_task, repo, &current_config)?
+    else {
+        return Ok(false);
+    };
+    if batch.writes.is_empty() {
+        return Err(anyhow::anyhow!("repair batch is empty").context(Bug));
+    }
+
+    // `replacement_resolves` invokes configured resolvers too. The state after
+    // those invocations, not merely after the report's invocations, is what the
+    // mutation gate and guarded writer must see (`A1-463`). A changing policy
+    // has no stable answer to "does this replacement resolve?"; fail closed
+    // instead of executing it repeatedly until one snapshot happens to stick.
+    let Some((after, post_resolution_config, post_resolution_config_dir)) =
+        post_resolution_repair_state(root, repo, current_config_bytes.as_ref(), &batch)?
+    else {
+        return Ok(false);
+    };
+    // `verify` discovers from `--repo`, which need not share an ancestor with
+    // the plan root. Do not enter the ordinary wrapper here: it would discover
+    // a second configuration from `root` and let one invocation judge the
+    // evidence and its mutation under different policies (`A1-462`).
+    refuse_bad_mutation_with_config(
+        root,
+        "apply repairs from `verify --fix`",
+        plan,
+        &after,
+        false,
+        false,
+        VerdictFlags {
+            deny_warnings: args.deny_warnings,
+            no_deny_warnings: args.no_deny_warnings,
+        },
+        &post_resolution_config,
+        post_resolution_config_dir.as_deref(),
+    )?;
+    save_batch(&batch.writes, "verify --fix")?;
+    for (id, repair) in batch.applied {
+        let aplan_core::Repair::ReplaceEvidence { from, to } = repair;
+        write_stdout(&format!(
+            "repaired {i}{id}{i:#}: {}:{} -> {}:{}\n",
+            from.kind.as_str(),
+            aplan_output::sanitize::visible(&from.reference),
+            to.kind.as_str(),
+            aplan_output::sanitize::visible(&to.reference),
+            i = aplan_output::style::ID,
+        ))?;
+    }
+    Ok(true)
 }
 
 fn run() -> Result<u8> {
@@ -1951,6 +5125,40 @@ fn run() -> Result<u8> {
     // to the help clap prints for `--help` and for a usage error.
     let cli = <Cli as clap::FromArgMatches>::from_arg_matches(&cli_command().get_matches())
         .unwrap_or_else(|e| e.exit());
+    // TUI lifecycle owns the same catchable signals because it must restore
+    // terminal modes before shared configured-command cleanup. Every other
+    // command gets one process-wide owner here, before dispatch can reach a
+    // configured spawn. Keeping this at the dispatch boundary makes new CLI
+    // paths safe by construction instead of by a command census.
+    let _termination_owner = if matches!(&cli.command, Command::Tui(_)) {
+        None
+    } else {
+        Some(
+            ConfiguredCommandSignalOwner::install()
+                .context("could not install configured-command termination handling")?,
+        )
+    };
+    if cli.timings && !timings_active() {
+        start_timings(true, std::time::Instant::now());
+    }
+    let cache_mode = aplan_app::CacheMode::from_name(&cli.cache)
+        .expect("clap restricts --cache to CacheMode::NAMES");
+    let _ = CACHE_MODE.set(cache_mode);
+    let progress_choice = aplan_output::progress::ProgressChoice::parse(&cli.progress)
+        .expect("clap restricts --progress to ProgressChoice::NAMES");
+    let progress_profile = command_progress_profile(&cli.command);
+    let color_choice = aplan_output::color::ColorChoice::parse(&cli.color)
+        .expect("clap restricts --color to ColorChoice::NAMES");
+    let presentation = aplan_output::progress::resolve_progress(
+        progress_choice,
+        progress_profile.surface,
+        progress_environment(),
+    );
+    let _ = PROGRESS_PRESENTATION.set(progress_color_choice(
+        presentation,
+        progress_profile.surface,
+        color_choice,
+    ));
     // Chosen once, before any command runs, and read-only afterwards: the
     // selection is a property of the invocation rather than of a call site, and
     // a command that read it from somewhere else would be the hole this exists
@@ -1962,9 +5170,48 @@ fn run() -> Result<u8> {
     } else {
         aplan_config::ConfigSource::Discover
     });
-    // Resolved lazily inside the arms that read the plan; `schema`/`facts`/`init`
-    // do not, so they never touch `.aplan.yml`.
-    dispatch(cli.command, cli.root)
+    // Resolved lazily inside the arms that need it; `schema`, `facts`, `explain`
+    // and `init` do not, so they never touch `.aplan.yml` or an explicitly
+    // selected file. The renderer spans the complete dispatch rather than one
+    // loader/provider child, which keeps validation and projection visible and
+    // gives every ordinary write one terminal-restoration owner.
+    let mut progress = CliProgress::for_current_invocation(progress_profile.source);
+    if !progress.enabled() {
+        return dispatch(cli.command, cli.root);
+    }
+    progress.install();
+    let command_operation = progress.command_operation;
+    let mut sink = |event| progress.event(event);
+    let mut operation = aplan_app::ProgressEmitter::begin(
+        command_operation,
+        aplan_app::OperationKind::CliCommand,
+        &mut sink,
+    );
+    operation.phase_started(
+        aplan_app::ProgressPhase::Projection,
+        None,
+        aplan_app::ProgressMeasure::Indeterminate,
+    );
+    let result = dispatch(cli.command, cli.root);
+    if result.is_ok() {
+        operation.phase_completed(
+            aplan_app::ProgressPhase::Projection,
+            None,
+            aplan_app::ProgressMeasure::Indeterminate,
+        );
+        operation.complete();
+    } else {
+        operation.phase_failed(
+            aplan_app::ProgressPhase::Projection,
+            None,
+            aplan_app::ProgressMeasure::Indeterminate,
+        );
+        operation.fail();
+    }
+    drop(operation);
+    drop(sink);
+    drop(progress);
+    result
 }
 
 /// The configuration source this invocation chose.
@@ -1974,6 +5221,27 @@ fn run() -> Result<u8> {
 /// reader. `crates/aplan/tests/trusted_config.rs` holds the line structurally --
 /// no call site may reach for `aplan_config::load_config_located` and bypass it.
 static CONFIG_SOURCE: std::sync::OnceLock<aplan_config::ConfigSource> = std::sync::OnceLock::new();
+
+/// The cache policy selected for this invocation.
+static CACHE_MODE: std::sync::OnceLock<aplan_app::CacheMode> = std::sync::OnceLock::new();
+
+/// Stream or in-frame ownership selected once for this invocation.
+static PROGRESS_PRESENTATION: std::sync::OnceLock<aplan_output::progress::ProgressPresentation> =
+    std::sync::OnceLock::new();
+
+#[derive(Debug, Clone)]
+struct InitialConfig {
+    source: aplan_config::ConfigSource,
+    config: aplan_config::Config,
+    directory: Option<PathBuf>,
+}
+
+/// The configuration root resolution already parsed and the command body may
+/// consume once when it selects the same frame. Later reads remain real reads:
+/// evidence providers can edit policy, and the mutation gate deliberately
+/// reloads after they finish.
+static INITIAL_CONFIG: std::sync::OnceLock<std::sync::Mutex<Option<InitialConfig>>> =
+    std::sync::OnceLock::new();
 
 /// Record the selection. Called once, from `run`.
 fn select_config(source: aplan_config::ConfigSource) {
@@ -1996,7 +5264,72 @@ fn config_at(dir: &std::path::Path) -> Result<(aplan_config::Config, Option<Path
     // `add` and `import` -- the commands that *write* -- ran under a refused
     // config saying nothing at all (`A1-155`, found by its audit).
     note_config_refused();
-    aplan_config::load_from(&source, dir).map_err(config_err)
+    timed("config", || {
+        if let Some(config) = take_initial_config(&source, dir) {
+            return Ok(config);
+        }
+        record_config_load();
+        aplan_config::load_from(&source, dir).map_err(config_err)
+    })
+}
+
+fn initial_config_slot() -> &'static std::sync::Mutex<Option<InitialConfig>> {
+    INITIAL_CONFIG.get_or_init(|| std::sync::Mutex::new(None))
+}
+
+fn remember_initial_config(config: &aplan_config::Config, directory: Option<&std::path::Path>) {
+    let source = CONFIG_SOURCE
+        .get()
+        .cloned()
+        .unwrap_or(aplan_config::ConfigSource::Discover);
+    *initial_config_slot()
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner) = Some(InitialConfig {
+        source,
+        config: config.clone(),
+        directory: directory.map(std::path::Path::to_path_buf),
+    });
+}
+
+fn take_initial_config(
+    source: &aplan_config::ConfigSource,
+    start: &std::path::Path,
+) -> Option<(aplan_config::Config, Option<PathBuf>)> {
+    let mut slot = initial_config_slot()
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    let cached = slot.as_ref()?;
+    if &cached.source != source {
+        return None;
+    }
+    let same_frame = match source {
+        aplan_config::ConfigSource::Discover => {
+            let selected = cached
+                .directory
+                .as_ref()
+                .map(|directory| directory.join(aplan_config::CONFIG_FILE));
+            aplan_config::discovered_config(start) == selected
+        }
+        aplan_config::ConfigSource::File(_) | aplan_config::ConfigSource::None => true,
+    };
+    if !same_frame {
+        return None;
+    }
+    let cached = slot.take().expect("checked above");
+    Some((cached.config, cached.directory))
+}
+
+/// The configuration file findings should name.
+///
+/// `load_from` returns a directory because relative values resolve from it. A
+/// selected file can have any name, though, and reconstructing `.aplan.yml`
+/// from that directory attributes a finding to a file the caller never read.
+fn selected_config_file(config_dir: Option<&std::path::Path>) -> Option<PathBuf> {
+    match CONFIG_SOURCE.get() {
+        Some(aplan_config::ConfigSource::File(path)) => Some(path.clone()),
+        Some(aplan_config::ConfigSource::None) => None,
+        _ => config_dir.map(|d| d.join(aplan_config::CONFIG_FILE)),
+    }
 }
 
 /// Say, once, that no configuration was read.
@@ -2019,17 +5352,92 @@ fn note_config_refused() {
     }
 }
 
-/// The repository the plan sits in.
+/// The Git worktree the plan sits in, without opening its history or config.
 ///
-/// `root.parent()` of a relative `aplan` is the empty path, which is not the
-/// current directory to anything that opens it -- the discovered config's
-/// absolute directory hid that until an explicit `--config` stopped standing in
-/// for it (`A1-155`, found by its audit).
+/// A plan root is conventionally `<repo>/aplan`, but it is allowed to be nested
+/// (`plans/tasks`). Taking one parent silently shrank `APLAN034`'s repository
+/// boundary in that supported layout (`A1-404`, audit of `A1-237`). Walking for
+/// the nearest `.git` marker handles ordinary worktrees and linked worktrees
+/// alike while keeping `check` structural: no object, index, hook or Git config
+/// is opened. A directory outside Git retains the old one-parent fallback.
 fn plan_repository(root: &std::path::Path) -> PathBuf {
+    let absolute = root
+        .canonicalize()
+        .or_else(|_| std::path::absolute(root))
+        .unwrap_or_else(|_| root.to_path_buf());
+    if let Some(repository) = absolute.ancestors().find(|candidate| {
+        candidate
+            .join(".git")
+            .symlink_metadata()
+            .is_ok_and(|metadata| {
+                let kind = metadata.file_type();
+                kind.is_dir() || kind.is_file()
+            })
+    }) {
+        return repository.to_path_buf();
+    }
+
+    // `root.parent()` of a relative `aplan` is the empty path, which is not the
+    // current directory to anything that opens it. Preserve the pre-A1-404
+    // fallback for plans that deliberately live outside a Git worktree.
     match root.parent() {
         Some(parent) if !parent.as_os_str().is_empty() => parent.to_path_buf(),
         _ => PathBuf::from("."),
     }
+}
+
+/// Find the repository that lexically contains a revision-addressed root.
+///
+/// [`plan_repository`] follows the current filesystem, which is right for a
+/// worktree command. It is wrong for `--at`: if the final plan-root component
+/// is a symlink that now points at another repository, canonicalising it first
+/// makes today's target choose which history the old path is read from. Prefer
+/// a real marker on the lexical ancestry. A symlinked repository alias remains
+/// a fallback when there is no enclosing repository of its own.
+fn revision_plan_repository(root: &std::path::Path) -> PathBuf {
+    let absolute =
+        std::path::absolute(root).map_or_else(|_| root.to_path_buf(), |path| normalize_path(&path));
+    // Interpret an explicit path inside the invocation repository in that
+    // repository's selected tree. A nested `.git` marker that exists only in
+    // today's worktree must not steal a path the outer repository owned at the
+    // requested commit (`A1-498`). Paths genuinely outside that boundary retain
+    // the supported cross-repository behavior and are discovered from the root.
+    if let Ok(cwd) = std::env::current_dir()
+        && let Some(invocation_repository) = lexical_repository(&cwd)
+        && absolute.starts_with(&invocation_repository)
+    {
+        return invocation_repository;
+    }
+
+    lexical_repository(&absolute).unwrap_or_else(|| match root.parent() {
+        Some(parent) if !parent.as_os_str().is_empty() => parent.to_path_buf(),
+        _ => PathBuf::from("."),
+    })
+}
+
+/// The nearest repository marker on a lexical path, without following a final
+/// symlink into a repository that may not have owned the path historically.
+fn lexical_repository(absolute: &std::path::Path) -> Option<PathBuf> {
+    let mut symlinked_marker = None;
+    for candidate in absolute.ancestors() {
+        let marker = candidate.join(".git");
+        let has_marker = marker.symlink_metadata().is_ok_and(|metadata| {
+            let kind = metadata.file_type();
+            kind.is_dir() || kind.is_file()
+        });
+        if !has_marker {
+            continue;
+        }
+        if candidate
+            .symlink_metadata()
+            .is_ok_and(|metadata| metadata.file_type().is_symlink())
+        {
+            symlinked_marker.get_or_insert_with(|| candidate.to_path_buf());
+        } else {
+            return Some(candidate.to_path_buf());
+        }
+    }
+    symlinked_marker
 }
 
 /// Whether this invocation named its configuration file.
@@ -2062,22 +5470,367 @@ fn cmd_schema() -> Result<u8> {
     Ok(EXIT_OK)
 }
 
+fn test_catalogue_text(value: &str) -> String {
+    let visible = aplan_output::sanitize::visible(value);
+    aplan_output::fold::fold(&visible, usize::MAX, 0)
+}
+
+fn test_catalogue_count(count: usize, noun: &str) -> String {
+    let suffix = if count == 1 { "" } else { "s" };
+    format!("{count} {noun}{suffix}")
+}
+
+fn push_test_catalogue_runner(
+    out: &mut String,
+    runner: &aplan_app::TestCatalogueRunner,
+    filtered: bool,
+) {
+    use aplan_app::TestCatalogueRunnerState;
+
+    let label = test_catalogue_text(&runner.runner.label);
+    let heading = aplan_output::style::HEADING;
+    match runner.state {
+        TestCatalogueRunnerState::Listed => {
+            let selected = if filtered {
+                format!("{} of {} matching", runner.matched, runner.total)
+            } else {
+                format!("{} listed", runner.total)
+            };
+            let _ = writeln!(
+                out,
+                "{heading}runner #{} `{label}`:{heading:#} {selected}",
+                runner.runner.index
+            );
+        }
+        TestCatalogueRunnerState::Empty => {
+            let _ = writeln!(
+                out,
+                "{heading}runner #{} `{label}`:{heading:#} empty",
+                runner.runner.index
+            );
+        }
+        TestCatalogueRunnerState::Failed => {
+            let _ = writeln!(
+                out,
+                "{heading}runner #{} `{label}`:{heading:#} failed (see finding below)",
+                runner.runner.index
+            );
+        }
+    }
+    for test in &runner.tests {
+        let evidence = test_catalogue_text(&test.evidence);
+        if test.ambiguous {
+            let owners = test
+                .listed_by
+                .iter()
+                .map(|owner| format!("#{} `{}`", owner.index, test_catalogue_text(&owner.label)))
+                .collect::<Vec<_>>()
+                .join(", ");
+            let _ = writeln!(
+                out,
+                "  {id}{evidence}{id:#}  {warning}[ambiguous: listed by {owners}; not valid evidence]{warning:#}",
+                id = aplan_output::style::ID,
+                warning = aplan_output::style::WARNING,
+            );
+        } else {
+            let _ = writeln!(out, "  {id}{evidence}{id:#}", id = aplan_output::style::ID);
+        }
+    }
+}
+
+fn render_test_catalogue_human(answer: &aplan_app::TestCatalogue) -> Result<()> {
+    use aplan_app::TestCatalogueState;
+
+    let mut out = String::new();
+    let heading = aplan_output::style::HEADING;
+    match answer.state {
+        TestCatalogueState::Unconfigured => {
+            let _ = writeln!(
+                out,
+                "{heading}test catalogue:{heading:#} no test runners are configured; there are no exact test evidence names to discover"
+            );
+        }
+        TestCatalogueState::NoMatch => {
+            let query = test_catalogue_text(answer.query.as_deref().unwrap_or_default());
+            let runners = test_catalogue_count(answer.summary.runners, "runner");
+            let _ = writeln!(
+                out,
+                "{heading}test catalogue:{heading:#} no names match `{query}` across {runners}"
+            );
+        }
+        TestCatalogueState::Partial => {
+            let answered = test_catalogue_count(
+                answer.summary.listed_runners + answer.summary.empty_runners,
+                "runner",
+            );
+            let failed = test_catalogue_count(answer.summary.failed_runners, "runner");
+            let _ = writeln!(
+                out,
+                "{heading}test catalogue:{heading:#} partial - {answered} answered and {failed} failed; absence is not authoritative"
+            );
+        }
+        TestCatalogueState::Complete => {
+            if let Some(query) = &answer.query {
+                let query = test_catalogue_text(query);
+                let matches = test_catalogue_count(answer.summary.matched_names, "unique match");
+                let runners = test_catalogue_count(answer.summary.runners, "runner");
+                let names = test_catalogue_count(answer.summary.unique_names, "total unique name");
+                let _ = writeln!(
+                    out,
+                    "{heading}test catalogue:{heading:#} {matches} for `{query}` across {runners} ({names})"
+                );
+            } else {
+                let names = test_catalogue_count(answer.summary.unique_names, "unique name");
+                let runners = test_catalogue_count(answer.summary.runners, "runner");
+                let _ = writeln!(
+                    out,
+                    "{heading}test catalogue:{heading:#} {names} from {runners}"
+                );
+            }
+        }
+    }
+    for runner in &answer.runners {
+        push_test_catalogue_runner(&mut out, runner, answer.query.is_some());
+    }
+    for finding in &answer.findings {
+        let message = test_catalogue_text(&finding.message);
+        let disposition = if finding.advisory { " (advisory)" } else { "" };
+        let severity = aplan_output::style::severity(&finding.severity);
+        let _ = writeln!(
+            out,
+            "{severity}{}{severity:#}[{id}{}{id:#}]{disposition}: {message}",
+            finding.severity,
+            finding.code,
+            id = aplan_output::style::ID,
+        );
+        if let Some(file) = &finding.file {
+            let rendered = file.display().to_string();
+            let shown = test_catalogue_text(&rendered);
+            let _ = writeln!(out, "  {heading}at:{heading:#} {shown}");
+        }
+        if let Some(instruction) = &finding.instruction {
+            let shown = test_catalogue_text(instruction);
+            let _ = writeln!(out, "  {heading}fix:{heading:#} {shown}");
+        }
+    }
+    write_stdout(&aplan_output::fold::fold_block(
+        &out,
+        aplan_output::fold::out_width(),
+        0,
+    ))
+}
+
+fn render_test_catalogue(answer: &aplan_app::TestCatalogue, format: Format) -> Result<()> {
+    #[derive(serde::Serialize)]
+    struct Document<'a> {
+        schema: &'static str,
+        catalogue: &'a aplan_app::TestCatalogue,
+    }
+
+    #[derive(serde::Serialize)]
+    struct AgentDocument<'a> {
+        schema: &'static str,
+        agent_instruction: &'static str,
+        catalogue: &'a aplan_app::TestCatalogue,
+    }
+
+    match format {
+        Format::Human => render_test_catalogue_human(answer),
+        Format::Json => write_stdout(&format!(
+            "{}\n",
+            serde_json::to_string_pretty(&Document {
+                schema: "aplan/test-catalogue/v1",
+                catalogue: answer,
+            })?
+        )),
+        Format::Agent => {
+            let instruction = match answer.state {
+                aplan_app::TestCatalogueState::Unconfigured => {
+                    "Configure a trusted test runner before citing test evidence."
+                }
+                aplan_app::TestCatalogueState::Partial => {
+                    "Fix every runner finding before treating an absent name as absent; cite only a non-ambiguous exact evidence value already returned."
+                }
+                aplan_app::TestCatalogueState::NoMatch => {
+                    "Broaden the search or fix the intended runner; no configured runner returned this term."
+                }
+                aplan_app::TestCatalogueState::Complete => {
+                    "Use a returned non-ambiguous `evidence` value unchanged with close or amend."
+                }
+            };
+            write_stdout(&format!(
+                "{}\n",
+                serde_json::to_string_pretty(&AgentDocument {
+                    schema: "aplan/test-catalogue-agent/v1",
+                    agent_instruction: instruction,
+                    catalogue: answer,
+                })?
+            ))
+        }
+        _ => unreachable!("the catalogue surface accepts only human, json and agent"),
+    }
+}
+
+/// `aplan test list`: inspect exactly what `close` and `verify` will accept.
+fn cmd_test_list(root: &std::path::Path, query: Option<&String>, format: &str) -> Result<u8> {
+    let format = format_for("test", format)?;
+    let (config, config_dir) = config_at(root)?;
+    let policy = verdict_policy(&config, false, false);
+    let request = aplan_app::TestCatalogueRequest {
+        query: query.cloned(),
+    };
+    let repository = plan_repository(root);
+    let config_file = selected_config_file(config_dir.as_deref());
+    let answer = if cli_progress_enabled() {
+        aplan_app::test_catalogue_with_progress(
+            &repository,
+            config.test.as_ref(),
+            config_file.as_deref(),
+            &policy,
+            request,
+            next_progress_operation(),
+            &mut send_cli_progress,
+        )?
+    } else {
+        aplan_app::test_catalogue(
+            &repository,
+            config.test.as_ref(),
+            config_file.as_deref(),
+            &policy,
+            request,
+        )?
+    };
+    timed("render", || render_test_catalogue(&answer, format))?;
+    Ok(if answer.denied {
+        EXIT_VIOLATIONS
+    } else {
+        EXIT_OK
+    })
+}
+
+fn receipt_producer(args: &TestReceiptArgs) -> aplan_attest::receipt::ProducerIdentity {
+    aplan_attest::receipt::ProducerIdentity {
+        repository: args.producer_repository.clone(),
+        workflow: args.producer_workflow.clone(),
+        run_id: args.producer_run_id.clone(),
+        event: args.producer_event.clone(),
+        privilege: match args.producer_privilege {
+            ReceiptPrivilege::Trusted => aplan_attest::receipt::ProducerPrivilege::Trusted,
+            ReceiptPrivilege::Untrusted => aplan_attest::receipt::ProducerPrivilege::Untrusted,
+        },
+    }
+}
+
+/// `aplan test receipt`: execute one complete provider and export the exact
+/// provider-scoped observation. No plan is loaded and no plan verdict is
+/// serialized.
+fn cmd_test_receipt(root: &std::path::Path, args: &TestReceiptArgs) -> Result<u8> {
+    let producer = receipt_producer(args);
+    producer.validate()?;
+    let (config, config_dir) = config_at(root)?;
+    let runners = config
+        .test
+        .as_ref()
+        .context("`aplan test receipt` requires configured `test` runners")?;
+    let inputs = config
+        .evidence
+        .as_ref()
+        .and_then(|evidence| evidence.observation_inputs.as_ref())
+        .context(
+            "`aplan test receipt` requires exhaustive `evidence.observation_inputs`; receipt reuse cannot infer repository inputs",
+        )?;
+    let (_, _, runner) = aplan_evidence::test_runner_by_selector(runners, &args.runner)
+        .map_err(anyhow::Error::msg)?;
+    let repository_root = plan_repository(root);
+    let material_before = aplan_evidence::test_material_identity(&repository_root, inputs, runner)
+        .map_err(anyhow::Error::msg)?;
+    let repository_before = aplan_attest::receipt::repository_context(&repository_root)?;
+    let started_at_epoch_seconds = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .context("the system clock is before the Unix epoch")?
+        .as_secs();
+    let observation = aplan_evidence::observe_test_runner(
+        runners,
+        &repository_root,
+        selected_config_file(config_dir.as_deref()),
+        &args.runner,
+    )
+    .map_err(anyhow::Error::msg)?;
+    let completed_at_epoch_seconds = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .context("the system clock is before the Unix epoch")?
+        .as_secs();
+    let material_after = aplan_evidence::test_material_identity(&repository_root, inputs, runner)
+        .map_err(anyhow::Error::msg)?;
+    if material_before != material_after {
+        anyhow::bail!(
+            "a declared provider material changed during execution; no receipt was published"
+        );
+    }
+    let repository_after = aplan_attest::receipt::repository_context(&repository_root)?;
+    if repository_before != repository_after {
+        anyhow::bail!(
+            "the repository audit context changed during execution; no receipt was published"
+        );
+    }
+    let statement = aplan_attest::receipt::build(aplan_attest::receipt::ReceiptInput {
+        repository: repository_after,
+        runner: runner.clone(),
+        observation,
+        material: material_after,
+        tool: tool_identity(),
+        producer,
+        started_at_epoch_seconds,
+        completed_at_epoch_seconds,
+    })?;
+    let bytes = statement.canonical_json()?;
+    if args.output == "-" {
+        let text = std::str::from_utf8(&bytes).context("canonical receipt is not UTF-8")?;
+        write_stdout(text)?;
+    } else {
+        aplan_attest::receipt::write_atomic(std::path::Path::new(&args.output), &bytes)?;
+    }
+    Ok(EXIT_OK)
+}
+
+fn cmd_test(root: &std::path::Path, command: &TestCommand, format: Option<&str>) -> Result<u8> {
+    match command {
+        TestCommand::List { query } => {
+            cmd_test_list(root, query.as_ref(), format.unwrap_or("human"))
+        }
+        TestCommand::Receipt(args) => {
+            anyhow::ensure!(
+                format.is_none(),
+                "`--format` applies to `aplan test list`; receipts always use canonical JSON"
+            );
+            cmd_test_receipt(root, args)
+        }
+    }
+}
+
 fn dispatch(command: Command, cli_root: Option<PathBuf>) -> Result<u8> {
     match command {
-        Command::Schema => cmd_schema(),
+        Command::Capture(_) | Command::Inbox(_) => dispatch_capture(command, cli_root),
+        Command::Schema | Command::Facts { .. } => dispatch_build_metadata(command),
         Command::Check(args) => cmd_check(&resolve_root(cli_root)?, &args),
         Command::Verify(args) => cmd_verify(&resolve_root(cli_root)?, &args),
+        Command::Test { command, format } => {
+            cmd_test(&resolve_root(cli_root)?, &command, format.as_deref())
+        }
         Command::Ready(args) => cmd_ready(&resolve_root(cli_root)?, &args),
         Command::Why { id, all, format } => cmd_why(&resolve_root(cli_root)?, &id, all, &format),
         Command::Version(args) => cmd_version(&resolve_root(cli_root)?, &args),
         Command::Due(args) => cmd_due(&resolve_root(cli_root)?, &args),
         Command::Graph(args) => cmd_graph(&resolve_root(cli_root)?, &args),
+        Command::Tui(args) => cmd_tui(&args, cli_root),
         Command::Show(args) => cmd_show(&resolve_root(cli_root)?, &args),
+        Command::Explain(args) => cmd_explain(&args),
         Command::Tree { id, depth, live } => cmd_tree(&resolve_root(cli_root)?, &id, depth, live),
 
-        Command::Summary { format, select } => {
-            cmd_summary(&resolve_root(cli_root)?, &format, &select)
-        }
+        Command::Summary { format, at, select } => match at {
+            Some(revision) => cmd_summary_at(cli_root.as_deref(), &revision, &format, &select),
+            None => cmd_summary(&resolve_root(cli_root)?, &format, &select),
+        },
 
         Command::Paths {
             sample,
@@ -2138,6 +5891,8 @@ fn dispatch(command: Command, cli_root: Option<PathBuf>) -> Result<u8> {
         // `dispatch` past its line limit, on that boundary rather than an
         // arbitrary one.
         Command::Drop { .. }
+        | Command::Park { .. }
+        | Command::Unpark { .. }
         | Command::Mv { .. }
         | Command::Claim { .. }
         | Command::Release { .. }
@@ -2152,30 +5907,715 @@ fn dispatch(command: Command, cli_root: Option<PathBuf>) -> Result<u8> {
             repo,
             restamp,
             no_resolve,
+            execute,
             verdict,
         } => cmd_close(
             &resolve_root(cli_root)?,
             &id,
             &evidence,
             &repo,
-            restamp,
-            no_resolve,
-            verdict,
+            CloseMode::new(restamp, no_resolve, execute, verdict),
         ),
 
-        Command::Add(args) => cmd_add(&resolve_root(cli_root.clone())?, &args),
-        Command::Amend(args) => cmd_amend(&resolve_root(cli_root)?, &args),
-
-        Command::Supersede(args) => cmd_supersede(&resolve_root(cli_root)?, &args),
-
-        Command::Dep(args) => cmd_dep(&resolve_root(cli_root)?, &args),
-        Command::Tag(args) => cmd_tag(&resolve_root(cli_root)?, &args),
-        Command::Import(args) => cmd_import(&resolve_root(cli_root)?, &args),
+        Command::Add(_)
+        | Command::Amend(_)
+        | Command::Supersede(_)
+        | Command::Dep { .. }
+        | Command::Tag(_)
+        | Command::Rekey(_)
+        | Command::Import(_)
+        | Command::Blueprint { .. } => dispatch_authoring(command, cli_root),
         Command::Mcp => cmd_mcp(cli_root),
         Command::Init { dir } => cmd_init(&dir),
-
-        Command::Facts { require, identity } => cmd_facts(&require, identity),
     }
+}
+
+fn dispatch_build_metadata(command: Command) -> Result<u8> {
+    match command {
+        Command::Schema => cmd_schema(),
+        Command::Facts { require, identity } => cmd_facts(&require, identity),
+        _ => unreachable!("dispatch_build_metadata receives only metadata commands"),
+    }
+}
+
+fn dispatch_capture(command: Command, cli_root: Option<PathBuf>) -> Result<u8> {
+    let root = resolve_root(cli_root)?;
+    match command {
+        Command::Capture(args) => cmd_capture(&root, &args),
+        Command::Inbox(args) => cmd_inbox(&root, &args),
+        _ => unreachable!("dispatch_capture receives only capture commands"),
+    }
+}
+
+/// Route operations that author task content through one plan-root boundary.
+fn dispatch_authoring(command: Command, cli_root: Option<PathBuf>) -> Result<u8> {
+    let root = resolve_root(cli_root)?;
+    match command {
+        Command::Add(args) => cmd_add(&root, &args),
+        Command::Amend(args) => cmd_amend(&root, &args),
+        Command::Supersede(args) => cmd_supersede(&root, &args),
+        Command::Dep { command, format } => cmd_dep(&root, &command, &format),
+        Command::Tag(args) => cmd_tag(&root, &args),
+        Command::Rekey(args) => cmd_rekey(&root, &args),
+        Command::Import(args) => cmd_import(&root, &args),
+        Command::Blueprint { command, format } => cmd_blueprint(&root, &command, &format),
+        _ => unreachable!("dispatch_authoring receives only authoring commands"),
+    }
+}
+
+fn cmd_capture(root: &std::path::Path, args: &CaptureArgs) -> Result<u8> {
+    let format = format_for("capture", &args.format)?;
+    let first_context = hermetic_application_context(root, HermeticContextOptions::default())?;
+    let source = args
+        .source
+        .as_deref()
+        .map(parse_capture_source)
+        .transpose()?;
+    let mut request = aplan_core::capture::CaptureCreate {
+        title: args.title.clone(),
+        kind: args.kind.clone(),
+        body: None,
+        labels: (!args.label.is_empty()).then(|| args.label.clone()),
+        revisit_at: args.revisit_at.clone(),
+        profile: args.profile.clone(),
+        promotion_defaults: args.promotion.value(),
+        source,
+        origin: aplan_core::capture::CaptureOrigin::Cli,
+    };
+    let editor_seed = if args.edit {
+        let policy = first_context
+            .report_config()
+            .expect("capture context retains resolved configuration")
+            .capture_policy();
+        request
+            .effective(&policy)
+            .map_err(anyhow::Error::msg)?
+            .body
+            .unwrap_or_default()
+    } else {
+        String::new()
+    };
+    request.body = capture_body_input(
+        args.body.as_deref(),
+        args.body_file.as_deref(),
+        args.edit,
+        &editor_seed,
+    )?;
+
+    publish_capture_create(root, &request, first_context, format, args.dry_run)
+}
+
+fn publish_capture_create(
+    root: &std::path::Path,
+    request: &aplan_core::capture::CaptureCreate,
+    first_context: aplan_app::PlanContext,
+    format: Format,
+    dry_run: bool,
+) -> Result<u8> {
+    let started = std::time::Instant::now();
+    let mut attempts = 0_u32;
+    let mut context = Some(first_context);
+    loop {
+        attempts += 1;
+        let current = match context.take() {
+            Some(context) => context,
+            None => hermetic_application_context(root, HermeticContextOptions::default())?,
+        };
+        let preview = match aplan_app::preview_capture_create(
+            &current,
+            request,
+            &aplan_core::capture::SystemClock,
+        ) {
+            Ok(preview) => preview,
+            Err(aplan_app::CaptureError::Snapshot(message))
+                if message.contains("changed while its guarded snapshot was being loaded") =>
+            {
+                if attempts >= 12 || started.elapsed() >= std::time::Duration::from_secs(3) {
+                    anyhow::bail!(
+                        "the capture inbox kept changing while creation was being prepared; no capture was written. Retry the command"
+                    );
+                }
+                std::thread::sleep(aplan_interop::ids::race_backoff(attempts));
+                continue;
+            }
+            Err(aplan_app::CaptureError::IdentityCollision { .. }) => {
+                if attempts >= 12 || started.elapsed() >= std::time::Duration::from_secs(3) {
+                    anyhow::bail!(
+                        "capture identity allocation kept colliding; no capture was written. Retry the command"
+                    );
+                }
+                std::thread::sleep(aplan_interop::ids::race_backoff(attempts));
+                continue;
+            }
+            Err(error) => return Err(error.into()),
+        };
+        if dry_run {
+            let outcome = if preview.idempotent_retry() {
+                aplan_output::CaptureActionOutcome::Unchanged
+            } else {
+                aplan_output::CaptureActionOutcome::Predicted
+            };
+            return render_capture_preview(&preview, outcome, format);
+        }
+        let report =
+            capture_action_report(&preview, aplan_output::CaptureActionOutcome::Predicted)?;
+        match aplan_app::commit_change_set(&current, preview.into_change_set()) {
+            aplan_app::CommitOutcome::Applied(_) => {
+                return render_capture_report(
+                    report,
+                    aplan_output::CaptureActionOutcome::Applied,
+                    format,
+                );
+            }
+            aplan_app::CommitOutcome::NoOp(_) => {
+                return render_capture_report(
+                    report,
+                    aplan_output::CaptureActionOutcome::Unchanged,
+                    format,
+                );
+            }
+            aplan_app::CommitOutcome::Stale { change, actual } if actual == *change.input() => {
+                if attempts >= 12 || started.elapsed() >= std::time::Duration::from_secs(3) {
+                    anyhow::bail!(
+                        "the capture inbox kept changing while creation was being prepared; no capture was written. Retry the command"
+                    );
+                }
+                std::thread::sleep(aplan_interop::ids::race_backoff(attempts));
+            }
+            aplan_app::CommitOutcome::Stale { change, .. } => {
+                anyhow::bail!(
+                    "capture creation input changed after preview; no capture was written. {}",
+                    change.stale_reason().unwrap_or(
+                        "Re-run the command against the current plan and selected configuration"
+                    )
+                )
+            }
+            aplan_app::CommitOutcome::Denied(_) => {
+                anyhow::bail!("capture creation was unexpectedly denied by mutation policy")
+            }
+            aplan_app::CommitOutcome::PublicationFailed { report, error, .. } => {
+                anyhow::bail!(
+                    "capture publication failed with filesystem state {:?}: {error}",
+                    report.state()
+                )
+            }
+        }
+    }
+}
+
+fn cmd_inbox(root: &std::path::Path, args: &InboxArgs) -> Result<u8> {
+    let format = if matches!(args.command.as_ref(), Some(InboxCommand::Promote(_))) {
+        format_for("capture", &args.format)?
+    } else {
+        format_for("inbox", &args.format)?
+    };
+    if let Some(command) = &args.command {
+        anyhow::ensure!(
+            args.kind.is_none()
+                && args.state == "open"
+                && args.label.is_none()
+                && args.revisit == "actionable"
+                && args.search.is_none()
+                && args.limit == 50,
+            "inbox list filters cannot be combined with `{}`",
+            inbox_command_name(command)
+        );
+        return cmd_inbox_command(root, command, format);
+    }
+    let context = hermetic_application_context(root, HermeticContextOptions::default())?;
+    let query = aplan_core::capture::CaptureQuery {
+        kind: args.kind.clone(),
+        state: parse_capture_state_filter(&args.state)?,
+        label: args.label.clone(),
+        revisit: parse_revisit_filter(&args.revisit)?,
+        search: args.search.clone(),
+        limit: args.limit,
+    };
+    let response = aplan_app::list_captures(&context, &query, &aplan_core::capture::SystemClock)?;
+    aplan_output::render_capture_collection(
+        &aplan_output::CaptureCollectionReport {
+            input: serde_json::to_value(&response.input)?,
+            inbox_sha256: response.inbox_sha256,
+            complete: response.complete,
+            list: response.list,
+        },
+        format,
+    )?;
+    Ok(EXIT_OK)
+}
+
+fn cmd_inbox_command(root: &std::path::Path, command: &InboxCommand, format: Format) -> Result<u8> {
+    match command {
+        InboxCommand::Show { id } => {
+            let context = hermetic_application_context(root, HermeticContextOptions::default())?;
+            let selector = human_capture_selector(id)?;
+            let response =
+                aplan_app::show_capture(&context, &selector, &aplan_core::capture::SystemClock)?;
+            aplan_output::render_capture_focused(
+                &aplan_output::CaptureFocusedReport {
+                    input: serde_json::to_value(&response.input)?,
+                    inbox_sha256: response.inbox_sha256,
+                    complete: response.complete,
+                    capture: response.capture,
+                },
+                format,
+            )?;
+            Ok(EXIT_OK)
+        }
+        InboxCommand::Amend(args) => cmd_capture_amend(root, args, format),
+        InboxCommand::Discard(args) => {
+            let context = hermetic_application_context(root, HermeticContextOptions::default())?;
+            let preview = aplan_app::preview_capture_discard(
+                &context,
+                &aplan_app::CaptureDiscardRequest {
+                    selector: human_capture_selector(&args.id)?,
+                    reason: args.reason.clone(),
+                },
+                &aplan_core::capture::SystemClock,
+            )?;
+            finish_capture_mutation(&context, preview, args.dry_run, format)
+        }
+        InboxCommand::Restore(args) => {
+            let context = hermetic_application_context(root, HermeticContextOptions::default())?;
+            let preview = aplan_app::preview_capture_restore(
+                &context,
+                &human_capture_selector(&args.id)?,
+                &aplan_core::capture::SystemClock,
+            )?;
+            finish_capture_mutation(&context, preview, args.dry_run, format)
+        }
+        InboxCommand::Promote(args) => cmd_capture_promote(root, args, format),
+    }
+}
+
+fn cmd_capture_promote(
+    root: &std::path::Path,
+    args: &CapturePromoteArgs,
+    format: Format,
+) -> Result<u8> {
+    let context = hermetic_application_context(
+        root,
+        HermeticContextOptions {
+            verdict: args.verdict,
+            ..HermeticContextOptions::default()
+        },
+    )?;
+    let request = aplan_app::CapturePromotionRequest {
+        selector: human_capture_selector(&args.id)?,
+        task_id: args.task_id.clone(),
+        phase: args.phase,
+        cut: args.cut.clone(),
+        effort_days: args.effort,
+        owner: args.owner.clone(),
+        paths: if args.clear_paths {
+            Some(Vec::new())
+        } else if args.paths.is_empty() {
+            None
+        } else {
+            Some(args.paths.clone())
+        },
+        tags: if args.clear_tags {
+            Some(Vec::new())
+        } else if args.tags.is_empty() {
+            None
+        } else {
+            Some(args.tags.clone())
+        },
+        reason: args.reason.clone(),
+    };
+    let preview = aplan_app::preview_capture_promotion(
+        &context,
+        &request,
+        &aplan_core::capture::SystemClock,
+    )?;
+    finish_capture_promotion(&context, preview, args.dry_run, format)
+}
+
+fn finish_capture_promotion(
+    context: &aplan_app::PlanContext,
+    preview: aplan_app::CapturePromotionPreview,
+    dry_run: bool,
+    format: Format,
+) -> Result<u8> {
+    finish_capture_promotion_with(
+        context,
+        preview,
+        dry_run,
+        format,
+        aplan_app::commit_change_set,
+    )
+}
+
+fn finish_capture_promotion_with(
+    context: &aplan_app::PlanContext,
+    preview: aplan_app::CapturePromotionPreview,
+    dry_run: bool,
+    format: Format,
+    commit: impl FnOnce(&aplan_app::PlanContext, aplan_app::ChangeSet) -> aplan_app::CommitOutcome,
+) -> Result<u8> {
+    let denied = preview.change_set().disposition() == aplan_app::ChangeDisposition::Denied;
+    if dry_run {
+        let outcome = if denied {
+            aplan_output::CaptureActionOutcome::Refused
+        } else if preview.idempotent_retry() {
+            aplan_output::CaptureActionOutcome::Unchanged
+        } else {
+            aplan_output::CaptureActionOutcome::Predicted
+        };
+        let report = capture_promotion_report(&preview, outcome)?;
+        aplan_output::render_capture_action(&report, format)?;
+        return Ok(if denied { EXIT_VIOLATIONS } else { EXIT_OK });
+    }
+    let report = capture_promotion_report(&preview, aplan_output::CaptureActionOutcome::Predicted)?;
+    let capture_id = report.capture.id.clone();
+    let task_id = report
+        .task_id
+        .clone()
+        .expect("a promotion report always carries its task id");
+    match commit(context, preview.into_change_set()) {
+        aplan_app::CommitOutcome::Applied(_) => {
+            render_capture_report(report, aplan_output::CaptureActionOutcome::Applied, format)
+        }
+        aplan_app::CommitOutcome::NoOp(_) => render_capture_report(
+            report,
+            aplan_output::CaptureActionOutcome::Unchanged,
+            format,
+        ),
+        aplan_app::CommitOutcome::Denied(_) => {
+            let code =
+                render_capture_report(report, aplan_output::CaptureActionOutcome::Refused, format)?;
+            debug_assert_eq!(code, EXIT_OK);
+            Ok(EXIT_VIOLATIONS)
+        }
+        aplan_app::CommitOutcome::Stale { change, .. } => anyhow::bail!(
+            "promotion of capture `{capture_id}` to task `{task_id}` became stale after preview; no task or capture was written. {}",
+            change.stale_reason().unwrap_or(
+                "Re-run the command against the current plan, inbox and selected configuration"
+            )
+        ),
+        aplan_app::CommitOutcome::PublicationFailed { report, error, .. } => anyhow::bail!(
+            "promotion of capture `{capture_id}` to task `{task_id}` failed during publication with filesystem state {:?}: {error}",
+            report.state()
+        ),
+    }
+}
+
+fn capture_promotion_report(
+    preview: &aplan_app::CapturePromotionPreview,
+    outcome: aplan_output::CaptureActionOutcome,
+) -> Result<aplan_output::CaptureActionReport> {
+    Ok(aplan_output::CaptureActionReport {
+        input: serde_json::to_value(preview.change_set().input())?,
+        inbox_sha256: preview.inbox_sha256().to_string(),
+        outcome,
+        publishable: preview.change_set().disposition() != aplan_app::ChangeDisposition::Denied,
+        capture: preview.capture().clone(),
+        task_id: Some(preview.task_id().to_string()),
+        files: preview
+            .change_set()
+            .files()
+            .iter()
+            .map(|file| file.path().display().to_string())
+            .collect(),
+        findings: preview.change_set().diagnostics().lines(),
+    })
+}
+
+fn cmd_capture_amend(
+    root: &std::path::Path,
+    args: &CaptureAmendArgs,
+    format: Format,
+) -> Result<u8> {
+    anyhow::ensure!(
+        !args.clear_promotion || args.promotion.is_empty(),
+        "`--clear-promotion` conflicts with individual promotion defaults"
+    );
+    let context = hermetic_application_context(root, HermeticContextOptions::default())?;
+    let selector = human_capture_selector(&args.id)?;
+    let focused = if args.edit || !args.promotion.is_empty() {
+        Some(
+            aplan_app::show_capture(&context, &selector, &aplan_core::capture::SystemClock)?
+                .capture,
+        )
+    } else {
+        None
+    };
+    let editor_seed = focused
+        .as_ref()
+        .and_then(|capture| capture.body.clone())
+        .unwrap_or_default();
+    let expected_sha256 = focused.as_ref().map(aplan_app::capture_fingerprint);
+    let supplied_body = args.body.is_some() || args.body_file.is_some() || args.edit;
+    let labels = if args.clear_labels {
+        Some(Vec::new())
+    } else if args.label.is_empty() {
+        None
+    } else {
+        Some(args.label.clone())
+    };
+    let revisit_at = if args.clear_revisit {
+        Some(None)
+    } else {
+        args.revisit_at.clone().map(Some)
+    };
+    let promotion_defaults = if args.clear_promotion {
+        Some(None)
+    } else if let Some(explicit) = args.promotion.value() {
+        let effective = focused
+            .as_ref()
+            .and_then(|capture| capture.promotion_defaults.as_ref())
+            .map_or(explicit.clone(), |existing| existing.overlay(&explicit));
+        Some(Some(effective))
+    } else {
+        None
+    };
+    let mut request = aplan_app::CaptureAmendRequest {
+        selector: Some(selector),
+        title: args.title.clone(),
+        kind: args.kind.clone(),
+        body: None,
+        labels,
+        revisit_at,
+        promotion_defaults,
+        expected_sha256,
+    };
+    if supplied_body || args.clear_body {
+        // Refuse a closed capture or any invalid non-body edit before opening
+        // a caller-selected file or launching an external editor. The final
+        // preview below repeats the complete check against a fresh guarded
+        // inbox snapshot after those explicit inputs have been captured.
+        let _ = aplan_app::preview_capture_amend(
+            &context,
+            &request,
+            &aplan_core::capture::SystemClock,
+        )?;
+    }
+    let body = capture_body_input(
+        args.body.as_deref(),
+        args.body_file.as_deref(),
+        args.edit,
+        &editor_seed,
+    )?;
+    request.body = if args.clear_body {
+        Some(None)
+    } else if supplied_body {
+        Some(body)
+    } else {
+        None
+    };
+    let preview =
+        aplan_app::preview_capture_amend(&context, &request, &aplan_core::capture::SystemClock)?;
+    finish_capture_mutation(&context, preview, args.dry_run, format)
+}
+
+fn finish_capture_mutation(
+    context: &aplan_app::PlanContext,
+    preview: aplan_app::CaptureMutationPreview,
+    dry_run: bool,
+    format: Format,
+) -> Result<u8> {
+    if dry_run {
+        return render_capture_preview(
+            &preview,
+            aplan_output::CaptureActionOutcome::Predicted,
+            format,
+        );
+    }
+    let report = capture_action_report(&preview, aplan_output::CaptureActionOutcome::Predicted)?;
+    match aplan_app::commit_change_set(context, preview.into_change_set()) {
+        aplan_app::CommitOutcome::Applied(_) => {
+            render_capture_report(report, aplan_output::CaptureActionOutcome::Applied, format)
+        }
+        aplan_app::CommitOutcome::NoOp(_) => render_capture_report(
+            report,
+            aplan_output::CaptureActionOutcome::Unchanged,
+            format,
+        ),
+        aplan_app::CommitOutcome::Stale { change, .. } => anyhow::bail!(
+            "the capture inbox changed after preview; no capture was written. {}",
+            change
+                .stale_reason()
+                .unwrap_or("Re-run the command against the current full id or prefix")
+        ),
+        aplan_app::CommitOutcome::Denied(_) => {
+            anyhow::bail!("capture mutation was unexpectedly denied by mutation policy")
+        }
+        aplan_app::CommitOutcome::PublicationFailed { report, error, .. } => anyhow::bail!(
+            "capture publication failed with filesystem state {:?}: {error}",
+            report.state()
+        ),
+    }
+}
+
+fn render_capture_preview(
+    preview: &aplan_app::CaptureMutationPreview,
+    outcome: aplan_output::CaptureActionOutcome,
+    format: Format,
+) -> Result<u8> {
+    let report = capture_action_report(preview, outcome)?;
+    aplan_output::render_capture_action(&report, format)?;
+    Ok(EXIT_OK)
+}
+
+fn capture_action_report(
+    preview: &aplan_app::CaptureMutationPreview,
+    outcome: aplan_output::CaptureActionOutcome,
+) -> Result<aplan_output::CaptureActionReport> {
+    Ok(aplan_output::CaptureActionReport {
+        input: serde_json::to_value(preview.change_set().input())?,
+        inbox_sha256: preview.inbox_sha256().to_string(),
+        outcome,
+        publishable: preview.change_set().disposition() != aplan_app::ChangeDisposition::Denied,
+        capture: preview.capture().clone(),
+        task_id: None,
+        files: preview
+            .change_set()
+            .files()
+            .iter()
+            .map(|file| file.path().display().to_string())
+            .collect(),
+        findings: preview.change_set().diagnostics().lines(),
+    })
+}
+
+fn render_capture_report(
+    mut report: aplan_output::CaptureActionReport,
+    outcome: aplan_output::CaptureActionOutcome,
+    format: Format,
+) -> Result<u8> {
+    report.outcome = outcome;
+    aplan_output::render_capture_action(&report, format)?;
+    Ok(EXIT_OK)
+}
+
+fn human_capture_selector(value: &str) -> Result<aplan_app::CaptureSelector> {
+    Ok(aplan_app::CaptureSelector::HumanPrefix(
+        aplan_app::HumanCapturePrefix::new(value)?,
+    ))
+}
+
+fn parse_capture_source(value: &str) -> Result<aplan_core::capture::CaptureSource> {
+    let (namespace, key) = value.split_once(':').ok_or_else(|| {
+        anyhow::anyhow!("`--source` must be `namespace:opaque-key`; the key may itself contain `:`")
+    })?;
+    Ok(aplan_core::capture::CaptureSource {
+        namespace: namespace.to_string(),
+        key: key.to_string(),
+    })
+}
+
+fn parse_capture_state_filter(value: &str) -> Result<Option<aplan_core::capture::CaptureState>> {
+    Ok(match value {
+        "open" => Some(aplan_core::capture::CaptureState::Open),
+        "promoted" => Some(aplan_core::capture::CaptureState::Promoted),
+        "discarded" => Some(aplan_core::capture::CaptureState::Discarded),
+        "all" => None,
+        _ => anyhow::bail!(
+            "`--state {value}` is not a capture state; use `open`, `promoted`, `discarded`, or `all`"
+        ),
+    })
+}
+
+fn parse_revisit_filter(value: &str) -> Result<aplan_core::capture::RevisitFilter> {
+    Ok(match value {
+        "actionable" => aplan_core::capture::RevisitFilter::Actionable,
+        "deferred" => aplan_core::capture::RevisitFilter::Deferred,
+        "all" => aplan_core::capture::RevisitFilter::All,
+        _ => anyhow::bail!(
+            "`--revisit {value}` is not a revisit filter; use `actionable`, `deferred`, or `all`"
+        ),
+    })
+}
+
+fn inbox_command_name(command: &InboxCommand) -> &'static str {
+    match command {
+        InboxCommand::Show { .. } => "show",
+        InboxCommand::Amend(_) => "amend",
+        InboxCommand::Discard(_) => "discard",
+        InboxCommand::Restore(_) => "restore",
+        InboxCommand::Promote(_) => "promote",
+    }
+}
+
+fn capture_body_input(
+    literal: Option<&str>,
+    file: Option<&str>,
+    edit: bool,
+    editor_seed: &str,
+) -> Result<Option<String>> {
+    if let Some(body) = literal {
+        return Ok(Some(body.to_string()));
+    }
+    if let Some(file) = file {
+        return if file == "-" {
+            Ok(Some(read_capture_stdin()?))
+        } else {
+            aplan_core::capture::read_capture_body_file(std::path::Path::new(file))
+                .map(Some)
+                .map_err(anyhow::Error::msg)
+        };
+    }
+    if edit {
+        return edit_capture_body(editor_seed).map(Some);
+    }
+    Ok(None)
+}
+
+fn read_capture_stdin() -> Result<String> {
+    use std::io::Read as _;
+    let mut bytes = Vec::new();
+    std::io::stdin()
+        .take(u64::try_from(aplan_core::capture::MAX_CAPTURE_BYTES).unwrap_or(u64::MAX) + 1)
+        .read_to_end(&mut bytes)
+        .context("reading capture body from standard input")?;
+    anyhow::ensure!(
+        bytes.len() <= aplan_core::capture::MAX_CAPTURE_BYTES,
+        "capture body from standard input exceeds the {}-byte limit",
+        aplan_core::capture::MAX_CAPTURE_BYTES
+    );
+    String::from_utf8(bytes).map_err(|error| {
+        anyhow::anyhow!(
+            "capture body from standard input is not UTF-8 (invalid byte at offset {})",
+            error.utf8_error().valid_up_to()
+        )
+    })
+}
+
+fn edit_capture_body(seed: &str) -> Result<String> {
+    let setting = std::env::var("VISUAL")
+        .ok()
+        .filter(|value| !value.trim().is_empty())
+        .or_else(|| {
+            std::env::var("EDITOR")
+                .ok()
+                .filter(|value| !value.trim().is_empty())
+        })
+        .ok_or_else(|| anyhow::anyhow!("`--edit` needs a non-empty `VISUAL` or `EDITOR`"))?;
+    let mut argv = shell_words::split(&setting)
+        .map_err(|error| anyhow::anyhow!("parsing editor setting: {error}"))?;
+    anyhow::ensure!(!argv.is_empty(), "the selected editor command is empty");
+    let executable = argv.remove(0);
+    let mut temporary = tempfile::Builder::new()
+        .prefix("aplan-capture-")
+        .suffix(".md")
+        .tempfile()
+        .context("creating temporary capture body for editor")?;
+    temporary
+        .write_all(seed.as_bytes())
+        .context("seeding temporary capture body")?;
+    temporary
+        .flush()
+        .context("flushing temporary capture body")?;
+    let status = std::process::Command::new(&executable)
+        .args(&argv)
+        .arg(temporary.path())
+        .status()
+        .with_context(|| format!("launching editor `{executable}`"))?;
+    anyhow::ensure!(
+        status.success(),
+        "editor `{executable}` exited with {status}; no capture was written"
+    );
+    aplan_core::capture::read_capture_body_file(temporary.path()).map_err(anyhow::Error::msg)
 }
 
 /// Parse one `kind:ref` argument.
@@ -2311,18 +6751,23 @@ fn cmd_mcp(cli_root: Option<PathBuf>) -> Result<u8> {
     // plan and its git history live is still the plan's own location. Without
     // this, a reviewing server resolved evidence against the trusted directory
     // and answered "not a git repository" (`A1-155`, found by its audit).
-    let plan_repo = Some(plan_repository(root));
+    let plan_repo = plan_repository(root);
     let default_traces_root = if config_refused() || is_explicit_config() {
-        plan_repo.clone()
+        Some(plan_repo.clone())
     } else {
-        config_dir.clone().or_else(|| plan_repo.clone())
+        config_dir.clone().or_else(|| Some(plan_repo.clone()))
     };
-    let options = resolve_check_options(
+    let options = aplan_app::configured_options(
         &config,
-        config_dir.as_deref(),
-        false,
-        default_traces_root,
-        false,
+        aplan_app::ConfigurationInputs {
+            directory: config_dir.as_deref(),
+            file: selected_config_file(config_dir.as_deref()),
+            no_require_effort: false,
+            traces_root: None,
+            no_traces: false,
+            default_traces: default_traces_root,
+            traces_repository: Some(plan_repo.clone()),
+        },
     );
     // `APLAN041` reaches this surface too, and it is the surface that needs it
     // most: the block is what an *agent* reads, and this is the agent's
@@ -2348,14 +6793,15 @@ fn cmd_mcp(cli_root: Option<PathBuf>) -> Result<u8> {
     // The warning policy travels with the options, or the surface an agent uses
     // reports a denied plan as clean (`A1-101`).
     let deny_warnings = resolve_deny_warnings(&config, false, false);
-    // Where git lives: the repository the plan sits in, on the same reasoning as
-    // the traces root above, and never the caller's directory.
-    let repo_root = if config_refused() || is_explicit_config() {
-        plan_repo.clone()
-    } else {
-        config_dir.clone().or_else(|| plan_repo.clone())
-    }
-    .unwrap_or_else(|| std::path::PathBuf::from("."));
+    // Where git lives is always the worktree containing the selected plan. A
+    // configuration directory is the frame for relative policy values, not a
+    // substitute repository boundary (`A1-604`).
+    let repo_root = plan_repo;
+    let verify = aplan_app::configured_verification(
+        &config,
+        selected_config_file(config_dir.as_deref()),
+        options.traces_root.clone(),
+    );
     let policy = aplan_mcp::Policy {
         options,
         id_strategy: config.id_strategy.unwrap_or_default(),
@@ -2363,25 +6809,13 @@ fn cmd_mcp(cli_root: Option<PathBuf>) -> Result<u8> {
         // disagree about whether a plan passes (`A1-101`, `A1-112`).
         verdict: aplan_core::Verdict {
             deny_warnings,
-            advisory: config.advisory.clone().unwrap_or_default(),
+            ..aplan_app::configured_verdict(&config)
         },
-        verify: aplan_evidence::VerifyOptions {
-            traces_root: None,
-            // Never from this surface, whatever the config says (`A1-102`).
-            execute: false,
-            test_runner: config.test.clone(),
-            max_unrelated_files: config.evidence.as_ref().and_then(|e| e.max_unrelated_files),
-            // The agent surface reaches the network only where the CLI does, and
-            // `aplan_verify` is the CLI's `verify` (`A1-104`).
-            url_check: config.url.clone(),
-            // For the same reason: this surface answers the question the CLI
-            // answers, and a rule that ran for one caller and not the other
-            // would be two tools wearing one name (`A1-313`).
-            version: config.version.clone(),
-            config_file: config_dir
-                .as_deref()
-                .map(|d| d.join(aplan_config::CONFIG_FILE)),
-        },
+        // Never executes a cited test through this surface (`A1-102`), but
+        // otherwise carries the same evidence providers and trace frame as the
+        // CLI's non-executing `verify`. Provider discovery/check commands may
+        // run; selecting a repository is therefore a trust choice.
+        verify,
         repo_root,
     };
 
@@ -2398,6 +6832,9 @@ fn cmd_mcp(cli_root: Option<PathBuf>) -> Result<u8> {
             root.to_path_buf(),
             policy,
             identity_value(),
+            CACHE_MODE.get().copied().unwrap_or_default(),
+            cache_writer_identity(),
+            written_by(),
         ))
         .context("serving MCP over stdio")?;
     Ok(EXIT_OK)
@@ -2441,6 +6878,8 @@ pub enum DepCommand {
     Add(DepArgs),
     /// Remove that edge again.
     Rm(DepArgs),
+    /// Apply additions and removals from one YAML file as a single post-state.
+    Apply(DepApplyArgs),
 }
 
 #[derive(clap::Args, Debug)]
@@ -2448,14 +6887,30 @@ pub struct DepArgs {
     /// The task that comes second.
     id: String,
     /// The task it comes after, which must finish first.
-    #[arg(long)]
-    after: String,
+    #[arg(long, required = true)]
+    after: Vec<String>,
     /// Record a *preference* rather than a dependency: `ready` offers this task
     /// after the other one when both are offerable, and nothing else changes.
     /// `critical-path`, `why` and the rules that judge a `done` task do not read
     /// it, so a preference can never stop work or lengthen a chain.
     #[arg(long)]
     prefer: bool,
+    /// Review the complete post-state without changing any file.
+    #[arg(long)]
+    dry_run: bool,
+    /// Whether a warning blocks this write, as `check` and `verify` take it.
+    #[command(flatten)]
+    verdict: VerdictFlags,
+}
+
+#[derive(clap::Args, Debug)]
+pub struct DepApplyArgs {
+    /// YAML list of target ids with `add` and `remove` prerequisite lists.
+    #[arg(long, value_name = "FILE")]
+    from: PathBuf,
+    /// Review the complete post-state without changing any file.
+    #[arg(long)]
+    dry_run: bool,
     /// Whether a warning blocks this write, as `check` and `verify` take it.
     #[command(flatten)]
     verdict: VerdictFlags,
@@ -2480,6 +6935,24 @@ pub struct SupersedeArgs {
     /// it inherits the predecessor's.
     #[arg(long = "tag")]
     tags: Vec<String>,
+    /// Replace inherited paths with this value. Repeatable. Omit both path
+    /// controls to inherit the predecessor's paths.
+    #[arg(long = "path", value_name = "GLOB", conflicts_with = "clear_paths")]
+    paths: Vec<String>,
+    /// Deliberately give the successor no paths instead of inheriting them.
+    #[arg(long, conflicts_with = "paths")]
+    clear_paths: bool,
+    /// Replace inherited traces with this value. Repeatable. Omit both trace
+    /// controls to inherit the predecessor's traces.
+    #[arg(long = "trace", value_name = "ANCHOR", conflicts_with = "clear_traces")]
+    traces: Vec<String>,
+    /// Deliberately give the successor no traces instead of inheriting them.
+    #[arg(long, conflicts_with = "traces")]
+    clear_traces: bool,
+    /// Complete Markdown body for the successor. Omit it for the generated
+    /// successor template; a blank body is refused.
+    #[arg(long, value_name = "MARKDOWN")]
+    body: Option<String>,
     /// Whether a warning blocks this write, as `check` and `verify` take it.
     #[command(flatten)]
     verdict: VerdictFlags,
@@ -2543,7 +7016,7 @@ pub struct CheckArgs {
 /// a flag.
 // Each bool is one command-line switch, which is what `clap` derives them from.
 #[allow(clippy::struct_excessive_bools)]
-#[derive(clap::Args, Debug)]
+#[derive(clap::Args, Debug, Clone)]
 pub struct VerifyArgs {
     /// Accepted so it can be refused by name: a gate over a subset would
     /// report a clean plan while ignoring the rest of it (`A1-214`).
@@ -2576,6 +7049,49 @@ pub struct VerifyArgs {
     /// whose passes are the same bytes as that miss.
     #[arg(long)]
     execute: bool,
+    /// Verify L1/L2/L3 from one complete current receipt per configured test
+    /// provider. The JSON import set supplies receipt paths and caller-owned
+    /// trust facts. This never starts a test provider or falls back to direct
+    /// execution when a receipt is absent, stale or rejected.
+    #[arg(
+        long,
+        value_name = "IMPORT_SET",
+        conflicts_with_all = ["execute", "fix", "refresh_test_receipts"]
+    )]
+    test_receipts: Option<PathBuf>,
+    /// Explicitly refresh missing or invalidated receipts, atomically publish a
+    /// complete set, then derive the whole-plan verdict from that set.
+    #[arg(
+        long,
+        value_name = "SET",
+        conflicts_with_all = ["execute", "fix", "test_receipts"]
+    )]
+    refresh_test_receipts: Option<PathBuf>,
+    /// Committed base revision for incremental refresh.
+    #[arg(long, value_name = "REV", requires = "refresh_test_receipts")]
+    refresh_base: Option<String>,
+    /// Committed head revision for clean base/head refresh.
+    #[arg(
+        long,
+        value_name = "REV",
+        requires = "refresh_test_receipts",
+        conflicts_with = "refresh_working_tree"
+    )]
+    refresh_head: Option<String>,
+    /// Compare the base with HEAD, the index, tracked edits and untracked files.
+    #[arg(
+        long,
+        requires = "refresh_test_receipts",
+        conflicts_with = "refresh_head"
+    )]
+    refresh_working_tree: bool,
+    /// Also execute the complete direct oracle and refuse any disagreement.
+    #[arg(long, requires = "refresh_test_receipts")]
+    refresh_shadow: bool,
+    /// Apply every exact repair this run computed, then verify the resulting
+    /// plan again. Judgement calls remain findings and are never changed.
+    #[arg(long, conflicts_with = "execute")]
+    fix: bool,
     /// Fail on warnings too, so every finding blocks. Overrides `deny_warnings`
     /// in `.aplan.yml`.
     #[arg(long)]
@@ -2583,6 +7099,31 @@ pub struct VerifyArgs {
     /// Do not fail on warnings, whatever `.aplan.yml` says.
     #[arg(long, conflicts_with = "deny_warnings")]
     no_deny_warnings: bool,
+}
+
+#[derive(Subcommand, Debug)]
+pub enum BlueprintCommand {
+    /// Bind, preview and optionally publish every task in one blueprint file.
+    Apply(BlueprintApplyArgs),
+}
+
+#[derive(clap::Args, Debug)]
+pub struct BlueprintApplyArgs {
+    /// Explicit V1 blueprint file to capture once for this invocation.
+    #[arg(long, value_name = "FILE")]
+    file: PathBuf,
+    /// Existing milestone to receive every created task, by id or cut label.
+    #[arg(long, value_name = "CUT")]
+    cut: String,
+    /// Bind one declared parameter as `NAME=VALUE`. Repeat for every parameter.
+    #[arg(long = "set", value_name = "NAME=VALUE")]
+    bindings: Vec<String>,
+    /// Render the complete proposed post-state without writing it.
+    #[arg(long)]
+    dry_run: bool,
+    /// Whether a warning blocks this write, as `check` and `verify` take it.
+    #[command(flatten)]
+    verdict: VerdictFlags,
 }
 
 /// Everything `aplan add` was asked to do.
@@ -2602,16 +7143,34 @@ pub struct AddArgs {
     // carries what this command already takes, so this is the same command
     // applied to a list rather than a new way to describe a task.
     /// Add every task in this file as one change, instead of one task from the
-    /// arguments. The file is a YAML list whose entries carry the fields above:
-    /// `title` and any of `id`, `phase`, `cut`, `effort`, `owner`, `tags`,
-    /// `paths`, `traces`, `blocked_by`. Nothing is written unless every task and
-    /// every cut it joins can be.
+    /// arguments. The file is a YAML list whose entries carry `title` and any
+    /// of `id`, `phase`, `cut`, `effort`, `owner`, `status`, `tags`, `paths`,
+    /// `traces`, `blocked_by`, `blocks`, `prefer_after`, `ratified_by`, `contains`,
+    /// `revisit_at`, `version_impact`, `version_impact_reason`, `evidence`, and
+    /// `body`. Nothing is written unless every task and every cut it joins can
+    /// be.
+    ///
+    /// `todo`, `in_progress`, and `blocked` are ordinary creation states;
+    /// `revisit_at` belongs only to `blocked`. `done` is ledger correction and
+    /// therefore requires evidence that resolves before the complete batch is
+    /// written. `dropped`, recorded release `version`, and fingerprint maps are
+    /// deliberately not creation fields: use the guarded lifecycle operation,
+    /// or let `close` derive their baselines and release version.
+    ///
+    /// A task tagged `milestone` cannot carry `effort` or `paths`: those fields
+    /// describe work, while a milestone is a checkpoint over work. The whole
+    /// batch is refused with `APLAN021` rather than silently dropping a field or
+    /// writing a plan the next `check` reports.
     ///
     /// **Order is for reading, not for resolving.** An entry may wait on, or
     /// join, any id the file declares -- above it or below it -- so a milestone
     /// can be written above the work it lists, the way a roadmap reads. Ids the
     /// file does not declare are minted in order, and one minted for a later
     /// entry has no name to be referred to by.
+    ///
+    /// `blocks` is the reverse dependency spelling: each named existing or
+    /// explicitly-declared task waits on this entry. Those target rewrites and
+    /// all creations publish as the same guarded batch.
     ///
     /// An entry may also carry `body`: the Markdown after the frontmatter,
     /// written verbatim. Leave it out to keep the scaffold, which is what an
@@ -2640,18 +7199,57 @@ pub struct AddArgs {
     /// exists, because `APLAN003` would reject the file anyway.
     #[arg(long = "blocked-by")]
     blocked_by: Vec<String>,
+    /// Initial live state: `todo`, `in_progress`, or `blocked`.
+    ///
+    /// `done` is accepted only by `--from` entries carrying resolvable evidence;
+    /// `dropped` records a later decision about work that already existed.
+    #[arg(long, value_name = "STATUS")]
+    status: Option<String>,
+    /// A non-blocking ordering preference. Repeatable.
+    #[arg(long = "prefer-after", value_name = "ID")]
+    prefer_after: Vec<String>,
+    /// An independent review task required before this task closes. Repeatable.
+    #[arg(long = "ratified-by", value_name = "ID")]
+    ratified_by: Vec<String>,
+    /// Work this checkpoint borrows for rollups. Repeatable.
+    #[arg(long, value_name = "ID")]
+    contains: Vec<String>,
+    /// Existing live task to move from its current cut into the new milestone
+    /// this add creates. Repeatable. Requires `--tag milestone`; each task must
+    /// belong to exactly one cut, and every source must retain live work.
+    ///
+    /// In this mode `--blocked-by` is reserved for milestone predecessors, so
+    /// sequencing and membership cannot be confused. The new milestone and all
+    /// source removals are published as one guarded batch.
+    #[arg(
+        long = "member",
+        value_name = "ID",
+        conflicts_with_all = ["from", "cut", "out"]
+    )]
+    members: Vec<String>,
     /// A tag. Repeatable.
     #[arg(long = "tag")]
     tags: Vec<String>,
     /// Estimate in days (`APLAN009` warns without one). Omitted by default: an
-    /// invented estimate is worse than a visible gap.
+    /// invented estimate is worse than a visible gap. Refused with
+    /// `--tag milestone`, because a checkpoint carries no effort.
     #[arg(long)]
     effort: Option<f64>,
     /// Who owns the task.
     #[arg(long)]
     owner: Option<String>,
+    /// RFC 3339 instant at which an initially `blocked` task is worth review.
+    #[arg(long, value_name = "RFC3339")]
+    revisit_at: Option<String>,
+    /// Effect on the released artifact: `none`, `fix`, `feature`, or `breaking`.
+    #[arg(long, value_name = "IMPACT")]
+    version_impact: Option<String>,
+    /// Explanation required when the explicit impact is below this task's floor.
+    #[arg(long, value_name = "REASON", requires = "version_impact")]
+    version_impact_reason: Option<String>,
     /// A glob naming files this task is responsible for. Repeatable. This is
     /// what lets `verify` bind a commit to the task (`APLAN012`, `APLAN023`).
+    /// Refused with `--tag milestone`, because a checkpoint owns no files.
     #[arg(long = "paths")]
     paths: Vec<String>,
     // `A1-116`. Refused through the same post-state check every mutation runs
@@ -2733,8 +7331,9 @@ pub struct ImportArgs {
     /// Print what would be imported, and write nothing.
     #[arg(long)]
     dry_run: bool,
-    /// `phase` for the imported tasks. Proposal repositories have no equivalent
-    /// field, and `phase` gates nothing.
+    /// Ordered reporting coordinate for the imported tasks. Source formats have
+    /// no equivalent aplan field, and this value creates no membership, gate,
+    /// or execution order.
     #[arg(long, default_value_t = 1)]
     phase: u32,
     /// How to treat a source that claims `implemented`: `todo` (the default,
@@ -2983,15 +7582,59 @@ fn id_strategy(root: &std::path::Path) -> Result<aplan_core::IdStrategy> {
 ///
 /// A named function because `add` and `add --from` print the identical shape and
 /// `cmd_add` is at its line ceiling, which is what asked the question.
-fn wrote_row(dry_run: bool, id: &str, title: &str, path: &std::path::Path) -> String {
+fn wrote_row(
+    dry_run: bool,
+    id: &str,
+    status: aplan_core::Status,
+    title: &str,
+    path: &std::path::Path,
+) -> String {
     format!(
-        "{} {i}{id}{i:#}  {st}todo{st:#}  {title}\n  {dim}-> {}{dim:#}",
+        "{} {i}{id}{i:#}  {st}{status}{st:#}  {title}\n  {dim}-> {}{dim:#}",
         if dry_run { "would write" } else { "wrote" },
         path.display(),
         i = aplan_output::style::ID,
-        st = aplan_output::style::status("todo"),
+        st = aplan_output::style::status(status.as_str()),
         dim = aplan_output::style::DIM
     )
+}
+
+fn creation_status(value: Option<&str>) -> Result<aplan_core::Status> {
+    let value = value.unwrap_or("todo");
+    let status = aplan_core::Status::ALL
+        .iter()
+        .copied()
+        .find(|status| status.as_str() == value)
+        .ok_or_else(|| {
+            anyhow::anyhow!(
+                "`--status {value}` is not a status; expected `todo`, `in_progress`, or `blocked`"
+            )
+        })?;
+    match status {
+        aplan_core::Status::Todo | aplan_core::Status::InProgress | aplan_core::Status::Blocked => {
+            Ok(status)
+        }
+        aplan_core::Status::Done => anyhow::bail!(
+            "`--status done` needs evidence resolved as one ledger correction; use `aplan add --from MANIFEST` with `status: done` and `evidence`"
+        ),
+        aplan_core::Status::Dropped => anyhow::bail!(
+            "`dropped` records a decision about existing work; create live work and use the guarded `drop` operation if that decision is later made"
+        ),
+    }
+}
+
+fn creation_version_impact(value: Option<&str>) -> Result<Option<aplan_core::task::VersionImpact>> {
+    value
+        .map(|value| match value {
+            "none" => Ok(aplan_core::task::VersionImpact::None),
+            "fix" => Ok(aplan_core::task::VersionImpact::Fix),
+            "feature" => Ok(aplan_core::task::VersionImpact::Feature),
+            "breaking" => Ok(aplan_core::task::VersionImpact::Breaking),
+            _ => anyhow::bail!(
+                "`--version-impact {value}` is not an impact; expected `none`, `fix`, `feature`, or `breaking`"
+            ),
+        })
+        .transpose()
 }
 
 /// Refuse an `add` the loader, the schema or the plan would reject, before any
@@ -3008,6 +7651,7 @@ fn refuse_bad_add_args(
     title: &str,
     id: &str,
     cut: Option<&str>,
+    status: aplan_core::Status,
 ) -> Result<()> {
     use aplan_interop::cut;
 
@@ -3021,16 +7665,46 @@ fn refuse_bad_add_args(
             existing.path.display()
         );
     }
+    cut::check_task_id_label(plan, id, None)?;
     // Refuse a task the loader would reject, or one nobody could identify. Both
     // of these were written happily by the first version of this command, which
     // then left the author with a file `check` fails on and no obvious cause: an
     // `--effort -1` is a schema error, and `--effort inf` was worse, because it
     // loaded cleanly and poisoned every rollup that adds the field up.
-    if title.trim().is_empty() {
+    if aplan_core::task::is_vacuous_ref(title) {
         anyhow::bail!("a task needs a title: it is how anyone finds this task again");
     }
     refuse_blank_tags(&args.tags)?;
     refuse_blank_owner(args.owner.as_ref())?;
+    if args
+        .paths
+        .iter()
+        .any(|path| aplan_core::task::is_vacuous_ref(path))
+    {
+        anyhow::bail!("a task path may not be blank");
+    }
+    if args
+        .traces
+        .iter()
+        .any(|trace| aplan_core::task::is_vacuous_ref(trace))
+    {
+        anyhow::bail!("a task trace may not be blank");
+    }
+    if args
+        .version_impact_reason
+        .as_deref()
+        .is_some_and(aplan_core::task::is_vacuous_ref)
+    {
+        anyhow::bail!("`--version-impact-reason` may not be blank");
+    }
+    if let Some(at) = args.revisit_at.as_deref() {
+        if status != aplan_core::Status::Blocked {
+            anyhow::bail!("`--revisit-at` belongs only to an initially `blocked` task");
+        }
+        if aplan_core::validate::rfc3339_to_epoch(at).is_none() {
+            anyhow::bail!("`--revisit-at` must be an RFC 3339 instant, not `{at}`");
+        }
+    }
     if let Some(days) = args.effort
         && (!days.is_finite() || days < 0.0)
     {
@@ -3039,15 +7713,61 @@ fn refuse_bad_add_args(
                  or omit it"
         );
     }
-    let unknown: Vec<&String> = args
-        .blocked_by
-        .iter()
+    refuse_bad_add_relations(plan, args)?;
+    if !args.members.is_empty() {
+        if args.id.is_none() || args.phase.is_none() {
+            anyhow::bail!(
+                "`--member` creates a new cut whose identity is a decision; supply both `--id` and `--phase`"
+            );
+        }
+        if !args.tags.iter().any(|tag| tag == "milestone") {
+            anyhow::bail!(
+                "`--member` creates a new cut, so the new task must carry `--tag milestone`"
+            );
+        }
+        for predecessor in &args.blocked_by {
+            let task = plan
+                .tasks
+                .iter()
+                .find(|loaded| loaded.task.id == *predecessor)
+                .expect("unknown blockers were refused above");
+            if !task.task.is_milestone() {
+                anyhow::bail!(
+                    "`--blocked-by {predecessor}` names work while `--member` is in use; use \
+                     `--member {predecessor}` for membership, and reserve `--blocked-by` for \
+                     milestone sequencing"
+                );
+            }
+        }
+    }
+    if let Some(cut_id) = cut {
+        cut::check_target_for_status(plan, cut_id, status)?;
+    }
+    Ok(())
+}
+
+fn refuse_bad_add_relations(plan: &aplan_core::Plan, args: &AddArgs) -> Result<()> {
+    let relations = [
+        &args.blocked_by,
+        &args.prefer_after,
+        &args.ratified_by,
+        &args.contains,
+    ];
+    if relations
+        .into_iter()
+        .flatten()
+        .any(|id| aplan_core::task::is_vacuous_ref(id))
+    {
+        anyhow::bail!("a related task id may not be blank or visually empty");
+    }
+    let unknown: Vec<&String> = relations
+        .into_iter()
+        .flatten()
         .filter(|b| !plan.tasks.iter().any(|lt| lt.task.id == **b))
         .collect();
     if !unknown.is_empty() {
         anyhow::bail!(
-            "blocked by task(s) that do not exist: {}. `APLAN003` would reject the file, so \
-             the id is checked before the file is written.",
+            "related task(s) do not exist: {}. Every creation-time relationship is resolved before the file is written.",
             unknown
                 .iter()
                 .map(|s| s.as_str())
@@ -3055,10 +7775,332 @@ fn refuse_bad_add_args(
                 .join(", ")
         );
     }
-    if let Some(cut_id) = cut {
-        cut::check_target(plan, cut_id)?;
+    Ok(())
+}
+
+fn apply_new_cut_add(
+    dry_run: bool,
+    task: &aplan_core::Task,
+    path: &std::path::Path,
+    moving: &aplan_interop::cut::NewCutMove,
+    out: &mut String,
+) -> Result<()> {
+    if dry_run {
+        for member in moving.members() {
+            let _ = writeln!(
+                out,
+                "  would add {member} to `{}` in {}",
+                task.id,
+                path.display()
+            );
+        }
+        for (source, removal) in moving.removals() {
+            for member in removal.removed() {
+                let _ = writeln!(
+                    out,
+                    "  would remove {member} from `{source}` in {}",
+                    removal.path().display()
+                );
+            }
+        }
+        return Ok(());
+    }
+
+    let contents = aplan_interop::emit::task_file(task, aplan_interop::emit::ADD_BODY)?;
+    let batch = std::iter::once(aplan_core::save::Replacement {
+        path: path.to_path_buf(),
+        expected: String::new(),
+        updated: contents,
+    })
+    .chain(
+        moving
+            .removals()
+            .iter()
+            .filter_map(|(_, removal)| removal.replacement()),
+    )
+    .collect::<Vec<_>>();
+    save_batch(&batch, "add")?;
+    for member in moving.members() {
+        let _ = writeln!(
+            out,
+            "  added {member} to `{}` in {}",
+            task.id,
+            path.display()
+        );
+    }
+    for (source, removal) in moving.removals() {
+        for member in removal.removed() {
+            let _ = writeln!(
+                out,
+                "  removed {member} from `{source}` in {}",
+                removal.path().display()
+            );
+        }
     }
     Ok(())
+}
+
+fn blueprint_bindings(values: &[String]) -> Result<std::collections::BTreeMap<String, String>> {
+    let mut bindings = std::collections::BTreeMap::new();
+    for value in values {
+        let (name, bound) = value
+            .split_once('=')
+            .ok_or_else(|| anyhow::anyhow!("`--set` needs `NAME=VALUE`, not `{value}`"))?;
+        if aplan_core::task::is_vacuous_ref(name) {
+            anyhow::bail!("`--set` needs a visible parameter name before `=`");
+        }
+        if bindings
+            .insert(name.to_string(), bound.to_string())
+            .is_some()
+        {
+            anyhow::bail!(
+                "blueprint parameter `{name}` was bound more than once; give one unambiguous value"
+            );
+        }
+    }
+    Ok(bindings)
+}
+
+fn blueprint_application_report(
+    root: &std::path::Path,
+    source_path: &str,
+    source_sha256: &str,
+    fallback_cut: &str,
+    change: &aplan_app::ChangeSet,
+    outcome: BlueprintOutcome,
+    attempts: u32,
+) -> BlueprintApplicationReport {
+    let tasks = change
+        .effects()
+        .iter()
+        .filter_map(|effect| match effect {
+            aplan_app::SemanticEffect::TaskCreated { task, title } => Some(BlueprintTask {
+                id: task.clone(),
+                title: title.clone(),
+            }),
+            _ => None,
+        })
+        .collect();
+    let cut = change
+        .effects()
+        .iter()
+        .find_map(|effect| match effect {
+            aplan_app::SemanticEffect::CutMembershipAdded { cut, .. } => Some(cut.clone()),
+            _ => None,
+        })
+        .unwrap_or_else(|| fallback_cut.to_string());
+    let files = change
+        .files()
+        .iter()
+        .map(|file| BlueprintFile {
+            path: file
+                .path()
+                .strip_prefix(root)
+                .unwrap_or_else(|_| file.path())
+                .display()
+                .to_string(),
+            kind: if file.before().is_some() {
+                BlueprintFileKind::Update
+            } else {
+                BlueprintFileKind::Create
+            },
+        })
+        .collect();
+    BlueprintApplicationReport {
+        source_path: source_path.to_string(),
+        source_sha256: source_sha256.to_string(),
+        plan_sha256: change.input().plan_sha256.clone(),
+        cut,
+        outcome,
+        publishable: change.disposition() != aplan_app::ChangeDisposition::Denied,
+        attempts,
+        tasks,
+        files,
+        findings: change.diagnostics().lines(),
+    }
+}
+
+fn render_blueprint_result(
+    report: &BlueprintApplicationReport,
+    format: Format,
+    exit: u8,
+) -> Result<u8> {
+    render_tolerant(|| render_blueprint_application(report, format))?;
+    Ok(exit)
+}
+
+fn wait_for_blueprint_retry(started: std::time::Instant, attempts: u32) -> Result<()> {
+    let elapsed = started.elapsed();
+    if elapsed >= ID_RACE_DEADLINE {
+        anyhow::bail!(
+            "the plan kept changing while this blueprint was prepared across {attempts} attempt(s) over {}ms; nothing was written. Run the command again against the plan as it is now",
+            elapsed.as_millis()
+        );
+    }
+    std::thread::sleep(aplan_interop::ids::race_backoff(attempts));
+    Ok(())
+}
+
+struct CapturedBlueprint {
+    source_path: String,
+    source_sha256: String,
+    request: aplan_app::BlueprintRequest,
+}
+
+fn capture_blueprint(args: &BlueprintApplyArgs) -> Result<CapturedBlueprint> {
+    let bindings = blueprint_bindings(&args.bindings)?;
+    let source_path = args.file.display().to_string();
+    let source_bytes = std::fs::read(&args.file)
+        .with_context(|| format!("reading blueprint {}", args.file.display()))?;
+    let source_sha256 = aplan_attest::sha256_hex(&source_bytes);
+    let contents = String::from_utf8(source_bytes).map_err(|error| {
+        anyhow::anyhow!(
+            "blueprint {} is not UTF-8 (invalid byte at offset {})",
+            args.file.display(),
+            error.utf8_error().valid_up_to()
+        )
+    })?;
+    // Captured once. Every stale attempt re-reads the plan and re-previews this
+    // exact request; it never combines newer blueprint bytes with an older
+    // digest or silently applies a file edited after invocation.
+    let request = aplan_app::BlueprintRequest {
+        source_name: source_path.clone(),
+        contents,
+        bindings,
+        cut: args.cut.clone(),
+    };
+    Ok(CapturedBlueprint {
+        source_path,
+        source_sha256,
+        request,
+    })
+}
+
+fn cmd_blueprint(
+    root: &std::path::Path,
+    command: &BlueprintCommand,
+    format_value: &str,
+) -> Result<u8> {
+    cmd_blueprint_with(
+        root,
+        command,
+        format_value,
+        hermetic_application_context,
+        aplan_app::commit_change_set,
+    )
+}
+
+fn cmd_blueprint_with<C, M>(
+    root: &std::path::Path,
+    command: &BlueprintCommand,
+    format_value: &str,
+    mut load_context: C,
+    commit: M,
+) -> Result<u8>
+where
+    C: FnMut(&std::path::Path, HermeticContextOptions) -> Result<aplan_app::PlanContext>,
+    M: Fn(&aplan_app::PlanContext, aplan_app::ChangeSet) -> aplan_app::CommitOutcome,
+{
+    let BlueprintCommand::Apply(args) = command;
+    let format = format_for("blueprint", format_value)?;
+    let captured = capture_blueprint(args)?;
+
+    let started = std::time::Instant::now();
+    let mut attempts = 0_u32;
+    loop {
+        attempts += 1;
+        let context = match load_context(
+            root,
+            HermeticContextOptions {
+                verdict: args.verdict,
+                trust: aplan_app::Trust::RepositoryRead,
+                ..HermeticContextOptions::default()
+            },
+        ) {
+            Ok(context) => context,
+            Err(error) if plan_snapshot_changed(&error) => {
+                wait_for_blueprint_retry(started, attempts)?;
+                continue;
+            }
+            Err(error) => return Err(error),
+        };
+        let preview = aplan_app::preview_blueprint(&context, &captured.request)?;
+        if args.dry_run {
+            let denied = preview.change_set().disposition() == aplan_app::ChangeDisposition::Denied;
+            let report = blueprint_application_report(
+                root,
+                &captured.source_path,
+                &captured.source_sha256,
+                &args.cut,
+                preview.change_set(),
+                if denied {
+                    BlueprintOutcome::Refused
+                } else {
+                    BlueprintOutcome::Predicted
+                },
+                attempts,
+            );
+            return render_blueprint_result(
+                &report,
+                format,
+                if denied { EXIT_VIOLATIONS } else { EXIT_OK },
+            );
+        }
+
+        match commit(&context, preview.into_change_set()) {
+            aplan_app::CommitOutcome::Applied(change) => {
+                let report = blueprint_application_report(
+                    root,
+                    &captured.source_path,
+                    &captured.source_sha256,
+                    &args.cut,
+                    &change,
+                    BlueprintOutcome::Applied,
+                    attempts,
+                );
+                return render_blueprint_result(&report, format, EXIT_OK);
+            }
+            aplan_app::CommitOutcome::NoOp(change) => {
+                let report = blueprint_application_report(
+                    root,
+                    &captured.source_path,
+                    &captured.source_sha256,
+                    &args.cut,
+                    &change,
+                    BlueprintOutcome::Unchanged,
+                    attempts,
+                );
+                return render_blueprint_result(&report, format, EXIT_OK);
+            }
+            aplan_app::CommitOutcome::Denied(change) => {
+                let report = blueprint_application_report(
+                    root,
+                    &captured.source_path,
+                    &captured.source_sha256,
+                    &args.cut,
+                    &change,
+                    BlueprintOutcome::Refused,
+                    attempts,
+                );
+                return render_blueprint_result(&report, format, EXIT_VIOLATIONS);
+            }
+            aplan_app::CommitOutcome::Stale { .. } => {
+                wait_for_blueprint_retry(started, attempts)?;
+            }
+            aplan_app::CommitOutcome::PublicationFailed { report, error, .. } => {
+                let observed = report
+                    .files()
+                    .iter()
+                    .map(|file| format!("{}={:?}", file.path().display(), file.state()))
+                    .collect::<Vec<_>>()
+                    .join(", ");
+                anyhow::bail!(
+                    "blueprint publication failed with filesystem state {:?}: {error}. Inspect the affected paths before retrying ({observed})",
+                    report.state()
+                );
+            }
+        }
+    }
 }
 
 fn cmd_add(root: &std::path::Path, args: &AddArgs) -> Result<u8> {
@@ -3079,7 +8121,7 @@ fn cmd_add(root: &std::path::Path, args: &AddArgs) -> Result<u8> {
     // the same reason -- judging this mutation against a plan another writer has
     // since changed would attribute their findings to it.
     let attempt = || -> Result<String> {
-        let plan = aplan_core::load_plan(root);
+        let plan = load_checked(root)?;
         // A `--cut` may be the milestone id or the label the cut reports itself
         // under, resolved once here so everything downstream works in ids
         // (`A1-139`). `roadmap` prints the label, so refusing it was the tool asking
@@ -3100,44 +8142,61 @@ fn cmd_add(root: &std::path::Path, args: &AddArgs) -> Result<u8> {
             None => ids::mint(&plan, phase, id_strategy(root)?)?,
         };
 
-        refuse_bad_add_args(&plan, args, title, &id, cut)?;
+        let status = creation_status(args.status.as_deref())?;
+        let version_impact = creation_version_impact(args.version_impact.as_deref())?;
+        refuse_bad_add_args(&plan, args, title, &id, cut, status)?;
+        let moving = (!args.members.is_empty())
+            .then(|| cut::plan_new_cut(&plan, &args.members))
+            .transpose()?;
+
+        let mut blocked_by = args.blocked_by.clone();
+        if let Some(moving) = &moving {
+            blocked_by.extend(moving.members().iter().cloned());
+        }
 
         let task = aplan_core::Task {
             id: id.clone(),
             title: title.to_string(),
             phase,
-            status: aplan_core::Status::Todo,
+            status,
             owner: args.owner.clone(),
             effort_days: args.effort,
-            blocked_by: args.blocked_by.clone(),
-            prefer_after: Vec::new(),
-            ratified_by: Vec::new(),
-            contains: Vec::new(),
+            blocked_by: emit::deduped(&blocked_by),
+            prefer_after: emit::deduped(&args.prefer_after),
+            ratified_by: emit::deduped(&args.ratified_by),
+            contains: emit::deduped(&args.contains),
             evidence: Vec::new(),
             // Repeats removed on both surfaces, in one place (`A1-116`).
             paths: emit::deduped(&args.paths),
             traces: emit::deduped(&args.traces),
             trace_fingerprints: std::collections::BTreeMap::new(),
+            evidence_fingerprints: std::collections::BTreeMap::new(),
             tags: emit::deduped(&args.tags),
-            revisit_at: None,
-            version_impact: None,
-            version_impact_reason: None,
+            revisit_at: args.revisit_at.clone(),
+            version_impact,
+            version_impact_reason: args.version_impact_reason.clone(),
             version: None,
         };
 
         // The whole post-state, through the one shared path (`A1-113`). The
         // milestone edit `--cut` performs is part of it, so a placement that would
         // break the plan is refused here rather than reported on the next `check`.
-        let after = post_state_for_add(&plan, &task, cut);
-        refuse_bad_mutation(root, &format!("add `{id}`"), &plan, &after, args.verdict)?;
+        let after = post_state_for_add(&plan, &task, cut, moving.as_ref());
+        refuse_bad_add_mutation(root, &format!("add `{id}`"), &plan, &after, args.verdict)?;
 
         let out_dir = args.out.clone().unwrap_or_else(|| successor_dir(root));
         let path = emit::task_path(&out_dir, &id);
 
         let mut out = String::new();
-        let _ = writeln!(out, "{}", wrote_row(args.dry_run, &id, &task.title, &path));
+        let _ = writeln!(
+            out,
+            "{}",
+            wrote_row(args.dry_run, &id, task.status, &task.title, &path)
+        );
 
-        if args.dry_run {
+        if let Some(moving) = &moving {
+            apply_new_cut_add(args.dry_run, &task, &path, moving, &mut out)?;
+        } else if args.dry_run {
             if let Some(cut_id) = cut {
                 let _ = writeln!(out, "  would add {id} to `{cut_id}`");
             }
@@ -3151,12 +8210,12 @@ fn cmd_add(root: &std::path::Path, args: &AddArgs) -> Result<u8> {
 
         Ok(out)
     };
-    // An `--id` the caller supplied is used verbatim, so a collision is their
-    // mistake and retrying would loop to the deadline restating it. Only a
-    // minted id is worth trying again.
+    // An `--id` the caller supplied is used verbatim, so its collision is their
+    // mistake and must not be retried. Candidate-set instability is a separate
+    // pre-write condition and remains safe to retry with either kind of id.
     let started = std::time::Instant::now();
-    let (mut out, tries) = with_id_retry(args.id.is_none(), ID_RACE_DEADLINE, attempt)?;
-    if let Some(note) = raced_for_the_id(tries, started.elapsed()) {
+    let (mut out, retries) = with_id_retry(args.id.is_none(), ID_RACE_DEADLINE, attempt)?;
+    if let Some(note) = authoring_contention_note(retries, started.elapsed()) {
         let _ = writeln!(out, "{note}");
     }
     out.push_str(&add_notes(args));
@@ -3245,7 +8304,7 @@ fn manifest_notes(
 /// judge a plan no author ever intends to have. The write is one batch through
 /// `save::replace_all`, so a failure anywhere writes nothing at all.
 fn cmd_add_from(root: &std::path::Path, args: &AddArgs, from: &std::path::Path) -> Result<u8> {
-    use aplan_interop::{cut, emit, manifest};
+    use aplan_interop::{emit, manifest};
 
     let entries = manifest::read(from)?;
     // **One attempt at minting and writing** (`A1-230`). A manifest entry
@@ -3253,18 +8312,23 @@ fn cmd_add_from(root: &std::path::Path, args: &AddArgs, from: &std::path::Path) 
     // re-reading and planning the batch again. The whole batch, because it is
     // all-or-nothing already: an entry may join a cut an earlier one creates,
     // so a partial re-plan would resolve against state that was never written.
-    let attempt = || -> Result<String> {
-        let plan = aplan_core::load_plan(root);
+    let attempt = || -> Result<Option<String>> {
+        let plan = load_for_bootstrap(root)?;
         let out_dir = args.out.clone().unwrap_or_else(|| successor_dir(root));
         let Planned {
-            after,
+            mut after,
             created,
             joined,
             bodies,
+            reverse_edges,
         } = plan_the_batch(root, &plan, &entries, &out_dir)?;
 
+        if !resolve_manifest_ledger(root, &mut after, &created, args.verdict)? {
+            return Ok(None);
+        }
+
         // One gate, on the plan the whole file produces (`A1-113`).
-        refuse_bad_mutation(
+        refuse_bad_add_mutation(
             root,
             &format!("add {} task(s) from {}", created.len(), from.display()),
             &plan,
@@ -3293,12 +8357,14 @@ fn cmd_add_from(root: &std::path::Path, args: &AddArgs, from: &std::path::Path) 
             let _ = writeln!(
                 out,
                 "{}",
-                wrote_row(args.dry_run, id, &lt.task.title, &lt.path)
+                wrote_row(args.dry_run, id, lt.task.status, &lt.task.title, &lt.path)
             );
         }
         out.push_str(&manifest_notes(&bodies, &created, &after));
         // A cut the plan already had is edited in place; one this file creates was
-        // written with its members above.
+        // written with its members above. Existing files are emitted below from
+        // the complete post-state so membership and reverse dependency edits to
+        // the same task remain one source-preserving rewrite.
         for (cut_id, ids) in &joined {
             if !plan.tasks.iter().any(|lt| lt.task.id == *cut_id) {
                 let _ = writeln!(
@@ -3309,31 +8375,45 @@ fn cmd_add_from(root: &std::path::Path, args: &AddArgs, from: &std::path::Path) 
                 );
                 continue;
             }
-            let pending = cut::plan_placement(&plan, cut_id, ids)?;
-            if let Some(replacement) = pending.replacement() {
-                let _ = writeln!(
-                    out,
-                    "  {} {} task(s) to `{cut_id}` in {}",
-                    if args.dry_run { "would add" } else { "added" },
-                    pending.added.len(),
-                    replacement.path.display()
-                );
-                batch.push(replacement);
-            }
+            let path = &plan
+                .tasks
+                .iter()
+                .find(|loaded| loaded.task.id == *cut_id)
+                .expect("the existing cut was just found")
+                .path;
+            let _ = writeln!(
+                out,
+                "  {} {} task(s) to `{cut_id}` in {}",
+                if args.dry_run { "would add" } else { "added" },
+                ids.len(),
+                path.display()
+            );
         }
+        for (target, blocker) in &reverse_edges {
+            let _ = writeln!(
+                out,
+                "  {} `{target}` come after `{blocker}`",
+                if args.dry_run { "would make" } else { "made" }
+            );
+        }
+        batch.extend(manifest_existing_replacements(&plan, &after)?);
 
         if !args.dry_run {
             save_batch(&batch, "add --from")?;
         }
-        Ok(out)
+        Ok(Some(out))
     };
-    // Only when the manifest left an id to be minted. A file that names every
-    // id is asserting them, so a collision is the manifest to fix and retrying
-    // would restate it until the deadline.
+    // `minted` controls only whether an id collision is retryable. A file that
+    // names every id is asserting them, so its collision is the manifest to
+    // fix. Candidate-set instability remains safe to retry either way because
+    // it occurs before this attempt can write.
     let minted = entries.iter().any(|e| e.id.is_none());
     let started = std::time::Instant::now();
-    let (mut out, tries) = with_id_retry(minted, ID_RACE_DEADLINE, attempt)?;
-    if let Some(note) = raced_for_the_id(tries, started.elapsed()) {
+    let (out, retries) = with_id_retry(minted, ID_RACE_DEADLINE, attempt)?;
+    let Some(mut out) = out else {
+        return Ok(EXIT_VIOLATIONS);
+    };
+    if let Some(note) = authoring_contention_note(retries, started.elapsed()) {
         let _ = writeln!(out, "{note}");
     }
     write_stdout(&out)?;
@@ -3355,6 +8435,105 @@ struct Planned {
     /// task, and a body written into the wrong file is the kind of mistake that
     /// looks like a plan rather than a bug (`A1-260`).
     bodies: std::collections::BTreeMap<String, String>,
+    /// Actual reverse dependency edges added by `blocks`, in stable manifest
+    /// order. Existing edges are idempotent and do not appear here.
+    reverse_edges: Vec<(String, String)>,
+}
+
+fn manifest_existing_replacements(
+    before: &aplan_core::Plan,
+    after: &aplan_core::Plan,
+) -> Result<Vec<aplan_core::save::Replacement>> {
+    before
+        .tasks
+        .iter()
+        .filter_map(|original| {
+            let final_task = after
+                .tasks
+                .iter()
+                .find(|loaded| loaded.task.id == original.task.id)?;
+            (original.task.blocked_by != final_task.task.blocked_by)
+                .then_some((original, final_task))
+        })
+        .map(|(original, final_task)| {
+            let expected = std::fs::read_to_string(&original.path)
+                .with_context(|| format!("reading {}", original.path.display()))?;
+            let updated =
+                aplan_core::close::set_blocked_by(&expected, &final_task.task.blocked_by)?;
+            Ok(aplan_core::save::Replacement {
+                path: original.path.clone(),
+                expected,
+                updated,
+            })
+        })
+        .collect()
+}
+
+/// Resolve and stamp every terminal ledger entry before the batch is judged or
+/// written. Returning `false` means the evidence gate already rendered the
+/// refusal; the caller must publish none of the prepared files.
+fn resolve_manifest_ledger(
+    root: &std::path::Path,
+    after: &mut aplan_core::Plan,
+    created: &[String],
+    verdict: VerdictFlags,
+) -> Result<bool> {
+    let (config, config_dir) = config_at(root)?;
+    let repo = plan_repository(root);
+    let opts = resolve_check_options(
+        &config,
+        config_dir.as_deref(),
+        false,
+        None,
+        false,
+        Some(repo.clone()),
+    );
+    for id in created {
+        let Some(loaded) = after
+            .tasks
+            .iter()
+            .find(|loaded| loaded.task.id == *id && loaded.task.status == aplan_core::Status::Done)
+            .cloned()
+        else {
+            continue;
+        };
+        if !evidence_resolves(
+            "add ledger entry",
+            id,
+            &loaded,
+            &loaded.task.evidence,
+            &repo,
+            &config,
+            verdict,
+        )? {
+            return Ok(false);
+        }
+        let trace_fingerprints = if opts.detect_drift {
+            aplan_core::trace_fingerprints(&loaded.task, opts.traces_root.as_deref())
+        } else {
+            std::collections::BTreeMap::new()
+        };
+        let evidence_fingerprints = if opts.detect_drift {
+            aplan_evidence::update_evidence_fingerprints(
+                &[],
+                &std::collections::BTreeMap::new(),
+                &loaded.task.evidence,
+                &repo,
+                false,
+            )?
+        } else {
+            std::collections::BTreeMap::new()
+        };
+        let task = &mut after
+            .tasks
+            .iter_mut()
+            .find(|candidate| candidate.task.id == *id)
+            .expect("ledger entry remains in post-state")
+            .task;
+        task.trace_fingerprints = trace_fingerprints;
+        task.evidence_fingerprints = evidence_fingerprints;
+    }
+    Ok(true)
 }
 
 /// Resolve every entry against the state the entries before it produce.
@@ -3364,8 +8543,9 @@ struct Planned {
 /// the earlier ones establish. Expressed as N invocations, an author has to work
 /// all three out in advance, which is what drove a pilot to write frontmatter
 /// directly (`A1-241`).
-/// One `add --from` entry as a `Task`, in the state `add` mints: `todo`, no
-/// evidence, nothing the manifest cannot say.
+/// One `add --from` entry as a `Task` with the creation-time model fields the
+/// manifest declared. Derived fields remain empty until evidence resolution and
+/// the post-state gate have both succeeded.
 ///
 /// Extracted from `plan_the_batch` when a new field pushed it one line over the
 /// length limit. Its own function rather than a wider limit: this is the part
@@ -3380,23 +8560,102 @@ fn task_from_entry(
         id: id.to_string(),
         title: entry.title.clone(),
         phase,
-        status: aplan_core::Status::Todo,
+        status: entry.status.unwrap_or(aplan_core::Status::Todo),
         owner: entry.owner.clone(),
         effort_days: entry.effort,
-        blocked_by: entry.blocked_by.clone(),
-        prefer_after: Vec::new(),
-        ratified_by: Vec::new(),
-        contains: Vec::new(),
-        evidence: Vec::new(),
+        blocked_by: aplan_interop::emit::deduped(&entry.blocked_by),
+        prefer_after: aplan_interop::emit::deduped(&entry.prefer_after),
+        ratified_by: aplan_interop::emit::deduped(&entry.ratified_by),
+        contains: aplan_interop::emit::deduped(&entry.contains),
+        evidence: entry.evidence.clone(),
         paths: aplan_interop::emit::deduped(&entry.paths),
         traces: aplan_interop::emit::deduped(&entry.traces),
         trace_fingerprints: std::collections::BTreeMap::new(),
+        evidence_fingerprints: std::collections::BTreeMap::new(),
         tags: aplan_interop::emit::deduped(&entry.tags),
-        revisit_at: None,
-        version_impact: None,
-        version_impact_reason: None,
+        revisit_at: entry.revisit_at.clone(),
+        version_impact: entry.version_impact,
+        version_impact_reason: entry.version_impact_reason.clone(),
         version: None,
     }
+}
+
+fn validate_manifest_creation_entry(
+    entry: &aplan_interop::manifest::Entry,
+) -> std::result::Result<(), String> {
+    if aplan_core::task::is_vacuous_ref(&entry.title) {
+        return Err("a task needs a title".to_string());
+    }
+    for (what, values) in [
+        ("tag", &entry.tags),
+        ("path", &entry.paths),
+        ("trace", &entry.traces),
+    ] {
+        if values
+            .iter()
+            .any(|value| aplan_core::task::is_vacuous_ref(value))
+        {
+            return Err(format!("a task {what} may not be blank or visually empty"));
+        }
+    }
+    if entry
+        .owner
+        .as_deref()
+        .is_some_and(aplan_core::task::is_vacuous_ref)
+    {
+        return Err("task owner may not be blank or visually empty".to_string());
+    }
+    if let Some(days) = entry.effort
+        && (!days.is_finite() || days < 0.0)
+    {
+        return Err(format!(
+            "`effort: {days}` is not a number of days; give a finite, non-negative estimate"
+        ));
+    }
+    let status = entry.status.unwrap_or(aplan_core::Status::Todo);
+    if status == aplan_core::Status::Dropped {
+        return Err(
+            "`dropped` records a decision about existing work; create live work and use the guarded `drop` operation if that decision is later made"
+                .to_string(),
+        );
+    }
+    if status == aplan_core::Status::Done && entry.evidence.is_empty() {
+        return Err(
+            "a `done` ledger entry needs evidence that can be resolved before it is written"
+                .to_string(),
+        );
+    }
+    if status != aplan_core::Status::Done && !entry.evidence.is_empty() {
+        return Err(
+            "creation evidence is accepted only for a `done` ledger entry; live work proves completion later through `close`"
+                .to_string(),
+        );
+    }
+    if let Some(at) = entry.revisit_at.as_deref() {
+        if status != aplan_core::Status::Blocked {
+            return Err(
+                "`revisit_at` belongs only to an initially parked (`blocked`) task".to_string(),
+            );
+        }
+        if aplan_core::validate::rfc3339_to_epoch(at).is_none() {
+            return Err(format!(
+                "`revisit_at` must be an RFC 3339 instant, not `{at}`"
+            ));
+        }
+    }
+    if entry
+        .version_impact_reason
+        .as_deref()
+        .is_some_and(aplan_core::task::is_vacuous_ref)
+    {
+        return Err("`version_impact_reason` may not be blank".to_string());
+    }
+    if entry.version_impact.is_none() && entry.version_impact_reason.is_some() {
+        return Err(
+            "`version_impact_reason` requires the `version_impact` it explains".to_string(),
+        );
+    }
+    Ok(())
 }
 
 fn plan_the_batch(
@@ -3431,16 +8690,7 @@ fn plan_the_batch(
         // Named by position *and* title: a manifest is generated, so "entry 87"
         // alone sends the author counting through a file they did not type.
         let at = |what: String| anyhow::anyhow!("entry {} (`{}`): {what}", n + 1, entry.title);
-        if entry.title.trim().is_empty() {
-            return Err(at("a task needs a title".to_string()));
-        }
-        if let Some(days) = entry.effort
-            && (!days.is_finite() || days < 0.0)
-        {
-            return Err(at(format!(
-                "`effort: {days}` is not a number of days; give a finite, non-negative estimate"
-            )));
-        }
+        validate_manifest_creation_entry(entry).map_err(at)?;
         let cut = entry_cut(entry, &after, &declared).map_err(at)?;
         let phase = entry
             .phase
@@ -3465,9 +8715,27 @@ fn plan_the_batch(
                 existing.path.display()
             )));
         }
-        let unknown: Vec<&str> = entry
-            .blocked_by
-            .iter()
+        aplan_interop::cut::check_task_id_label(&after, &id, None)
+            .map_err(|error| at(error.to_string()))?;
+        let relations = [
+            &entry.blocked_by,
+            &entry.blocks,
+            &entry.prefer_after,
+            &entry.ratified_by,
+            &entry.contains,
+        ];
+        if relations
+            .into_iter()
+            .flatten()
+            .any(|id| aplan_core::task::is_vacuous_ref(id))
+        {
+            return Err(at(
+                "a related task id may not be blank or visually empty".to_string()
+            ));
+        }
+        let unknown: Vec<&str> = relations
+            .into_iter()
+            .flatten()
             .filter(|b| {
                 !after.tasks.iter().any(|lt| lt.task.id == **b)
                     && !declared.contains_key(b.as_str())
@@ -3476,7 +8744,7 @@ fn plan_the_batch(
             .collect();
         if !unknown.is_empty() {
             return Err(at(format!(
-                "blocked by task(s) the plan does not have and this file does not declare: {}",
+                "related task(s) the plan does not have and this file does not declare: {}",
                 unknown.join(", ")
             )));
         }
@@ -3488,7 +8756,7 @@ fn plan_the_batch(
             // often than it is an author asking for a task with no prose -- and
             // the way to ask for that is to leave the key out, which says the
             // same thing and keeps the scaffold to write into (`A1-260`).
-            if body.trim().is_empty() {
+            if aplan_core::task::is_vacuous_ref(body) {
                 return Err(at(
                     "`body` is empty. Leave the key out to keep the scaffold `aplan add` \
                      writes, or give the Markdown this task's file should carry"
@@ -3505,13 +8773,67 @@ fn plan_the_batch(
     }
 
     write_membership(&mut after, &joined);
+    let reverse_edges = write_manifest_reverse_edges(&mut after, entries, &created)?;
+
+    // A later entry may introduce the cut whose label shadows an earlier
+    // task. Recheck the complete post-state, not only the prefix seen while
+    // each entry was planned.
+    for id in &created {
+        aplan_interop::cut::check_task_id_label(&after, id, Some(id))?;
+    }
 
     Ok(Planned {
         after,
         created,
         joined,
         bodies,
+        reverse_edges,
     })
+}
+
+fn write_manifest_reverse_edges(
+    after: &mut aplan_core::Plan,
+    entries: &[aplan_interop::manifest::Entry],
+    created: &[String],
+) -> Result<Vec<(String, String)>> {
+    let mut added = Vec::new();
+    for (index, (entry, blocker)) in entries.iter().zip(created).enumerate() {
+        let title = &entry.title;
+        let at = |message: String| anyhow::anyhow!("entry {} (`{title}`): {message}", index + 1);
+        let mut seen = std::collections::BTreeSet::new();
+        for target in &entry.blocks {
+            if !seen.insert(target) {
+                return Err(at(format!("`blocks` names `{target}` more than once")));
+            }
+            let target_task = after
+                .tasks
+                .iter()
+                .find(|loaded| loaded.task.id == *target)
+                .ok_or_else(|| {
+                    at(format!(
+                        "`blocks` names task `{target}` that is not declared"
+                    ))
+                })?;
+            if target_task.task.status.is_terminal() {
+                return Err(at(format!(
+                    "cannot make settled task `{target}` wait on `{blocker}`; revive it before changing its dependencies"
+                )));
+            }
+            if let Some(why) = aplan_core::mutation::membership_edit(after, target, blocker, true) {
+                return Err(at(why));
+            }
+            let target_task = after
+                .tasks
+                .iter_mut()
+                .find(|loaded| loaded.task.id == *target)
+                .expect("the reverse dependency target was just found");
+            if !target_task.task.blocked_by.contains(blocker) {
+                target_task.task.blocked_by.push(blocker.clone());
+                added.push((target.clone(), blocker.clone()));
+            }
+        }
+    }
+    Ok(added)
 }
 
 /// Write each cut's new members into its milestone.
@@ -3551,10 +8873,15 @@ fn entry_cut(
     let id = match cut::resolve_id(after, name) {
         Ok(id) => {
             // Only a cut that already exists is asked whether it can take work.
-            // One this file declares later is a new entry, so it is `todo` and
-            // tagged `milestone` by construction: there is no settled cut and no
-            // non-milestone target to refuse.
-            cut::check_target(after, &id).map_err(|e| e.to_string())?;
+            // One this file declares later is handled below. Existing cuts are
+            // status-aware so a proved done ledger entry may extend a done cut
+            // while every live member remains refused there.
+            cut::check_target_for_status(
+                after,
+                &id,
+                entry.status.unwrap_or(aplan_core::Status::Todo),
+            )
+            .map_err(|e| e.to_string())?;
             id
         }
         // **Only when the plan has no such cut.** An ambiguous label, or a name
@@ -3570,6 +8897,12 @@ fn entry_cut(
                     .iter()
                     .any(|t| t == aplan_core::task::MILESTONE_TAG) =>
             {
+                cut::check_status_compatibility(
+                    name,
+                    later.status.unwrap_or(aplan_core::Status::Todo),
+                    entry.status.unwrap_or(aplan_core::Status::Todo),
+                )
+                .map_err(|error| error.to_string())?;
                 name.clone()
             }
             // Declared here, and not a cut. Saying "no cut `X` in this plan" of
@@ -3794,6 +9127,7 @@ fn place_import(
                     root.display()
                 );
             }
+            aplan_interop::cut::check_task_id_label(plan, &task.id, None)?;
         }
         return Ok(());
     }
@@ -3925,7 +9259,14 @@ fn apply_import_tags(tasks: &mut [aplan_core::task::Task], tags: &[String]) {
 /// rather than a warning about a problem the invocation already solved.
 fn unmet_families(root: &std::path::Path, tasks: &[aplan_core::task::Task]) -> Result<Vec<String>> {
     let (config, config_dir) = config_at(root)?;
-    let opts = resolve_check_options(&config, config_dir.as_deref(), false, None, false);
+    let opts = resolve_check_options(
+        &config,
+        config_dir.as_deref(),
+        false,
+        None,
+        false,
+        Some(plan_repository(root)),
+    );
     Ok(opts
         .tag_families
         .iter()
@@ -3968,7 +9309,7 @@ fn cmd_import(root: &std::path::Path, args: &ImportArgs) -> Result<u8> {
     // --- say what will happen, or make it happen ----------------------------
     let lines = imported_lines(&imported.tasks, &out_dir);
 
-    let plan = aplan_core::load_plan(root);
+    let plan = load_for_bootstrap(root)?;
     let mut report = imported.report;
     place_import(
         root,
@@ -4013,7 +9354,7 @@ fn cmd_import(root: &std::path::Path, args: &ImportArgs) -> Result<u8> {
         }
         if let Some(cut_id) = cut.as_deref() {
             // Reload: the tasks just written are the ones being placed.
-            let plan = aplan_core::load_plan(root);
+            let plan = load_checked(root)?;
             let placed = cut::place(&plan, cut_id, &ids)?;
             report.push(report::Notice::new(
                 &source_name,
@@ -4153,11 +9494,25 @@ pub struct ShowArgs {
     /// directory).
     #[arg(long, default_value = ".")]
     repo: PathBuf,
-    /// Skip the evidence ladder, exactly as `close --no-resolve` does, and say
-    /// what was skipped. Resolution is what this command adds to reading the
-    /// file, so it is on by default.
-    #[arg(long)]
+    #[command(flatten)]
+    evidence: ShowEvidenceArgs,
+}
+
+#[derive(Debug, clap::Args)]
+struct ShowEvidenceArgs {
+    /// Skip even retained evidence observations and say what was skipped.
+    #[arg(long, conflicts_with_all = ["refresh_evidence", "require_current_evidence"])]
     no_resolve: bool,
+    /// Explicitly run configured evidence providers, publishing a complete
+    /// stable observation for later reads. Eligible progress uses stderr and
+    /// is controlled by the global `--progress` policy.
+    #[arg(long, conflicts_with = "no_resolve")]
+    refresh_evidence: bool,
+    /// Render the task, then return the violations exit status unless every
+    /// cited item has a current observation. Ordinary `show` remains a read
+    /// even when its disposable observation is absent or stale.
+    #[arg(long, conflicts_with = "no_resolve")]
+    require_current_evidence: bool,
 }
 
 /// `aplan show`, the read half of the surface (`A1-118`).
@@ -4174,83 +9529,257 @@ fn cmd_show(root: &std::path::Path, args: &ShowArgs) -> Result<u8> {
     // (`A1-118`). Through the surface table now, so `show` cannot drift from
     // the nine that were already going through one gate (`A1-184`).
     let format = format_for("show", &args.format)?;
-    let plan = load_checked(root)?;
-    if !loaded_cleanly(&plan) {
-        return Ok(EXIT_VIOLATIONS);
-    }
-    let (config, config_dir) = config_at(&args.repo)?;
-    let check_opts = resolve_check_options(&config, config_dir.as_deref(), false, None, false);
-
-    let mut report = validate(&plan, &check_opts);
-    // The same convention `close` follows (`A1-109`): resolve unless told not to,
-    // and say what was skipped rather than showing an unresolved task as a clean
-    // one. A plan kept outside a repository is a real situation and not a reason
-    // to refuse to show a task, so it reads as "not resolved" for the same reason
-    // `--no-resolve` does, which is the answer `close` already gives.
-    let mut resolved = !args.no_resolve;
-    if resolved {
-        let opts = aplan_evidence::VerifyOptions {
-            traces_root: None,
-            execute: false,
-            test_runner: config.test.clone(),
-            max_unrelated_files: config.evidence.as_ref().and_then(|e| e.max_unrelated_files),
-            url_check: config.url.clone(),
-            // Deliberately not `config.version`: this resolves one task's
-            // citations, and `APLAN048` is a finding about the plan against the
-            // repository. Running the version command to show a task would be a
-            // subprocess nobody asked for, reported against a plan of one
-            // (`A1-313`).
-            version: None,
-            config_file: config_dir
-                .as_deref()
-                .map(|d| d.join(aplan_config::CONFIG_FILE)),
-        };
-        // Only this task's citations: see `Show::only`.
-        let one = aplan_core::show::only(&plan, &args.id);
-        match aplan_evidence::verify(&one, &args.repo, &opts) {
-            Ok(evidence) => report.diagnostics.extend(evidence.diagnostics),
-            Err(
-                e
-                @ (aplan_evidence::Error::NotARepository(_) | aplan_evidence::Error::NoCommits(_)),
-            ) => {
-                errln!("aplan: {e}; showing what the rules alone can say.");
-                resolved = false;
-            }
-            Err(e) => return Err(anyhow::Error::new(e).context("resolving evidence")),
-        }
-    }
-
-    let tasks: Vec<_> = plan.tasks.iter().map(|lt| &lt.task).collect();
-    let graph = Graph::new(tasks.iter().copied());
-    let rows = graph.task_rows();
-    let body = if args.body {
-        plan.tasks
-            .iter()
-            .find(|lt| lt.task.id == args.id)
-            .and_then(|lt| std::fs::read_to_string(&lt.path).ok())
-            .and_then(|text| {
-                aplan_core::load::split_frontmatter(&text).map(|(_, body)| body.to_string())
-            })
+    let identified = if args.body {
+        Some(load_identified_checked(root)?)
     } else {
         None
     };
-    let Some(view) =
-        aplan_core::Show::assemble(&graph, &rows, &report.diagnostics, &args.id, resolved, body)
-    else {
+    let typed = if identified.is_none() {
+        Some(load_semantic_checked(root)?)
+    } else {
+        None
+    };
+    let plan = identified.as_ref().map_or_else(
+        || typed.as_ref().expect("typed show load"),
+        |loaded| &loaded.plan,
+    );
+    if !loaded_cleanly(plan) {
+        return Ok(EXIT_VIOLATIONS);
+    }
+    let claims = aplan_app::claims::snapshot(root, plan)?;
+    let (config, config_dir) = config_at(&args.repo)?;
+    let check_opts = resolve_check_options(
+        &config,
+        config_dir.as_deref(),
+        false,
+        None,
+        false,
+        Some(plan_repository(root)),
+    );
+
+    let tasks: Vec<_> = plan.tasks.iter().map(|lt| &lt.task).collect();
+    let graph = timed("project", || build_graph(tasks.iter().copied()));
+    let mut report = timed("validate", || {
+        validate_with_store_graph(root, args.body, plan, &check_opts, &graph)
+    });
+    let mut opts = aplan_app::configured_verification(
+        &config,
+        selected_config_file(config_dir.as_deref()),
+        check_opts.traces_root.clone(),
+    );
+    // A single-task inspection does not run the repository's version command.
+    opts.version = None;
+    let one = aplan_core::show::only(plan, &args.id);
+    let mode = if args.evidence.no_resolve {
+        aplan_app::EvidenceInspectionMode::Skip
+    } else if args.evidence.refresh_evidence {
+        aplan_app::EvidenceInspectionMode::Refresh
+    } else {
+        aplan_app::EvidenceInspectionMode::Stored
+    };
+    let inspection = inspect_show_evidence(&one, &args.repo, &opts, mode)?;
+    report
+        .diagnostics
+        .extend(inspection.report.diagnostics.iter().cloned());
+
+    let view = timed("project", || {
+        let rows = graph.task_rows();
+        let body = args
+            .body
+            .then(|| show_body(identified.as_ref(), plan, &args.id))
+            .flatten()
+            .map(str::to_string);
+        aplan_core::Show::assemble(
+            aplan_core::ShowSources {
+                graph: &graph,
+                rows: &rows,
+                diagnostics: &report.diagnostics,
+                unloadable: &plan.unloadable,
+                claims: &claims,
+            },
+            &args.id,
+            false,
+            body,
+        )
+    });
+    let Some(mut view) = view else {
         anyhow::bail!("no task `{}` in this plan", args.id);
     };
+    aplan_app::apply_evidence_inspection(&mut view, &inspection);
 
-    match format {
-        Format::Json => render_tolerant(|| {
-            // `anstream` passes every byte that is not an SGR sequence through
-            // untouched, so the JSON is identical at any `--color` (`A1-286`).
-            let mut out = anstream::stdout().lock();
-            serde_json::to_writer_pretty(&mut out, &view)?;
-            writeln!(out)
-        })?,
-        _ => write_stdout(&aplan_output::render_show(&view))?,
+    timed("render", || -> Result<()> {
+        match format {
+            Format::Json => render_tolerant(|| {
+                // `anstream` passes every byte that is not an SGR sequence through
+                // untouched, so the JSON is identical at any `--color` (`A1-286`).
+                let mut out = anstream::stdout().lock();
+                serde_json::to_writer_pretty(&mut out, &view)?;
+                writeln!(out)
+            })?,
+            _ => write_stdout(&aplan_output::render_show(&view))?,
+        }
+        Ok(())
+    })?;
+    Ok(
+        if args.evidence.require_current_evidence && !view.resolved {
+            EXIT_VIOLATIONS
+        } else {
+            EXIT_OK
+        },
+    )
+}
+
+fn inspect_show_evidence(
+    plan: &aplan_core::Plan,
+    repo: &std::path::Path,
+    options: &aplan_evidence::VerifyOptions,
+    mode: aplan_app::EvidenceInspectionMode,
+) -> Result<aplan_app::EvidenceInspection> {
+    match inspect_evidence_with_cli_progress(plan, repo, options, mode) {
+        Ok(inspection) => Ok(inspection),
+        Err(
+            error
+            @ (aplan_evidence::Error::NotARepository(_) | aplan_evidence::Error::NoCommits(_)),
+        ) => {
+            errln!("aplan: {error}; showing what the hermetic rules can say.");
+            Ok(aplan_app::inspect_evidence(
+                plan,
+                repo,
+                options,
+                aplan_app::EvidenceInspectionMode::Skip,
+                &aplan_app::EvidenceObservationOptions::default(),
+                |_| {},
+            )
+            .expect("skipping evidence performs no repository operation"))
+        }
+        Err(error) => Err(anyhow::Error::new(error).context("resolving evidence")),
+    }
+}
+
+fn show_body<'a>(
+    loaded: Option<&'a aplan_core::IdentifiedPlan>,
+    plan: &aplan_core::Plan,
+    id: &str,
+) -> Option<&'a str> {
+    let task = plan.tasks.iter().find(|loaded| loaded.task.id == id)?;
+    let input = loaded?
+        .inputs
+        .iter()
+        .find(|input| input.path == task.path)?;
+    let aplan_core::PlanFileContent::Bytes(bytes) = &input.content else {
+        return None;
+    };
+    std::str::from_utf8(bytes)
+        .ok()
+        .and_then(aplan_core::load::split_frontmatter)
+        .map(|(_, body)| body)
+}
+
+/// A vocabulary `aplan explain` can address.
+///
+/// Kept typed even while rules are the only useful member: adding another
+/// vocabulary becomes an explicit new value, and a name is never guessed by
+/// trying task ids, tags, rules and configuration keys in some hidden order.
+#[derive(Debug, Clone, Copy, ValueEnum)]
+enum ExplainVocabulary {
+    /// A diagnostic code such as `APLAN012`.
+    Rule,
+}
+
+/// What `aplan explain` addresses (`A1-198`).
+#[derive(Debug, clap::Args)]
+pub struct ExplainArgs {
+    /// The vocabulary the name belongs to. Currently: `rule`.
+    #[arg(value_enum)]
+    vocabulary: ExplainVocabulary,
+    /// The exact stable name to explain.
+    name: String,
+}
+
+/// Explain one enumerable name without loading a plan, repository or config.
+fn cmd_explain(args: &ExplainArgs) -> Result<u8> {
+    match args.vocabulary {
+        ExplainVocabulary::Rule => {
+            let Some(explanation) = aplan_core::explain_rule(&args.name) else {
+                let known = aplan_core::Rule::ALL
+                    .iter()
+                    .map(|rule| rule.code())
+                    .collect::<Vec<_>>()
+                    .join(", ");
+                anyhow::bail!("unknown rule `{}`; known rule codes: {known}", args.name);
+            };
+            write_stdout(&aplan_output::render_rule_explanation(&explanation))?;
+        }
     }
     Ok(EXIT_OK)
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, ValueEnum)]
+enum GraphTextLayout {
+    /// The compatibility row-and-lane document.
+    Lanes,
+    /// The shared phase/rank/card scene used by the interactive graph.
+    Layered,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, ValueEnum)]
+enum GraphOrientation {
+    Auto,
+    LeftToRight,
+    TopToBottom,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, ValueEnum)]
+enum GraphOrder {
+    Readability,
+    PlanPriority,
+    Id,
+    Title,
+    StatusReadiness,
+    Criticality,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, ValueEnum)]
+enum GraphDetail {
+    Compact,
+    Comfortable,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum GraphLevel {
+    Plan,
+    Phase(u32),
+    Milestone(String),
+    Task(String),
+}
+
+impl std::str::FromStr for GraphLevel {
+    type Err = String;
+
+    fn from_str(value: &str) -> Result<Self, Self::Err> {
+        if value == "plan" {
+            return Ok(Self::Plan);
+        }
+        let Some((kind, id)) = value.split_once(':') else {
+            return Err(
+                "expected `plan`, `phase:<number>`, `milestone:<id>` or `task:<id>`".to_string(),
+            );
+        };
+        if id.is_empty() {
+            return Err(format!("`{kind}:` needs a value"));
+        }
+        match kind {
+            "phase" => id
+                .parse::<u32>()
+                .map(Self::Phase)
+                .map_err(|_| format!("`phase:{id}` needs a non-negative integer phase")),
+            "milestone" => Ok(Self::Milestone(id.to_string())),
+            "task" => Ok(Self::Task(id.to_string())),
+            _ => Err(
+                "expected `plan`, `phase:<number>`, `milestone:<id>` or `task:<id>`".to_string(),
+            ),
+        }
+    }
 }
 
 /// What `aplan graph` renders, when it is not the whole plan (`A1-126`).
@@ -4273,12 +9802,52 @@ pub struct GraphArgs {
     /// nodes wide. What is left out is always reported, never silent.
     #[arg(long)]
     membership: bool,
-    /// Output format: mermaid (the default, renders in a README and a browser),
-    /// text (drawn at this terminal), dot (Graphviz, which every other layout
-    /// and analysis tool reads), or json. `--cut` and `--tag` scope every one of
-    /// them, so the scope and the rendering are independent.
-    #[arg(long, default_value = "mermaid")]
-    format: String,
+    /// Emphasize one task plus its direct visible dependency blockers and
+    /// dependents. Presentation only: this never adds a task to the active
+    /// selectors or `--reach` scope. Requires `--format text`.
+    #[arg(long, value_name = "ID")]
+    focus: Option<String>,
+    /// Project the deterministic whole-plan critical route over the visible
+    /// graph. Presentation only: it does not change scope or enable membership
+    /// edges. Requires `--format text`.
+    #[arg(long)]
+    critical: bool,
+    /// Output format: text (the attended default, drawn at this terminal),
+    /// mermaid (the redirected default, for compatible scripts and documents),
+    /// dot (Graphviz), or json. An explicit value always wins. `--cut` and
+    /// `--tag` scope every format, so scope and rendering are independent.
+    #[arg(long)]
+    format: Option<String>,
+    /// Text layout: `lanes` preserves the existing row document; `layered`
+    /// uses the same semantic projection and validated cell scene as the TUI.
+    /// Only meaningful with `--format text`. The default is `layered`; use
+    /// `--layout lanes` for the byte-compatible row-and-lane document.
+    #[arg(long, value_enum)]
+    layout: Option<GraphTextLayout>,
+    /// Layered semantic level: `plan`, `phase:<number>`, `milestone:<id>` or
+    /// `task:<id>`. Only meaningful with `--layout layered`.
+    #[arg(long, value_name = "LEVEL")]
+    level: Option<GraphLevel>,
+    /// Layered flow direction. `auto` uses the shared scene's deterministic
+    /// quality comparison; an explicit value pins it.
+    #[arg(long, value_enum)]
+    orientation: Option<GraphOrientation>,
+    /// Sort only nodes which share a phase and dependency rank.
+    #[arg(long, value_enum)]
+    order: Option<GraphOrder>,
+    /// Layered card detail. Compact retains identity and status; comfortable
+    /// also includes titles and aggregate work facts.
+    #[arg(long, value_enum)]
+    detail: Option<GraphDetail>,
+    /// Exact maximum graph drawing width in terminal cells. Human notes fold
+    /// at this width but keep an indivisible id/path copyable. Redirected
+    /// layered output requires the value so its bytes never depend on a terminal.
+    #[arg(long, value_name = "COLUMNS")]
+    width: Option<usize>,
+    /// Use ASCII borders, connectors and arrows. Layered output otherwise uses
+    /// deterministic Unicode even when redirected.
+    #[arg(long)]
+    ascii: bool,
 }
 
 /// `aplan graph`, scoped rather than all-or-nothing (`A1-126`).
@@ -4288,13 +9857,23 @@ pub struct GraphArgs {
 /// would answer a question nobody asked and grow the diagram this exists to
 /// shrink.
 fn cmd_graph(root: &std::path::Path, args: &GraphArgs) -> Result<u8> {
-    let format = format_for("graph", &args.format)?;
+    let format = format_for("graph", graph_format(args))?;
+    validate_graph_presentation(format, args)?;
+    if format == Format::Text && graph_text_layout(args) == GraphTextLayout::Layered {
+        return cmd_layered_graph(root, args);
+    }
+    if format != Format::Text && (args.focus.is_some() || args.critical) {
+        anyhow::bail!(
+            "`--focus` and `--critical` are human text decoration and require `--format text`; \
+             use `--cut`, `--tag` or `--reach` to change what Mermaid, DOT or JSON contains"
+        );
+    }
     let plan = load_checked(root)?;
     if !loaded_cleanly(&plan) {
         return Ok(EXIT_VIOLATIONS);
     }
     let tasks: Vec<_> = plan.tasks.iter().map(|lt| &lt.task).collect();
-    let graph = Graph::new(tasks.iter().copied());
+    let graph = build_graph(tasks.iter().copied());
 
     let mut include: std::collections::BTreeSet<&str> = graph.by_id.keys().copied().collect();
     let mut scoped = Vec::new();
@@ -4318,26 +9897,7 @@ fn cmd_graph(root: &std::path::Path, args: &GraphArgs) -> Result<u8> {
         include.retain(|id| members.contains(id));
     }
     if !selector.is_empty() {
-        let rows = graph.task_rows();
-        let admitted: std::collections::BTreeSet<&str> = rows
-            .tasks
-            .iter()
-            .filter(|row| {
-                graph.get(&row.id).is_some_and(|t| {
-                    // The cut dimension is applied above, against the milestone
-                    // and its members; applying it again here would drop the
-                    // milestone, which is a member of no cut but is the thing
-                    // the members hang from.
-                    aplan_core::select::Selector {
-                        cuts: Vec::new(),
-                        ..selector.clone()
-                    }
-                    .matches(t, row.cut.as_deref(), row.milestone.as_deref())
-                })
-            })
-            .map(|row| row.id.as_str())
-            .collect();
-        include.retain(|id| admitted.contains(id));
+        apply_graph_selector(root, &plan, &graph, &selector, &mut include)?;
         scoped.extend(selector.describe());
     }
     // A *selection*, intersected with the others rather than replacing them:
@@ -4392,6 +9952,7 @@ fn cmd_graph(root: &std::path::Path, args: &GraphArgs) -> Result<u8> {
     // a reachability scope that did not name its graph would leave a reader to
     // assume which one (`A1-221`).
     view.scope.clone_from(&scoped);
+    validate_graph_focus(&graph, &include, &view, &scoped, args.focus.as_deref())?;
     // The narrowing can empty a view that the scope did not: a cut whose members
     // depend on nothing has edges only by membership. Refused for the same
     // reason an empty filter is, and saying which of the two happened.
@@ -4406,17 +9967,7 @@ fn cmd_graph(root: &std::path::Path, args: &GraphArgs) -> Result<u8> {
         Format::Mermaid => write_stdout(&aplan_output::mermaid_of_view(&view))?,
         Format::Dot => write_stdout(&aplan_output::dot_of_view(&view))?,
         Format::Text => {
-            // Box drawing is what makes this readable and is not guaranteed in
-            // every terminal or CI log, so it follows the same signal colour
-            // does: a terminal gets it, a pipe gets ASCII (`A1-219`).
-            let glyphs = if std::io::IsTerminal::is_terminal(&std::io::stdout()) {
-                aplan_output::lanes::Glyphs::UNICODE
-            } else {
-                aplan_output::lanes::Glyphs::ASCII
-            };
-            let drawn =
-                aplan_output::lanes::text_of_view(&view, glyphs, aplan_output::fold::out_width())
-                    .map_err(|too_wide| anyhow::anyhow!("{too_wide}"))?;
+            let drawn = render_text_graph(&graph, &view, args)?;
             write_stdout(&drawn)?;
         }
         Format::Json => return write_json(&view, "aplan/graph/v1"),
@@ -4424,6 +9975,765 @@ fn cmd_graph(root: &std::path::Path, args: &GraphArgs) -> Result<u8> {
         other => anyhow::bail!("`{}` does not render a graph", other.as_str()),
     }
     Ok(EXIT_OK)
+}
+
+fn graph_format(args: &GraphArgs) -> &str {
+    graph_format_for_terminal(
+        args.format.as_deref(),
+        std::io::IsTerminal::is_terminal(&std::io::stdout()),
+    )
+}
+
+fn graph_format_for_terminal(explicit: Option<&str>, stdout_is_terminal: bool) -> &str {
+    explicit.unwrap_or(if stdout_is_terminal {
+        "text"
+    } else {
+        "mermaid"
+    })
+}
+
+fn validate_graph_presentation(format: Format, args: &GraphArgs) -> Result<()> {
+    if let Some(width) = args.width
+        && !(20..=65_535).contains(&width)
+    {
+        anyhow::bail!("`--width {width}` must be between 20 and 65535 terminal columns");
+    }
+    let text_only = args.layout.is_some()
+        || args.level.is_some()
+        || args.orientation.is_some()
+        || args.order.is_some()
+        || args.detail.is_some()
+        || args.width.is_some()
+        || args.ascii;
+    if format != Format::Text && text_only {
+        anyhow::bail!(
+            "`--layout`, `--level`, `--orientation`, `--order`, `--detail`, `--width` and \
+             `--ascii` control human text only and require `--format text`; Mermaid, DOT and \
+             JSON remain byte-stable and accept only graph scope controls"
+        );
+    }
+    let layout = graph_text_layout(args);
+    if layout == GraphTextLayout::Lanes
+        && (args.level.is_some()
+            || args.orientation.is_some()
+            || args.order.is_some()
+            || args.detail.is_some())
+    {
+        anyhow::bail!(
+            "`--level`, `--orientation`, `--order` and `--detail` describe the layered scene; \
+             add `--format text --layout layered`, or remove them to retain the lanes layout"
+        );
+    }
+    if format == Format::Text
+        && layout == GraphTextLayout::Layered
+        && !std::io::IsTerminal::is_terminal(&std::io::stdout())
+        && args.width.is_none()
+    {
+        anyhow::bail!(
+            "redirected layered text requires `--width <columns>` so its bytes do not depend on \
+             an ambient terminal; use `--width 120` (or another exact value), or select \
+             `--layout lanes` for the compatibility document"
+        );
+    }
+    Ok(())
+}
+
+fn graph_text_layout(args: &GraphArgs) -> GraphTextLayout {
+    args.layout.unwrap_or(GraphTextLayout::Layered)
+}
+
+#[allow(clippy::too_many_lines)]
+fn cmd_layered_graph(root: &std::path::Path, args: &GraphArgs) -> Result<u8> {
+    use aplan_app::{
+        CellCardSize, CellPeerOrder, CellSceneDensity, CellSceneJob, CellSceneOrientation,
+        CellSceneRequest, CellSceneResult, GraphExplorerIdentity, GraphExplorerLocation,
+        GraphExplorerRequest, GraphExplorerSelectionOrigin, GraphExplorerState,
+    };
+    use aplan_output::layered::{LayeredDetail, LayeredRenderError, LayeredRenderOptions};
+
+    let context = hermetic_application_context(
+        root,
+        HermeticContextOptions {
+            retain_sources: false,
+            // Layered graph consumes semantic projections, not a structural
+            // report. Publish parsed artifacts now so the same read can warm
+            // its next process instead of waiting for a report it never asks
+            // the context to compute.
+            cache_publication: CachePublication::Immediate,
+            ..HermeticContextOptions::default()
+        },
+    )?;
+    if !loaded_cleanly(context.plan()) {
+        return Ok(EXIT_VIOLATIONS);
+    }
+    {
+        let graph = build_graph(context.plan().tasks.iter().map(|loaded| &loaded.task));
+        refuse_a_release_as_a_cut(context.plan(), &graph, &args.select.cut)?;
+        for cut in &args.select.cut {
+            let _ = cut_members(context.plan(), &graph, cut)?;
+        }
+    }
+    let catalogue = aplan_app::task_catalogue(&context);
+    let workspace = aplan_app::graph_workspace(&context, catalogue.clone());
+    let graph = build_graph(context.plan().tasks.iter().map(|loaded| &loaded.task));
+    let selector = args.select.selector()?;
+    let scope = args
+        .reach
+        .as_deref()
+        .map(layered_graph_scope)
+        .transpose()?
+        .unwrap_or_default();
+    let reach_edges = args
+        .reach
+        .as_ref()
+        .and_then(|_| scope.walked_edges(args.membership))
+        .map(aplan_core::reach::Edges::describe);
+    let level = args.level.clone().unwrap_or(GraphLevel::Plan);
+    let location = match &level {
+        GraphLevel::Plan => GraphExplorerLocation::Plan,
+        GraphLevel::Phase(phase) => GraphExplorerLocation::Phase(*phase),
+        GraphLevel::Milestone(id) => GraphExplorerLocation::Milestone(id.clone()),
+        GraphLevel::Task(id) => GraphExplorerLocation::Task(id.clone()),
+    };
+    validate_layered_level(&graph, &level)?;
+    if let Some(focus) = args.focus.as_deref()
+        && graph.get(focus).is_none()
+    {
+        anyhow::bail!("no task `{focus}` in this plan; `--focus` requires an exact task id");
+    }
+    let selected = args
+        .focus
+        .as_deref()
+        .map(|id| layered_identity(&graph, id))
+        .or_else(|| match &level {
+            GraphLevel::Milestone(id) => Some(GraphExplorerIdentity::Milestone(id.clone())),
+            GraphLevel::Task(id) => Some(layered_identity(&graph, id)),
+            GraphLevel::Plan | GraphLevel::Phase(_) => None,
+        });
+    let projection = workspace.project_explorer(&GraphExplorerRequest {
+        graph: aplan_app::GraphRequest {
+            selector,
+            scope,
+            membership: args.membership,
+        },
+        location,
+        selected,
+        selection_origin: if args.focus.is_some()
+            || matches!(level, GraphLevel::Milestone(_) | GraphLevel::Task(_))
+        {
+            GraphExplorerSelectionOrigin::Contextual
+        } else {
+            GraphExplorerSelectionOrigin::Automatic
+        },
+        ..GraphExplorerRequest::default()
+    });
+    match &projection.state {
+        GraphExplorerState::Complete | GraphExplorerState::InvalidTaskCycle => {}
+        GraphExplorerState::Empty => anyhow::bail!(
+            "the layered graph level is empty after the active selectors and scope; remove a \
+             selector, choose another `--level`, or use `--format json` to inspect raw scope"
+        ),
+        GraphExplorerState::UnknownLocation(location) => {
+            anyhow::bail!("the requested layered graph level does not exist: {location:?}")
+        }
+        GraphExplorerState::SourceUnavailable(state) => {
+            anyhow::bail!("the layered graph source is unavailable: {state:?}")
+        }
+    }
+    if let Some(focus) = args.focus.as_deref() {
+        if !projection
+            .accounting
+            .admitted_task_ids
+            .iter()
+            .any(|id| id == focus)
+        {
+            anyhow::bail!(
+                "focus task `{focus}` is outside the active graph scope. `--focus` changes \
+                 emphasis, not scope; remove a conflicting selector or use `--reach \
+                 upstream:{focus}` or `--reach downstream:{focus}`"
+            );
+        }
+        let expected = layered_identity(&graph, focus);
+        if projection
+            .selection
+            .as_ref()
+            .map(|selection| &selection.subject)
+            != Some(&expected)
+        {
+            anyhow::bail!(
+                "focus task `{focus}` is not represented at the requested layered level. Choose \
+                 `--level task:{focus}`, its milestone level, or a plan/phase level which admits it"
+            );
+        }
+    }
+
+    let detail = args.detail.unwrap_or(GraphDetail::Comfortable);
+    let density = match detail {
+        GraphDetail::Compact => CellSceneDensity::Compact,
+        GraphDetail::Comfortable => CellSceneDensity::Comfortable,
+    };
+    let peer_order = match args.order.unwrap_or(GraphOrder::Readability) {
+        GraphOrder::Readability => CellPeerOrder::Readability,
+        GraphOrder::PlanPriority => CellPeerOrder::PlanPriority,
+        GraphOrder::Id => CellPeerOrder::Identity,
+        GraphOrder::Title => CellPeerOrder::Title,
+        GraphOrder::StatusReadiness => CellPeerOrder::Status,
+        GraphOrder::Criticality => CellPeerOrder::Criticality,
+    };
+    let width = args
+        .width
+        .or_else(aplan_output::layered::attended_width)
+        .ok_or_else(|| {
+            anyhow::anyhow!(
+                "layered output has no terminal width; pass an exact `--width <columns>`"
+            )
+        })?;
+    let mut request = CellSceneRequest::new(projection.clone());
+    request.card_sizes = projection
+        .graph
+        .nodes
+        .iter()
+        .map(|node| {
+            (
+                node.identity.clone(),
+                CellCardSize::for_density(node, density),
+            )
+        })
+        .collect();
+    request.peer_order = peer_order;
+    request.ordering_hints =
+        aplan_app::cell_scene_ordering_hints(peer_order, &projection, &catalogue);
+    let ready_scene = |result| -> Result<Box<aplan_app::CellScene>> {
+        match result {
+            CellSceneResult::Ready(scene) => Ok(scene),
+            CellSceneResult::Fallback(fallback) => {
+                Err(anyhow::anyhow!(layered_fallback_message(&fallback)))
+            }
+        }
+    };
+    let render_scene = |scene: &aplan_app::CellScene| -> Result<String> {
+        let mut text_scene =
+            aplan_app::layered_text_scene(&projection, scene, args.focus.is_some(), args.critical)?;
+        text_scene.notes =
+            layered_graph_notes(args, &projection, scene, detail, width, reach_edges);
+        Ok(aplan_output::layered::text_of_layered_scene(
+            &text_scene,
+            LayeredRenderOptions {
+                width,
+                ascii: args.ascii,
+                detail: match detail {
+                    GraphDetail::Compact => LayeredDetail::Compact,
+                    GraphDetail::Comfortable => LayeredDetail::Comfortable,
+                },
+            },
+        )?)
+    };
+
+    let orientation = args.orientation.unwrap_or(GraphOrientation::Auto);
+    let drawn = if orientation == GraphOrientation::Auto {
+        // The application model deliberately chooses Auto from intrinsic scene
+        // quality: its scene must remain independent of a changing viewport.
+        // A static document has one exact width, so retain both validated
+        // candidates until the complete painter can say which ones fit. This
+        // is selection, not fallback: neither geometry nor painted bytes are
+        // clipped or parsed and an explicitly requested direction never takes
+        // this path.
+        let mut rendered = Vec::new();
+        let mut render_errors = Vec::new();
+        for direction in [
+            CellSceneOrientation::LeftToRight,
+            CellSceneOrientation::TopToBottom,
+        ] {
+            let mut candidate_request = request.clone();
+            candidate_request.orientation = direction;
+            let CellSceneResult::Ready(scene) =
+                CellSceneJob::new(1, candidate_request).run().result
+            else {
+                continue;
+            };
+            match render_scene(&scene) {
+                Ok(text) => rendered.push((scene.metrics.quality_score, scene.direction, text)),
+                Err(error) => render_errors.push(error),
+            }
+        }
+        rendered.sort_by_key(|(quality, direction, _)| (*quality, *direction));
+        if let Some((_, _, text)) = rendered.into_iter().next() {
+            text
+        } else if !render_errors.is_empty() {
+            // When both complete candidates are merely too wide, report the
+            // smallest width which would make Auto succeed. A structural
+            // painter error is stronger and must not be hidden by another
+            // direction's width refusal.
+            if let Some(index) = render_errors.iter().position(|error| {
+                !matches!(
+                    error.downcast_ref::<LayeredRenderError>(),
+                    Some(LayeredRenderError::TooWide { .. })
+                )
+            }) {
+                return Err(render_errors.swap_remove(index));
+            }
+            let error = render_errors
+                .into_iter()
+                .min_by_key(|error| match error.downcast_ref::<LayeredRenderError>() {
+                    Some(LayeredRenderError::TooWide { required, .. }) => *required,
+                    _ => usize::MAX,
+                })
+                .expect("non-empty render errors");
+            return Err(error);
+        } else {
+            let mut automatic = request;
+            automatic.orientation = CellSceneOrientation::Auto;
+            let scene = ready_scene(CellSceneJob::new(1, automatic).run().result)?;
+            render_scene(&scene)?
+        }
+    } else {
+        request.orientation = match orientation {
+            GraphOrientation::LeftToRight => CellSceneOrientation::LeftToRight,
+            GraphOrientation::TopToBottom => CellSceneOrientation::TopToBottom,
+            GraphOrientation::Auto => unreachable!("handled above"),
+        };
+        let scene = ready_scene(CellSceneJob::new(1, request).run().result)?;
+        render_scene(&scene)?
+    };
+    write_stdout(&drawn)?;
+    Ok(EXIT_OK)
+}
+
+fn layered_graph_scope(query: &str) -> Result<aplan_app::GraphScope> {
+    Ok(match parse_reach(query)? {
+        aplan_core::reach::Reach::Upstream(id) => aplan_app::GraphScope::Upstream(id),
+        aplan_core::reach::Reach::Downstream(id) => aplan_app::GraphScope::Downstream(id),
+        aplan_core::reach::Reach::Between(from, to) => aplan_app::GraphScope::Between(from, to),
+        aplan_core::reach::Reach::Unreachable => aplan_app::GraphScope::Unreachable,
+    })
+}
+
+fn validate_layered_level(graph: &Graph<'_>, level: &GraphLevel) -> Result<()> {
+    let (id, milestone) = match level {
+        GraphLevel::Plan | GraphLevel::Phase(_) => return Ok(()),
+        GraphLevel::Milestone(id) => (id, true),
+        GraphLevel::Task(id) => (id, false),
+    };
+    let task = graph
+        .get(id)
+        .ok_or_else(|| anyhow::anyhow!("no task `{id}` in this plan"))?;
+    if milestone
+        && !task
+            .tags
+            .iter()
+            .any(|tag| tag == aplan_core::task::MILESTONE_TAG)
+    {
+        anyhow::bail!(
+            "`--level milestone:{id}` names an ordinary task; use `--level task:{id}` or name a \
+             task carrying the milestone tag"
+        );
+    }
+    Ok(())
+}
+
+fn layered_identity(graph: &Graph<'_>, id: &str) -> aplan_app::GraphExplorerIdentity {
+    if graph.get(id).is_some_and(|task| {
+        task.tags
+            .iter()
+            .any(|tag| tag == aplan_core::task::MILESTONE_TAG)
+    }) {
+        aplan_app::GraphExplorerIdentity::Milestone(id.to_string())
+    } else {
+        aplan_app::GraphExplorerIdentity::Task(id.to_string())
+    }
+}
+
+fn layered_degradation(reason: &aplan_app::CellSceneDegradation) -> String {
+    serde_json::to_string(reason).unwrap_or_else(|_| format!("{reason:?}"))
+}
+
+fn layered_fallback_message(fallback: &aplan_app::CellSceneFallback) -> String {
+    let reasons = fallback
+        .reasons
+        .iter()
+        .map(layered_degradation)
+        .collect::<Vec<_>>()
+        .join(", ");
+    let nodes = fallback
+        .nodes
+        .iter()
+        .map(|omission| omission.identity.id())
+        .collect::<Vec<_>>()
+        .join(", ");
+    let edges = fallback
+        .edges
+        .iter()
+        .map(|omission| {
+            format!(
+                "{} -> {}",
+                omission.identity.from.id(),
+                omission.identity.to.id()
+            )
+        })
+        .collect::<Vec<_>>()
+        .join(", ");
+    format!(
+        "layered layout refused: {reasons}. Omitted {} node(s) [{}] and {} edge(s) \
+         [{}]. Narrow with `--cut`, `--tag`, `--reach` or a detail `--level`, or use \
+         `--layout lanes`/`--format mermaid` for a complete alternative",
+        fallback.nodes.len(),
+        nodes,
+        fallback.edges.len(),
+        edges
+    )
+}
+
+#[allow(clippy::too_many_lines)]
+fn layered_graph_notes(
+    args: &GraphArgs,
+    projection: &aplan_app::GraphExplorerProjection,
+    scene: &aplan_app::CellScene,
+    detail: GraphDetail,
+    width: usize,
+    reach_edges: Option<&str>,
+) -> Vec<String> {
+    let level = match &projection.location {
+        aplan_app::GraphExplorerLocation::Plan => "plan".to_string(),
+        aplan_app::GraphExplorerLocation::Phase(phase) => format!("phase:{phase}"),
+        aplan_app::GraphExplorerLocation::Milestone(id) => format!("milestone:{id}"),
+        aplan_app::GraphExplorerLocation::Task(id) => format!("task:{id}"),
+    };
+    let order = args.order.unwrap_or(GraphOrder::Readability);
+    let mut notes = vec![format!(
+        "level: {level}; direction: {}; order: {}; detail: {}; width: {width}; {} node(s), {} edge(s)",
+        match scene.direction {
+            aplan_app::CellSceneDirection::LeftToRight => "left-to-right",
+            aplan_app::CellSceneDirection::TopToBottom => "top-to-bottom",
+        },
+        match order {
+            GraphOrder::Readability => "readability (crossing-minimized)",
+            GraphOrder::PlanPriority => "plan-priority peers",
+            GraphOrder::Id => "id peers",
+            GraphOrder::Title => "title peers",
+            GraphOrder::StatusReadiness => "status/readiness peers",
+            GraphOrder::Criticality => "criticality peers",
+        },
+        match detail {
+            GraphDetail::Compact => "compact",
+            GraphDetail::Comfortable => "comfortable",
+        },
+        scene.nodes.len(),
+        scene.edges.len(),
+    )];
+    let mut source_scope = projection.accounting.source_scope.clone();
+    if let (Some(reach), Some(edges)) = (&args.reach, reach_edges) {
+        // The application projection owns which graph was walked; the CLI
+        // retains the exact query spelling so the scope remains copyable.
+        let _ = source_scope.pop();
+        source_scope.push(format!("reach `{reach}` over {edges}"));
+    }
+    notes.push(if source_scope.is_empty() {
+        "scope: whole plan".to_string()
+    } else {
+        format!("scope: {}", source_scope.join(" and "))
+    });
+    notes.push(format!(
+        "accounting: {}/{} level task(s) visible; {}/{} admitted dependency edge(s) represented; {} boundary edge(s)",
+        projection.accounting.visible_task_ids.len(),
+        projection.accounting.level_task_ids.len(),
+        projection.accounting.represented_dependency_edges,
+        projection.accounting.admitted_dependency_edges,
+        projection.accounting.boundary_dependency_edges,
+    ));
+    if !projection.accounting.boundary_dependencies.is_empty() {
+        notes.push(format!(
+            "scope boundary dependencies ({}): {}. Widen the selector/scope to include both ends, or use `--format json`/`--format dot` for the complete scoped export",
+            projection.accounting.boundary_dependencies.len(),
+            projection
+                .accounting
+                .boundary_dependencies
+                .iter()
+                .map(|edge| format!("{} -> {}", edge.from, edge.to))
+                .collect::<Vec<_>>()
+                .join(", ")
+        ));
+    }
+    if let Some(note) = projection.accounting.grouping.omission_note() {
+        notes.push(note);
+    }
+    let internal = projection
+        .graph
+        .nodes
+        .iter()
+        .filter(|node| !node.internal_dependencies.is_empty())
+        .map(|node| {
+            format!(
+                "{}={}",
+                node.identity.id(),
+                node.internal_dependencies.len()
+            )
+        })
+        .collect::<Vec<_>>();
+    if !internal.is_empty() {
+        notes.push(format!(
+            "dependencies represented inside aggregate card(s): {}",
+            internal.join(", ")
+        ));
+    }
+    if let Some(context) = &projection.phase_context
+        && !context.boundary_edges.is_empty()
+    {
+        notes.push(format!(
+            "phase boundary dependencies ({}): {}",
+            context.boundary_edges.len(),
+            context
+                .boundary_edges
+                .iter()
+                .map(|edge| format!(
+                    "{} {:?} {} ({} raw)",
+                    edge.visible.id(),
+                    edge.direction,
+                    edge.remote.id(),
+                    edge.dependency_count
+                ))
+                .collect::<Vec<_>>()
+                .join("; ")
+        ));
+    }
+    if !projection.boundaries.is_empty() {
+        notes.push(format!(
+            "window continuations ({}): {}",
+            projection.boundaries.len(),
+            projection
+                .boundaries
+                .iter()
+                .map(|continuation| format!(
+                    "{} {:?} ({} node(s), {} edge(s))",
+                    continuation.cursor.key.boundary,
+                    continuation.cursor.key.direction,
+                    continuation.omitted_nodes,
+                    continuation.omitted_edges
+                ))
+                .collect::<Vec<_>>()
+                .join("; ")
+        ));
+    }
+    if !projection.accounting.level_omitted_task_ids.is_empty() {
+        notes.push(format!(
+            "level omissions ({}): {}",
+            projection.accounting.level_omitted_task_ids.len(),
+            projection.accounting.level_omitted_task_ids.join(", ")
+        ));
+    }
+    if !projection.accounting.window_omitted_task_ids.is_empty() {
+        notes.push(format!(
+            "window omissions ({}): {}. Narrow with `--cut`, `--tag` or `--reach`, or select a detail `--level`",
+            projection.accounting.window_omitted_task_ids.len(),
+            projection.accounting.window_omitted_task_ids.join(", ")
+        ));
+    }
+    let degraded = scene
+        .edges
+        .iter()
+        .filter(|edge| !edge.degradations.is_empty())
+        .map(|edge| {
+            format!(
+                "{} -> {} ({})",
+                edge.identity.from.id(),
+                edge.identity.to.id(),
+                edge.degradations
+                    .iter()
+                    .map(layered_degradation)
+                    .collect::<Vec<_>>()
+                    .join(", ")
+            )
+        })
+        .collect::<Vec<_>>();
+    if !degraded.is_empty() {
+        notes.push(format!(
+            "connector omissions ({}): {}",
+            degraded.len(),
+            degraded.join("; ")
+        ));
+    }
+    if args.critical {
+        if projection.state == aplan_app::GraphExplorerState::InvalidTaskCycle {
+            notes.push(
+                "critical route: unavailable because the canonical task dependency graph is cyclic"
+                    .to_string(),
+            );
+        } else {
+            notes.push(format!(
+                "critical route: {}/{} scoped raw task(s) represented by visible cards marked `C`",
+                projection
+                    .graph
+                    .nodes
+                    .iter()
+                    .filter(|node| node
+                        .represented_ids
+                        .iter()
+                        .any(|id| projection.critical_path.contains(id)))
+                    .count(),
+                projection.critical_path.len()
+            ));
+        }
+    }
+    for condition in &projection.conditions {
+        notes.push(format!("condition: {}", layered_condition(condition)));
+    }
+    notes
+}
+
+fn layered_condition(condition: &aplan_app::GraphExplorerCondition) -> String {
+    use aplan_app::GraphExplorerCondition;
+    match condition {
+        GraphExplorerCondition::DisconnectedComponents { components } => {
+            format!("{components} disconnected components")
+        }
+        GraphExplorerCondition::TasksOutsideMilestones { ids } => {
+            format!("tasks outside milestones: {}", ids.join(", "))
+        }
+        GraphExplorerCondition::CrossPhaseDependencies { edges } => {
+            format!("{} cross-phase dependency edge(s)", edges.len())
+        }
+        GraphExplorerCondition::CrossCutDependencies { edges } => {
+            format!("{} cross-cut dependency edge(s)", edges.len())
+        }
+        GraphExplorerCondition::EmptyPhases { phases } => format!(
+            "empty phase band(s): {}",
+            phases
+                .iter()
+                .map(u32::to_string)
+                .collect::<Vec<_>>()
+                .join(", ")
+        ),
+        GraphExplorerCondition::MilestoneOnly => "milestone-only plan".to_string(),
+        GraphExplorerCondition::NoMilestones => "no milestones; tasks remain explicit".to_string(),
+        GraphExplorerCondition::AggregateFeedback { components } => format!(
+            "{} aggregate feedback component(s); the underlying task graph remains acyclic",
+            components.len()
+        ),
+        GraphExplorerCondition::InvalidTaskCycle { components } => format!(
+            "invalid task cycle in {} component(s); feedback geometry does not make it valid",
+            components.len()
+        ),
+    }
+}
+
+fn apply_graph_selector<'task>(
+    root: &std::path::Path,
+    plan: &aplan_core::Plan,
+    graph: &Graph<'task>,
+    selector: &aplan_core::select::Selector,
+    include: &mut std::collections::BTreeSet<&'task str>,
+) -> Result<()> {
+    let claim_snapshot = if selector.unclaimed {
+        let snapshot = aplan_app::claims::snapshot(root, plan)?;
+        if !snapshot.scope.available {
+            anyhow::bail!(
+                "cannot select `--unclaimed`: {}",
+                snapshot
+                    .scope
+                    .reason
+                    .as_deref()
+                    .unwrap_or("local claim coordination is unavailable")
+            );
+        }
+        Some(snapshot)
+    } else {
+        None
+    };
+    let rows = graph.task_rows();
+    let without_cut = aplan_core::select::Selector {
+        // The cut dimension is applied before this helper, against the
+        // milestone and its members. Applying it again would drop the
+        // milestone, which is a member of no cut but anchors those members.
+        cuts: Vec::new(),
+        ..selector.clone()
+    };
+    let admitted: std::collections::BTreeSet<&str> = rows
+        .tasks
+        .iter()
+        .filter(|row| {
+            graph.get(&row.id).is_some_and(|task| {
+                without_cut.matches_claimed(
+                    task,
+                    row.cut.as_deref(),
+                    row.milestone.as_deref(),
+                    claim_snapshot
+                        .as_ref()
+                        .map(|snapshot| snapshot.claim(&task.id).is_some()),
+                )
+            })
+        })
+        .map(|row| row.id.as_str())
+        .collect();
+    include.retain(|id| admitted.contains(id));
+    Ok(())
+}
+
+fn validate_graph_focus(
+    graph: &Graph<'_>,
+    include: &std::collections::BTreeSet<&str>,
+    view: &aplan_output::GraphView,
+    scoped: &[String],
+    focus: Option<&str>,
+) -> Result<()> {
+    let Some(focus) = focus else {
+        return Ok(());
+    };
+    if graph.get(focus).is_none() {
+        anyhow::bail!("no task `{focus}` in this plan; `--focus` requires an exact task id");
+    }
+    if !include.contains(focus) {
+        let scope = if scoped.is_empty() {
+            "the active graph scope".to_string()
+        } else {
+            scoped.join(" and ")
+        };
+        anyhow::bail!(
+            "focus task `{focus}` is outside {scope}. `--focus` changes emphasis, not scope; \
+             remove a conflicting selector or use `--reach upstream:{focus}` or \
+             `--reach downstream:{focus}`"
+        );
+    }
+    if !view.nodes.iter().any(|node| node.id == focus) {
+        anyhow::bail!(
+            "focus task `{focus}` has only cut-membership relationships in this view and is not \
+             drawable. Add `--membership`, or focus a task with a dependency edge"
+        );
+    }
+    Ok(())
+}
+
+fn render_text_graph(
+    graph: &Graph<'_>,
+    view: &aplan_output::GraphView,
+    args: &GraphArgs,
+) -> Result<String> {
+    // Box drawing is what makes this readable and is not guaranteed in every
+    // terminal or CI log, so it follows the same signal colour does: a
+    // terminal gets it, a pipe gets ASCII (`A1-219`).
+    let glyphs = if args.ascii {
+        aplan_output::lanes::Glyphs::ASCII
+    } else if std::io::IsTerminal::is_terminal(&std::io::stdout()) {
+        aplan_output::lanes::Glyphs::UNICODE
+    } else {
+        aplan_output::lanes::Glyphs::ASCII
+    };
+    let critical_route = args.critical.then(|| graph.critical_route()).flatten();
+    let critical = if !args.critical {
+        aplan_output::lanes::CriticalOverlay::Off
+    } else if let Some(route) = critical_route.as_ref() {
+        aplan_output::lanes::CriticalOverlay::Route(route)
+    } else {
+        aplan_output::lanes::CriticalOverlay::Unavailable
+    };
+    aplan_output::lanes::text_of_presented_view(
+        view,
+        glyphs,
+        args.width.unwrap_or_else(aplan_output::fold::out_width),
+        aplan_output::lanes::GraphPresentation {
+            focus: args.focus.as_deref(),
+            critical,
+        },
+    )
+    .map_err(|too_wide| anyhow::anyhow!("{too_wide}"))
 }
 
 /// What to say when a `--reach` value is not one of the four.
@@ -4512,7 +10822,7 @@ fn cmd_tree(root: &std::path::Path, id: &str, depth: Option<usize>, live: bool) 
         return Ok(EXIT_VIOLATIONS);
     }
     let tasks: Vec<_> = plan.tasks.iter().map(|lt| &lt.task).collect();
-    let graph = Graph::new(tasks.iter().copied());
+    let graph = build_graph(tasks.iter().copied());
     let Some(out) = aplan_output::tree(&graph, id, depth, live) else {
         anyhow::bail!("no task `{id}` in this plan");
     };
@@ -4537,12 +10847,15 @@ fn cmd_ready(root: &std::path::Path, args: &ReadyArgs) -> Result<u8> {
     // same fields the JSON serialises, so the sentence `--explain` prints and
     // the fields a script sorts by cannot say different things (`A1-182`).
     let selector = select.selector()?;
-    let mut answer = aplan_mcp::tools::ready_of(&plan);
+    let claims = aplan_app::claims::snapshot(root, &plan)?;
+    let mut answer = timed("project", || aplan_mcp::tools::ready_of(&plan, &claims));
     if !selector.is_empty() {
         // Ranked over the whole plan and then narrowed: a rank is an order over
         // everything that could be started, and recomputing it inside a subset
         // would answer a different question (`A1-214`).
-        let keep = selected_ids(&plan, &selector)?;
+        let keep = timed("project", || {
+            selected_ids_with_claims(&plan, &selector, Some(&claims))
+        })?;
         answer.ready.retain(|t| keep.contains(&t.id));
         answer.closeable_cuts.retain(|t| keep.contains(&t.id));
     }
@@ -4550,22 +10863,34 @@ fn cmd_ready(root: &std::path::Path, args: &ReadyArgs) -> Result<u8> {
         // `--explain` is not consulted: the reasons are fields here, and a
         // machine shape conditional on a flag is one a consumer has to know the
         // invocation to read.
-        return write_json(&answer, "aplan/ready/v1");
+        return timed("render", || write_json(&answer, "aplan/ready/v2"));
     }
 
     let mut out = String::new();
+    if !answer.coordination.available {
+        let _ = writeln!(
+            out,
+            "claim coordination unavailable: {}",
+            answer
+                .coordination
+                .reason
+                .as_deref()
+                .unwrap_or("no local coordination scope")
+        );
+    }
     for t in &answer.ready {
         let effort = t
             .effort_days
             .map_or_else(String::new, |e| format!(" ({e}d)"));
-        // **The holder rides with the title, not in a column of its own**
-        // (`A1-359`). A fleet picking work has to see what somebody already
-        // holds, and the alternative -- hiding held tasks by default -- was
-        // rejected because the default set must not change: a caller that
-        // reads this list today would silently start seeing less.
-        // `--unclaimed` is how a reader asks for the narrower answer.
+        // Responsibility and active coordination ride with the title, named
+        // rather than collapsed into one ambiguous bracket (`A1-531`). The
+        // default set remains complete; `--unclaimed` asks for the narrower
+        // answer without erasing stable ownership.
+        let owner = t.owner.as_deref().map_or_else(String::new, |who| {
+            format!(" [owner {}]", aplan_output::sanitize::visible(who))
+        });
         let held = t.held_by.as_deref().map_or_else(String::new, |who| {
-            format!(" [{}]", aplan_output::sanitize::visible(who))
+            format!(" [claim {}]", aplan_output::sanitize::visible(who))
         });
         // The title is the trailing column and the effort rides with it, so a
         // long title folds under itself rather than under the id (`A1-206`).
@@ -4575,9 +10900,10 @@ fn cmd_ready(root: &std::path::Path, args: &ReadyArgs) -> Result<u8> {
             aplan_output::fold::row(
                 &format!("{id}{}{id:#}  ", t.id, id = aplan_output::style::ID),
                 &format!(
-                    "{}{dim}{}{}{dim:#}",
+                    "{}{dim}{}{}{}{dim:#}",
                     aplan_output::sanitize::visible(&t.title),
                     effort,
+                    owner,
                     held,
                     dim = aplan_output::style::DIM
                 ),
@@ -4612,9 +10938,9 @@ fn cmd_ready(root: &std::path::Path, args: &ReadyArgs) -> Result<u8> {
     }
     if answer.ready.is_empty() {
         let tasks: Vec<_> = plan.tasks.iter().map(|lt| &lt.task).collect();
-        out.push_str(&why_nothing_is_ready(&Graph::new(tasks.iter().copied())));
+        out.push_str(&why_nothing_is_ready(&build_graph(tasks.iter().copied())));
     }
-    write_stdout(&out)?;
+    timed("render", || write_stdout(&out))?;
     Ok(EXIT_OK)
 }
 
@@ -4682,7 +11008,10 @@ fn cmd_tag(root: &std::path::Path, args: &TagCommand) -> Result<u8> {
 /// two answers depending on which command took it (`A1-251`, audit). One guard,
 /// called by all three.
 fn refuse_blank_tags(tags: &[String]) -> Result<()> {
-    if let Some(blank) = tags.iter().find(|t| t.trim().is_empty()) {
+    if let Some(blank) = tags
+        .iter()
+        .find(|tag| aplan_core::task::is_vacuous_ref(tag))
+    {
         anyhow::bail!("a tag is a word, and `{blank}` is blank");
     }
     Ok(())
@@ -4691,18 +11020,18 @@ fn refuse_blank_tags(tags: &[String]) -> Result<()> {
 /// Refuse a blank `--owner` (`A1-359`, audit).
 ///
 /// `--owner ""` wrote `owner: ''`, which is a third state the model does not
-/// have: the task is not held by anybody a reader can see, and it is not
-/// *unassigned* either, so `ready --unclaimed` passed over it and `ready`
-/// printed an empty `[]` beside it. Absent is how the model spells unassigned,
-/// and the only way to write that is to leave the key out.
+/// have: no role or person a reader can see is responsible, but the task is not
+/// *unassigned* either. Absent is how the model spells unassigned, and the only
+/// way to write that is to leave the key out. Active work is a separate local
+/// claim and does not change this durable field (`A1-531`).
 ///
 /// The same stance `refuse_blank_tags` takes one function up, for the same
 /// reason: a blank the caller typed is a mistake worth naming.
 fn refuse_blank_owner(owner: Option<&String>) -> Result<()> {
-    if let Some(blank) = owner.filter(|o| o.trim().is_empty()) {
+    if let Some(blank) = owner.filter(|owner| aplan_core::task::is_vacuous_ref(owner)) {
         anyhow::bail!(
             "`--owner {blank}` is blank, which is not the same as unassigned: leave the flag \
-             out to file a task nobody holds, or `aplan release <id>` to give one up"
+             out to file a task with no durable owner"
         );
     }
     Ok(())
@@ -4888,19 +11217,182 @@ fn tag_rename(root: &std::path::Path, args: &TagRenameArgs) -> Result<u8> {
     Ok(EXIT_OK)
 }
 
-fn cmd_dep(root: &std::path::Path, args: &DepCommand) -> Result<u8> {
-    let (
-        adding,
-        DepArgs {
-            id,
-            after,
-            prefer,
-            verdict,
-        },
-    ) = match args {
-        DepCommand::Add(a) => (true, a),
-        DepCommand::Rm(a) => (false, a),
+fn cmd_dep(root: &std::path::Path, args: &DepCommand, format: &str) -> Result<u8> {
+    let format = format_for("dep", format)?;
+    match args {
+        DepCommand::Apply(args) => {
+            let (source, entries) = aplan_interop::dependency_manifest::read(&args.from)?;
+            let operations = entries
+                .into_iter()
+                .flat_map(|entry| {
+                    let id = entry.id;
+                    entry
+                        .add
+                        .into_iter()
+                        .map({
+                            let id = id.clone();
+                            move |after| aplan_app::DependencyRequest {
+                                id: id.clone(),
+                                after,
+                                operation: aplan_app::DependencyOperation::Add,
+                            }
+                        })
+                        .chain(entry.remove.into_iter().map(move |after| {
+                            aplan_app::DependencyRequest {
+                                id: id.clone(),
+                                after,
+                                operation: aplan_app::DependencyOperation::Remove,
+                            }
+                        }))
+                })
+                .collect();
+            cmd_dependency_batch(
+                root,
+                operations,
+                args.dry_run,
+                format,
+                args.verdict,
+                Some((
+                    args.from.display().to_string(),
+                    aplan_attest::sha256_hex(source.as_bytes()),
+                )),
+            )
+        }
+        DepCommand::Add(args) => cmd_dep_edges(root, args, true, format),
+        DepCommand::Rm(args) => cmd_dep_edges(root, args, false, format),
+    }
+}
+
+fn cmd_dep_edges(
+    root: &std::path::Path,
+    args: &DepArgs,
+    adding: bool,
+    format: Format,
+) -> Result<u8> {
+    if args.prefer {
+        if args.after.len() != 1 || args.dry_run || format != Format::Human {
+            anyhow::bail!(
+                "`--prefer` accepts one `--after` with human applied output; dependency batch controls do not apply to ordering preferences"
+            );
+        }
+        return cmd_preference(root, args, adding);
+    }
+    if args.after.len() == 1 && !args.dry_run && format == Format::Human {
+        return cmd_single_dependency(root, args, adding);
+    }
+    let operation = if adding {
+        aplan_app::DependencyOperation::Add
+    } else {
+        aplan_app::DependencyOperation::Remove
     };
+    let operations = args
+        .after
+        .iter()
+        .map(|after| aplan_app::DependencyRequest {
+            id: args.id.clone(),
+            after: after.clone(),
+            operation,
+        })
+        .collect();
+    cmd_dependency_batch(root, operations, args.dry_run, format, args.verdict, None)
+}
+
+fn cmd_single_dependency(root: &std::path::Path, args: &DepArgs, adding: bool) -> Result<u8> {
+    let id = &args.id;
+    let after = &args.after[0];
+    if id == after {
+        anyhow::bail!("`{id}` cannot come after itself");
+    }
+    let plan = load_identified_checked(root)?;
+    if !loaded_cleanly(&plan.plan) {
+        return Ok(EXIT_VIOLATIONS);
+    }
+    let (config, config_dir) = config_at(root)?;
+    let options = resolve_check_options(
+        &config,
+        config_dir.as_deref(),
+        false,
+        None,
+        false,
+        Some(plan_repository(root)),
+    );
+    let policy = verdict_policy(
+        &config,
+        args.verdict.deny_warnings,
+        args.verdict.no_deny_warnings,
+    );
+    let context = aplan_app::PlanContext::new(
+        plan,
+        aplan_app::ContextInputs {
+            repository_root: plan_repository(root),
+            configuration_file: selected_config_file(config_dir.as_deref()),
+            trust: aplan_app::Trust::Hermetic,
+            options,
+            verdict: policy,
+        },
+    );
+    let operation = if adding {
+        aplan_app::DependencyOperation::Add
+    } else {
+        aplan_app::DependencyOperation::Remove
+    };
+    let response = aplan_app::edit_dependency(
+        &context,
+        &aplan_app::DependencyRequest {
+            id: id.clone(),
+            after: after.clone(),
+            operation,
+        },
+    )
+    .map_err(|error| dependency_error(error, adding))?;
+
+    let (verb, bare) = ("comes after", "come after");
+    if !response.changed && !response.denied {
+        write_stdout(&if adding {
+            format!("`{id}` already {verb} `{after}`\n")
+        } else {
+            format!("`{id}` does not {bare} `{after}`\n")
+        })?;
+        return Ok(EXIT_OK);
+    }
+    let what = if adding {
+        format!("make `{id}` come after `{after}`")
+    } else {
+        format!("stop `{id}` coming after `{after}`")
+    };
+    if response.denied {
+        anyhow::bail!(
+            "refusing to {what}: it would add {} finding(s) `check` reports:\n  {}",
+            response.diagnostics.added.len(),
+            response.diagnostics.lines().join("\n  ")
+        );
+    }
+    if !response.diagnostics.added.is_empty() {
+        write_stdout(&aplan_output::fold::fold_block(
+            &format!(
+                "note: this adds {} finding(s) `check` will report:\n  {}\n",
+                response.diagnostics.added.len(),
+                response.diagnostics.lines().join("\n  ")
+            ),
+            aplan_output::fold::out_width(),
+            6,
+        ))?;
+    }
+    let file = response
+        .file
+        .as_ref()
+        .expect("a changed dependency edit names its file");
+    write_stdout(&format!(
+        "{} `{id}` {verb} `{after}` in {}\n",
+        if adding { "now" } else { "no longer" },
+        file.display()
+    ))?;
+    Ok(EXIT_OK)
+}
+
+fn cmd_preference(root: &std::path::Path, args: &DepArgs, adding: bool) -> Result<u8> {
+    let id = &args.id;
+    let after = &args.after[0];
     if id == after {
         anyhow::bail!("`{id}` cannot come after itself");
     }
@@ -4910,27 +11402,13 @@ fn cmd_dep(root: &std::path::Path, args: &DepCommand) -> Result<u8> {
     }
     let lt = locate(&plan, id)?;
 
-    // Cut membership is `mv`'s, and only a dependency edge can express it: a
-    // preference is not membership, so this guard reads the edge being edited
-    // rather than the command (`A1-150`).
-    if !*prefer && let Some(why) = aplan_core::mutation::membership_edit(&plan, id, after, adding) {
-        anyhow::bail!(why);
-    }
-
     // A preference edits `prefer_after`, a dependency edits `blocked_by`, and the
     // two are never the same list: writing a preference into `blocked_by` is the
     // conflation ADR-0017 measured and ADR-0025 exists to keep separate.
     // Two forms of the verb, because "does not comes after" is what one form
     // produces and a message a person reads has to be a sentence.
-    let (verb, bare, mut edges) = if *prefer {
-        (
-            "prefers to follow",
-            "prefer to follow",
-            lt.task.prefer_after.clone(),
-        )
-    } else {
-        ("comes after", "come after", lt.task.blocked_by.clone())
-    };
+    let (verb, bare) = ("prefers to follow", "prefer to follow");
+    let mut edges = lt.task.prefer_after.clone();
     let present = edges.iter().any(|b| b == after);
     match (adding, present) {
         (true, true) => {
@@ -4947,21 +11425,16 @@ fn cmd_dep(root: &std::path::Path, args: &DepCommand) -> Result<u8> {
 
     let original = std::fs::read_to_string(&lt.path)
         .with_context(|| format!("reading {}", lt.path.display()))?;
-    let updated = if *prefer {
-        aplan_core::close::set_prefer_after(&original, &edges)
-    } else {
-        aplan_core::close::set_blocked_by(&original, &edges)
-    }
-    .map_err(|e| close_err("dep", id, &e))?;
+    let updated = aplan_core::close::set_prefer_after(&original, &edges)
+        .map_err(|e| close_err("dep", id, &e))?;
 
     let after_plan = aplan_core::mutation::with_replaced(&plan, id, task_of(&updated, id)?);
-    let what = match (adding, *prefer) {
-        (true, false) => format!("make `{id}` come after `{after}`"),
-        (false, false) => format!("stop `{id}` coming after `{after}`"),
-        (true, true) => format!("make `{id}` prefer to follow `{after}`"),
-        (false, true) => format!("stop `{id}` preferring to follow `{after}`"),
+    let what = if adding {
+        format!("make `{id}` prefer to follow `{after}`")
+    } else {
+        format!("stop `{id}` preferring to follow `{after}`")
     };
-    refuse_bad_mutation(root, &what, &plan, &after_plan, *verdict)?;
+    refuse_bad_mutation(root, &what, &plan, &after_plan, args.verdict)?;
 
     // The *subcommand*, not the command: `dep` on its own prints help and exits
     // `0`, so "Run `aplan dep` again" named an invocation that does nothing. The
@@ -4979,6 +11452,200 @@ fn cmd_dep(root: &std::path::Path, args: &DepCommand) -> Result<u8> {
         lt.path.display()
     ))?;
     Ok(EXIT_OK)
+}
+
+fn cmd_dependency_batch(
+    root: &std::path::Path,
+    operations: Vec<aplan_app::DependencyRequest>,
+    dry_run: bool,
+    format: Format,
+    verdict: VerdictFlags,
+    source: Option<(String, String)>,
+) -> Result<u8> {
+    let plan = load_identified_checked(root)?;
+    if !loaded_cleanly(&plan.plan) {
+        return Ok(EXIT_VIOLATIONS);
+    }
+    let (config, config_dir) = config_at(root)?;
+    let options = resolve_check_options(
+        &config,
+        config_dir.as_deref(),
+        false,
+        None,
+        false,
+        Some(plan_repository(root)),
+    );
+    let policy = verdict_policy(&config, verdict.deny_warnings, verdict.no_deny_warnings);
+    let context = aplan_app::PlanContext::new(
+        plan,
+        aplan_app::ContextInputs {
+            repository_root: plan_repository(root),
+            configuration_file: selected_config_file(config_dir.as_deref()),
+            trust: aplan_app::Trust::Hermetic,
+            options,
+            verdict: policy,
+        },
+    );
+    let request = aplan_app::DependencyBatchRequest { operations };
+    let preview = aplan_app::preview_dependency_batch(&context, &request)
+        .map_err(|error| dependency_error(error, true))?;
+    if dry_run {
+        let outcome = match preview.change_set().disposition() {
+            aplan_app::ChangeDisposition::Ready => DependencyBatchOutcome::Predicted,
+            aplan_app::ChangeDisposition::NoOp => DependencyBatchOutcome::Unchanged,
+            aplan_app::ChangeDisposition::Denied => DependencyBatchOutcome::Refused,
+        };
+        let exit = if outcome == DependencyBatchOutcome::Refused {
+            EXIT_VIOLATIONS
+        } else {
+            EXIT_OK
+        };
+        return render_dependency_batch_result(
+            root,
+            &request,
+            preview.change_set(),
+            outcome,
+            source,
+            format,
+            exit,
+        );
+    }
+    match aplan_app::commit_dependency_batch(&context, preview) {
+        aplan_app::CommitOutcome::Applied(change) => render_dependency_batch_result(
+            root,
+            &request,
+            &change,
+            DependencyBatchOutcome::Applied,
+            source,
+            format,
+            EXIT_OK,
+        ),
+        aplan_app::CommitOutcome::NoOp(change) => render_dependency_batch_result(
+            root,
+            &request,
+            &change,
+            DependencyBatchOutcome::Unchanged,
+            source,
+            format,
+            EXIT_OK,
+        ),
+        aplan_app::CommitOutcome::Denied(change) => render_dependency_batch_result(
+            root,
+            &request,
+            &change,
+            DependencyBatchOutcome::Refused,
+            source,
+            format,
+            EXIT_VIOLATIONS,
+        ),
+        aplan_app::CommitOutcome::Stale { .. } => {
+            anyhow::bail!(
+                "the plan changed after this dependency batch was reviewed; nothing was written. Preview the complete post-state again"
+            )
+        }
+        aplan_app::CommitOutcome::PublicationFailed { error, report, .. } => {
+            anyhow::bail!(
+                "dependency batch publication failed with filesystem state {:?}: {}",
+                report.state(),
+                aplan_core::save::advice(&error, "aplan dep apply")
+            )
+        }
+    }
+}
+
+fn render_dependency_batch_result(
+    root: &std::path::Path,
+    request: &aplan_app::DependencyBatchRequest,
+    change: &aplan_app::ChangeSet,
+    outcome: DependencyBatchOutcome,
+    source: Option<(String, String)>,
+    format: Format,
+    exit: u8,
+) -> Result<u8> {
+    let changed = change
+        .effects()
+        .iter()
+        .filter_map(|effect| match effect {
+            aplan_app::SemanticEffect::DependencyAdded { task, after } => {
+                Some((task.as_str(), "add", after.as_str()))
+            }
+            aplan_app::SemanticEffect::DependencyRemoved { task, after } => {
+                Some((task.as_str(), "remove", after.as_str()))
+            }
+            _ => None,
+        })
+        .collect::<BTreeSet<_>>();
+    let mut operations = request
+        .operations
+        .iter()
+        .map(|operation| {
+            let kind = if operation.operation == aplan_app::DependencyOperation::Add {
+                "add"
+            } else {
+                "remove"
+            };
+            DependencyBatchOperation {
+                task: operation.id.clone(),
+                operation: kind.to_string(),
+                after: operation.after.clone(),
+                changes_state: changed.contains(&(
+                    operation.id.as_str(),
+                    kind,
+                    operation.after.as_str(),
+                )),
+            }
+        })
+        .collect::<Vec<_>>();
+    operations
+        .sort_by(|a, b| (&a.task, &a.after, &a.operation).cmp(&(&b.task, &b.after, &b.operation)));
+    let mut files = change
+        .files()
+        .iter()
+        .map(|file| {
+            file.path()
+                .strip_prefix(root)
+                .unwrap_or_else(|_| file.path())
+                .display()
+                .to_string()
+        })
+        .collect::<Vec<_>>();
+    files.sort();
+    let (source_path, source_sha256) = source.unzip();
+    let report = DependencyBatchReport {
+        plan_sha256: change.input().plan_sha256.clone(),
+        source_path,
+        source_sha256,
+        outcome,
+        publishable: change.disposition() != aplan_app::ChangeDisposition::Denied,
+        operations,
+        files,
+        findings: change.diagnostics().lines(),
+    };
+    render_tolerant(|| render_dependency_batch(&report, format))?;
+    Ok(exit)
+}
+
+/// Preserve application failure categories while adding CLI-specific advice.
+///
+/// Keeping this mapping typed is part of the delivery-adapter contract: a
+/// rewrite that produced invalid frontmatter is an internal error (exit 3),
+/// while an invalid request, a refused edit and a guarded-write conflict are
+/// usage/state errors (exit 2).
+fn dependency_error(error: aplan_app::Error, adding: bool) -> anyhow::Error {
+    match error {
+        aplan_app::Error::Arguments(message)
+        | aplan_app::Error::Plan(message)
+        | aplan_app::Error::Refused(message) => anyhow::anyhow!(message),
+        aplan_app::Error::Rewrite { id, source } => close_err("dep", &id, &source),
+        aplan_app::Error::Write(error) => anyhow::anyhow!(aplan_core::save::advice(
+            &error,
+            if adding {
+                "aplan dep add"
+            } else {
+                "aplan dep rm"
+            },
+        )),
+    }
 }
 
 /// `aplan supersede`, the repair for a closed task whose traced outcome stopped
@@ -5028,7 +11695,7 @@ fn refusals_before_a_successor(
             lt.task.status
         );
     }
-    if args.title.trim().is_empty() {
+    if aplan_core::task::is_vacuous_ref(&args.title) {
         anyhow::bail!("a successor needs a title: it is what now needs doing");
     }
     // Both added by `A1-251`, which gave this command a `--tag`: a blank tag and
@@ -5036,6 +11703,29 @@ fn refusals_before_a_successor(
     // and belong before the plan is touched for the same reason.
     refuse_blank_tags(&args.tags)?;
     refuse_blank_owner(args.owner.as_ref())?;
+    if args
+        .paths
+        .iter()
+        .any(|path| aplan_core::task::is_vacuous_ref(path))
+    {
+        anyhow::bail!("a successor path may not be blank");
+    }
+    if args
+        .traces
+        .iter()
+        .any(|trace| aplan_core::task::is_vacuous_ref(trace))
+    {
+        anyhow::bail!("a successor trace may not be blank");
+    }
+    if args
+        .body
+        .as_deref()
+        .is_some_and(aplan_core::task::is_vacuous_ref)
+    {
+        anyhow::bail!(
+            "successor body is blank; omit `--body` for the generated template, or supply Markdown"
+        );
+    }
     if let Some(days) = args.effort
         && (!days.is_finite() || days < 0.0)
     {
@@ -5074,13 +11764,25 @@ fn successor_task(
         ratified_by: Vec::new(),
         contains: Vec::new(),
         evidence: Vec::new(),
-        // Inherited, because the successor is about the same code and the same
-        // document: the `traces` are what drifted, and the `paths` are what the
-        // work will touch. Both are editable afterwards, and neither is a guess:
-        // they are the predecessor's own answers to the same questions.
-        paths: lt.task.paths.clone(),
-        traces: lt.task.traces.clone(),
+        // Omission inherits. Clear and replacement are distinct explicit
+        // choices, so a successor need not carry predecessor scope that no
+        // longer describes the corrective work.
+        paths: if args.clear_paths {
+            Vec::new()
+        } else if args.paths.is_empty() {
+            lt.task.paths.clone()
+        } else {
+            emit::deduped(&args.paths)
+        },
+        traces: if args.clear_traces {
+            Vec::new()
+        } else if args.traces.is_empty() {
+            lt.task.traces.clone()
+        } else {
+            emit::deduped(&args.traces)
+        },
         trace_fingerprints: std::collections::BTreeMap::new(),
+        evidence_fingerprints: std::collections::BTreeMap::new(),
         // **Inherited for the reason `paths` and `traces` are** (`A1-251`): they
         // are the predecessor's own answers to the same questions, and a
         // successor is about the same work. It is also the only default that
@@ -5138,7 +11840,14 @@ fn cmd_supersede(root: &std::path::Path, args: &SupersedeArgs) -> Result<u8> {
         let successor = successor_task(lt, args, &id, phase);
 
         let (config, config_dir) = config_at(root)?;
-        let opts = resolve_check_options(&config, config_dir.as_deref(), false, None, false);
+        let opts = resolve_check_options(
+            &config,
+            config_dir.as_deref(),
+            false,
+            None,
+            false,
+            Some(plan_repository(root)),
+        );
         let fingerprints = if opts.detect_drift {
             aplan_core::trace_fingerprints(&lt.task, opts.traces_root.as_deref())
         } else {
@@ -5178,6 +11887,7 @@ fn cmd_supersede(root: &std::path::Path, args: &SupersedeArgs) -> Result<u8> {
             &aplan_core::mutation::with_replaced(&plan, &args.id, task_of(&restamped, &args.id)?),
             &successor,
             cut.as_deref(),
+            None,
         );
         refuse_bad_mutation(
             root,
@@ -5188,7 +11898,10 @@ fn cmd_supersede(root: &std::path::Path, args: &SupersedeArgs) -> Result<u8> {
         )?;
 
         let out_dir = successor_dir(root);
-        let body = supersede_body(&lt.task, &args.id);
+        let body = args
+            .body
+            .clone()
+            .unwrap_or_else(|| supersede_body(&lt.task, &args.id));
 
         // One change, or none (`A1-246`); the argument is on `supersede_writes`.
         let (batch, placed) = supersede_writes(
@@ -5215,11 +11928,11 @@ fn cmd_supersede(root: &std::path::Path, args: &SupersedeArgs) -> Result<u8> {
     };
     let started = std::time::Instant::now();
     // `supersede` has no flag for the successor id, so it is always minted.
-    let (said, tries) = with_id_retry(true, ID_RACE_DEADLINE, attempt)?;
+    let (said, retries) = with_id_retry(true, ID_RACE_DEADLINE, attempt)?;
     let Some(mut said) = said else {
         return Ok(EXIT_VIOLATIONS);
     };
-    if let Some(note) = raced_for_the_id(tries, started.elapsed()) {
+    if let Some(note) = authoring_contention_note(retries, started.elapsed()) {
         let _ = writeln!(said, "{note}");
     }
     write_stdout(&said)?;
@@ -5423,17 +12136,12 @@ fn cmd_amend(root: &std::path::Path, args: &AmendArgs) -> Result<u8> {
         // Names a citation the task already carries, so any kind the file
         // can hold (`A1-361`).
         let drop = parse_citation(drop)?;
-        let remaining: Vec<aplan_core::Evidence> = lt
-            .task
-            .evidence
-            .iter()
-            .filter(|e| **e != drop)
-            .cloned()
-            .collect();
+        let repaired = aplan_core::remove_evidence(&original, &drop)
+            .map_err(|e| close_err("amend", id, &e))?;
+        let amended = task_of(&repaired, id)?.evidence;
         (
-            aplan_core::remove_evidence(&original, &drop)
-                .map_err(|e| close_err("amend", id, &e))?,
-            remaining,
+            repaired,
+            amended,
             format!("- {}:{}", drop.kind.as_str(), drop.reference),
         )
     } else if let Some(add) = &args.add_evidence {
@@ -5459,27 +12167,7 @@ fn cmd_amend(root: &std::path::Path, args: &AmendArgs) -> Result<u8> {
                  the one to replace it with"
             );
         };
-        // `from` names what is already there and `to` is written, so only
-        // `to` is judged by what `close` would record (`A1-361`).
-        let (from, to) = (parse_citation(from)?, parse_evidence(to)?);
-        let amended: Vec<aplan_core::Evidence> = lt
-            .task
-            .evidence
-            .iter()
-            .map(|e| if *e == from { to.clone() } else { e.clone() })
-            .collect();
-        (
-            aplan_core::replace_evidence(&original, &from, &to)
-                .map_err(|e| close_err("amend", id, &e))?,
-            amended,
-            format!(
-                "{}:{} -> {}:{}",
-                from.kind.as_str(),
-                from.reference,
-                to.kind.as_str(),
-                to.reference
-            ),
-        )
+        replacement_edit(&original, from, to, id)?
     };
 
     // The same gate `close` applies, through the same function. A repair that
@@ -5498,9 +12186,31 @@ fn cmd_amend(root: &std::path::Path, args: &AmendArgs) -> Result<u8> {
     // case -- p0000004 item 9 was seven citations across two tasks -- and it is
     // the "right about a citation and wrong about the task" shape `p00025` item
     // 14 names (`A1-110`, found dogfooding on this plan).
-    } else if !replacement_resolves(id, lt, &lt.task.evidence, &amended, repo, &config)? {
+    } else if !replacement_resolves(
+        &RepairTarget {
+            id,
+            task: &lt.task,
+            path: &lt.path,
+        },
+        &lt.task.evidence,
+        &amended,
+        repo,
+        &config,
+        RepairOperation::Amend,
+    )? {
         return Ok(EXIT_VIOLATIONS);
     }
+
+    let evidence_fingerprints = maintained_evidence_fingerprints(
+        config.detect_drift.unwrap_or(false),
+        no_resolve,
+        &lt.task.evidence,
+        &lt.task.evidence_fingerprints,
+        &amended,
+        repo,
+    )?;
+    let repaired = aplan_core::set_evidence_fingerprints(&repaired, &evidence_fingerprints)
+        .map_err(|e| close_err("amend", id, &e))?;
 
     let after = aplan_core::mutation::with_replaced(&plan, id, task_of(&repaired, id)?);
     refuse_bad_mutation_unless(
@@ -5519,6 +12229,47 @@ fn cmd_amend(root: &std::path::Path, args: &AmendArgs) -> Result<u8> {
         i = aplan_output::style::ID
     ))?;
     Ok(EXIT_OK)
+}
+
+fn apply_evidence_replacement(
+    file: &str,
+    from: &aplan_core::Evidence,
+    to: &aplan_core::Evidence,
+) -> Result<String, aplan_core::CloseError> {
+    aplan_core::apply_repair(
+        file,
+        &aplan_core::Repair::ReplaceEvidence {
+            from: from.clone(),
+            to: to.clone(),
+        },
+    )
+}
+
+fn replacement_edit(
+    original: &str,
+    from: &str,
+    to: &str,
+    id: &str,
+) -> Result<(String, Vec<aplan_core::Evidence>, String)> {
+    // `from` names what is already there and `to` is written, so only
+    // `to` is judged by what `close` would record (`A1-361`).
+    let (from, to) = (parse_citation(from)?, parse_evidence(to)?);
+    let repaired =
+        apply_evidence_replacement(original, &from, &to).map_err(|e| close_err("amend", id, &e))?;
+    // The core owns citation identity (`kind:ref`, not the complete record):
+    // parse its candidate instead of reimplementing that identity here. The
+    // duplicate model treated a dated citation as different from the same
+    // `kind:ref` named by the flag, then resolved the unchanged before-state
+    // while the bytes actually contained a new citation (`A1-717`, audit).
+    let amended = task_of(&repaired, id)?.evidence;
+    let said = format!(
+        "{}:{} -> {}:{}",
+        from.kind.as_str(),
+        from.reference,
+        to.kind.as_str(),
+        to.reference
+    );
+    Ok((repaired, amended, said))
 }
 
 /// The sentence a surface prints about evidence nothing resolved.
@@ -5546,19 +12297,52 @@ fn unresolved_note(kinds: &[&str], repository_unreadable: bool) -> String {
 /// task is closed, something on it has rotted, and refusing the fix because a
 /// neighbouring citation is also rotten makes the tool unusable exactly where it
 /// is most needed (`A1-110`).
+struct RepairTarget<'a> {
+    id: &'a str,
+    task: &'a aplan_core::Task,
+    path: &'a std::path::Path,
+}
+
+#[derive(Clone, Copy)]
+enum RepairOperation {
+    Amend,
+    Computed,
+}
+
+impl RepairOperation {
+    fn refusal(self) -> (&'static str, &'static str) {
+        match self {
+            Self::Amend => (
+                "amend",
+                "Fix the citation, or pass `--no-resolve` to record it unchecked.",
+            ),
+            Self::Computed => (
+                "apply repair to",
+                "The computed edit is not valid in this task's context, so nothing was written.",
+            ),
+        }
+    }
+}
+
 fn replacement_resolves(
-    id: &str,
-    lt: &aplan_core::load::LoadedTask,
+    target: &RepairTarget<'_>,
     before: &[aplan_core::Evidence],
     after: &[aplan_core::Evidence],
     repo: &std::path::Path,
     config: &aplan_config::Config,
+    operation: RepairOperation,
 ) -> Result<bool> {
+    let RepairTarget { id, task, path } = target;
     let verify_opts = aplan_evidence::VerifyOptions {
+        detect_drift: false,
         traces_root: None,
         execute: false,
         test_runner: config.test.clone(),
         max_unrelated_files: config.evidence.as_ref().and_then(|e| e.max_unrelated_files),
+        observation_inputs: config
+            .evidence
+            .as_ref()
+            .and_then(|e| e.observation_inputs.clone()),
         url_check: None,
         // Nor the version: what a closure proves is about this citation, and
         // `APLAN048` is about the release (`A1-313`).
@@ -5569,7 +12353,7 @@ fn replacement_resolves(
     };
     let resolve = |ev: &[aplan_core::Evidence]| -> Result<Vec<String>> {
         Ok(
-            aplan_evidence::resolve_proposed(&lt.task, &lt.path, ev, repo, &verify_opts)
+            aplan_evidence::resolve_proposed(task, path, ev, repo, &verify_opts)
                 .context("resolving the evidence before recording it")?
                 .report
                 .diagnostics
@@ -5579,7 +12363,7 @@ fn replacement_resolves(
         )
     };
     let existing = resolve(before)?;
-    let proposed = aplan_evidence::resolve_proposed(&lt.task, &lt.path, after, repo, &verify_opts)
+    let proposed = aplan_evidence::resolve_proposed(task, path, after, repo, &verify_opts)
         .context("resolving the evidence before recording it")?;
 
     let findings: Vec<&aplan_core::Diagnostic> = proposed
@@ -5595,9 +12379,10 @@ fn replacement_resolves(
                 write_stdout(&format!("  fix: {fix}\n"))?;
             }
         }
+        let (operation, refusal_advice) = operation.refusal();
         write_stdout(&format!(
-            "aplan: refusing to amend `{id}`: this change would fail `aplan verify`. \
-             Fix the citation, or pass `--no-resolve` to record it unchecked.\n"
+            "aplan: refusing to {operation} `{id}`: this change would fail `aplan verify`. \
+             {refusal_advice}\n"
         ))?;
         return Ok(false);
     }
@@ -5653,10 +12438,15 @@ fn evidence_resolves(
     verdict: VerdictFlags,
 ) -> Result<bool> {
     let verify_opts = aplan_evidence::VerifyOptions {
+        detect_drift: false,
         traces_root: None,
         execute: false,
         test_runner: config.test.clone(),
         max_unrelated_files: config.evidence.as_ref().and_then(|e| e.max_unrelated_files),
+        observation_inputs: config
+            .evidence
+            .as_ref()
+            .and_then(|e| e.observation_inputs.clone()),
         // Deliberately not `config.url`: `close` must not reach the network to
         // record a citation. A link down for an hour would block a closure, and
         // `APLAN016` is a warning precisely because it is not a statement about
@@ -5733,7 +12523,7 @@ fn recorded_version(
     }
     let policy = config.version.clone().unwrap_or_default();
     let tasks: Vec<_> = plan.tasks.iter().map(|lt| &lt.task).collect();
-    let graph = Graph::new(tasks.iter().copied());
+    let graph = build_graph(tasks.iter().copied());
     match aplan_evidence::version::version_for_release(repo, plan, &graph, &policy) {
         Ok(version) => Some(version),
         Err(why) => {
@@ -5749,15 +12539,401 @@ fn recorded_version(
     }
 }
 
+fn restamp_task(
+    root: &std::path::Path,
+    plan: &aplan_core::Plan,
+    lt: &aplan_core::load::LoadedTask,
+    trace_fingerprints: &std::collections::BTreeMap<String, String>,
+    repo: &std::path::Path,
+    verdict: VerdictFlags,
+) -> Result<u8> {
+    let id = &lt.task.id;
+    let original = std::fs::read_to_string(&lt.path)
+        .with_context(|| format!("reading {}", lt.path.display()))?;
+    let source_task = task_of(&original, id)?;
+    ensure_restamp_source_matches_loaded(&lt.task, &source_task)?;
+    let updated = aplan_core::restamp(&original, trace_fingerprints)
+        .map_err(|e| close_err("restamp", id, &e))?;
+    let evidence_fingerprints = aplan_evidence::update_evidence_fingerprints(
+        &lt.task.evidence,
+        &lt.task.evidence_fingerprints,
+        &lt.task.evidence,
+        repo,
+        true,
+    )?;
+    let updated = aplan_core::set_evidence_fingerprints(&updated, &evidence_fingerprints)
+        .map_err(|e| close_err("restamp", id, &e))?;
+    let after = aplan_core::mutation::with_replaced(plan, id, task_of(&updated, id)?);
+    refuse_bad_mutation(root, &format!("restamp `{id}`"), plan, &after, verdict)?;
+    let trace_changes = fingerprint_changes(&lt.task.trace_fingerprints, trace_fingerprints);
+    let evidence_changes =
+        fingerprint_changes(&lt.task.evidence_fingerprints, &evidence_fingerprints);
+    let counts = restamp_fingerprint_counts(trace_changes, evidence_changes);
+    if trace_changes.changed == 0 && evidence_changes.changed == 0 {
+        // A no-op is a read, not a mutation. In particular, do not replace the
+        // task merely to serialize the same baselines again: that obscures the
+        // committed-content boundary for file evidence and needlessly changes
+        // file identity, timestamps and watcher events.
+        let answer = if trace_changes.unchanged == 0 && evidence_changes.unchanged == 0 {
+            "no stampable fingerprint baselines"
+        } else {
+            "fingerprint baselines already current"
+        };
+        write_stdout(&format!(
+            "restamp {id}: {answer}; no task file written ({counts})\n"
+        ))?;
+    } else {
+        save_one(&lt.path, &original, &updated, "close")?;
+        write_stdout(&format!("restamped {id}: {counts}\n"))?;
+    }
+    Ok(EXIT_OK)
+}
+
+/// Refuse a result computed from a task snapshot other than the one about to
+/// be reported or rewritten. The guarded writer catches edits after the source
+/// reread; this closes the earlier window between loading the plan and that
+/// reread, including the no-op path that deliberately never reaches a writer.
+fn ensure_restamp_source_matches_loaded(
+    loaded: &aplan_core::Task,
+    source: &aplan_core::Task,
+) -> Result<()> {
+    if loaded != source {
+        anyhow::bail!(
+            "task `{}` changed while `close --restamp` was preparing its baselines; no task file \
+             was written. Re-run the command against the current task.",
+            loaded.id
+        );
+    }
+    Ok(())
+}
+
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+struct FingerprintChanges {
+    changed: usize,
+    unchanged: usize,
+}
+
+/// Compare stored and proposed baselines by subject, counting additions,
+/// replacements and removals once each. Carrying both counts prevents a
+/// restamp that examined two current entries from sounding like it changed two
+/// entries, while the union makes removal of an orphaned key visible too.
+fn fingerprint_changes(
+    before: &std::collections::BTreeMap<String, String>,
+    after: &std::collections::BTreeMap<String, String>,
+) -> FingerprintChanges {
+    let mut changes = FingerprintChanges::default();
+    for (key, value) in before {
+        if after.get(key) == Some(value) {
+            changes.unchanged += 1;
+        } else {
+            changes.changed += 1;
+        }
+    }
+    changes.changed += after
+        .keys()
+        .filter(|key| !before.contains_key(*key))
+        .count();
+    changes
+}
+
+fn restamp_fingerprint_counts(traces: FingerprintChanges, evidence: FingerprintChanges) -> String {
+    format!(
+        "trace fingerprints: {} changed, {} unchanged; committed file-evidence fingerprints: {} changed, {} unchanged",
+        traces.changed, traces.unchanged, evidence.changed, evidence.unchanged
+    )
+}
+
+#[cfg(test)]
+mod restamp_reporting_tests {
+    use super::*;
+
+    /// Proof for `close.restamp_reports_baseline_changes`: a no-op answer is
+    /// permitted only when the task reread after fingerprint computation is
+    /// semantically the one that computation used.
+    #[test]
+    fn a_no_op_restamp_refuses_a_task_changed_since_plan_load() {
+        let loaded = task_of(
+            "---\nid: A-1\ntitle: task\nphase: 1\nstatus: done\nevidence:\n- kind: test\n  ref: proof\ntrace_fingerprints:\n  DOC.md#contract: old\n---\n\nbody\n",
+            "A-1",
+        )
+        .expect("loaded task");
+        let same_task_different_source = task_of(
+            "---\ntitle: task\nid: A-1\nphase: 1\nstatus: done\ntrace_fingerprints: {DOC.md#contract: old}\nevidence: [{kind: test, ref: proof}]\n---\n\nchanged body\n",
+            "A-1",
+        )
+        .expect("semantically identical task");
+        ensure_restamp_source_matches_loaded(&loaded, &same_task_different_source)
+            .expect("formatting and body are not task-semantic races");
+
+        let changed = task_of(
+            "---\nid: A-1\ntitle: task\nphase: 1\nstatus: done\nevidence:\n- kind: test\n  ref: proof\ntrace_fingerprints:\n  DOC.md#contract: concurrent\n---\n\nbody\n",
+            "A-1",
+        )
+        .expect("concurrently changed task");
+        let error = ensure_restamp_source_matches_loaded(&loaded, &changed)
+            .expect_err("a stale loaded task must not authorize a no-op result");
+        let message = error.to_string();
+        assert!(message.contains("changed while `close --restamp` was preparing"));
+        assert!(message.contains("no task file was written"));
+        assert!(message.contains("Re-run the command"));
+    }
+
+    #[test]
+    fn additions_replacements_removals_and_current_baselines_are_counted_once() {
+        let before = std::collections::BTreeMap::from([
+            ("current".to_string(), "same".to_string()),
+            ("removed".to_string(), "old".to_string()),
+            ("replaced".to_string(), "old".to_string()),
+        ]);
+        let after = std::collections::BTreeMap::from([
+            ("added".to_string(), "new".to_string()),
+            ("current".to_string(), "same".to_string()),
+            ("replaced".to_string(), "new".to_string()),
+        ]);
+
+        assert_eq!(
+            fingerprint_changes(&before, &after),
+            FingerprintChanges {
+                changed: 3,
+                unchanged: 1,
+            }
+        );
+        assert_eq!(
+            fingerprint_changes(
+                &std::collections::BTreeMap::new(),
+                &std::collections::BTreeMap::default(),
+            ),
+            FingerprintChanges::default()
+        );
+    }
+}
+
+fn fingerprint_counts(traces: usize, evidence: usize) -> String {
+    match (traces, evidence) {
+        (traces, 0) => format!("{traces} trace fingerprint(s) stamped"),
+        (0, evidence) => format!("{evidence} evidence fingerprint(s) stamped"),
+        (traces, evidence) => {
+            format!("{traces} trace fingerprint(s), {evidence} evidence fingerprint(s) stamped")
+        }
+    }
+}
+
+fn focused_close_context(
+    root: &std::path::Path,
+    repo: &std::path::Path,
+    verdict: VerdictFlags,
+) -> Result<aplan_app::PlanContext> {
+    let (config, config_dir) = config_at(root)?;
+    let plan = aplan_core::load_plan_identified(root);
+    let opts = resolve_check_options(
+        &config,
+        config_dir.as_deref(),
+        false,
+        None,
+        false,
+        Some(repo.to_path_buf()),
+    );
+    refuse_absent_external_roots(&opts)?;
+    let opts = with_agents_block(opts, root, config_dir.as_deref(), &config, &plan.plan);
+    let policy = verdict_policy(&config, verdict.deny_warnings, verdict.no_deny_warnings);
+    let context = aplan_app::PlanContext::new(
+        plan,
+        aplan_app::ContextInputs {
+            repository_root: repo.to_path_buf(),
+            configuration_file: selected_config_file(config_dir.as_deref()),
+            trust: aplan_app::Trust::ConfiguredProcesses,
+            options: opts,
+            verdict: policy,
+        },
+    );
+    Ok(context.with_captured_report_config(config)?)
+}
+
+fn render_focused_close_preview(
+    preview: &aplan_app::EvidenceMutationPreview,
+    verdict: &aplan_core::Verdict,
+) -> Result<()> {
+    let review = preview.change_set().evidence_review();
+    if !review.findings.is_empty() {
+        let report = aplan_core::Report {
+            diagnostics: review.findings.clone(),
+            tasks_checked: 1,
+        };
+        render_proposed(&report, verdict)?;
+    }
+    for line in preview.change_set().diagnostics().lines() {
+        write_stdout(&format!("{line}\n"))?;
+    }
+    for notice in &review.notices {
+        write_stdout(&format!("note: {notice}\n"))?;
+    }
+    Ok(())
+}
+
+fn cmd_close_execute(
+    root: &std::path::Path,
+    id: &str,
+    evidence_args: &[String],
+    repo: &std::path::Path,
+    verdict: VerdictFlags,
+) -> Result<u8> {
+    let evidence = evidence_args
+        .iter()
+        .map(|argument| parse_evidence(argument))
+        .collect::<Result<Vec<_>>>()?;
+    if !evidence
+        .iter()
+        .any(|citation| citation.kind == aplan_core::EvidenceKind::Test)
+    {
+        anyhow::bail!(
+            "`close --execute` requires at least one explicit `--evidence test:NAME`; without \
+             one there is no focused L3 claim to prove"
+        );
+    }
+    let context = focused_close_context(root, repo, verdict)?;
+    let preview = aplan_app::preview_close(
+        &context,
+        &aplan_app::CloseRequest {
+            id: id.to_string(),
+            evidence,
+            no_resolve: false,
+            execute: true,
+        },
+    )?;
+    render_focused_close_preview(&preview, context.verdict())?;
+    if preview.change_set().disposition() == aplan_app::ChangeDisposition::Denied {
+        write_stdout(&format!(
+            "aplan: refusing to close `{id}`: focused L3 did not prove the proposed closure; \
+             L2 listing resolution alone cannot publish `done`. `aplan` published no plan \
+             bytes; effects of the explicitly launched configured test command are not rolled \
+             back.\n"
+        ))?;
+        return Ok(EXIT_VIOLATIONS);
+    }
+    let evidence = match preview.change_set().effects() {
+        [aplan_app::SemanticEffect::TaskClosed { evidence, .. }] => evidence.clone(),
+        _ => anyhow::bail!("internal: focused close preview lost its task-closure effect"),
+    };
+    let distinct = match preview.change_set().evidence() {
+        aplan_app::ChangeEvidence::Resolution { observed, .. } => observed
+            .iter()
+            .filter(|citation| citation.kind == aplan_core::EvidenceKind::Test)
+            .map(|citation| {
+                (
+                    citation.resolution.resolver.clone(),
+                    citation.reference.clone(),
+                )
+            })
+            .collect::<std::collections::BTreeSet<_>>()
+            .len(),
+        _ => anyhow::bail!("internal: focused close preview has no resolution ledger"),
+    };
+    match aplan_app::commit_change_set(&context, preview.into_change_set()) {
+        aplan_app::CommitOutcome::Applied(_) => {
+            let refs = evidence
+                .iter()
+                .map(|citation| format!("{}:{}", citation.kind.as_str(), citation.reference))
+                .collect::<Vec<_>>()
+                .join(", ");
+            write_stdout(&format!(
+                "closed {i}{id}{i:#} with evidence: {refs} (focused L3 executed and proved \
+                 {distinct} distinct runner/test identity(ies))\n",
+                i = aplan_output::style::ID
+            ))?;
+            Ok(EXIT_OK)
+        }
+        aplan_app::CommitOutcome::Stale { change, .. } => {
+            let reason = change.stale_reason().unwrap_or(
+                "the reviewed repository, plan or selected configuration changed after execution",
+            );
+            write_stdout(&format!(
+                "aplan: refusing to close `{id}`: {reason}; the L3 result is stale and nothing \
+                 was published by `aplan`. Effects of the explicitly launched configured test \
+                 command are not rolled back. Run the focused close again against current \
+                 inputs.\n"
+            ))?;
+            Ok(EXIT_VIOLATIONS)
+        }
+        aplan_app::CommitOutcome::Denied(_) => {
+            write_stdout(&format!(
+                "aplan: refusing to close `{id}`: the reviewed focused closure is denied; \
+                 `aplan` published no plan bytes. Effects of the explicitly launched configured \
+                 test command are not rolled back.\n"
+            ))?;
+            Ok(EXIT_VIOLATIONS)
+        }
+        aplan_app::CommitOutcome::NoOp(_) => {
+            anyhow::bail!("internal: focused close unexpectedly produced no task change")
+        }
+        aplan_app::CommitOutcome::PublicationFailed { error, report, .. } => {
+            let publication = if report.state() == aplan_app::PublicationState::Unchanged {
+                "`aplan` published no plan bytes"
+            } else {
+                "`aplan` could not confirm complete publication; inspect every reported path"
+            };
+            anyhow::bail!(
+                "focused close publication failed: {publication}. Effects of the explicitly \
+                 launched configured test command are not rolled back. Writer error: {error}"
+            )
+        }
+    }
+}
+
+#[derive(Clone, Copy)]
+struct CloseMode {
+    restamp: bool,
+    no_resolve: bool,
+    execute: bool,
+    verdict: VerdictFlags,
+}
+
+impl CloseMode {
+    const fn new(restamp: bool, no_resolve: bool, execute: bool, verdict: VerdictFlags) -> Self {
+        Self {
+            restamp,
+            no_resolve,
+            execute,
+            verdict,
+        }
+    }
+}
+
+fn close_evidence(
+    evidence_args: &[String],
+    repo: &std::path::Path,
+) -> Result<Vec<aplan_core::Evidence>> {
+    if evidence_args.is_empty() {
+        let sha = aplan_evidence::head_sha(repo)
+            .context("deriving HEAD (pass `--evidence kind:ref` to give it explicitly)")?;
+        Ok(vec![aplan_core::Evidence {
+            kind: aplan_core::EvidenceKind::Commit,
+            reference: sha,
+            captured: None,
+        }])
+    } else {
+        evidence_args
+            .iter()
+            .map(|argument| parse_evidence(argument))
+            .collect()
+    }
+}
+
 fn cmd_close(
     root: &std::path::Path,
     id: &str,
     evidence_args: &[String],
     repo: &std::path::Path,
-    restamp: bool,
-    no_resolve: bool,
-    verdict: VerdictFlags,
+    mode: CloseMode,
 ) -> Result<u8> {
+    let CloseMode {
+        restamp,
+        no_resolve,
+        execute,
+        verdict,
+    } = mode;
+    if execute {
+        return cmd_close_execute(root, id, evidence_args, repo, verdict);
+    }
     let plan = load_checked(root)?;
     // Never edit a task inside a plan that does not load, its neighbours might be
     // the reason this one should not close.
@@ -5770,45 +12946,37 @@ fn cmd_close(
     // Config drives drift stamping (`APLAN018`): whether it is on, and the
     // `traces_root` the traced documents are read from.
     let (config, config_dir) = config_at(root)?;
-    let opts = resolve_check_options(&config, config_dir.as_deref(), false, None, false);
+    let opts = resolve_check_options(
+        &config,
+        config_dir.as_deref(),
+        false,
+        None,
+        false,
+        Some(plan_repository(root)),
+    );
     let fingerprints = if opts.detect_drift {
         aplan_core::trace_fingerprints(&lt.task, opts.traces_root.as_deref())
     } else {
         std::collections::BTreeMap::new()
     };
 
+    // `--restamp`: re-take a `done` task's trace and mutable-evidence
+    // fingerprints after deliberate review, changing neither status nor citation.
+    if restamp {
+        if !opts.detect_drift {
+            anyhow::bail!(
+                "cannot restamp `{id}` while `detect_drift` is disabled: enable it before \
+                 reviewing and refreshing trace or evidence baselines"
+            );
+        }
+        return restamp_task(root, &plan, lt, &fingerprints, repo, verdict);
+    }
+
     let original = std::fs::read_to_string(&lt.path)
         .with_context(|| format!("reading {}", lt.path.display()))?;
 
-    // `--restamp`: re-take a `done` task's trace fingerprints, nothing else.
-    if restamp {
-        let updated = aplan_core::restamp(&original, &fingerprints)
-            .map_err(|e| close_err("restamp", id, &e))?;
-        let after = aplan_core::mutation::with_replaced(&plan, id, task_of(&updated, id)?);
-        refuse_bad_mutation(root, &format!("restamp `{id}`"), &plan, &after, verdict)?;
-        save_one(&lt.path, &original, &updated, "close")?;
-        write_stdout(&format!(
-            "restamped {id}: {} trace fingerprint(s)\n",
-            fingerprints.len()
-        ))?;
-        return Ok(EXIT_OK);
-    }
-
     // Evidence: the explicit list, or the current HEAD commit derived for free.
-    let evidence = if evidence_args.is_empty() {
-        let sha = aplan_evidence::head_sha(repo)
-            .context("deriving HEAD (pass `--evidence kind:ref` to give it explicitly)")?;
-        vec![aplan_core::Evidence {
-            kind: aplan_core::EvidenceKind::Commit,
-            reference: sha,
-            captured: None,
-        }]
-    } else {
-        evidence_args
-            .iter()
-            .map(|a| parse_evidence(a))
-            .collect::<Result<Vec<_>>>()?
-    };
+    let evidence = close_evidence(evidence_args, repo)?;
 
     // Structural refusals first: already `done`, already carrying evidence. They
     // are hermetic and instant, and running the ladder ahead of them spent a
@@ -5819,7 +12987,7 @@ fn cmd_close(
     // grading a guess, and written into the node so a later run can ask what a
     // release contained without re-deriving from a plan that has since moved.
     let recorded = recorded_version(&plan, &lt.task, repo, &config);
-    let updated = aplan_core::close(&original, &evidence, &fingerprints, recorded.as_deref())
+    let mut updated = aplan_core::close(&original, &evidence, &fingerprints, recorded.as_deref())
         .map_err(|e| close_err("close", id, &e))?;
 
     // Then the gate, still before anything is written (`A1-109`).
@@ -5833,6 +13001,20 @@ fn cmd_close(
              the repository. Run `aplan verify` before trusting this closure.\n",
         )?;
     }
+
+    let evidence_fingerprints = if opts.detect_drift && !no_resolve {
+        aplan_evidence::update_evidence_fingerprints(
+            &lt.task.evidence,
+            &lt.task.evidence_fingerprints,
+            &evidence,
+            repo,
+            false,
+        )?
+    } else {
+        std::collections::BTreeMap::new()
+    };
+    updated = aplan_core::set_evidence_fingerprints(&updated, &evidence_fingerprints)
+        .map_err(|e| close_err("close", id, &e))?;
 
     let after = aplan_core::mutation::with_replaced(&plan, id, task_of(&updated, id)?);
     refuse_bad_mutation_unless(
@@ -5849,10 +13031,13 @@ fn cmd_close(
         .iter()
         .map(|e| format!("{}:{}", e.kind.as_str(), e.reference))
         .collect();
-    let stamped = if fingerprints.is_empty() {
+    let stamped = if fingerprints.is_empty() && evidence_fingerprints.is_empty() {
         String::new()
     } else {
-        format!(" ({} trace fingerprint(s) stamped)", fingerprints.len())
+        format!(
+            " ({})",
+            fingerprint_counts(fingerprints.len(), evidence_fingerprints.len())
+        )
     };
     // Tolerate a closed pipe (`aplan close ... | head`), like every other
     // stdout-writing command: the file is already written, so a `println!` panic
@@ -5940,7 +13125,6 @@ fn cmd_facts(require: &[String], identity: bool) -> Result<u8> {
 /// value lives for anyone who needs to check it.
 pub fn written_by() -> (String, String) {
     static SURFACE: std::sync::OnceLock<String> = std::sync::OnceLock::new();
-    let id = tool_identity();
     let surface = SURFACE
         .get_or_init(|| {
             let mut input = facts_document();
@@ -5951,7 +13135,7 @@ pub fn written_by() -> (String, String) {
                 .collect()
         })
         .clone();
-    (id.version, surface)
+    (env!("CARGO_PKG_VERSION").to_string(), surface)
 }
 
 /// What this build renders for a fixed input, as one string to digest
@@ -6075,6 +13259,15 @@ fn tool_identity() -> aplan_attest::ToolIdentity {
     aplan_attest::identify(&facts_document())
 }
 
+#[cfg(feature = "tui")]
+fn tool_identity_for_facts(facts: &aplan_app::BuildFacts) -> aplan_attest::ToolIdentity {
+    let document = format!(
+        "{}\n",
+        serde_json::to_string_pretty(facts).expect("facts are serialisable")
+    );
+    aplan_attest::identify(&document)
+}
+
 /// The identity as a document, as a function of the identity alone.
 ///
 /// Separate from reading it so the "absent rather than empty" rule can be
@@ -6147,6 +13340,10 @@ struct CapabilitySource {
     /// The field to read from each element, or `None` when the array holds
     /// strings directly.
     field: Option<&'static str>,
+    /// When set, only rows whose boolean field is true are advertised. Build
+    /// capabilities remain visible in `facts` when disabled without making
+    /// `--require` claim that the absent implementation exists.
+    enabled_by: Option<&'static str>,
     /// The words the flag's help must use for this source, so a reader learns it
     /// is assertable.
     help_word: &'static str,
@@ -6156,37 +13353,50 @@ const CAPABILITY_SOURCES: &[CapabilitySource] = &[
     CapabilitySource {
         key: "config_keys",
         field: None,
+        enabled_by: None,
         help_word: "config key",
     },
     CapabilitySource {
         key: "formats",
         field: None,
+        enabled_by: None,
         help_word: "output format",
     },
     CapabilitySource {
         key: "evidence_kinds",
         field: None,
+        enabled_by: None,
         help_word: "evidence kind",
     },
     CapabilitySource {
         key: "rules",
         field: Some("code"),
+        enabled_by: None,
         help_word: "rule code",
     },
     CapabilitySource {
         key: "commands",
         field: Some("name"),
+        enabled_by: None,
         help_word: "command",
     },
     CapabilitySource {
         key: "behaviours",
         field: Some("name"),
+        enabled_by: None,
         help_word: "behaviour",
     },
     CapabilitySource {
         key: "mcp_tools",
         field: Some("name"),
+        enabled_by: None,
         help_word: "MCP tool",
+    },
+    CapabilitySource {
+        key: "build_capabilities",
+        field: Some("name"),
+        enabled_by: Some("enabled"),
+        help_word: "build capability",
     },
 ];
 
@@ -6229,9 +13439,16 @@ pub fn advertised_names(doc: &serde_json::Value) -> std::collections::BTreeSet<S
         let Some(items) = doc.get(source.key).and_then(|v| v.as_array()) else {
             continue;
         };
-        advertised.extend(items.iter().filter_map(|v| match source.field {
-            None => v.as_str().map(str::to_string),
-            Some(f) => v.get(f).and_then(|x| x.as_str()).map(str::to_string),
+        advertised.extend(items.iter().filter_map(|v| {
+            if source.enabled_by.is_some_and(|field| {
+                v.get(field).and_then(serde_json::Value::as_bool) != Some(true)
+            }) {
+                return None;
+            }
+            match source.field {
+                None => v.as_str().map(str::to_string),
+                Some(f) => v.get(f).and_then(|x| x.as_str()).map(str::to_string),
+            }
         }));
     }
     advertised
@@ -6304,28 +13521,44 @@ fn assert_capabilities(require: &[String]) -> Result<u8> {
 /// tree, so the committed `facts.json` (gated by `tests/facts.rs`) can never drift
 /// from what the tool actually does.
 pub fn facts() -> String {
-    use serde_json::json;
+    facts_for_build(cfg!(feature = "tui"))
+}
 
+fn facts_for_build(tui: bool) -> String {
+    serde_json::to_string_pretty(&build_facts_for_build(tui)).expect("facts are serialisable")
+}
+
+#[cfg(feature = "tui")]
+fn build_facts() -> aplan_app::BuildFacts {
+    build_facts_for_build(cfg!(feature = "tui"))
+}
+
+fn build_facts_for_build(tui: bool) -> aplan_app::BuildFacts {
     let rules: Vec<_> = aplan_core::Rule::ALL
         .iter()
-        .map(|r| {
-            json!({
-                "code": r.code(),
-                "severity": r.severity().to_string(),
-                "title": r.title(),
-            })
+        .map(|rule| aplan_app::RuleFact {
+            code: rule.code().to_string(),
+            severity: rule.severity().to_string(),
+            title: rule.title().to_string(),
         })
         .collect();
-    let formats: Vec<_> = Format::ALL.iter().map(|f| f.as_str()).collect();
+    let formats: Vec<_> = Format::ALL
+        .iter()
+        .map(|format| format.as_str().to_string())
+        .collect();
     // Named behaviours, so a change that widens what an existing name accepts is
     // assertable rather than a release note (`A1-099`).
     let behaviours: Vec<_> = aplan_core::behaviour::ALL
         .iter()
-        .map(|b| json!({ "name": b.name, "what": b.what }))
+        .filter(|behaviour| tui || !behaviour.name.starts_with("tui."))
+        .map(|behaviour| aplan_app::BehaviourFact {
+            name: behaviour.name.to_string(),
+            what: behaviour.what.to_string(),
+        })
         .collect();
     let evidence_kinds: Vec<_> = aplan_core::EvidenceKind::ALL
         .iter()
-        .map(|k| k.as_str())
+        .map(|kind| kind.as_str().to_string())
         .collect();
     // Subcommands, introspected from clap so the list cannot drift from the CLI.
     let commands: Vec<_> = Cli::command()
@@ -6337,19 +13570,24 @@ pub fn facts() -> String {
             // this answers the question a consumer actually has before it
             // invokes one (`A1-184`).
             let surface = surface_of(c.get_name());
-            let formats: Vec<&str> = surface
-                .map(|s| s.formats().iter().map(|f| f.as_str()).collect())
+            let formats: Vec<String> = surface
+                .map(|s| {
+                    s.formats()
+                        .iter()
+                        .map(|format| format.as_str().to_string())
+                        .collect()
+                })
                 .unwrap_or_default();
             // Which of them it emits when `--format` is not passed. Trivial
             // while every command defaulted to `human`, and a real question
             // since `graph` began defaulting to `mermaid` (`A1-193`): a
             // consumer that omits the flag cannot otherwise tell what it gets.
-            json!({
-                "name": c.get_name(),
-                "about": c.get_about().map(ToString::to_string),
-                "formats": formats,
-                "default_format": surface.map(|s| s.default_format().as_str()),
-            })
+            aplan_app::CommandFact {
+                name: c.get_name().to_string(),
+                about: c.get_about().map(ToString::to_string),
+                formats,
+                default_format: surface.map(|s| s.default_format().as_str().to_string()),
+            }
         })
         .collect();
 
@@ -6359,41 +13597,54 @@ pub fn facts() -> String {
     // assert is one they discover by trying it (`A1-082`).
     let mcp_tools: Vec<_> = aplan_mcp::TOOLS
         .iter()
-        .map(|t| json!({ "name": t.name, "description": t.description }))
+        .map(|tool| aplan_app::McpToolFact {
+            name: tool.name.to_string(),
+            description: tool.description.to_string(),
+        })
         .collect();
 
     // What this build *accepts*, not what it is called. A version string cannot
     // answer "does this binary know `test.covers`?", and that is the question an
     // adopter staging a build actually has (`A1-060`).
     let config_keys = aplan_config::accepted_keys();
+    let build_capabilities = build_capabilities(tui);
 
-    let value = json!({
-        "version": env!("CARGO_PKG_VERSION"),
-        "schema_version": "v1",
-        "counts": {
-            "rules": rules.len(),
-            "behaviours": behaviours.len(),
-            "formats": formats.len(),
-            "commands": commands.len(),
-            "evidence_kinds": evidence_kinds.len(),
-            "config_keys": config_keys.len(),
-            "mcp_tools": mcp_tools.len(),
+    let counts = aplan_app::FactCounts {
+        rules: rules.len(),
+        behaviours: behaviours.len(),
+        formats: formats.len(),
+        commands: commands.len(),
+        evidence_kinds: evidence_kinds.len(),
+        config_keys: config_keys.len(),
+        mcp_tools: mcp_tools.len(),
+        build_capabilities: build_capabilities.len(),
+    };
+    aplan_app::BuildFacts {
+        behaviours,
+        build_capabilities,
+        commands,
+        config_keys,
+        counts,
+        evidence_kinds,
+        exit_codes: aplan_app::ExitCodeFacts {
+            clean: EXIT_OK,
+            error: EXIT_VIOLATIONS,
+            usage: EXIT_USAGE,
+            internal: EXIT_INTERNAL,
         },
-        "exit_codes": {
-            "clean": EXIT_OK,
-            "error": EXIT_VIOLATIONS,
-            "usage": EXIT_USAGE,
-            "internal": EXIT_INTERNAL,
-        },
-        "rules": rules,
-        "behaviours": behaviours,
-        "formats": formats,
-        "commands": commands,
-        "evidence_kinds": evidence_kinds,
-        "config_keys": config_keys,
-        "mcp_tools": mcp_tools,
-    });
-    serde_json::to_string_pretty(&value).expect("facts are serialisable")
+        formats,
+        mcp_tools,
+        rules,
+        schema_version: "v1".to_string(),
+        version: env!("CARGO_PKG_VERSION").to_string(),
+    }
+}
+
+fn build_capabilities(tui: bool) -> Vec<aplan_app::BuildCapabilityFact> {
+    vec![aplan_app::BuildCapabilityFact {
+        name: "build.tui".to_string(),
+        enabled: tui,
+    }]
 }
 
 /// How many recent commits `aplan paths` samples by default.
@@ -6445,6 +13696,7 @@ fn write_json<T: serde::Serialize>(value: &T, schema: &str) -> Result<u8> {
 /// decide what exists: a task whose blocker is outside the subset is still
 /// blocked, and filtering first would answer that it is ready (`A1-214`).
 fn selected_ids(
+    root: &std::path::Path,
     plan: &aplan_core::load::Plan,
     selector: &aplan_core::select::Selector,
 ) -> Result<std::collections::BTreeSet<String>> {
@@ -6454,17 +13706,55 @@ fn selected_ids(
     if selector.is_empty() {
         return Ok(plan.tasks.iter().map(|lt| lt.task.id.clone()).collect());
     }
+    let claims = if selector.unclaimed {
+        let snapshot = aplan_app::claims::snapshot(root, plan)?;
+        if !snapshot.scope.available {
+            anyhow::bail!(
+                "cannot select `--unclaimed`: {}. Run inside a Git repository or omit that \
+                 selector; unavailable coordination is not evidence that work is free",
+                snapshot
+                    .scope
+                    .reason
+                    .as_deref()
+                    .unwrap_or("the local claim scope is unavailable")
+            );
+        }
+        Some(snapshot)
+    } else {
+        None
+    };
+    selected_ids_with_claims(plan, selector, claims.as_ref())
+}
+
+fn selected_ids_with_claims(
+    plan: &aplan_core::load::Plan,
+    selector: &aplan_core::select::Selector,
+    claims: Option<&aplan_core::ClaimSnapshot>,
+) -> Result<std::collections::BTreeSet<String>> {
+    if selector.unclaimed && !claims.is_some_and(|snapshot| snapshot.scope.available) {
+        anyhow::bail!(
+            "cannot select `--unclaimed` without an available local claim snapshot; unavailable \
+             coordination is not evidence that work is free"
+        );
+    }
     let tasks: Vec<_> = plan.tasks.iter().map(|lt| &lt.task).collect();
-    let graph = Graph::new(tasks.iter().copied());
+    let graph = build_graph(tasks.iter().copied());
     refuse_a_release_as_a_cut(plan, &graph, &selector.cuts)?;
     Ok(graph
         .task_rows()
         .tasks
         .iter()
         .filter(|row| {
-            graph
-                .get(&row.id)
-                .is_some_and(|t| selector.matches(t, row.cut.as_deref(), row.milestone.as_deref()))
+            graph.get(&row.id).is_some_and(|t| {
+                selector.matches_claimed(
+                    t,
+                    row.cut.as_deref(),
+                    row.milestone.as_deref(),
+                    claims
+                        .as_ref()
+                        .map(|snapshot| snapshot.claim(&t.id).is_some()),
+                )
+            })
         })
         .map(|row| row.id.clone())
         .collect())
@@ -6557,27 +13847,27 @@ fn refuse_selection_on_a_gate(command: &str, select: &SelectArgs) -> Result<()> 
 /// one place" is satisfied by there being one `SelectArgs` rather than by there
 /// being a parser.
 ///
-/// **`phase` is deliberately not here.** `A1-187` is weighing retiring it into a
-/// tag family, and a `--phase` on nine commands would turn that from one field
-/// into a break across the whole surface. `--tag` covers it the moment it
-/// becomes a tag.
+/// Phase is the plan's ordered reporting coordinate (`A1-187`). Selecting one
+/// does not give it graph or execution semantics: like every other dimension,
+/// it narrows only the rows rendered after the whole plan has been derived.
 #[derive(Debug, Clone, clap::Args)]
 pub struct SelectArgs {
     /// Only this cut: its milestone id (`M-v0.9`) or the label it reports itself
     /// under (`v0.9`). Repeatable, and any of them matches.
     #[arg(long, value_name = "CUT")]
     pub cut: Vec<String>,
+    /// Only tasks in this numeric phase. Repeatable, and any of them matches.
+    #[arg(long, value_name = "PHASE")]
+    pub phase: Vec<u32>,
     /// Only tasks carrying this tag. Repeatable, and any of them matches.
     #[arg(long, value_name = "TAG")]
     pub tag: Vec<String>,
     /// Only tasks with this owner. Repeatable, and any of them matches.
     #[arg(long, value_name = "OWNER")]
     pub owner: Vec<String>,
-    /// Only tasks nobody holds, so a fleet can see what is free to pick up.
-    ///
-    /// The complement of `--owner`, and naming both selects nothing: a task
-    /// cannot be held by somebody and by nobody, and narrowing across
-    /// dimensions is what every other pair of these flags does.
+    /// Only tasks with no ephemeral claim, so a fleet can see what is free.
+    /// Independent of stable `--owner`: responsible but inactive work can
+    /// match both selectors.
     #[arg(long)]
     pub unclaimed: bool,
     /// Only tasks with this status. Repeatable, and any of them matches.
@@ -6613,6 +13903,7 @@ impl SelectArgs {
         }
         Ok(aplan_core::select::Selector {
             cuts: self.cut.clone(),
+            phases: self.phase.clone(),
             tags: self.tag.clone(),
             owners: self.owner.clone(),
             statuses,
@@ -6633,8 +13924,19 @@ impl SelectArgs {
 /// `every_formatted_command_declares_a_surface`, so a new command with a
 /// `--format` cannot quietly accept everything.
 pub const COMMAND_SURFACES: &[(&str, Surface, Option<&str>)] = &[
+    (
+        "capture",
+        Surface::Action,
+        Some("one capture creation preview or result"),
+    ),
+    ("inbox", Surface::Report, Some("the capture inbox")),
     ("check", Surface::Diagnostics, None),
     ("verify", Surface::Diagnostics, None),
+    (
+        "test",
+        Surface::Catalogue,
+        Some("the configured test evidence catalogue"),
+    ),
     // The third column is what this command prints, when the surface's own noun
     // undersells it. `show` renders *one task*, and saying so is why a reader
     // who asked for `sarif` understands the refusal rather than only receiving
@@ -6665,6 +13967,21 @@ pub const COMMAND_SURFACES: &[(&str, Surface, Option<&str>)] = &[
     ("summary", Surface::Report, None),
     ("tasks", Surface::Report, None),
     ("critical-path", Surface::Report, None),
+    (
+        "blueprint",
+        Surface::Action,
+        Some("one blueprint preview or application result"),
+    ),
+    (
+        "dep",
+        Surface::Action,
+        Some("one dependency rewrite preview or application result"),
+    ),
+    (
+        "rekey",
+        Surface::Report,
+        Some("the completed id migration and possible prose references"),
+    ),
     ("graph", Surface::Graph, None),
     ("roadmap", Surface::Document, None),
     ("deprecations", Surface::Document, None),
@@ -6748,13 +14065,15 @@ fn format_for(command: &str, value: &str) -> Result<Format> {
             if elsewhere.is_empty() {
                 String::new()
             } else {
+                let rendered = format
+                    .surfaces()
+                    .iter()
+                    .map(|surface| surface.describe().to_string())
+                    .collect::<Vec<_>>();
                 format!(
                     "; `{}` renders {}, which {} {}",
                     format.as_str(),
-                    format
-                        .surfaces()
-                        .first()
-                        .map_or("something else", |s| s.describe()),
+                    list_of_str(&rendered),
                     and_list(&elsewhere),
                     if elsewhere.len() == 1 { "does" } else { "do" }
                 )
@@ -6806,7 +14125,7 @@ fn cmd_vacuity(root: &std::path::Path, format: &str, select: &SelectArgs) -> Res
         return Ok(EXIT_VIOLATIONS);
     }
     let selector = select.selector()?;
-    let keep = selected_ids(&plan, &selector)?;
+    let keep = selected_ids(root, &plan, &selector)?;
     let tasks: Vec<&aplan_core::task::Task> = plan
         .tasks
         .iter()
@@ -6816,7 +14135,14 @@ fn cmd_vacuity(root: &std::path::Path, format: &str, select: &SelectArgs) -> Res
     // The configuration too, so a rule it switched off is reported as not run
     // rather than as having checked its subjects (`A1-269`).
     let (config, config_dir) = config_at(root)?;
-    let opts = resolve_check_options(&config, config_dir.as_deref(), false, None, false);
+    let opts = resolve_check_options(
+        &config,
+        config_dir.as_deref(),
+        false,
+        None,
+        false,
+        Some(plan_repository(root)),
+    );
     let mut off = aplan_core::vacuity::switched_off(&plan, &opts);
     off.extend(resolver_side_off(&config, &tasks));
     let report = aplan_core::vacuity::of_with(&tasks, &off);
@@ -6907,7 +14233,7 @@ fn cmd_deprecations(root: &std::path::Path, format: &str) -> Result<u8> {
         return Ok(EXIT_VIOLATIONS);
     }
     let tasks: Vec<&aplan_core::task::Task> = plan.tasks.iter().map(|lt| &lt.task).collect();
-    let graph = aplan_core::Graph::new(tasks.iter().copied());
+    let graph = build_graph(tasks.iter().copied());
     let report = aplan_core::deprecation::of(&tasks, &graph.roadmap());
 
     if markdown {
@@ -6936,7 +14262,7 @@ fn cmd_paths(
     // Milestones carry no `paths` and no work, exactly as every other rollup
     // reads them.
     let selector = select.selector()?;
-    let keep = selected_ids(&plan, &selector)?;
+    let keep = selected_ids(root, &plan, &selector)?;
     let tasks: Vec<&aplan_core::task::Task> = plan
         .tasks
         .iter()
@@ -7044,8 +14370,9 @@ fn cmd_stale(
             .unwrap_or(DEFAULT_STALE_DAYS),
     );
 
+    let claims = aplan_app::claims::snapshot(root, &plan)?;
     let selector = select.selector()?;
-    let keep = selected_ids(&plan, &selector)?;
+    let keep = selected_ids_with_claims(&plan, &selector, Some(&claims))?;
     // Paths as git names them: relative to the repository, whatever the caller
     // typed to reach the plan.
     let repo_root = std::fs::canonicalize(repo).unwrap_or_else(|_| repo.to_path_buf());
@@ -7113,7 +14440,7 @@ fn cmd_stale(
         }
     };
 
-    let graph = Graph::new(plan.tasks.iter().map(|lt| &lt.task));
+    let graph = build_graph(plan.tasks.iter().map(|lt| &lt.task));
     let ready: std::collections::BTreeSet<&str> =
         graph.ready().iter().map(|t| t.id.as_str()).collect();
 
@@ -7130,13 +14457,17 @@ fn cmd_stale(
             fresh += 1;
             continue;
         }
+        let claim = claims.claim(&lt.task.id).cloned();
         stale.push(aplan_output::StaleTask {
             id: lt.task.id.clone(),
             title: lt.task.title.clone(),
             status: lt.task.status.to_string(),
             idle_days,
             ready: ready.contains(lt.task.id.as_str()),
-            held_by: lt.task.owner.clone(),
+            owner: lt.task.owner.clone(),
+            held_by: claim.as_ref().map(|record| record.holder.clone()),
+            claim_age_seconds: claims.age_seconds(&lt.task.id),
+            claim,
         });
     }
     // Readiest first, then idlest, then by id: what a reader can pick up now,
@@ -7154,6 +14485,8 @@ fn cmd_stale(
         tasks: stale,
         fresh,
         untracked,
+        coordination: claims.scope,
+        claim_observed_at_epoch_seconds: claims.observed_at_epoch_seconds,
     };
     render_tolerant(|| aplan_output::render_stale(&report, format))?;
     // Always `0`: this is advice, and advice does not fail a build (`A1-020`).
@@ -7175,7 +14508,14 @@ fn cmd_attest(
     let plan = load_checked(root)?;
     let (config, config_dir) = config_at(repo)?;
     let policy = verdict_policy(&config, false, false);
-    let check_opts = resolve_check_options(&config, config_dir.as_deref(), false, None, false);
+    let check_opts = resolve_check_options(
+        &config,
+        config_dir.as_deref(),
+        false,
+        None,
+        false,
+        Some(plan_repository(root)),
+    );
     refuse_absent_external_roots(&check_opts)?;
 
     let unloadable = load_errors(&plan);
@@ -7204,19 +14544,22 @@ fn cmd_attest(
     // reporting one of *its* tasks as a verify finding sends the reader to fix
     // the wrong thing (`A1-040`, its audit).
     aplan_attest::refuse_dirty(repo).map_err(anyhow::Error::from)?;
-    let mut report = validate(&plan, &check_opts);
+    let mut report = timed("validate", || validate(&plan, &check_opts));
     let opts = aplan_evidence::VerifyOptions {
-        traces_root: None,
+        detect_drift: check_opts.detect_drift,
+        traces_root: check_opts.traces_root.clone(),
         execute,
         test_runner: config.test.clone(),
         max_unrelated_files: config.evidence.as_ref().and_then(|e| e.max_unrelated_files),
+        observation_inputs: config
+            .evidence
+            .as_ref()
+            .and_then(|e| e.observation_inputs.clone()),
         url_check: config.url.clone(),
         // An attestation says this plan verified, so it says what `verify` says
         // (`A1-313`).
         version: config.version.clone(),
-        config_file: config_dir
-            .as_deref()
-            .map(|d| d.join(aplan_config::CONFIG_FILE)),
+        config_file: selected_config_file(config_dir.as_deref()),
     };
     let evidence = aplan_evidence::verify(&plan, repo, &opts)
         .context("resolving evidence against the repository")?;
@@ -7255,8 +14598,8 @@ fn cmd_attest(
         aplan_attest::attest(&plan, repo, tool, execute, unproven).map_err(anyhow::Error::from)?;
     let document = attestation.to_json();
     if let Some(note_ref) = attach_note {
-        let oid =
-            aplan_attest::attach_note(repo, note_ref, &document).map_err(anyhow::Error::from)?;
+        let oid = aplan_attest::attach_note(repo, note_ref, &attestation.commit, &document)
+            .map_err(anyhow::Error::from)?;
         errln!(
             "attached {oid} to {} on `refs/notes/{note_ref}`; read it with `git notes \
              --ref={note_ref} show`",
@@ -7342,7 +14685,7 @@ fn cmd_due(root: &std::path::Path, args: &DueArgs) -> Result<u8> {
     };
 
     let selector = select.selector()?;
-    let keep = selected_ids(&plan, &selector)?;
+    let keep = selected_ids(root, &plan, &selector)?;
     let mut due = Vec::new();
     let mut waiting = 0usize;
     for lt in &plan.tasks {
@@ -7431,7 +14774,7 @@ fn cmd_version(root: &std::path::Path, args: &VersionArgs) -> Result<u8> {
     let policy = config.version.clone().unwrap_or_default();
     let floors = policy.floors();
     let tasks: Vec<_> = plan.tasks.iter().map(|lt| &lt.task).collect();
-    let graph = Graph::new(tasks.iter().copied());
+    let graph = build_graph(tasks.iter().copied());
 
     let Some(id) = id else {
         return cmd_version_next(&plan, &graph, repo, &policy, floors, format);
@@ -7700,18 +15043,18 @@ fn cmd_why(root: &std::path::Path, id: &str, all: bool, format: &str) -> Result<
     }
     let walk = aplan_mcp::tools::walk_for(all);
     if format == Format::Json {
-        let answer =
-            aplan_mcp::tools::why_of(&plan, id, walk).map_err(|e| anyhow::anyhow!("{e}"))?;
-        return write_json(&answer, "aplan/why/v1");
+        let answer = timed("project", || aplan_mcp::tools::why_of(&plan, id, walk))
+            .map_err(|e| anyhow::anyhow!("{e}"))?;
+        return timed("render", || write_json(&answer, "aplan/why/v1"));
     }
     let tasks: Vec<_> = plan.tasks.iter().map(|lt| &lt.task).collect();
-    let graph = Graph::new(tasks.iter().copied());
+    let graph = build_graph(tasks.iter().copied());
 
     let Some(task) = graph.get(id) else {
         anyhow::bail!("no task `{id}` in this plan");
     };
     let blockers = graph.why_blocked(id, walk);
-    let unknown = graph.direct_unknown_blockers(id);
+    let unknown = graph.unknown_blockers(id, walk);
     // A parked task is blocked by a decision, not by an edge. Saying
     // "ready: nothing blocks it" about a task whose status is literally
     // `blocked` is the tool contradicting its own plan.
@@ -7975,7 +15318,7 @@ fn cmd_export_agents_md(
     // property of the plan rather than of its progress. A plan that did not load
     // still has ids, so this does not refuse -- but a plan with none teaches
     // nothing and the block simply says less.
-    let plan = aplan_core::load_plan(root);
+    let plan = load_checked(root)?;
     let contract = agent_contract(root, config_dir.as_deref(), &config, &plan);
     let wb = written_by();
     let block = aplan_output::render_agents_md(
@@ -8177,7 +15520,8 @@ fn mcp_agents_block(
     config_dir: Option<&std::path::Path>,
     config: &aplan_config::Config,
 ) -> Options {
-    let plan = aplan_core::load_plan(root);
+    let plan = load_store_snapshot(root, false, false)
+        .map_or_else(|_| aplan_core::load_plan(root), |snapshot| snapshot.plan);
     with_agents_block(options, root, config_dir, config, &plan)
 }
 
@@ -8225,29 +15569,6 @@ fn policy_is_this_trees_own(root: &std::path::Path) -> bool {
     }
 }
 
-/// The `AGENTS.md` a repository's generated block would live in.
-///
-/// The same root the MCP server resolves for git: the config's directory when
-/// one was discovered, and the plan's repository otherwise. A named `--config`
-/// says where config values resolve and nothing about where the repository is,
-/// which is the distinction `A1-155` drew.
-fn agents_md_path(root: &std::path::Path, config_dir: Option<&std::path::Path>) -> PathBuf {
-    let base = if config_refused() || is_explicit_config() {
-        plan_repository(root)
-    } else {
-        config_dir.map_or_else(|| plan_repository(root), std::path::Path::to_path_buf)
-    };
-    let path = base.join("AGENTS.md");
-    // Named as a reader would type it. A discovered config's directory is
-    // absolute, and `APLAN041`'s fix line is a command to paste: an absolute
-    // path from the machine that ran the gate is the wrong thing to paste on
-    // any other, which is the frame `A1-143` drew for `APLAN018`.
-    match std::env::current_dir() {
-        Ok(cwd) => path.strip_prefix(&cwd).unwrap_or(&path).to_path_buf(),
-        Err(_) => path,
-    }
-}
-
 /// Fill in the comparison `APLAN041` needs, once the plan is loaded.
 ///
 /// Separate from [`resolve_check_options`] because the block is rendered from
@@ -8256,7 +15577,7 @@ fn agents_md_path(root: &std::path::Path, config_dir: Option<&std::path::Path>) 
 /// run `export-agents-md` is the common case, and the rule is silent for it
 /// anyway (`A1-273`).
 fn with_agents_block(
-    mut opts: Options,
+    opts: Options,
     root: &std::path::Path,
     config_dir: Option<&std::path::Path>,
     config: &aplan_config::Config,
@@ -8265,51 +15586,25 @@ fn with_agents_block(
     if !policy_is_this_trees_own(root) {
         return opts;
     }
-    // A plan that did not load whole cannot say what its own contract should
-    // contain: the block names the id convention the plan teaches, so a plan
-    // read from a subset of its files renders a subset's block. Measured before
-    // this: a repository whose task files were all unreadable reported `failed:
-    // 0 error(s), 1 warning(s) across 0 tasks`, the single finding being a stale
-    // contract that was not stale -- and the fix it named would have written a
-    // block claiming the plan teaches no id convention (`A1-273`, audit).
-    //
-    // `load_errors` rather than `loaded_cleanly`, which prints. The rule comes
-    // back the moment the plan parses, and the reader has `APLAN001` to act on
-    // meanwhile.
-    if !load_errors(plan).is_empty() {
-        return opts;
-    }
-    let path = agents_md_path(root, config_dir);
-    if !path.is_file() {
-        return opts;
-    }
-    let contract = agent_contract(root, config_dir, config, plan);
-    opts.agents_block = Some(aplan_core::AgentsBlock {
-        path,
-        current: {
-            let wb = written_by();
-            block_between_markers(&aplan_output::render_agents_md(
-                &contract,
-                Some(&aplan_output::WrittenBy {
-                    version: &wb.0,
-                    surface: &wb.1,
-                }),
-            ))
-        },
-    });
-    opts
-}
-
-/// The generated block without its own markers, which is what a file carries
-/// between them.
-fn block_between_markers(rendered: &str) -> String {
-    match aplan_core::contract::block_in(rendered) {
-        aplan_core::contract::Block::Present(inner) => inner.to_string(),
-        // The renderer writes both markers, so this is unreachable in practice;
-        // returning the whole thing makes a broken renderer a loud mismatch
-        // rather than a silent pass.
-        _ => rendered.to_string(),
-    }
+    let agent_root = if config_refused() || is_explicit_config() {
+        plan_repository(root)
+    } else {
+        config_dir.map_or_else(|| plan_repository(root), std::path::Path::to_path_buf)
+    };
+    let wb = written_by();
+    let tools = aplan_mcp::tools::TOOLS
+        .iter()
+        .map(|tool| (tool.name.to_string(), tool.description.to_string()))
+        .collect::<Vec<_>>();
+    aplan_app::configured_agents_block(
+        opts,
+        root,
+        &agent_root,
+        config,
+        plan,
+        Some((&wb.0, &wb.1)),
+        &tools,
+    )
 }
 
 /// Assemble the contract from the repository's policy and its plan's shape.
@@ -8319,84 +15614,21 @@ fn agent_contract(
     config: &aplan_config::Config,
     plan: &aplan_core::Plan,
 ) -> aplan_output::AgentContract {
-    let evidence = config.evidence.as_ref();
-    aplan_output::AgentContract {
+    let tools = aplan_mcp::tools::TOOLS
+        .iter()
+        .map(|tool| (tool.name.to_string(), tool.description.to_string()))
+        .collect::<Vec<_>>();
+    aplan_app::configured_agent_contract(
         // Relative to the repository, never as resolved on this machine. The
         // block is a committed file with a drift gate on it, and an absolute
         // path makes it disagree with itself on the next developer's checkout --
         // which is a generated artifact failing for a reason nothing in the plan
         // caused (ADR-0009).
-        plan_dir: plan_dir_for_prose(root, config_dir),
-        id_examples: aplan_interop::ids::example_ids(plan),
-        // One line per scope, in file order, described in the same words the
-        // selector uses everywhere else (`A1-183`).
-        scoped_evidence: config
-            .policy
-            .as_deref()
-            .unwrap_or_default()
-            .iter()
-            .filter_map(|p| {
-                let sel = p.when.selector().unwrap_or_default();
-                let kinds = p.evidence.as_ref()?.require_min_strength.as_ref()?;
-                let requirement = if kinds.is_empty() {
-                    "no evidence strength is required".to_string()
-                } else {
-                    format!(
-                        "a `done` task must cite {} evidence",
-                        kinds
-                            .iter()
-                            .map(|k| format!("`{}`", k.as_str()))
-                            .collect::<Vec<_>>()
-                            .join(" or ")
-                    )
-                };
-                Some((sel.describe().join(", "), requirement))
-            })
-            .collect(),
-        min_strength: evidence
-            .and_then(|e| e.require_min_strength.as_ref())
-            .map(|k| k.iter().map(|kind| kind.as_str().to_string()).collect())
-            .unwrap_or_default(),
-        exempt_tags: evidence
-            .and_then(|e| e.exempt_tags.as_ref())
-            .cloned()
-            .unwrap_or_default(),
-        advisory: config.advisory.clone().unwrap_or_default(),
-        switches: [
-            (
-                aplan_output::Switch::DenyWarnings,
-                config.deny_warnings.unwrap_or(false),
-            ),
-            (
-                aplan_output::Switch::DetectDrift,
-                config.detect_drift.unwrap_or(false),
-            ),
-            (
-                aplan_output::Switch::RequireCutMembership,
-                config.require_cut_membership.unwrap_or(false),
-            ),
-            (
-                aplan_output::Switch::RequireEffort,
-                config.require_effort.unwrap_or(true),
-            ),
-            (aplan_output::Switch::UrlCheck, config.url.is_some()),
-        ]
-        .into_iter()
-        .filter_map(|(switch, on)| on.then_some(switch))
-        .collect(),
-        runners: config
-            .test
-            .as_ref()
-            // A runner may be unnamed, which is the single-runner form: it has
-            // nothing to call itself and the sentence below reads better for it.
-            .map(|rs| rs.all().iter().filter_map(|r| r.name.clone()).collect())
-            .unwrap_or_default(),
-        runner_count: config.test.as_ref().map_or(0, |rs| rs.all().len()),
-        tools: aplan_mcp::tools::TOOLS
-            .iter()
-            .map(|t| (t.name.to_string(), t.description.to_string()))
-            .collect(),
-    }
+        plan_dir_for_prose(root, config_dir),
+        config,
+        plan,
+        &tools,
+    )
 }
 
 /// `aplan check-docs`, the gate every adopter rebuilds (`A1-148`).
@@ -8584,6 +15816,60 @@ fn check_docs_human(
 /// `ROADMAP.md` and an absolute path are one document. A config entry naming a
 /// document this run was not given is not a finding: `check-docs docs/foo.md`
 /// must not report every cut in `ROADMAP.md` because the config mentions it.
+fn configured_document_inputs(
+    config: &aplan_config::Config,
+    config_dir: Option<&std::path::Path>,
+) -> aplan_app::DocumentInputs {
+    let Some(docs) = config.docs.as_ref() else {
+        return aplan_app::DocumentInputs::default();
+    };
+    let base = config_dir.unwrap_or_else(|| std::path::Path::new("."));
+    let paths = match docs.document_paths(base) {
+        Ok(paths) if !paths.is_empty() => paths,
+        Ok(_) => {
+            return aplan_app::DocumentInputs {
+                state: aplan_app::DocumentInputState::Unavailable(
+                    "the configured document set resolved to no files".to_string(),
+                ),
+                documents: Vec::new(),
+            };
+        }
+        Err(error) => {
+            return aplan_app::DocumentInputs {
+                state: aplan_app::DocumentInputState::Unavailable(error.to_string()),
+                documents: Vec::new(),
+            };
+        }
+    };
+    let documents = paths
+        .into_iter()
+        .map(|path| {
+            let label = path
+                .strip_prefix(base)
+                .unwrap_or(&path)
+                .display()
+                .to_string();
+            let membership = membership_shape(config, config_dir, &path).map(|shape| match shape {
+                aplan_interop::docs::DeclaredBy::Line(marker) => {
+                    aplan_app::DocumentMembership::Line(marker)
+                }
+                aplan_interop::docs::DeclaredBy::Table => aplan_app::DocumentMembership::Table,
+            });
+            let content = std::fs::read_to_string(&path).map_err(|error| error.to_string());
+            aplan_app::DocumentInput {
+                label,
+                path,
+                content,
+                membership,
+            }
+        })
+        .collect();
+    aplan_app::DocumentInputs {
+        state: aplan_app::DocumentInputState::Configured,
+        documents,
+    }
+}
+
 fn membership_shape(
     config: &aplan_config::Config,
     config_dir: Option<&std::path::Path>,
@@ -8635,9 +15921,9 @@ fn cmd_check_docs(
     // to prevent, arriving from the tool itself (`A1-148`).
     if aplan_interop::docs::Vocabulary::of(&ids).is_empty() {
         anyhow::bail!(
-            "this plan's ids teach no prefix (an id ending in digits, like `T-042`, teaches \
-             `T-`), so nothing in a document can be told from an ordinary word; `check-docs` \
-             checked nothing"
+            "this plan's ids teach no prefix (an id with a numeric core, like `T-042` or \
+             `M-p0-design`, teaches its family), so nothing in a document can be told from an \
+             ordinary word; `check-docs` checked nothing"
         );
     }
 
@@ -8645,6 +15931,29 @@ fn cmd_check_docs(
     // rather than per document: it is the plan's copy of the fact, and the
     // documents hold the other one.
     let (config, config_dir) = config_at(root)?;
+    let implicit = paths.is_empty();
+    let declared_paths;
+    let paths = if implicit {
+        let Some(docs) = config.docs.as_ref() else {
+            anyhow::bail!(
+                "no documents were passed and `.aplan.yml` declares none; pass paths for a \
+                 one-off check, or declare `docs.paths`"
+            );
+        };
+        let base = config_dir
+            .as_deref()
+            .unwrap_or_else(|| std::path::Path::new("."));
+        declared_paths = docs.document_paths(base)?;
+        if declared_paths.is_empty() {
+            anyhow::bail!(
+                "no documents were passed and `.aplan.yml` declares none; pass paths for a \
+                 one-off check, or declare `docs.paths`"
+            );
+        }
+        declared_paths.as_slice()
+    } else {
+        paths
+    };
     //
     // Cuts only. A release is a milestone too (ADR-0022), and its `blocked_by`
     // holds the *cuts* it closes rather than work, so asking a document to
@@ -8666,15 +15975,25 @@ fn cmd_check_docs(
     let mut findings: Vec<(String, aplan_interop::docs::Reference, Vec<&str>)> = Vec::new();
     let mut disagreements: Vec<(String, aplan_interop::docs::MembershipProblem)> = Vec::new();
     for path in paths {
+        let shown = if implicit {
+            config_dir
+                .as_deref()
+                .and_then(|base| path.strip_prefix(base).ok())
+                .unwrap_or(path)
+                .display()
+                .to_string()
+        } else {
+            path.display().to_string()
+        };
         let text =
             std::fs::read_to_string(path).with_context(|| format!("reading {}", path.display()))?;
         for r in aplan_interop::docs::dangling(&text, &ids) {
             let near = aplan_interop::docs::nearest(&r.id, &ids);
-            findings.push((path.display().to_string(), r, near));
+            findings.push((shown.clone(), r, near));
         }
         if let Some(declared_by) = membership_shape(&config, config_dir.as_deref(), path) {
             for p in aplan_interop::docs::membership(&text, &milestones, &declared_by, &ids) {
-                disagreements.push((path.display().to_string(), p));
+                disagreements.push((shown.clone(), p));
             }
         }
     }
@@ -8700,7 +16019,7 @@ fn quoted(ids: &[String]) -> String {
         .join(", ")
 }
 
-/// `aplan summary`, roll the plan up by phase (tasks, effort, ready count).
+/// `aplan summary`, roll the plan up by phase or a declared tag family.
 fn cmd_summary(root: &std::path::Path, format: &str, select: &SelectArgs) -> Result<u8> {
     // `summary` renders only a table or a JSON document; reject the diagnostic
     // formats (`agent`, `github`) rather than silently collapsing them to JSON,
@@ -8712,18 +16031,258 @@ fn cmd_summary(root: &std::path::Path, format: &str, select: &SelectArgs) -> Res
     if !loaded_cleanly(&plan) {
         return Ok(EXIT_VIOLATIONS);
     }
+    let (config, _) = config_at(root)?;
+    render_summary_answer(Some(root), &plan, &config, format, select)
+}
+
+/// `aplan summary --at`, with repository-owned inputs read from one immutable
+/// commit and no checkout (`A1-194`).
+fn cmd_summary_at(
+    cli_root: Option<&std::path::Path>,
+    revision: &str,
+    format: &str,
+    select: &SelectArgs,
+) -> Result<u8> {
+    let format = format_for("summary", format)?;
+    let source = CONFIG_SOURCE
+        .get()
+        .cloned()
+        .unwrap_or(aplan_config::ConfigSource::Discover);
+
+    // Discovery itself is revision-addressed. An explicit config remains the
+    // caller's trust boundary, and --no-config remains a refusal to read one.
+    let (repo, commit, config, root) = match source {
+        aplan_config::ConfigSource::Discover => {
+            let probe = cli_root.unwrap_or_else(|| std::path::Path::new("."));
+            let repo = aplan_evidence::Repo::discover(&revision_plan_repository(probe))?;
+            let workdir = repo
+                .workdir()
+                .ok_or_else(|| anyhow::anyhow!("a historical plan needs a Git worktree"))?;
+            let commit = repo.resolve_revision(revision).ok_or_else(|| {
+                anyhow::anyhow!("revision `{revision}` does not resolve to a commit")
+            })?;
+            let (config, config_dir) =
+                config_at_revision(&repo, &commit, &workdir).map_err(config_err)?;
+            let root = cli_root.map_or_else(
+                || root_from_config(config.root.clone(), config_dir.as_deref()),
+                std::path::Path::to_path_buf,
+            );
+            (repo, commit, config, root)
+        }
+        aplan_config::ConfigSource::File(_) | aplan_config::ConfigSource::None => {
+            let (config, config_dir) = config_at(std::path::Path::new("."))?;
+            let root = cli_root.map_or_else(
+                || root_from_config(config.root.clone(), config_dir.as_deref()),
+                std::path::Path::to_path_buf,
+            );
+            let repo = aplan_evidence::Repo::discover(&revision_plan_repository(&root))?;
+            let commit = repo.resolve_revision(revision).ok_or_else(|| {
+                anyhow::anyhow!("revision `{revision}` does not resolve to a commit")
+            })?;
+            (repo, commit, config, root)
+        }
+    };
+    let workdir = repo
+        .workdir()
+        .ok_or_else(|| anyhow::anyhow!("a historical plan needs a Git worktree"))?;
+    let relative_root = repository_relative(&workdir, &root, "plan root")?;
+    let snapshot = repo
+        .plan_files_at(&commit, &relative_root)?
+        .ok_or_else(|| {
+            anyhow::anyhow!("resolved commit `{commit}` disappeared while reading it")
+        })?;
+    if !snapshot.root_found {
+        anyhow::bail!(
+            "revision `{}` does not contain plan root `{}`",
+            snapshot.commit,
+            relative_root.display()
+        );
+    }
+    let plan = load_plan_files(&root, snapshot.files);
+    errln!(
+        "aplan: summary reads committed plan at {} (resolved from `{revision}`).",
+        snapshot.commit
+    );
+    if !loaded_cleanly(&plan) {
+        return Ok(EXIT_VIOLATIONS);
+    }
+    render_summary_answer(None, &plan, &config, format, select)
+}
+
+/// Discover `.aplan.yml` in a commit from the invocation's working directory,
+/// using the same nearest-ancestor rule as filesystem discovery.
+fn config_at_revision(
+    repo: &aplan_evidence::Repo,
+    commit: &str,
+    workdir: &std::path::Path,
+) -> std::result::Result<(aplan_config::Config, Option<PathBuf>), aplan_config::Error> {
+    let cwd = std::env::current_dir().map_err(|e| aplan_config::Error::Io(e.to_string()))?;
+    let Ok(mut relative) = repository_relative(workdir, &cwd, "configuration discovery start")
+    else {
+        // An explicit root may deliberately select another repository, but
+        // config discovery cannot start in the caller's different trust
+        // domain. Preserve ADR-0047's explicit `--config`/`--no-config`
+        // boundary and make the previously generic path error actionable
+        // whether or not caller-side discovery happens to find a file
+        // (`A1-498`).
+        return Err(external_revision_discovery(
+            &cwd,
+            aplan_config::discovered_config(&cwd).as_deref(),
+            workdir,
+        ));
+    };
+    loop {
+        let candidate = relative.join(aplan_config::CONFIG_FILE);
+        if let Some(bytes) = repo
+            .checkout_blob_at(commit, &candidate)
+            .map_err(|e| aplan_config::Error::Io(e.to_string()))?
+        {
+            let path = workdir.join(&candidate);
+            let config = aplan_config::parse_config_bytes(&bytes, &path)?;
+            return Ok((config, path.parent().map(std::path::Path::to_path_buf)));
+        }
+        if !relative.pop() {
+            break;
+        }
+    }
+    if let Some(path) = aplan_config::discovered_config(&cwd)
+        && repository_relative(workdir, &path, "discovered configuration").is_err()
+    {
+        return Err(external_revision_config(&path, workdir));
+    }
+    Ok((aplan_config::Config::default(), None))
+}
+
+fn external_revision_config(
+    path: &std::path::Path,
+    workdir: &std::path::Path,
+) -> aplan_config::Error {
+    aplan_config::Error::Io(format!(
+        "revision-addressed discovery reached `{}` outside repository `{}`; select that current \
+         policy explicitly with `--config`, or refuse it with `--no-config`",
+        path.display(),
+        workdir.display()
+    ))
+}
+
+fn external_revision_discovery(
+    cwd: &std::path::Path,
+    discovered: Option<&std::path::Path>,
+    workdir: &std::path::Path,
+) -> aplan_config::Error {
+    let subject = discovered.map_or_else(
+        || format!("start `{}`", cwd.display()),
+        |path| format!("current policy `{}`", path.display()),
+    );
+    aplan_config::Error::Io(format!(
+        "revision-addressed configuration discovery {subject} is outside repository `{}`; select \
+         current policy explicitly with `--config`, or select no policy with `--no-config`",
+        workdir.display()
+    ))
+}
+
+/// Make `path` repository-relative, including a historical root absent from the
+/// current worktree. This is deliberately lexical: following a current
+/// worktree symlink would make an old report depend on today's target. The
+/// repository reader follows the symlink stored in the selected tree instead.
+fn repository_relative(
+    workdir: &std::path::Path,
+    path: &std::path::Path,
+    what: &str,
+) -> Result<PathBuf> {
+    let repository = std::fs::canonicalize(workdir).unwrap_or_else(|_| workdir.to_path_buf());
+    let absolute = std::path::absolute(path)
+        .map(|absolute| normalize_path(&absolute))
+        .with_context(|| format!("resolving {what} `{}`", path.display()))?;
+    if let Ok(relative) = absolute.strip_prefix(&repository) {
+        return Ok(relative.to_path_buf());
+    }
+
+    // `revision_plan_repository` deliberately accepts a symlink alias to an
+    // external repository when no enclosing repository owns that lexical path.
+    // libgit2 reports the real worktree, so map only that repository prefix to
+    // the real path and keep the plan suffix lexical. Canonicalising `path`
+    // whole would reintroduce A1-194's defect where today's plan-root symlink
+    // chooses the historical target (`A1-498`).
+    if let Some(alias) = lexical_repository(&absolute)
+        && std::fs::canonicalize(&alias).is_ok_and(|real| normalize_path(&real) == repository)
+        && let Ok(relative) = absolute.strip_prefix(alias)
+    {
+        return Ok(relative.to_path_buf());
+    }
+
+    Err(anyhow::anyhow!(
+        "{what} `{}` is outside repository `{}`; a revision can only address paths in its repository",
+        path.display(),
+        repository.display()
+    ))
+}
+
+/// Lexically remove `.` and `..` from an absolute path whose final component
+/// need not exist. Canonicalisation already handles existing paths.
+fn normalize_path(path: &std::path::Path) -> PathBuf {
+    use std::path::Component;
+
+    let mut out = PathBuf::new();
+    for component in path.components() {
+        match component {
+            Component::CurDir => {}
+            Component::ParentDir => {
+                out.pop();
+            }
+            Component::Prefix(prefix) => out.push(prefix.as_os_str()),
+            Component::RootDir => out.push(component.as_os_str()),
+            Component::Normal(part) => out.push(part),
+        }
+    }
+    out
+}
+
+fn render_summary_answer(
+    root: Option<&std::path::Path>,
+    plan: &aplan_core::load::Plan,
+    config: &aplan_config::Config,
+    format: Format,
+    select: &SelectArgs,
+) -> Result<u8> {
     let tasks: Vec<_> = plan.tasks.iter().map(|lt| &lt.task).collect();
-    let graph = Graph::new(tasks.iter().copied());
+    let graph = build_graph(tasks.iter().copied());
     // The declared throughput, if any: `summary` derives its durations from it
     // (`A1-147`, ADR-0023). A repository whose `.aplan.yml` does not load has
     // already failed above, so this cannot silently report nothing.
-    let (config, _) = config_at(root)?;
     let selector = select.selector()?;
-    let keep = selected_ids(&plan, &selector)?;
-    let summary = graph
-        .summary_of(&|id| keep.contains(id))
-        .with_throughput(config.effort_days_per_week);
-    render_tolerant(|| render_summary(&summary, format))?;
+    if selector.unclaimed && root.is_none() {
+        anyhow::bail!(
+            "`summary --at` cannot select `--unclaimed`: claims are ephemeral local state and \
+             have no historical value at a Git revision"
+        );
+    }
+    let keep = match root {
+        Some(root) => selected_ids(root, plan, &selector)?,
+        None => selected_ids_with_claims(plan, &selector, None)?,
+    };
+    if let Some((family, members)) = config
+        .summary
+        .as_ref()
+        .and_then(|summary| summary.group_by.as_ref())
+        .and_then(|family| {
+            config
+                .tag_families
+                .as_ref()
+                .and_then(|families| families.get(family))
+                .map(|members| (family, members))
+        })
+    {
+        let summary = graph
+            .summary_grouped_by_of(family, members.members(), &|id| keep.contains(id))
+            .with_throughput(config.effort_days_per_week);
+        render_tolerant(|| render_grouped_summary(&summary, format))?;
+    } else {
+        let summary = graph
+            .summary_of(&|id| keep.contains(id))
+            .with_throughput(config.effort_days_per_week);
+        render_tolerant(|| render_summary(&summary, format))?;
+    }
     Ok(EXIT_OK)
 }
 
@@ -8743,6 +16302,28 @@ fn dispatch_placement(command: Command, cli_root: Option<PathBuf>) -> Result<u8>
         Command::Drop { ids, cut, verdict } => {
             cmd_drop(&resolve_root(cli_root)?, &ids, cut, verdict)
         }
+        Command::Park {
+            ids,
+            reason,
+            revisit_at,
+            tags,
+            verdict,
+        } => cmd_portfolio(
+            &resolve_root(cli_root)?,
+            ids,
+            aplan_app::PortfolioOperation::Park {
+                reason,
+                revisit_at,
+                tags,
+            },
+            verdict,
+        ),
+        Command::Unpark { ids, verdict } => cmd_portfolio(
+            &resolve_root(cli_root)?,
+            ids,
+            aplan_app::PortfolioOperation::Unpark,
+            verdict,
+        ),
         Command::Mv {
             ids,
             cut,
@@ -8755,19 +16336,13 @@ fn dispatch_placement(command: Command, cli_root: Option<PathBuf>) -> Result<u8>
             phase,
             verdict,
         ),
-        Command::Claim {
-            id,
-            as_name,
-            from,
-            verdict,
-        } => cmd_claim(
+        Command::Claim { id, as_name, from } => cmd_claim(
             &resolve_root(cli_root)?,
             &id,
             as_name.as_deref(),
             from.as_deref(),
-            verdict,
         ),
-        Command::Release { id, verdict } => cmd_release(&resolve_root(cli_root)?, &id, verdict),
+        Command::Release { id } => cmd_release(&resolve_root(cli_root)?, &id),
         Command::Start { id, verdict } => cmd_working(&resolve_root(cli_root)?, &id, true, verdict),
         Command::Stop { id, verdict } => cmd_working(&resolve_root(cli_root)?, &id, false, verdict),
         // Unreachable by construction: the caller matches these four before
@@ -8777,14 +16352,127 @@ fn dispatch_placement(command: Command, cli_root: Option<PathBuf>) -> Result<u8>
     }
 }
 
+fn cmd_portfolio(
+    root: &std::path::Path,
+    ids: Vec<String>,
+    operation: aplan_app::PortfolioOperation,
+    verdict: VerdictFlags,
+) -> Result<u8> {
+    let (config, config_dir) = config_at(root)?;
+    let plan = aplan_core::load_plan_identified(root);
+    let options = resolve_check_options(
+        &config,
+        config_dir.as_deref(),
+        false,
+        None,
+        false,
+        Some(plan_repository(root)),
+    );
+    refuse_absent_external_roots(&options)?;
+    let options = with_agents_block(options, root, config_dir.as_deref(), &config, &plan.plan);
+    let policy = verdict_policy(&config, verdict.deny_warnings, verdict.no_deny_warnings);
+    let context = aplan_app::PlanContext::new(
+        plan,
+        aplan_app::ContextInputs {
+            repository_root: plan_repository(root),
+            configuration_file: selected_config_file(config_dir.as_deref()),
+            trust: aplan_app::Trust::RepositoryRead,
+            options,
+            verdict: policy,
+        },
+    )
+    .with_captured_report_config(config)?;
+    let request = aplan_app::PortfolioRequest { ids, operation };
+    let action = match &request.operation {
+        aplan_app::PortfolioOperation::Park { .. } => "park",
+        aplan_app::PortfolioOperation::Unpark => "unpark",
+    };
+    let preview = aplan_app::preview_portfolio(&context, &request)
+        .map_err(|error| portfolio_error(error, action))?;
+    for line in preview.change_set().diagnostics().lines() {
+        write_stdout(&format!("{line}\n"))?;
+    }
+    if preview.change_set().disposition() == aplan_app::ChangeDisposition::Denied {
+        write_stdout(
+            "aplan: refusing the parking change because its complete post-state is denied; no plan bytes were written\n",
+        )?;
+        return Ok(EXIT_VIOLATIONS);
+    }
+    let verb = match &request.operation {
+        aplan_app::PortfolioOperation::Park { .. } => "parked",
+        aplan_app::PortfolioOperation::Unpark => "unparked",
+    };
+    let affected = preview.affected().to_vec();
+    match aplan_app::commit_change_set(&context, preview.into_change_set()) {
+        aplan_app::CommitOutcome::Applied(_) => {
+            let id_style = aplan_output::style::ID;
+            let ids = affected
+                .iter()
+                .map(|id| {
+                    format!(
+                        "{id_style}{}{id_style:#}",
+                        aplan_output::sanitize::visible(id)
+                    )
+                })
+                .collect::<Vec<_>>()
+                .join(", ");
+            write_stdout(&format!("{verb} {} task(s): {}\n", affected.len(), ids))?;
+            Ok(EXIT_OK)
+        }
+        aplan_app::CommitOutcome::Stale { change, .. } => {
+            let reason = change
+                .stale_reason()
+                .unwrap_or("the identified plan or configuration changed");
+            write_stdout(&format!(
+                "aplan: refusing to {verb} work: {reason}; no prepared plan bytes were written. Reload and try again.\n"
+            ))?;
+            Ok(EXIT_VIOLATIONS)
+        }
+        aplan_app::CommitOutcome::Denied(_) => {
+            write_stdout(&format!(
+                "aplan: refusing to {verb} work: the reviewed post-state is denied; no plan bytes were written\n"
+            ))?;
+            Ok(EXIT_VIOLATIONS)
+        }
+        aplan_app::CommitOutcome::NoOp(_) => {
+            anyhow::bail!("internal: parking preview unexpectedly produced no task changes")
+        }
+        aplan_app::CommitOutcome::PublicationFailed { error, report, .. } => {
+            anyhow::bail!(
+                "parking publication failed ({:?}): {error}; inspect every reported path before retrying",
+                report.state()
+            )
+        }
+    }
+}
+
+/// Preserve the application failure category at the portfolio CLI boundary.
+///
+/// `PortfolioError` deliberately carries a typed rewrite source. Letting
+/// `anyhow` format the enum erased that source's `Produced` category, so an
+/// internal writer failure said "internal" while exiting as usage. This is the
+/// same exhaustive adapter as dependency mutation, kept separate because the
+/// application surfaces have distinct error enums (`A1-720`).
+fn portfolio_error(error: aplan_app::PortfolioError, action: &str) -> anyhow::Error {
+    match error {
+        aplan_app::PortfolioError::Arguments(message)
+        | aplan_app::PortfolioError::Plan(message)
+        | aplan_app::PortfolioError::Refused(message) => anyhow::anyhow!(message),
+        aplan_app::PortfolioError::Rewrite { id, source } => close_err(action, &id, &source),
+    }
+}
+
 /// Who this invocation is acting as, or a refusal naming every source.
 ///
 /// One function so `claim` and anything after it resolve identically, and so
 /// the precedence lives in `aplan_interop::identity` where it is tested without
 /// an environment (`A1-359`).
-fn acting_as(root: &std::path::Path, as_name: Option<&str>) -> Result<String> {
+fn acting_as(
+    root: &std::path::Path,
+    as_name: Option<&str>,
+) -> Result<aplan_interop::identity::ResolvedIdentity> {
     let sources = aplan_interop::identity::from_environment(as_name, root);
-    aplan_interop::identity::resolve(&sources).map_err(anyhow::Error::from)
+    aplan_interop::identity::resolve_detailed(&sources).map_err(anyhow::Error::from)
 }
 
 /// A name as it is safe to print back.
@@ -8796,161 +16484,112 @@ fn shown(name: &str) -> String {
     aplan_output::sanitize::visible(name).into_owned()
 }
 
-/// `aplan claim`: record who holds a task (`A1-359`).
+/// `aplan claim`: record an ephemeral holder in the Git-common claim store.
 ///
-/// **The mutual exclusion is the compare-and-swap, not the name.** Two agents
-/// both read "unassigned", both write their own name, and without a swap the
-/// last writer wins while `check` reports a perfectly valid plan -- two actors
-/// doing the same work, and nothing in the plan able to say so. `save_one`
-/// carries `expected`, so the second writer is told the file no longer holds
-/// what it read. That is the invariant hand-editing cannot maintain, which is
-/// the bar `A1-077` set for a write surface and the reason this one earns its
-/// place where a bare `status` setter did not.
-///
-/// Identity is a *label* here rather than a boundary: nothing stops a caller
-/// passing `--as` somebody else's name, and nothing needs to, because the
-/// exclusion does not depend on who you say you are.
+/// The store is shared by linked worktrees. Its guarded replacement is the
+/// mutual exclusion; the holder remains an attribution label, not an identity
+/// boundary. Durable task `owner` is deliberately untouched (`A1-531`).
 fn cmd_claim(
     root: &std::path::Path,
     id: &str,
     as_name: Option<&str>,
     from: Option<&str>,
-    verdict: VerdictFlags,
 ) -> Result<u8> {
-    let plan = aplan_core::load_plan(root);
+    let plan = load_checked(root)?;
     if !loaded_cleanly(&plan) {
-        anyhow::bail!("the plan did not load; run `aplan check` before mutating it");
+        anyhow::bail!("the plan did not load; run `aplan check` before claiming work");
     }
     let lt = locate(&plan, id)?;
-    let who = acting_as(root, as_name)?;
-
-    let original = std::fs::read_to_string(&lt.path)
-        .with_context(|| format!("reading {}", lt.path.display()))?;
-    // **The holder as this file holds it now, not as the plan snapshot had
-    // it** (`A1-359`, found by its own concurrency test). The snapshot is taken
-    // before this read, so a claimant that loaded the plan while the task was
-    // free and read the file after somebody else claimed it would check the
-    // snapshot (free, so no `--from` needed), then compare-and-swap against the
-    // content it had just read (which matches), and win -- two callers told
-    // they hold one task, which is the single thing this command exists to
-    // prevent. Measured at two of eight.
-    //
-    // Checking the bytes that are about to be swapped closes it: the check and
-    // the `expected` now describe the same state, and anything that moves
-    // between them fails the swap.
-    let current = task_of(&original, id)?;
-
-    // **Both sides named**, which is `amend --replace-evidence`'s idiom: a
-    // takeover that only names the taker leaves a diff nobody can read back.
-    match (current.owner.as_deref(), from) {
-        (Some(holder), None) => anyhow::bail!(
-            "`{id}` is held by `{}`; naming them is how a takeover is recorded, so run \
-             `aplan claim {id} --from {}` if you mean to take it, or \
-             `aplan release {id}` first if they are done with it",
-            shown(holder),
-            shown(holder)
-        ),
-        (Some(holder), Some(named)) if holder != named => anyhow::bail!(
-            "`{id}` is held by `{}`, not `{}`; `--from` is checked rather than taken on \
-             trust, because a stale name means you are taking it from somebody you \
-             have not seen",
-            shown(holder),
-            shown(named)
-        ),
-        (None, Some(named)) => anyhow::bail!(
-            "`{id}` is held by nobody, so there is nothing to take it from: drop \
-             `--from {}` and claim it",
-            shown(named)
-        ),
-        _ => {}
+    if lt.task.status.is_terminal() {
+        anyhow::bail!(
+            "cannot claim `{id}` because it is `{}`; claims name work happening now, while its \
+             durable `owner` may still record responsibility for completed work",
+            lt.task.status
+        );
     }
-
-    let updated = aplan_core::close::set_owner(&original, Some(&who))
-        .map_err(|e| close_err("claim", id, &e))?;
-    // **The gate runs**, because `owner` is not inert: a `policy` scope may
-    // select on it, so a claim can move a task into a stricter evidence
-    // standard and make a closure that was clean report a finding. Judged
-    // before the write, like every other mutation (`A1-113`).
-    let after = aplan_core::mutation::with_replaced(&plan, id, task_of(&updated, id)?);
-    refuse_bad_mutation(root, &format!("claim `{id}`"), &plan, &after, verdict)?;
-    save_one(&lt.path, &original, &updated, "claim")?;
+    let who = acting_as(root, as_name)?;
+    let change = aplan_app::claims::claim(
+        root,
+        &plan,
+        id,
+        &who,
+        from,
+        aplan_app::claims::now_epoch_seconds(),
+    )?;
 
     let mut out = String::new();
-    let _ = writeln!(out, "`{id}` is held by `{}`", shown(&who));
-    if let Some(holder) = current.owner.as_deref() {
-        let _ = writeln!(out, "  taken from `{}`", shown(holder));
+    let _ = writeln!(
+        out,
+        "`{id}` is held by `{}` since Unix time {}",
+        shown(&change.current.holder),
+        change.current.claimed_at_epoch_seconds
+    );
+    let _ = writeln!(
+        out,
+        "  origin: {}",
+        shown_claim_origin(&change.current.origin)
+    );
+    if let Some(displaced) = &change.displaced {
+        let _ = writeln!(
+            out,
+            "  taken from `{}` (claimed at Unix time {}, origin: {})",
+            shown(&displaced.holder),
+            displaced.claimed_at_epoch_seconds,
+            shown_claim_origin(&displaced.origin)
+        );
     }
-    let _ = writeln!(out, "  -> {}", lt.path.display());
-    // Starting is a separate act, and saying so once is better than a reader
-    // assuming a claim moved the status.
-    if current.status == aplan_core::Status::Todo {
+    if let Some(scope) = &change.scope.id {
+        let _ = writeln!(out, "  local coordination scope: {scope}");
+    }
+    if let Some(owner) = lt.task.owner.as_deref() {
+        let _ = writeln!(out, "  stable task owner remains `{}`", shown(owner));
+    }
+    for warning in &change.warnings {
+        let _ = writeln!(out, "  warning: {}", shown(warning));
+    }
+    if lt.task.status == aplan_core::Status::Todo {
         let _ = writeln!(
             out,
             "  still `todo`: `aplan start {id}` records that work has begun"
-        );
-    } else if current.status.is_terminal() {
-        // Allowed rather than refused: this is the only way to attribute
-        // finished work without hand-editing the file, and `owner` on a closed
-        // task is ordinary -- this plan carries 228 of them. Said out loud so a
-        // caller who meant a live task sees it (`A1-359`, audit).
-        let _ = writeln!(
-            out,
-            "  note: `{id}` is `{}`, so this records who did it rather than who is on it",
-            current.status
         );
     }
     write_stdout(&out)?;
     Ok(EXIT_OK)
 }
 
-/// `aplan release`: drop a claim, naming whose it was (`A1-359`).
+/// `aplan release`: drop a local claim, naming whose it was (`A1-531`).
 ///
 /// **Anybody may run it**, deliberately. A claim with no expiry needs a way out
-/// that does not depend on the holder being available, and the alternative --
-/// only the holder may release -- turns an abandoned claim into something no
-/// command can clear, which is the hand-editing this exists to remove. The
-/// two-step bypass (release, then claim) is therefore open, and it leaves a
-/// record: this names the holder it dropped, and the diff shows it.
-fn cmd_release(root: &std::path::Path, id: &str, verdict: VerdictFlags) -> Result<u8> {
-    let plan = aplan_core::load_plan(root);
-    if !loaded_cleanly(&plan) {
-        anyhow::bail!("the plan did not load; run `aplan check` before mutating it");
-    }
-    let lt = locate(&plan, id)?;
-    // **The holder as this file holds it now** (`A1-359`, audit). Read from the
-    // plan snapshot, this could report the wrong displaced holder: the snapshot
-    // is taken before the file, so a release could say it dropped a claim that
-    // was already gone, or name a holder a concurrent takeover had replaced.
-    // The write was never wrong -- the compare-and-swap refuses an interleaving
-    // it cannot account for, measured at five of eight under contention -- but
-    // the *record* of what was displaced is what this command exists to leave.
-    //
-    // It also makes the two surfaces agree: `aplan_release` has read the file
-    // since it was written, and `mcp_parity` cannot see a difference that only
-    // shows up under concurrency.
-    let original = std::fs::read_to_string(&lt.path)
-        .with_context(|| format!("reading {}", lt.path.display()))?;
-    let current = task_of(&original, id)?;
-    let Some(holder) = current.owner.clone() else {
-        // Not an error: a caller clearing a claim that is already clear got the
-        // outcome it asked for. Said plainly so a script does not have to parse
-        // a failure to learn nothing needed doing.
-        write_stdout(&format!("`{id}` is held by nobody; nothing to release\n"))?;
-        return Ok(EXIT_OK);
+/// that does not depend on the holder or even the task still being present.
+fn cmd_release(root: &std::path::Path, id: &str) -> Result<u8> {
+    let plan = load_checked(root)?;
+    let task_exists = plan.tasks.iter().any(|loaded| loaded.task.id == id);
+    let change = aplan_app::claims::release(root, id)?;
+    let Some(released) = change.released else {
+        if task_exists {
+            write_stdout(&format!("`{id}` is held by nobody; nothing to release\n"))?;
+            return Ok(EXIT_OK);
+        }
+        anyhow::bail!("no task or local claim has id `{id}`");
     };
-
-    let updated =
-        aplan_core::close::set_owner(&original, None).map_err(|e| close_err("release", id, &e))?;
-    let after = aplan_core::mutation::with_replaced(&plan, id, task_of(&updated, id)?);
-    refuse_bad_mutation(root, &format!("release `{id}`"), &plan, &after, verdict)?;
-    save_one(&lt.path, &original, &updated, "release")?;
-
     write_stdout(&format!(
-        "`{id}` released; it was held by `{}`\n  -> {}\n",
-        shown(&holder),
-        lt.path.display()
-    ))
-    .map(|()| EXIT_OK)
+        "`{id}` released; it was held by `{}` since Unix time {}\n  origin: {}\n",
+        shown(&released.holder),
+        released.claimed_at_epoch_seconds,
+        shown_claim_origin(&released.origin)
+    ))?;
+    Ok(EXIT_OK)
+}
+
+fn shown_claim_origin(origin: &aplan_core::ClaimOrigin) -> String {
+    match (&origin.host, &origin.worktree) {
+        (Some(host), Some(worktree)) => {
+            format!("host `{}`, worktree `{}`", shown(host), shown(worktree))
+        }
+        (Some(host), None) => format!("host `{}`", shown(host)),
+        (None, Some(worktree)) => format!("worktree `{}`", shown(worktree)),
+        (None, None) => "unknown local origin".to_string(),
+    }
 }
 
 /// `aplan start` and `aplan stop`: set and clear `in_progress` (`A1-359`).
@@ -8971,7 +16610,7 @@ fn cmd_working(
     starting: bool,
     verdict: VerdictFlags,
 ) -> Result<u8> {
-    let plan = aplan_core::load_plan(root);
+    let plan = load_checked(root)?;
     if !loaded_cleanly(&plan) {
         anyhow::bail!("the plan did not load; run `aplan check` before mutating it");
     }
@@ -9047,15 +16686,40 @@ fn cmd_working(
     // Who is on it is a different question, and an unclaimed task that somebody
     // has started is the coordination gap this pair exists to close.
     if starting {
-        match current.owner.as_deref() {
-            None => {
+        // A corrupt or unavailable local claim store must not block this
+        // independent durable status transition. Report that coordination is
+        // unknown; never turn the failure into "held by nobody" (`A1-531`).
+        let claims = aplan_app::claims::snapshot(root, &plan).unwrap_or_else(|error| {
+            aplan_core::ClaimSnapshot::unavailable(
+                aplan_app::claims::now_epoch_seconds(),
+                error.to_string(),
+            )
+        });
+        match claims.claim(id) {
+            None if claims.scope.available => {
                 let _ = writeln!(
                     out,
                     "  held by nobody: `aplan claim {id}` records who is on it"
                 );
             }
-            Some(holder) => {
-                let _ = writeln!(out, "  held by `{}`", shown(holder));
+            Some(claim) => {
+                let _ = writeln!(
+                    out,
+                    "  held by `{}` since Unix time {}",
+                    shown(&claim.holder),
+                    claim.claimed_at_epoch_seconds
+                );
+            }
+            None => {
+                let _ = writeln!(
+                    out,
+                    "  claim coordination unavailable: {}",
+                    claims
+                        .scope
+                        .reason
+                        .as_deref()
+                        .unwrap_or("no local coordination scope")
+                );
             }
         }
     }
@@ -9069,7 +16733,7 @@ fn cmd_drop(
     by_cut: bool,
     verdict: VerdictFlags,
 ) -> Result<u8> {
-    let plan = aplan_core::load_plan(root);
+    let plan = load_checked(root)?;
     if !loaded_cleanly(&plan) {
         anyhow::bail!("the plan did not load; run `aplan check` before mutating it");
     }
@@ -9186,6 +16850,7 @@ fn cmd_drop(
     // milestone, which is every member of the cut orphaned at once.
     save_batch(&writes, "drop")?;
 
+    let _progress_write = ProgressWriteGuard::new();
     let mut out = anstream::stdout().lock();
     for lt in &targets {
         writeln!(
@@ -9296,6 +16961,493 @@ type CutMove = (
     Vec<(String, aplan_interop::cut::PendingRemoval)>,
 );
 
+fn rekeyed(values: &[String], old: &str, new: &str) -> Vec<String> {
+    values
+        .iter()
+        .map(|value| if value == old { new } else { value }.to_string())
+        .collect()
+}
+
+fn rekey_task_file(
+    original: &str,
+    task: &aplan_core::Task,
+    old: &str,
+    new: &str,
+) -> Result<String> {
+    let mut updated = if task.id == old {
+        aplan_core::close::set_id(original, new).map_err(|e| close_err("rekey", old, &e))?
+    } else {
+        original.to_string()
+    };
+    if task.blocked_by.iter().any(|id| id == old) {
+        updated =
+            aplan_core::close::rekey_blocked_by(&updated, &rekeyed(&task.blocked_by, old, new))
+                .map_err(|e| close_err("rekey", &task.id, &e))?;
+    }
+    if task.prefer_after.iter().any(|id| id == old) {
+        updated =
+            aplan_core::close::rekey_prefer_after(&updated, &rekeyed(&task.prefer_after, old, new))
+                .map_err(|e| close_err("rekey", &task.id, &e))?;
+    }
+    if task.ratified_by.iter().any(|id| id == old) {
+        updated =
+            aplan_core::close::set_ratified_by(&updated, &rekeyed(&task.ratified_by, old, new))
+                .map_err(|e| close_err("rekey", &task.id, &e))?;
+    }
+    if task.contains.iter().any(|id| id == old) {
+        updated = aplan_core::close::set_contains(&updated, &rekeyed(&task.contains, old, new))
+            .map_err(|e| close_err("rekey", &task.id, &e))?;
+    }
+    Ok(updated)
+}
+
+fn rekey_plan_model(
+    plan: &aplan_core::Plan,
+    old: &str,
+    new: &str,
+    destination: &std::path::Path,
+) -> aplan_core::Plan {
+    let mut out = aplan_core::mutation::clone_of(plan);
+    for loaded in &mut out.tasks {
+        loaded.task.blocked_by = rekeyed(&loaded.task.blocked_by, old, new);
+        loaded.task.prefer_after = rekeyed(&loaded.task.prefer_after, old, new);
+        loaded.task.ratified_by = rekeyed(&loaded.task.ratified_by, old, new);
+        loaded.task.contains = rekeyed(&loaded.task.contains, old, new);
+        if loaded.task.id == old {
+            loaded.task.id = new.to_string();
+            loaded.path = destination.to_path_buf();
+        }
+    }
+    out
+}
+
+fn conventional_rekey_path(path: &std::path::Path, old: &str, new: &str) -> PathBuf {
+    let conventional = path
+        .file_name()
+        .is_some_and(|name| name == std::ffi::OsStr::new(&format!("{old}.md")));
+    if conventional {
+        path.with_file_name(format!("{new}.md"))
+    } else {
+        path.to_path_buf()
+    }
+}
+
+fn rekey_config_model(config: &mut aplan_config::Config, old: &str, new: &str) {
+    for policy in config.policy.iter_mut().flatten() {
+        for cut in &mut policy.when.cut {
+            if cut == old {
+                *cut = new.to_string();
+            }
+        }
+    }
+}
+
+fn is_within(path: &std::path::Path, repository: &std::path::Path) -> bool {
+    let absolute = |path: &std::path::Path| {
+        path.canonicalize()
+            .or_else(|_| std::path::absolute(path))
+            .unwrap_or_else(|_| path.to_path_buf())
+    };
+    absolute(path).starts_with(absolute(repository))
+}
+
+#[derive(Debug, serde::Serialize)]
+struct RekeyOccurrence {
+    path: String,
+    line: usize,
+    column: usize,
+}
+
+fn collect_text_files(dir: &std::path::Path, files: &mut BTreeSet<PathBuf>) {
+    let Ok(entries) = std::fs::read_dir(dir) else {
+        return;
+    };
+    for entry in entries.flatten() {
+        let path = entry.path();
+        let name = entry.file_name();
+        let Ok(kind) = entry.file_type() else {
+            continue;
+        };
+        if kind.is_dir() {
+            if name != ".git" && name != "target" {
+                collect_text_files(&path, files);
+            }
+        } else if kind.is_file() {
+            files.insert(path);
+        }
+    }
+}
+
+fn prose_occurrences(
+    repository: &std::path::Path,
+    config: &aplan_config::Config,
+    old: &str,
+) -> Vec<RekeyOccurrence> {
+    let mut files = BTreeSet::new();
+    collect_text_files(repository, &mut files);
+    for membership in config
+        .docs
+        .as_ref()
+        .and_then(|docs| docs.membership.as_ref())
+        .into_iter()
+        .flatten()
+    {
+        files.insert(repository.join(&membership.doc));
+    }
+
+    let mut occurrences = Vec::new();
+    for path in files {
+        let Ok(bytes) = std::fs::read(&path) else {
+            continue;
+        };
+        let Ok(text) = std::str::from_utf8(&bytes) else {
+            continue;
+        };
+        let shown = path
+            .strip_prefix(repository)
+            .unwrap_or(&path)
+            .display()
+            .to_string();
+        for (line_index, line) in text.lines().enumerate() {
+            for (column, _) in line.match_indices(old).filter(|(column, _)| {
+                let before = line[..*column].chars().next_back();
+                let after_text = &line[*column + old.len()..];
+                let after = after_text.chars().next();
+                let part_of_id = |ch: char| ch.is_alphanumeric() || matches!(ch, '-' | '_' | '.');
+                // A conventional task move makes `OLD.md` stale. The dot is an
+                // id character in every other neighbour check, but suppressing
+                // this exact suffix hid the repository link most likely to be
+                // broken by the filename move (`A1-411`). It is a review list,
+                // so the possible false positive is safer than a silent link.
+                let moved_filename = after_text
+                    .strip_prefix(".md")
+                    .is_some_and(|rest| !rest.chars().next().is_some_and(part_of_id));
+                !before.is_some_and(part_of_id)
+                    && (!after.is_some_and(part_of_id) || moved_filename)
+            }) {
+                occurrences.push(RekeyOccurrence {
+                    path: shown.clone(),
+                    line: line_index + 1,
+                    column: line[..column].chars().count() + 1,
+                });
+            }
+        }
+    }
+    occurrences
+}
+
+struct PreparedRekey {
+    expected: aplan_core::Plan,
+    produced: aplan_core::Plan,
+    replacements: Vec<aplan_core::save::Replacement>,
+    relocation: aplan_core::save::Relocation,
+}
+
+fn prepare_rekey(
+    plan: &aplan_core::Plan,
+    old: &str,
+    new: &str,
+    destination: &std::path::Path,
+) -> Result<PreparedRekey> {
+    let expected = rekey_plan_model(plan, old, new, destination);
+    let mut replacements = Vec::new();
+    let mut relocation = None;
+    let mut produced = aplan_core::mutation::clone_of(plan);
+    for lt in &plan.tasks {
+        let original = std::fs::read_to_string(&lt.path)
+            .with_context(|| format!("reading {}", lt.path.display()))?;
+        let updated = rekey_task_file(&original, &lt.task, old, new)?;
+        let task = task_of(&updated, &lt.task.id)?;
+        if let Some(slot) = produced.tasks.iter_mut().find(|slot| slot.path == lt.path) {
+            slot.task = task;
+            if lt.task.id == old {
+                slot.path = destination.to_path_buf();
+            }
+        }
+        if updated == original {
+            continue;
+        }
+        if lt.task.id == old {
+            relocation = Some(aplan_core::save::Relocation {
+                from: lt.path.clone(),
+                to: destination.to_path_buf(),
+                expected: original,
+                updated,
+            });
+        } else {
+            replacements.push(aplan_core::save::Replacement {
+                path: lt.path.clone(),
+                expected: original,
+                updated,
+            });
+        }
+    }
+    for wanted in &expected.tasks {
+        let actual = produced
+            .tasks
+            .iter()
+            .find(|task| task.path == wanted.path)
+            .ok_or_else(|| anyhow::anyhow!("the rekeyed plan lost {}", wanted.path.display()))?;
+        if actual.task != wanted.task {
+            return Err(anyhow::anyhow!(
+                "the rekey rewrite of `{old}` did not produce the planned structured state"
+            )
+            .context(Bug));
+        }
+    }
+    let relocation = relocation
+        .ok_or_else(|| anyhow::anyhow!("the rekey did not prepare its source file").context(Bug))?;
+    Ok(PreparedRekey {
+        expected,
+        produced,
+        replacements,
+        relocation,
+    })
+}
+
+struct PreparedRekeyPolicy {
+    config: aplan_config::Config,
+    file: Option<PathBuf>,
+    replacement: Option<aplan_core::save::Replacement>,
+}
+
+fn prepare_rekey_policy(
+    task: &aplan_core::Task,
+    config: &aplan_config::Config,
+    config_dir: Option<&std::path::Path>,
+    repository: &std::path::Path,
+    old: &str,
+    new: &str,
+) -> Result<PreparedRekeyPolicy> {
+    let mut prepared = PreparedRekeyPolicy {
+        config: config.clone(),
+        file: None,
+        replacement: None,
+    };
+    let id_is_also_label = task.is_milestone() && aplan_core::cut_label(task) == old;
+    let policy_names_id = task.is_milestone()
+        && !id_is_also_label
+        && config
+            .policy
+            .as_deref()
+            .unwrap_or_default()
+            .iter()
+            .any(|policy| policy.when.cut.iter().any(|cut| cut == old));
+    if !policy_names_id {
+        return Ok(prepared);
+    }
+
+    let path = selected_config_file(config_dir).ok_or_else(|| {
+        anyhow::anyhow!(
+            "the selected policy names `{old}`, but no configuration file can be updated"
+        )
+    })?;
+    if !is_within(&path, repository) {
+        anyhow::bail!(
+            "the selected configuration {} is outside the plan repository and its `policy[].when.cut` names `{old}`. `rekey` never writes policy outside this repository; update or select an in-repository configuration first. Nothing was written",
+            path.display()
+        );
+    }
+    let original = std::fs::read_to_string(&path)
+        .with_context(|| format!("reading selected configuration {}", path.display()))?;
+    let updated = aplan_config::rekey_policy_cuts(&original, old, new)
+        .map_err(|e| anyhow::anyhow!("cannot rekey policy in {}: {e}", path.display()))?
+        .ok_or_else(|| {
+            anyhow::anyhow!(
+                "the parsed policy names `{old}`, but its source could not be located; nothing was written"
+            )
+        })?;
+    rekey_config_model(&mut prepared.config, old, new);
+    prepared.file = Some(path.clone());
+    prepared.replacement = Some(aplan_core::save::Replacement {
+        path,
+        expected: original,
+        updated,
+    });
+    Ok(prepared)
+}
+
+struct RekeyReport<'a> {
+    old: &'a str,
+    new: &'a str,
+    destination: &'a std::path::Path,
+    renamed: bool,
+    config_file: Option<&'a std::path::Path>,
+    repository: &'a std::path::Path,
+    occurrences: &'a [RekeyOccurrence],
+}
+
+fn write_rekey_report(format: Format, report: &RekeyReport<'_>) -> Result<u8> {
+    let RekeyReport {
+        old,
+        new,
+        destination,
+        renamed,
+        config_file,
+        repository,
+        occurrences,
+    } = report;
+    let moved_to = destination
+        .strip_prefix(repository)
+        .unwrap_or(destination)
+        .display()
+        .to_string();
+    let boundary = format!(
+        "Git history, external links, external documents and other repositories still name `{old}`; review them separately"
+    );
+    if format == Format::Json {
+        write_json(
+            &serde_json::json!({
+                "old": old,
+                "new": new,
+                "task_file": moved_to,
+                "renamed_file": renamed,
+                "config_file": config_file.map(|path| path.strip_prefix(repository).unwrap_or(path).display().to_string()),
+                "possible_prose_references": occurrences,
+                "boundary": boundary,
+            }),
+            "aplan/rekey/v1",
+        )?;
+        return Ok(EXIT_OK);
+    }
+
+    let mut out = String::new();
+    let _ = writeln!(out, "rekeyed `{}` as `{}`", shown(old), shown(new));
+    let _ = writeln!(out, "  -> {}", shown(&moved_to));
+    if let Some(path) = config_file {
+        let shown_path = path.strip_prefix(repository).unwrap_or(path);
+        let _ = writeln!(
+            out,
+            "  updated policy -> {}",
+            shown(&shown_path.display().to_string())
+        );
+    }
+    if occurrences.is_empty() {
+        let _ = writeln!(out, "possible prose references: none in repository text");
+    } else {
+        let _ = writeln!(
+            out,
+            "possible prose references (not rewritten; each may mean something else):"
+        );
+        for occurrence in *occurrences {
+            let _ = writeln!(
+                out,
+                "  {}:{}:{}",
+                shown(&occurrence.path),
+                occurrence.line,
+                occurrence.column
+            );
+        }
+    }
+    let _ = writeln!(out, "note: {}", shown(&boundary));
+    write_stdout(&out)?;
+    Ok(EXIT_OK)
+}
+
+/// `aplan rekey`, one stable-id migration over the task graph and repository
+/// policy, with prose left for adjudication.
+fn cmd_rekey(root: &std::path::Path, args: &RekeyArgs) -> Result<u8> {
+    let RekeyArgs {
+        old,
+        new,
+        allow_terminal,
+        format,
+        verdict,
+    } = args;
+    let format = format_for("rekey", format)?;
+    if old == new {
+        anyhow::bail!("`{old}` is already the requested id");
+    }
+    if !aplan_interop::emit::is_usable_id(new) {
+        anyhow::bail!(
+            "`{new}` cannot be used as a task id and file stem: use a non-empty name other than `.` or `..`, with no leading or trailing whitespace, NUL, or path separator"
+        );
+    }
+
+    let plan = load_checked(root)?;
+    if !loaded_cleanly(&plan) {
+        anyhow::bail!("the plan did not load; run `aplan check` before mutating it");
+    }
+    let source = locate(&plan, old)?;
+    let claims = aplan_app::claims::snapshot(root, &plan)?;
+    if let Some(claim) = claims.claim(old) {
+        anyhow::bail!(
+            "cannot rekey `{old}` while it is held by `{}`; run `aplan release {old}` first so \
+             the local claim cannot become an orphan or make `{new}` look free",
+            shown(&claim.holder)
+        );
+    }
+    if plan.tasks.iter().any(|lt| lt.task.id == *new) {
+        anyhow::bail!("task id `{new}` is already occupied; nothing was written");
+    }
+    aplan_interop::cut::check_task_id_label(&plan, new, Some(old))?;
+    if source.task.status.is_terminal() && !allow_terminal {
+        anyhow::bail!(
+            "`{old}` is `{}`, so its id may already be a durable citation. Re-run with `--allow-terminal` only after reviewing that Git history, external links, external documents and other repositories will still name `{old}`",
+            source.task.status
+        );
+    }
+
+    let destination = conventional_rekey_path(&source.path, old, new);
+    let relocating = destination != source.path;
+    if relocating && destination.symlink_metadata().is_ok() {
+        anyhow::bail!(
+            "{} already exists, so `{new}` has no free conventional filename; nothing was written",
+            destination.display()
+        );
+    }
+
+    let mut prepared = prepare_rekey(&plan, old, new, &destination)?;
+
+    let repository = plan_repository(root);
+    let (config, config_dir) = config_at(root)?;
+    let policy = prepare_rekey_policy(
+        &source.task,
+        &config,
+        config_dir.as_deref(),
+        &repository,
+        old,
+        new,
+    )?;
+    if let Some(replacement) = policy.replacement {
+        prepared.replacements.push(replacement);
+    }
+
+    refuse_bad_mutation_with_config(
+        root,
+        &format!("rekey `{old}` as `{new}`"),
+        // A stable-id migration is a graph isomorphism. Diagnostics that named
+        // the old id acquire the new spelling, which makes an ordinary delta
+        // mistake every pre-existing finding for a new one. Compare the bytes
+        // produced with the independently built semantic post-state instead:
+        // any rewrite defect is still added, while a dirty plan remains
+        // repairable under the mutation contract.
+        &prepared.expected,
+        &prepared.produced,
+        false,
+        false,
+        *verdict,
+        &policy.config,
+        config_dir.as_deref(),
+    )?;
+
+    save_relocation(&prepared.replacements, &prepared.relocation, "rekey")?;
+
+    let occurrences = prose_occurrences(&repository, &policy.config, old);
+    write_rekey_report(
+        format,
+        &RekeyReport {
+            old,
+            new,
+            destination: &destination,
+            renamed: relocating,
+            config_file: policy.file.as_deref(),
+            repository: &repository,
+            occurrences: &occurrences,
+        },
+    )
+}
+
 fn plan_cut_move(plan: &aplan_core::Plan, ids: &[String], cut: &str) -> Result<CutMove> {
     let leaving = cuts_being_left(plan, ids, cut)?;
 
@@ -9320,7 +17472,7 @@ fn cmd_mv(
     phase: Option<u32>,
     verdict: VerdictFlags,
 ) -> Result<u8> {
-    let plan = aplan_core::load_plan(root);
+    let plan = load_checked(root)?;
     if !loaded_cleanly(&plan) {
         anyhow::bail!("the plan did not load; run `aplan check` before mutating it");
     }
@@ -9429,6 +17581,7 @@ fn cmd_mv(
         .collect();
     save_batch(&batch, "mv")?;
 
+    let _progress_write = ProgressWriteGuard::new();
     let mut out = anstream::stdout().lock();
     if let (Some(cut), Some((_, pending)), Some(placement)) = (cut, moving, placement) {
         let placed = aplan_interop::cut::Placed {
@@ -9444,9 +17597,9 @@ fn cmd_mv(
                 writeln!(out, "`{id}` was already in `{cut}`")?;
             }
         }
-        // Reporting only: the batch above wrote every one of these or none of
-        // them. This loop used to be where each source was written, and where
-        // the message describing a task left in two cuts had to live (`A1-234`).
+        // Reporting only after the batch returned success. This loop used to be
+        // where each source was written, and where the message describing a task
+        // left in two cuts had to live (`A1-234`).
         for (from, removal) in pending {
             let removed = removal.into_removed();
             for id in &removed.removed {
@@ -9468,10 +17621,11 @@ fn cmd_mv(
 /// Write a batch through the one writer that refuses to clobber, saying which
 /// command is asking (`A1-234`).
 ///
-/// Shared because both callers need the same three sentences and the same
-/// promise in each of them: **nothing was written**. A refusal a reader cannot
-/// act on is a refusal they work around, and "run it again" is only honest
-/// while the plan is untouched.
+/// Shared because both callers need the same advice. Conflict, lock,
+/// compare-and-swap and staging refusals leave the plan untouched; a late I/O
+/// failure in the rename loop is reported as an I/O failure and makes no
+/// all-or-none claim. A refusal a reader cannot act on is a refusal they work
+/// around, and "run it again" is only honest while the plan is untouched.
 /// One task file, replaced only while it still holds what the caller read.
 ///
 /// The single-file shape of [`save_batch`], and the reason it exists rather than
@@ -9526,6 +17680,19 @@ fn save_batch(batch: &[aplan_core::save::Replacement], command: &str) -> Result<
     })
 }
 
+/// The relocation form of [`save_batch`], with the same retry advice.
+fn save_relocation(
+    batch: &[aplan_core::save::Replacement],
+    relocation: &aplan_core::save::Relocation,
+    command: &str,
+) -> Result<()> {
+    let retry = format!("aplan {command}");
+    aplan_core::save::replace_all_relocating(batch, relocation).map_err(|e| {
+        let advice = aplan_core::save::advice(&e, &retry);
+        anyhow::Error::new(SaveFailed { advice, kind: e })
+    })
+}
+
 /// How long a command that mints an id keeps trying when another writer takes it
 /// first (`A1-230`).
 ///
@@ -9565,9 +17732,52 @@ fn lost_the_id(error: &anyhow::Error) -> bool {
         .is_some_and(|e| matches!(e, aplan_interop::emit::EmitError::Exists { .. }))
 }
 
-/// Run `attempt` until it stops losing an id race, or `deadline` passes
-/// (`A1-230`). Every caller passes [`ID_RACE_DEADLINE`]; it is a parameter so a
-/// test can reach the refusal without holding real contention open for seconds.
+/// A plan load that lost its stable candidate set before this command could
+/// inspect or write anything (`A1-628`).
+fn plan_snapshot_changed(error: &anyhow::Error) -> bool {
+    error.chain().any(|source| {
+        source
+            .downcast_ref::<std::io::Error>()
+            .is_some_and(aplan_app::is_transient_plan_snapshot_change)
+    })
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum AuthoringContention {
+    IdTaken,
+    SnapshotChanged,
+}
+
+fn authoring_contention(error: &anyhow::Error, minted: bool) -> Option<AuthoringContention> {
+    if minted && lost_the_id(error) {
+        Some(AuthoringContention::IdTaken)
+    } else if plan_snapshot_changed(error) {
+        Some(AuthoringContention::SnapshotChanged)
+    } else {
+        None
+    }
+}
+
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+struct AuthoringRetryStats {
+    attempts: u32,
+    id_collisions: u32,
+    snapshot_changes: u32,
+}
+
+impl AuthoringRetryStats {
+    fn record(&mut self, contention: AuthoringContention) {
+        match contention {
+            AuthoringContention::IdTaken => self.id_collisions += 1,
+            AuthoringContention::SnapshotChanged => self.snapshot_changes += 1,
+        }
+    }
+}
+
+/// Run `attempt` until bounded pre-write authoring contention stops, or
+/// `deadline` passes (`A1-230`, `A1-628`). Every caller passes
+/// [`ID_RACE_DEADLINE`]; it is a parameter so a test can reach the refusal
+/// without holding real contention open for seconds.
 ///
 /// **Every attempt re-reads the plan**, which is the whole point: the id that
 /// collided is now taken, so minting again from the plan as it is finds the next
@@ -9578,22 +17788,57 @@ fn lost_the_id(error: &anyhow::Error) -> bool {
 ///
 /// `add` is no longer a pure function of the plan it read, and that is the trade
 /// taken deliberately: the id a caller gets now depends on who else was writing.
-/// The count comes back so the caller can say so, because contention a fleet
-/// cannot see is contention it never fixes.
+/// Candidate-set instability is the other safe retry: the store returns it only
+/// when it cannot establish the plan snapshot with which an attempt begins, so
+/// that attempt has not reached a write. A file changed after the snapshot is
+/// deliberately distinct and retains its ordinary refusal.
+///
+/// The cause counts come back so the caller can say what happened rather than
+/// misreporting every retry as an id collision.
 fn with_id_retry<T>(
     minted: bool,
     deadline: std::time::Duration,
-    mut attempt: impl FnMut() -> Result<T>,
-) -> Result<(T, u32)> {
+    attempt: impl FnMut() -> Result<T>,
+) -> Result<(T, AuthoringRetryStats)> {
     let started = std::time::Instant::now();
-    let mut tries = 0u32;
+    with_id_retry_timing(
+        minted,
+        deadline,
+        attempt,
+        || started.elapsed(),
+        aplan_interop::ids::race_backoff,
+        std::thread::sleep,
+    )
+}
+
+/// The retry loop with time and waiting supplied by its caller.
+///
+/// Production supplies [`std::time::Instant`], the real jittered backoff and
+/// [`std::thread::sleep`] above. Keeping the policy in this function lets tests
+/// advance a controlled clock through the exact same attempt/deadline path:
+/// an instrumented or heavily loaded host cannot turn a scheduler measurement
+/// into the verdict those tests are meant to prove (`A1-599`).
+fn with_id_retry_timing<T>(
+    minted: bool,
+    deadline: std::time::Duration,
+    mut attempt: impl FnMut() -> Result<T>,
+    mut elapsed: impl FnMut() -> std::time::Duration,
+    mut backoff: impl FnMut(u32) -> std::time::Duration,
+    mut wait: impl FnMut(std::time::Duration),
+) -> Result<(T, AuthoringRetryStats)> {
+    let mut stats = AuthoringRetryStats::default();
     loop {
-        tries += 1;
+        stats.attempts += 1;
         match attempt() {
-            Ok(value) => return Ok((value, tries)),
-            Err(e) if minted && lost_the_id(&e) => {
-                if started.elapsed() < deadline {
-                    std::thread::sleep(aplan_interop::ids::race_backoff(tries));
+            Ok(value) => return Ok((value, stats)),
+            Err(e) => {
+                let Some(contention) = authoring_contention(&e, minted) else {
+                    return Err(e);
+                };
+                stats.record(contention);
+                let took = elapsed();
+                if took < deadline {
+                    wait(backoff(stats.attempts));
                     continue;
                 }
                 // **What a script can act on** (`A1-230`, and `A1-109`'s
@@ -9607,32 +17852,61 @@ fn with_id_retry<T>(
                 // command recommends a feature because it saw a condition, and
                 // a fleet that reaches this deadline is exactly the reader
                 // `docs/upgrading.md` is written for.
-                return Err(e.context(format!(
-                    "another writer took every id this minted, {tries} times over \
-                     {}ms; nothing was written. Run the command again to mint from \
-                     the plan as it is now",
-                    started.elapsed().as_millis()
-                )));
+                let context = match (stats.id_collisions > 0, stats.snapshot_changes > 0) {
+                    (true, false) => format!(
+                        "another writer took every id this minted, {} times over \
+                         {}ms; nothing was written. Run the command again to mint from \
+                         the plan as it is now",
+                        stats.attempts,
+                        took.as_millis()
+                    ),
+                    (false, true) => format!(
+                        "another writer kept changing the plan before this command could write, \
+                         {} attempts over {}ms; nothing was written. Run the command again \
+                         against the plan as it is now",
+                        stats.attempts,
+                        took.as_millis()
+                    ),
+                    (true, true) => format!(
+                        "other writers changed the plan or took ids this command minted across \
+                         {} attempts over {}ms; nothing was written. Run the command again \
+                         against the plan as it is now",
+                        stats.attempts,
+                        took.as_millis()
+                    ),
+                    (false, false) => unreachable!("the retry branch recorded its cause"),
+                };
+                return Err(e.context(context));
             }
-            Err(e) => return Err(e),
         }
     }
 }
 
-/// What a run says about an id race it won on a later attempt.
+/// What a run says about bounded authoring contention it won on a later attempt.
 ///
 /// Only when there was one, and it names the cost rather than the mechanism: a
 /// reader who sees this on every run has a fleet contending for sequential ids,
 /// which is the condition `docs/upgrading.md` discusses. Per ADR-0024 this does
 /// not recommend a config key.
-fn raced_for_the_id(tries: u32, elapsed: std::time::Duration) -> Option<String> {
-    (tries > 1).then(|| {
-        format!(
-            "  another writer held the id this was going to use; minted again \
-             ({tries} attempts over {}ms)",
-            elapsed.as_millis()
-        )
-    })
+fn authoring_contention_note(
+    retries: AuthoringRetryStats,
+    elapsed: std::time::Duration,
+) -> Option<String> {
+    let cause = match (retries.id_collisions > 0, retries.snapshot_changes > 0) {
+        (false, false) => return None,
+        (true, false) => "another writer held the id this was going to use; minted again",
+        (false, true) => {
+            "another writer changed the plan while this command read it; retried from a fresh snapshot"
+        }
+        (true, true) => {
+            "other writers changed the plan and held ids this command was going to use; retried"
+        }
+    };
+    Some(format!(
+        "  {cause} ({} attempts over {}ms)",
+        retries.attempts,
+        elapsed.as_millis()
+    ))
 }
 
 /// Open every file this move will write, before any of them is written.
@@ -9756,10 +18030,11 @@ fn report_phase(edits: &[PhaseEdit], phase: u32, out: &mut impl std::io::Write) 
 
 /// `aplan tasks`, the plan as data.
 ///
-/// `summary` rolls up by phase and by nothing else, so a project that types its
+/// `summary` originally rolled up only by phase, so a project that types its
 /// work another way kept a hand-maintained second copy of the effort table, of
-/// exactly the fact this tool owns (`A1-075`). A `--group-by` flag would have
-/// answered one question and invited the next.
+/// exactly the fact this tool owns (`A1-075`). Configured family grouping now
+/// answers one deliberate alternate view; this data surface remains the answer
+/// for every ad hoc rollup.
 fn cmd_tasks(root: &std::path::Path, format: &str, select: &SelectArgs) -> Result<u8> {
     let format = format_for("tasks", format)?;
     let plan = load_checked(root)?;
@@ -9769,17 +18044,23 @@ fn cmd_tasks(root: &std::path::Path, format: &str, select: &SelectArgs) -> Resul
         return Ok(EXIT_VIOLATIONS);
     }
     let selector = select.selector()?;
+    let claims = aplan_app::claims::snapshot(root, &plan)?;
     let tasks: Vec<_> = plan.tasks.iter().map(|lt| &lt.task).collect();
-    let graph = Graph::new(tasks.iter().copied());
+    let graph = build_graph(tasks.iter().copied());
     refuse_a_release_as_a_cut(&plan, &graph, &selector.cuts)?;
     // Rows built over the whole plan, then narrowed: every derived field on a
     // row -- `ready`, `rank`, `cut` -- is the answer the whole plan gives, which
     // is the only answer that is true (`A1-214`).
-    let mut export = graph.task_rows();
+    let mut export = graph.task_rows().with_claims(&claims);
     export.tasks.retain(|row| {
-        graph
-            .get(&row.id)
-            .is_some_and(|t| selector.matches(t, row.cut.as_deref(), row.milestone.as_deref()))
+        graph.get(&row.id).is_some_and(|t| {
+            selector.matches_claimed(
+                t,
+                row.cut.as_deref(),
+                row.milestone.as_deref(),
+                Some(row.claim.is_some()),
+            )
+        })
     });
     render_tolerant(|| render_tasks(&export, format))?;
     Ok(EXIT_OK)
@@ -9811,7 +18092,7 @@ fn cmd_critical_path(root: &std::path::Path, args: &CriticalPathArgs) -> Result<
         return Ok(EXIT_VIOLATIONS);
     }
     let tasks: Vec<_> = plan.tasks.iter().map(|lt| &lt.task).collect();
-    let graph = Graph::new(tasks.iter().copied());
+    let graph = build_graph(tasks.iter().copied());
     // **What is left, measured rather than subtracted** (`A1-352`). Not the
     // live tail of the chain above: a chain that is mostly finished can be the
     // longest one while a shorter all-live chain is the real bound on what
@@ -9946,7 +18227,7 @@ fn cmd_roadmap(root: &std::path::Path, args: &RoadmapArgs) -> Result<u8> {
         return Ok(EXIT_VIOLATIONS);
     }
     let tasks: Vec<_> = plan.tasks.iter().map(|lt| &lt.task).collect();
-    let mut roadmap = Graph::new(tasks.iter().copied()).roadmap();
+    let mut roadmap = build_graph(tasks.iter().copied()).roadmap();
     // Grouped only where the repository asked for it; the config load already
     // refused a `group_by` naming a family `tag_families` does not declare, so
     // the members are here to be grouped by (`A1-078`).
@@ -10006,6 +18287,1423 @@ mod suggestion_tests {
 mod tests {
     use super::*;
     use aplan_config::Config;
+
+    fn parsed_graph_args(args: &[&str]) -> GraphArgs {
+        let cli = Cli::try_parse_from(
+            std::iter::once("aplan")
+                .chain(std::iter::once("graph"))
+                .chain(args.iter().copied()),
+        )
+        .expect("representative graph command parses");
+        let Command::Graph(args) = cli.command else {
+            panic!("graph command must parse as graph")
+        };
+        args
+    }
+
+    #[test]
+    fn capture_argument_parsers_keep_human_shortcuts_bounded_and_typed() {
+        let source = parse_capture_source("tracker:opaque:key").expect("source");
+        assert_eq!(source.namespace, "tracker");
+        assert_eq!(source.key, "opaque:key");
+        assert!(
+            parse_capture_source("missing-separator")
+                .expect_err("missing namespace separator")
+                .to_string()
+                .contains("namespace:opaque-key")
+        );
+
+        for (value, expected) in [
+            ("open", Some(aplan_core::capture::CaptureState::Open)),
+            (
+                "promoted",
+                Some(aplan_core::capture::CaptureState::Promoted),
+            ),
+            (
+                "discarded",
+                Some(aplan_core::capture::CaptureState::Discarded),
+            ),
+            ("all", None),
+        ] {
+            assert_eq!(parse_capture_state_filter(value).expect("state"), expected);
+        }
+        let state_error = parse_capture_state_filter("unknown")
+            .expect_err("unknown state")
+            .to_string();
+        assert!(
+            state_error.contains("not a capture state") && state_error.contains("discarded"),
+            "{state_error}"
+        );
+
+        for (value, expected) in [
+            ("actionable", aplan_core::capture::RevisitFilter::Actionable),
+            ("deferred", aplan_core::capture::RevisitFilter::Deferred),
+            ("all", aplan_core::capture::RevisitFilter::All),
+        ] {
+            assert_eq!(
+                parse_revisit_filter(value).expect("revisit filter"),
+                expected
+            );
+        }
+        let revisit_error = parse_revisit_filter("unknown")
+            .expect_err("unknown revisit filter")
+            .to_string();
+        assert!(
+            revisit_error.contains("not a revisit filter") && revisit_error.contains("deferred"),
+            "{revisit_error}"
+        );
+
+        for (subcommand, expected) in [
+            (["show", "I-0"].as_slice(), "show"),
+            (["amend", "I-0"].as_slice(), "amend"),
+            (["discard", "I-0"].as_slice(), "discard"),
+            (["restore", "I-0"].as_slice(), "restore"),
+        ] {
+            let cli = Cli::try_parse_from(
+                ["aplan", "inbox"]
+                    .into_iter()
+                    .chain(subcommand.iter().copied()),
+            )
+            .expect("inbox command parses");
+            let Command::Inbox(args) = cli.command else {
+                panic!("command must remain inbox")
+            };
+            assert_eq!(
+                inbox_command_name(args.command.as_ref().expect("nested command")),
+                expected
+            );
+        }
+
+        let empty = CapturePromotionArgs::default();
+        assert!(empty.is_empty());
+        let selected = CapturePromotionArgs {
+            phase: Some(2),
+            ..CapturePromotionArgs::default()
+        };
+        assert_eq!(selected.value().and_then(|value| value.phase), Some(2));
+        assert_eq!(
+            capture_body_input(Some("body"), None, false, "").unwrap(),
+            Some("body".into())
+        );
+        let body_dir = tempfile::Builder::new()
+            .tempdir_in(aplan_core::fixture::fixture_root())
+            .expect("tempdir");
+        let body_path = body_dir.path().join("body.md");
+        std::fs::write(&body_path, "body from file").expect("body file");
+        assert_eq!(
+            capture_body_input(None, body_path.to_str(), false, "").unwrap(),
+            Some("body from file".into())
+        );
+        assert_eq!(capture_body_input(None, None, false, "").unwrap(), None);
+    }
+
+    #[test]
+    fn capture_and_inbox_clap_contracts_preserve_safe_defaults() {
+        let cli = Cli::try_parse_from(["aplan", "inbox"]).expect("default inbox view parses");
+        let Command::Inbox(args) = cli.command else {
+            panic!("command must remain inbox")
+        };
+        assert!(args.command.is_none());
+        assert_eq!(args.state, "open");
+        assert_eq!(args.revisit, "actionable");
+        assert_eq!(args.limit, 50);
+        assert_eq!(args.format, "human");
+
+        let selector = human_capture_selector("I-01K8Z3").expect("canonical human prefix");
+        let aplan_app::CaptureSelector::HumanPrefix(prefix) = selector else {
+            panic!("the human CLI must never create an exact machine selector")
+        };
+        assert_eq!(prefix.as_str(), "I-01K8Z3");
+        for invalid in ["I-", "01K8Z3", "I-01k8z3", "I-01ILOU"] {
+            assert!(
+                human_capture_selector(invalid).is_err(),
+                "`{invalid}` is not a canonical bounded human prefix"
+            );
+        }
+
+        assert!(
+            Cli::try_parse_from([
+                "aplan",
+                "capture",
+                "idea",
+                "--body",
+                "literal",
+                "--body-file",
+                "body.md",
+            ])
+            .is_err(),
+            "capture must reject competing body sources"
+        );
+
+        let cli = Cli::try_parse_from([
+            "aplan",
+            "inbox",
+            "promote",
+            "I-01K8Z3A4H00000000000000000",
+            "--task-id",
+            "A-1",
+        ])
+        .expect("promotion parses");
+        let Command::Inbox(inbox) = cli.command else {
+            panic!("command must remain inbox")
+        };
+        let Some(InboxCommand::Promote(promote)) = inbox.command else {
+            panic!("nested command must remain promotion")
+        };
+        let directory = tempfile::Builder::new()
+            .tempdir_in(aplan_core::fixture::fixture_root())
+            .expect("tempdir");
+        let missing = directory.path().join("missing-plan");
+        let error = cmd_capture_promote(&missing, &promote, Format::Json)
+            .expect_err("a missing plan root must stop promotion before preview");
+        assert!(error.to_string().contains("is not a directory"), "{error}");
+    }
+
+    /// Child-process lifecycle tests hold the public bytes; this companion
+    /// drives the CLI adapter itself so coverage includes request construction
+    /// and the guarded dry-run boundary.
+    #[test]
+    fn capture_adapter_previews_in_process_without_publishing() {
+        let (_directory, plan, _source) = blueprint_adapter_fixture();
+        let cli = Cli::try_parse_from([
+            "aplan",
+            "capture",
+            "Adapter preview",
+            "--body",
+            "reviewed body",
+            "--label",
+            "review",
+            "--dry-run",
+            "--format",
+            "json",
+        ])
+        .expect("capture preview parses");
+        let Command::Capture(args) = cli.command else {
+            panic!("command must remain capture")
+        };
+
+        assert_eq!(cmd_capture(&plan, &args).expect("capture preview"), EXIT_OK);
+        assert!(
+            !plan.join(".inbox").exists(),
+            "a capture preview must not publish its staging directory"
+        );
+    }
+
+    #[test]
+    fn capture_and_inbox_adapters_publish_and_read_in_process() {
+        let (_directory, plan, _source) = blueprint_adapter_fixture();
+        let cli = Cli::try_parse_from([
+            "aplan",
+            "capture",
+            "Adapter publication",
+            "--body",
+            "retained detail",
+            "--label",
+            "review",
+            "--source",
+            "unit:adapter",
+            "--format",
+            "json",
+        ])
+        .expect("capture publication parses");
+        let Command::Capture(args) = cli.command else {
+            panic!("command must remain capture")
+        };
+        assert_eq!(cmd_capture(&plan, &args).expect("capture apply"), EXIT_OK);
+
+        let mut records: Vec<_> = std::fs::read_dir(plan.join(".inbox"))
+            .expect("published inbox")
+            .map(|entry| entry.expect("capture record").path())
+            .collect();
+        records.sort();
+        assert_eq!(records.len(), 1, "one request must publish one record");
+        let record = std::fs::read_to_string(&records[0]).expect("capture YAML");
+        for expected in [
+            "title: Adapter publication",
+            "body: retained detail",
+            "labels:",
+            "- review",
+            "namespace: unit",
+            "key: adapter",
+        ] {
+            assert!(
+                record.contains(expected),
+                "missing `{expected}` in:\n{record}"
+            );
+        }
+
+        let cli =
+            Cli::try_parse_from(["aplan", "inbox", "--format", "json"]).expect("inbox list parses");
+        let Command::Inbox(args) = cli.command else {
+            panic!("command must remain inbox")
+        };
+        assert_eq!(cmd_inbox(&plan, &args).expect("inbox list"), EXIT_OK);
+    }
+
+    #[test]
+    fn import_and_citation_refusals_name_the_accepted_syntax() {
+        let import = |format: &str, implemented_as: &str, id_prefix: Option<&str>| ImportArgs {
+            source: "source.md".into(),
+            format: format.into(),
+            out: None,
+            dry_run: true,
+            phase: 1,
+            implemented_as: implemented_as.into(),
+            as_of: None,
+            cut: None,
+            id_prefix: id_prefix.map(str::to_string),
+            tags: Vec::new(),
+        };
+        assert!(
+            import_options(&import("checklist", "todo", Some("bad_prefix")))
+                .expect_err("invalid prefix")
+                .to_string()
+                .contains("must be alphanumeric")
+        );
+        assert!(
+            import_options(&import("checklist", "later", None))
+                .expect_err("invalid implementation policy")
+                .to_string()
+                .contains("expected: todo, done")
+        );
+        assert!(
+            citation("unknown:value", false)
+                .expect_err("unknown evidence kind")
+                .to_string()
+                .contains("commit, test, file, url")
+        );
+    }
+
+    #[test]
+    fn receipt_producer_preserves_authenticated_coordinates_and_privilege() {
+        for (input, expected) in [
+            (
+                ReceiptPrivilege::Trusted,
+                aplan_attest::receipt::ProducerPrivilege::Trusted,
+            ),
+            (
+                ReceiptPrivilege::Untrusted,
+                aplan_attest::receipt::ProducerPrivilege::Untrusted,
+            ),
+        ] {
+            let producer = receipt_producer(&TestReceiptArgs {
+                runner: "runner".into(),
+                output: "-".into(),
+                producer_repository: "owner/repository".into(),
+                producer_workflow: "workflow/job".into(),
+                producer_run_id: "123".into(),
+                producer_event: "push".into(),
+                producer_privilege: input,
+            });
+            assert_eq!(producer.repository, "owner/repository");
+            assert_eq!(producer.workflow, "workflow/job");
+            assert_eq!(producer.run_id, "123");
+            assert_eq!(producer.event, "push");
+            assert_eq!(producer.privilege, expected);
+        }
+    }
+
+    #[test]
+    fn capture_publication_refuses_a_snapshot_that_moved_after_preview() {
+        let dir = tempfile::Builder::new()
+            .tempdir_in(aplan_core::fixture::fixture_root())
+            .expect("tempdir");
+        let context = aplan_app::PlanContext::new(
+            aplan_core::load_plan_identified(dir.path()),
+            aplan_app::ContextInputs {
+                repository_root: dir.path().to_path_buf(),
+                configuration_file: None,
+                trust: aplan_app::Trust::Hermetic,
+                options: aplan_core::Options::default(),
+                verdict: aplan_core::Verdict::default(),
+            },
+        )
+        .with_report_config(Config::default());
+        let preview = aplan_app::preview_capture_create_with_id(
+            &context,
+            &aplan_core::capture::CaptureCreate {
+                title: "captured".into(),
+                kind: None,
+                body: None,
+                labels: None,
+                revisit_at: None,
+                profile: None,
+                promotion_defaults: None,
+                source: None,
+                origin: aplan_core::capture::CaptureOrigin::Cli,
+            },
+            &aplan_core::capture::FixedClock(1_767_225_600),
+            "I-01K8Z3A4H00000000000000000",
+        )
+        .expect("preview");
+        let inbox = dir.path().join(aplan_core::capture::INBOX_DIR);
+        std::fs::create_dir_all(&inbox).expect("inbox");
+        std::fs::write(inbox.join("concurrent-member"), "moved").expect("concurrent change");
+
+        let error = finish_capture_mutation(&context, preview, false, Format::Json)
+            .expect_err("stale guarded snapshot");
+        assert!(
+            error.to_string().contains("changed after preview"),
+            "{error}"
+        );
+    }
+
+    fn capture_promotion_adapter_fixture() -> (
+        tempfile::TempDir,
+        aplan_app::PlanContext,
+        aplan_app::CapturePromotionPreview,
+    ) {
+        const CAPTURE_ID: &str = "I-01K8Z3A4H00000000000000000";
+        let dir = tempfile::Builder::new()
+            .tempdir_in(aplan_core::fixture::fixture_root())
+            .expect("tempdir");
+        let context = aplan_app::PlanContext::new(
+            aplan_core::load_plan_identified(dir.path()),
+            aplan_app::ContextInputs {
+                repository_root: dir.path().to_path_buf(),
+                configuration_file: None,
+                trust: aplan_app::Trust::Hermetic,
+                options: aplan_core::Options::default(),
+                verdict: aplan_core::Verdict::default(),
+            },
+        )
+        .with_report_config(Config::default());
+        let clock = aplan_core::capture::FixedClock(1_767_225_600);
+        let creation = aplan_app::preview_capture_create_with_id(
+            &context,
+            &aplan_core::capture::CaptureCreate {
+                title: "promoted adapter capture".into(),
+                kind: None,
+                body: Some("retained body".into()),
+                labels: None,
+                revisit_at: None,
+                profile: None,
+                promotion_defaults: None,
+                source: None,
+                origin: aplan_core::capture::CaptureOrigin::Cli,
+            },
+            &clock,
+            CAPTURE_ID,
+        )
+        .expect("capture preview");
+        assert!(matches!(
+            aplan_app::commit_change_set(&context, creation.into_change_set()),
+            aplan_app::CommitOutcome::Applied(_)
+        ));
+        let preview = aplan_app::preview_capture_promotion(
+            &context,
+            &aplan_app::CapturePromotionRequest {
+                selector: aplan_app::CaptureSelector::Exact(
+                    aplan_app::ExactCaptureId::new(CAPTURE_ID).expect("capture id"),
+                ),
+                task_id: Some("A-1".into()),
+                phase: Some(1),
+                cut: None,
+                effort_days: Some(1.0),
+                owner: None,
+                paths: Some(vec!["src/**".into()]),
+                tags: Some(vec!["cross-cutting".into()]),
+                reason: Some("triaged".into()),
+            },
+            &clock,
+        )
+        .expect("promotion preview");
+        (dir, context, preview)
+    }
+
+    #[test]
+    fn capture_promotion_adapter_names_both_identities_on_late_refusals() {
+        let (_directory, context, stale_preview) = capture_promotion_adapter_fixture();
+        let error = finish_capture_promotion_with(
+            &context,
+            stale_preview,
+            false,
+            Format::Json,
+            |context, change| aplan_app::CommitOutcome::Stale {
+                change,
+                actual: context.identity().clone(),
+            },
+        )
+        .expect_err("injected stale publication");
+        let message = error.to_string();
+        assert!(
+            message.contains("I-01K8Z3A4H00000000000000000"),
+            "{message}"
+        );
+        assert!(message.contains("A-1"), "{message}");
+        assert!(
+            message.contains("no task or capture was written"),
+            "{message}"
+        );
+
+        let (_directory, context, failed_preview) = capture_promotion_adapter_fixture();
+        let error = finish_capture_promotion_with(
+            &context,
+            failed_preview,
+            false,
+            Format::Json,
+            |_context, change| aplan_app::CommitOutcome::PublicationFailed {
+                report: aplan_app::observe_publication(&change),
+                error: aplan_core::save::SaveError::Io {
+                    path: change.files()[0].path().to_path_buf(),
+                    source: std::io::Error::other("injected publication failure"),
+                },
+                change,
+            },
+        )
+        .expect_err("injected publication failure");
+        let message = error.to_string();
+        assert!(
+            message.contains("I-01K8Z3A4H00000000000000000"),
+            "{message}"
+        );
+        assert!(message.contains("A-1"), "{message}");
+        assert!(message.contains("filesystem state Unchanged"), "{message}");
+        assert!(
+            message.contains("injected publication failure"),
+            "{message}"
+        );
+    }
+
+    #[test]
+    fn graph_presentation_defaults_and_refusals_are_explicit() {
+        assert_eq!(graph_format_for_terminal(None, true), "text");
+        assert_eq!(graph_format_for_terminal(None, false), "mermaid");
+        assert_eq!(graph_format_for_terminal(Some("dot"), true), "dot");
+
+        let layered = parsed_graph_args(&["--format", "text", "--width", "80"]);
+        assert_eq!(graph_text_layout(&layered), GraphTextLayout::Layered);
+        validate_graph_presentation(Format::Text, &layered).expect("bounded layered document");
+
+        let lanes = parsed_graph_args(&["--format", "text", "--layout", "lanes"]);
+        assert_eq!(graph_text_layout(&lanes), GraphTextLayout::Lanes);
+        validate_graph_presentation(Format::Text, &lanes).expect("redirected lanes document");
+
+        let invalid_width = parsed_graph_args(&["--format", "text", "--width", "19"]);
+        assert!(
+            validate_graph_presentation(Format::Text, &invalid_width)
+                .expect_err("undersized terminal width must be refused")
+                .to_string()
+                .contains("between 20 and 65535")
+        );
+
+        let machine_with_text_control = parsed_graph_args(&["--format", "json", "--ascii"]);
+        assert!(
+            validate_graph_presentation(Format::Json, &machine_with_text_control)
+                .expect_err("machine graph must reject text controls")
+                .to_string()
+                .contains("control human text only")
+        );
+
+        let lanes_with_layered_control = parsed_graph_args(&[
+            "--format",
+            "text",
+            "--layout",
+            "lanes",
+            "--orientation",
+            "top-to-bottom",
+        ]);
+        assert!(
+            validate_graph_presentation(Format::Text, &lanes_with_layered_control)
+                .expect_err("lanes must reject layered controls")
+                .to_string()
+                .contains("describe the layered scene")
+        );
+
+        let redirected_layered = parsed_graph_args(&["--format", "text"]);
+        assert!(
+            validate_graph_presentation(Format::Text, &redirected_layered)
+                .expect_err("redirected layered output needs an exact width")
+                .to_string()
+                .contains("redirected layered text requires")
+        );
+
+        assert!(CachePublication::WithStructuralReport.defers());
+        assert!(!CachePublication::Immediate.defers());
+    }
+
+    #[test]
+    fn layered_scope_and_condition_copy_cover_every_typed_variant() {
+        use aplan_app::{GraphExplorerCondition, GraphExplorerDependency, GraphExplorerIdentity};
+
+        assert_eq!("plan".parse::<GraphLevel>(), Ok(GraphLevel::Plan));
+        for invalid in ["unknown", "task:", "phase:-1", "unknown:A"] {
+            assert!(
+                invalid.parse::<GraphLevel>().is_err(),
+                "accepted invalid level {invalid:?}"
+            );
+        }
+
+        assert!(matches!(
+            layered_graph_scope("upstream:A").expect("upstream"),
+            aplan_app::GraphScope::Upstream(id) if id == "A"
+        ));
+        assert!(matches!(
+            layered_graph_scope("downstream:B").expect("downstream"),
+            aplan_app::GraphScope::Downstream(id) if id == "B"
+        ));
+        assert!(matches!(
+            layered_graph_scope("between:A..B").expect("between"),
+            aplan_app::GraphScope::Between(from, to) if from == "A" && to == "B"
+        ));
+        assert_eq!(
+            layered_graph_scope("unreachable").expect("unreachable"),
+            aplan_app::GraphScope::Unreachable
+        );
+
+        let edge = GraphExplorerDependency {
+            from: "A".to_string(),
+            to: "B".to_string(),
+        };
+        let cases = [
+            GraphExplorerCondition::DisconnectedComponents { components: 2 },
+            GraphExplorerCondition::TasksOutsideMilestones {
+                ids: vec!["A".to_string()],
+            },
+            GraphExplorerCondition::CrossPhaseDependencies {
+                edges: vec![edge.clone()],
+            },
+            GraphExplorerCondition::CrossCutDependencies { edges: vec![edge] },
+            GraphExplorerCondition::EmptyPhases { phases: vec![3, 4] },
+            GraphExplorerCondition::MilestoneOnly,
+            GraphExplorerCondition::NoMilestones,
+            GraphExplorerCondition::AggregateFeedback {
+                components: vec![vec![GraphExplorerIdentity::Task("A".to_string())]],
+            },
+            GraphExplorerCondition::InvalidTaskCycle {
+                components: vec![vec!["A".to_string(), "B".to_string()]],
+            },
+        ];
+        let copy: Vec<_> = cases.iter().map(layered_condition).collect();
+        assert_eq!(copy.len(), cases.len());
+        assert!(copy.iter().all(|line| !line.is_empty()));
+        assert!(copy.iter().any(|line| line.contains("3, 4")));
+    }
+
+    #[test]
+    fn layered_level_validation_and_identity_distinguish_tasks_from_milestones() {
+        let task =
+            |source: &str| yaml_compat::from_str::<aplan_core::Task>(source).expect("task fixture");
+        let tasks = [
+            task("id: T-1\ntitle: task\nphase: 1\nstatus: todo"),
+            task("id: M-1\ntitle: milestone\nphase: 1\nstatus: todo\ntags: [milestone]"),
+        ];
+        let graph = build_graph(tasks.iter());
+        for level in [
+            GraphLevel::Plan,
+            GraphLevel::Phase(1),
+            GraphLevel::Task("T-1".into()),
+            GraphLevel::Milestone("M-1".into()),
+        ] {
+            validate_layered_level(&graph, &level).expect("valid level");
+        }
+        assert!(validate_layered_level(&graph, &GraphLevel::Task("missing".into())).is_err());
+        assert!(validate_layered_level(&graph, &GraphLevel::Milestone("T-1".into())).is_err());
+        assert_eq!(
+            layered_identity(&graph, "T-1"),
+            aplan_app::GraphExplorerIdentity::Task("T-1".into())
+        );
+        assert_eq!(
+            layered_identity(&graph, "M-1"),
+            aplan_app::GraphExplorerIdentity::Milestone("M-1".into())
+        );
+    }
+
+    #[test]
+    fn graph_focus_refusals_distinguish_identity_scope_and_drawable_membership() {
+        let task = |id: &str| {
+            yaml_compat::from_str::<aplan_core::Task>(&format!(
+                "id: {id}\ntitle: {id}\nphase: 1\nstatus: todo"
+            ))
+            .expect("task fixture")
+        };
+        let tasks = [task("A"), task("B")];
+        let graph = build_graph(tasks.iter());
+        let mut include = std::collections::BTreeSet::from(["A"]);
+        let mut view = aplan_output::GraphView {
+            nodes: vec![aplan_output::GraphNode {
+                id: "A".to_string(),
+                title: "A".to_string(),
+                status: aplan_core::Status::Todo,
+                done: false,
+            }],
+            edges: Vec::new(),
+            hidden_edges: 0,
+            grouping: aplan_output::Grouping::default(),
+            scope: Vec::new(),
+        };
+
+        validate_graph_focus(&graph, &include, &view, &[], None).expect("focus is optional");
+        let missing = validate_graph_focus(&graph, &include, &view, &[], Some("MISSING"))
+            .expect_err("unknown focus");
+        assert!(missing.to_string().contains("no task `MISSING`"));
+
+        let outside = validate_graph_focus(&graph, &include, &view, &[], Some("B"))
+            .expect_err("focus outside default scope");
+        assert!(
+            outside
+                .to_string()
+                .contains("outside the active graph scope")
+        );
+        let selected_scope = validate_graph_focus(
+            &graph,
+            &include,
+            &view,
+            &["tag `area:tui`".to_string()],
+            Some("B"),
+        )
+        .expect_err("focus outside selected scope");
+        assert!(
+            selected_scope
+                .to_string()
+                .contains("outside tag `area:tui`")
+        );
+
+        include.insert("B");
+        let membership_only = validate_graph_focus(&graph, &include, &view, &[], Some("B"))
+            .expect_err("focus omitted from dependency view");
+        assert!(
+            membership_only
+                .to_string()
+                .contains("only cut-membership relationships")
+        );
+        view.nodes.push(aplan_output::GraphNode {
+            id: "B".to_string(),
+            title: "B".to_string(),
+            status: aplan_core::Status::Todo,
+            done: false,
+        });
+        validate_graph_focus(&graph, &include, &view, &[], Some("B"))
+            .expect("visible in-scope focus");
+    }
+
+    #[test]
+    fn manifest_reverse_edges_name_the_entry_and_missing_target_without_mutation() {
+        let directory = tempfile::Builder::new()
+            .tempdir_in(aplan_core::fixture::fixture_root())
+            .expect("fixture directory");
+        let mut plan = aplan_core::load_plan(directory.path());
+        let entries = [yaml_compat::from_str::<aplan_interop::manifest::Entry>(
+            "title: New blocker\nblocks: [MISSING]",
+        )
+        .expect("manifest entry")];
+        let before_tasks = plan.tasks.len();
+
+        let error = write_manifest_reverse_edges(&mut plan, &entries, &["A-new".to_string()])
+            .expect_err("missing reverse dependency target");
+
+        assert!(
+            error.to_string().contains(
+                "entry 1 (`New blocker`): `blocks` names task `MISSING` that is not declared"
+            ),
+            "{error:#}"
+        );
+        assert_eq!(plan.tasks.len(), before_tasks, "a refusal mutated the plan");
+    }
+
+    #[test]
+    fn layered_fallback_names_each_omitted_subject_and_recovery() {
+        use aplan_app::{
+            CellEdgeIdentity, CellEdgeOmission, CellNodeOmission, CellSceneDegradation,
+            CellSceneFallback, ConfigurationContentIdentity, ConfigurationIdentity,
+            GraphExplorerDependency, GraphExplorerIdentity, GraphExplorerLocation, InputIdentity,
+            RepositoryIdentity, Trust,
+        };
+
+        let reason = CellSceneDegradation::KernelRejected;
+        let from = GraphExplorerIdentity::Task("T-1".to_string());
+        let to = GraphExplorerIdentity::Milestone("M-1".to_string());
+        let fallback = CellSceneFallback {
+            generation: 1,
+            input: InputIdentity {
+                source: "test",
+                plan_root: "plan".into(),
+                plan_sha256: "plan".to_string(),
+                repository_root: ".".into(),
+                repository: RepositoryIdentity::NotObserved {
+                    reason: "not needed by this rendering test".to_string(),
+                },
+                configuration: ConfigurationIdentity {
+                    path: None,
+                    sha256: "configuration".to_string(),
+                    content: ConfigurationContentIdentity::Absent,
+                },
+                trust: Trust::Hermetic,
+                sha256: "input".to_string(),
+            },
+            location: GraphExplorerLocation::Plan,
+            reasons: vec![reason.clone()],
+            nodes: vec![CellNodeOmission {
+                identity: from.clone(),
+                reason: reason.clone(),
+            }],
+            edges: vec![CellEdgeOmission {
+                identity: CellEdgeIdentity {
+                    from,
+                    to,
+                    ordinal: 0,
+                    provenance: vec![GraphExplorerDependency {
+                        from: "T-1".to_string(),
+                        to: "M-1".to_string(),
+                    }],
+                },
+                reason,
+            }],
+            retained: None,
+        };
+
+        let message = layered_fallback_message(&fallback);
+        assert!(message.contains("kernel_rejected"), "{message}");
+        assert!(message.contains("1 node(s) [T-1]"), "{message}");
+        assert!(message.contains("1 edge(s) [T-1 -> M-1]"), "{message}");
+        assert!(message.contains("--layout lanes"), "{message}");
+    }
+
+    #[test]
+    fn document_report_names_each_prefix_and_membership_disagreement() {
+        let findings = [(
+            "PLAN.md".to_string(),
+            aplan_interop::docs::Reference {
+                id: "A2-7".to_string(),
+                line: 3,
+                column: 1,
+                mistyped_prefix: vec!["A1-".to_string(), "A3-".to_string()],
+            },
+            vec!["A1-7"],
+        )];
+        let disagreements = [(
+            "PLAN.md".to_string(),
+            aplan_interop::docs::MembershipProblem {
+                milestone: "M-v1".to_string(),
+                undeclared: vec!["A1-1".to_string()],
+                unplanned: vec!["A1-9".to_string()],
+                no_declaration: true,
+                repeated_section: false,
+            },
+        )];
+
+        let report = check_docs_human(1, &findings, &disagreements);
+        for expected in [
+            "whose ids use `A1-` or `A3-` (did you mean A1-7?)",
+            "`M-v1` has members and this document's section for it declares none",
+            "`M-v1` includes `A1-1`, which this document does not declare",
+            "this document declares `A1-9`, which `M-v1` does not include",
+            "1 document(s), 1 reference(s) naming no task, 1 cut(s) whose membership disagrees",
+        ] {
+            assert!(
+                report.contains(expected),
+                "missing {expected:?} in {report:?}"
+            );
+        }
+    }
+
+    #[cfg(feature = "tui")]
+    fn resolve_initial_load(load: aplan_tui::InitialLoad) -> aplan_tui::InitialLaunch {
+        resolve_initial_load_with_progress(load).0
+    }
+
+    #[cfg(feature = "tui")]
+    fn resolve_initial_load_with_progress(
+        load: aplan_tui::InitialLoad,
+    ) -> (aplan_tui::InitialLaunch, Vec<aplan_app::ProgressEvent>) {
+        let cancellation = aplan_app::CancellationToken::default();
+        let mut events = Vec::new();
+        let mut sink = |event| events.push(event);
+        let mut progress = aplan_app::ProgressEmitter::begin(
+            aplan_app::OperationId::new(1),
+            aplan_app::OperationKind::PlanLoad,
+            &mut sink,
+        );
+        let launch = load(&mut progress, &cancellation).expect("fixture launch");
+        progress.complete();
+        drop(progress);
+        (launch, events)
+    }
+
+    fn progress_profile(args: &[&str]) -> CommandProgressProfile {
+        let cli = Cli::try_parse_from(std::iter::once("aplan").chain(args.iter().copied()))
+            .expect("representative command parses");
+        command_progress_profile(&cli.command)
+    }
+
+    #[test]
+    fn command_progress_census_derives_work_and_output_ownership_from_the_mode() {
+        use aplan_output::progress::ProgressSurface::{Human, Interactive, Machine};
+        for (args, surface, source) in [
+            (&["check"][..], Human, ProgressSource::PlanLoad),
+            (
+                &["check", "--format", "json"],
+                Machine,
+                ProgressSource::PlanLoad,
+            ),
+            (&["graph"], Machine, ProgressSource::PlanLoad),
+            (
+                &["graph", "--format", "text", "--width", "240"],
+                Human,
+                ProgressSource::PlanLoad,
+            ),
+            (&["verify"], Human, ProgressSource::PlanAndProviders),
+            (&["test", "list"], Human, ProgressSource::ProvidersOnly),
+            (
+                &[
+                    "test",
+                    "receipt",
+                    "1",
+                    "--producer-repository",
+                    "owner/repo",
+                    "--producer-workflow",
+                    "ci/test",
+                    "--producer-run-id",
+                    "1",
+                    "--producer-event",
+                    "push",
+                    "--producer-privilege",
+                    "trusted",
+                ],
+                Machine,
+                ProgressSource::ProvidersOnly,
+            ),
+            (
+                &["show", "T-1", "--refresh-evidence"],
+                Human,
+                ProgressSource::PlanAndProviders,
+            ),
+            (&["show", "T-1"], Human, ProgressSource::PlanAndRepository),
+            (
+                &["show", "T-1", "--no-resolve"],
+                Human,
+                ProgressSource::PlanLoad,
+            ),
+            (&["paths"], Human, ProgressSource::PlanAndRepository),
+            (&["stale"], Human, ProgressSource::PlanAndRepository),
+            (&["version"], Human, ProgressSource::PlanAndProviders),
+            (&["version", "T-1"], Human, ProgressSource::PlanLoad),
+            (&["schema"], Machine, ProgressSource::Inapplicable),
+            (&["close", "T-1"], Human, ProgressSource::PlanAndProviders),
+            (&["mcp"], Machine, ProgressSource::LongLivedProtocol),
+            (&["tui"], Interactive, ProgressSource::InteractiveFrame),
+        ] {
+            assert_eq!(
+                progress_profile(args),
+                CommandProgressProfile { surface, source },
+                "wrong progress disposition for {args:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn stream_progress_obeys_global_color_without_styling_machine_modes() {
+        use aplan_output::color::ColorChoice;
+        use aplan_output::progress::{ProgressPresentation, ProgressSurface};
+
+        let plain = ProgressPresentation::Stderr {
+            animated: false,
+            color: false,
+        };
+        assert_eq!(
+            progress_color_choice(plain, ProgressSurface::Human, ColorChoice::Always),
+            ProgressPresentation::Stderr {
+                animated: false,
+                color: true,
+            }
+        );
+        let coloured = ProgressPresentation::Stderr {
+            animated: true,
+            color: true,
+        };
+        for (surface, choice) in [
+            (ProgressSurface::Human, ColorChoice::Never),
+            (ProgressSurface::Machine, ColorChoice::Always),
+        ] {
+            assert_eq!(
+                progress_color_choice(coloured, surface, choice),
+                ProgressPresentation::Stderr {
+                    animated: true,
+                    color: false,
+                }
+            );
+        }
+    }
+
+    fn renderer_event(
+        operation: aplan_app::OperationId,
+        sequence: u64,
+        kind: aplan_app::OperationKind,
+        subject: aplan_app::ProgressSubject,
+        lifecycle: aplan_app::ProgressLifecycle,
+        measure: aplan_app::ProgressMeasure,
+    ) -> aplan_app::ProgressEvent {
+        aplan_app::ProgressEvent {
+            operation,
+            sequence,
+            kind,
+            subject,
+            lifecycle,
+            measure,
+        }
+    }
+
+    fn begin_rendered_operation(
+        view: &mut ProgressViewState,
+        operation: aplan_app::OperationId,
+        kind: aplan_app::OperationKind,
+    ) {
+        for progress in [
+            renderer_event(
+                operation,
+                0,
+                kind,
+                aplan_app::ProgressSubject::Operation,
+                aplan_app::ProgressLifecycle::Queued,
+                aplan_app::ProgressMeasure::Indeterminate,
+            ),
+            renderer_event(
+                operation,
+                1,
+                kind,
+                aplan_app::ProgressSubject::Operation,
+                aplan_app::ProgressLifecycle::Started,
+                aplan_app::ProgressMeasure::Indeterminate,
+            ),
+        ] {
+            assert!(view.accept(progress));
+        }
+    }
+
+    /// Proof for `progress.cli_renderer_is_identity_safe_and_terminal_safe`.
+    #[test]
+    fn progress_renderer_validates_identities_and_aggregates_children() {
+        use aplan_app::{
+            OperationId, OperationKind, ProgressChildId, ProgressLifecycle, ProgressMeasure,
+            ProgressPhase, ProgressSubject, ProgressUnit,
+        };
+
+        let command = OperationId::new(41);
+        let mut view = ProgressViewState::new(command);
+        begin_rendered_operation(&mut view, command, OperationKind::CliCommand);
+        assert!(view.accept(renderer_event(
+            command,
+            2,
+            OperationKind::CliCommand,
+            ProgressSubject::Phase {
+                phase: ProgressPhase::Projection,
+                child: None,
+            },
+            ProgressLifecycle::Started,
+            ProgressMeasure::Indeterminate,
+        )));
+
+        let providers = OperationId::new(42);
+        begin_rendered_operation(&mut view, providers, OperationKind::TestCatalogue);
+        for progress in [
+            renderer_event(
+                providers,
+                2,
+                OperationKind::TestCatalogue,
+                ProgressSubject::Phase {
+                    phase: ProgressPhase::EvidenceProvider,
+                    child: None,
+                },
+                ProgressLifecycle::Started,
+                ProgressMeasure::bounded(0, 2, ProgressUnit::Providers),
+            ),
+            renderer_event(
+                providers,
+                3,
+                OperationKind::TestCatalogue,
+                ProgressSubject::Phase {
+                    phase: ProgressPhase::EvidenceProvider,
+                    child: Some(ProgressChildId::new(99)),
+                },
+                ProgressLifecycle::Started,
+                ProgressMeasure::Indeterminate,
+            ),
+        ] {
+            assert!(view.accept(progress));
+        }
+        assert_eq!(view.detail(), "querying evidence providers (0/2 providers)");
+        assert!(!view.detail().contains("99"), "child identity leaked");
+
+        for (raw_id, unit, expected) in [
+            (43, ProgressUnit::Sources, "1/3 sources"),
+            (44, ProgressUnit::Items, "1/3 items"),
+        ] {
+            let measured = OperationId::new(raw_id);
+            let mut measured_view = ProgressViewState::new(measured);
+            begin_rendered_operation(&mut measured_view, measured, OperationKind::TestCatalogue);
+            assert!(measured_view.accept(renderer_event(
+                measured,
+                2,
+                OperationKind::TestCatalogue,
+                ProgressSubject::Phase {
+                    phase: ProgressPhase::EvidenceProvider,
+                    child: None,
+                },
+                ProgressLifecycle::Started,
+                ProgressMeasure::bounded(1, 3, unit),
+            )));
+            assert!(
+                measured_view.detail().contains(expected),
+                "{}",
+                measured_view.detail()
+            );
+        }
+
+        // A duplicate and an event from a generation that was never opened are
+        // rejected rather than becoming the latest visible state.
+        assert!(!view.accept(renderer_event(
+            providers,
+            3,
+            OperationKind::TestCatalogue,
+            ProgressSubject::Operation,
+            ProgressLifecycle::Completed,
+            ProgressMeasure::Indeterminate,
+        )));
+        assert!(!view.accept(renderer_event(
+            OperationId::new(40),
+            7,
+            OperationKind::PlanLoad,
+            ProgressSubject::Phase {
+                phase: ProgressPhase::SourceParsing,
+                child: None,
+            },
+            ProgressLifecycle::Advanced,
+            ProgressMeasure::Indeterminate,
+        )));
+        assert_eq!(view.detail(), "querying evidence providers (0/2 providers)");
+    }
+
+    #[test]
+    fn progress_renderer_accepts_one_command_terminal_and_labels_every_outcome() {
+        use aplan_app::{
+            OperationId, OperationKind, ProgressLifecycle, ProgressMeasure, ProgressPhase,
+            ProgressSubject,
+        };
+
+        let command = OperationId::new(51);
+        let mut view = ProgressViewState::new(command);
+        begin_rendered_operation(&mut view, command, OperationKind::CliCommand);
+        assert!(view.accept(renderer_event(
+            command,
+            2,
+            OperationKind::CliCommand,
+            ProgressSubject::Phase {
+                phase: ProgressPhase::Projection,
+                child: None,
+            },
+            ProgressLifecycle::Started,
+            ProgressMeasure::Indeterminate,
+        )));
+        for progress in [
+            renderer_event(
+                command,
+                3,
+                OperationKind::CliCommand,
+                ProgressSubject::Phase {
+                    phase: ProgressPhase::Projection,
+                    child: None,
+                },
+                ProgressLifecycle::Completed,
+                ProgressMeasure::Indeterminate,
+            ),
+            renderer_event(
+                command,
+                4,
+                OperationKind::CliCommand,
+                ProgressSubject::Operation,
+                ProgressLifecycle::Completed,
+                ProgressMeasure::Indeterminate,
+            ),
+        ] {
+            assert!(view.accept(progress));
+        }
+        assert_eq!(view.command_terminal, Some(ProgressLifecycle::Completed));
+        assert!(!view.accept(renderer_event(
+            command,
+            5,
+            OperationKind::CliCommand,
+            ProgressSubject::Operation,
+            ProgressLifecycle::Completed,
+            ProgressMeasure::Indeterminate,
+        )));
+        for (lifecycle, label) in [
+            (ProgressLifecycle::Queued, "queued"),
+            (ProgressLifecycle::Started, "active"),
+            (ProgressLifecycle::Advanced, "active"),
+            (ProgressLifecycle::Completed, "complete"),
+            (ProgressLifecycle::Failed, "failed"),
+            (ProgressLifecycle::Cancelled, "cancelled"),
+        ] {
+            assert_eq!(progress_lifecycle_label(lifecycle), label);
+        }
+    }
+
+    #[test]
+    fn progress_renderer_control_messages_acknowledge_and_restore_rows() {
+        use aplan_app::{
+            OperationId, OperationKind, ProgressLifecycle, ProgressMeasure, ProgressSubject,
+        };
+
+        let operation = OperationId::new(61);
+        let epoch = std::time::Instant::now()
+            .checked_sub(std::time::Duration::from_secs(1))
+            .expect("one-second-old epoch");
+        let mut animated = CliProgressRenderer::new(epoch, operation, true, false);
+        assert!(animated.message(ProgressMessage::Event(
+            renderer_event(
+                operation,
+                0,
+                OperationKind::CliCommand,
+                ProgressSubject::Operation,
+                ProgressLifecycle::Queued,
+                ProgressMeasure::Indeterminate,
+            ),
+            None,
+        )));
+        assert!(matches!(animated.row, ProgressRowState::Painted));
+
+        let (paused, pause_ack) = std::sync::mpsc::sync_channel(1);
+        assert!(animated.message(ProgressMessage::Pause(paused)));
+        pause_ack.recv().expect("pause acknowledgement");
+        assert_eq!(animated.pause_depth, 1);
+        assert!(matches!(animated.row, ProgressRowState::Suppressed));
+        assert!(animated.message(ProgressMessage::Resume));
+        assert_eq!(animated.pause_depth, 0);
+        assert!(matches!(animated.row, ProgressRowState::Painted));
+
+        let (stopped, stop_ack) = std::sync::mpsc::sync_channel(1);
+        assert!(!animated.message(ProgressMessage::Stop(Some(stopped))));
+        stop_ack.recv().expect("stop acknowledgement");
+
+        let mut static_row = CliProgressRenderer::new(epoch, operation, false, false);
+        static_row.row = ProgressRowState::Painted;
+        assert!(!static_row.message(ProgressMessage::Stop(None)));
+
+        let mut hidden = CliProgressRenderer::new(
+            std::time::Instant::now(),
+            OperationId::new(62),
+            false,
+            false,
+        );
+        for (sequence, lifecycle) in [
+            (0, ProgressLifecycle::Queued),
+            (1, ProgressLifecycle::Started),
+            (2, ProgressLifecycle::Completed),
+        ] {
+            let terminal = lifecycle == ProgressLifecycle::Completed;
+            let (acknowledge, acknowledged) = std::sync::mpsc::sync_channel(1);
+            assert_eq!(
+                hidden.message(ProgressMessage::Event(
+                    renderer_event(
+                        OperationId::new(62),
+                        sequence,
+                        OperationKind::CliCommand,
+                        ProgressSubject::Operation,
+                        lifecycle,
+                        ProgressMeasure::Indeterminate,
+                    ),
+                    Some(acknowledge),
+                )),
+                !terminal
+            );
+            acknowledged.recv().expect("event acknowledgement");
+        }
+        assert!(matches!(hidden.row, ProgressRowState::Hidden));
+        assert!(hidden.deadline.is_none());
+
+        let (signal_sender, signal_receiver) = std::sync::mpsc::channel();
+        *SIGNAL_CLI_PROGRESS
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner) = Some(signal_sender);
+        let signal_worker = std::thread::spawn(move || {
+            let ProgressMessage::Stop(Some(acknowledge)) =
+                signal_receiver.recv().expect("signal stop message")
+            else {
+                panic!("signal bridge sent the wrong progress message")
+            };
+            acknowledge.send(()).expect("signal stop acknowledgement");
+        });
+        stop_cli_progress_for_signal();
+        signal_worker.join().expect("signal progress worker");
+        *SIGNAL_CLI_PROGRESS
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner) = None;
+        stop_cli_progress_for_signal();
+    }
+
+    #[test]
+    fn progress_renderer_handles_a_pause_before_reveal_and_a_visible_finish() {
+        use aplan_app::{
+            OperationId, OperationKind, ProgressLifecycle, ProgressMeasure, ProgressSubject,
+        };
+
+        let epoch = std::time::Instant::now()
+            .checked_sub(std::time::Duration::from_secs(1))
+            .expect("one-second-old epoch");
+        let operation = OperationId::new(63);
+        let mut renderer = CliProgressRenderer::new(epoch, operation, true, false);
+        let (pause_sender, pause_receiver) = std::sync::mpsc::sync_channel(1);
+        assert!(renderer.message(ProgressMessage::Pause(pause_sender)));
+        pause_receiver
+            .recv()
+            .expect("initial pause acknowledgement");
+        for (sequence, lifecycle) in [
+            (0, ProgressLifecycle::Queued),
+            (1, ProgressLifecycle::Started),
+        ] {
+            assert!(renderer.message(ProgressMessage::Event(
+                renderer_event(
+                    operation,
+                    sequence,
+                    OperationKind::CliCommand,
+                    ProgressSubject::Operation,
+                    lifecycle,
+                    ProgressMeasure::Indeterminate,
+                ),
+                None,
+            )));
+        }
+        assert!(matches!(renderer.row, ProgressRowState::Suppressed));
+        assert!(renderer.message(ProgressMessage::Resume));
+        assert!(matches!(renderer.row, ProgressRowState::Painted));
+        assert!(!renderer.message(ProgressMessage::Event(
+            renderer_event(
+                operation,
+                2,
+                OperationKind::CliCommand,
+                ProgressSubject::Operation,
+                ProgressLifecycle::Completed,
+                ProgressMeasure::Indeterminate,
+            ),
+            None,
+        )));
+        assert!(matches!(renderer.row, ProgressRowState::Hidden));
+
+        let mut waiting =
+            CliProgressRenderer::new(std::time::Instant::now(), OperationId::new(64), true, false);
+        waiting.timeout();
+        assert!(waiting.deadline.is_none());
+    }
+
+    #[test]
+    fn progress_renderer_handles_disconnected_and_uninstalled_routes() {
+        use aplan_app::{
+            OperationId, OperationKind, ProgressLifecycle, ProgressMeasure, ProgressSubject,
+        };
+
+        let (disconnected_sender, disconnected_receiver) = std::sync::mpsc::channel();
+        drop(disconnected_sender);
+        run_progress_renderer(
+            &disconnected_receiver,
+            std::time::Instant::now(),
+            OperationId::new(65),
+            true,
+            false,
+        );
+        let (deadline_sender, deadline_receiver) = std::sync::mpsc::channel();
+        deadline_sender
+            .send(ProgressMessage::Event(
+                renderer_event(
+                    OperationId::new(66),
+                    0,
+                    OperationKind::CliCommand,
+                    ProgressSubject::Operation,
+                    ProgressLifecycle::Queued,
+                    ProgressMeasure::Indeterminate,
+                ),
+                None,
+            ))
+            .expect("queued deadline event");
+        drop(deadline_sender);
+        run_progress_renderer(
+            &deadline_receiver,
+            std::time::Instant::now(),
+            OperationId::new(66),
+            true,
+            false,
+        );
+
+        let mut disabled = CliProgress {
+            sender: None,
+            worker: None,
+            command_operation: OperationId::new(67),
+        };
+        disabled.event(renderer_event(
+            OperationId::new(67),
+            0,
+            OperationKind::CliCommand,
+            ProgressSubject::Operation,
+            ProgressLifecycle::Queued,
+            ProgressMeasure::Indeterminate,
+        ));
+
+        let (current_sender, current_receiver) = std::sync::mpsc::channel();
+        CURRENT_CLI_PROGRESS.with(|slot| *slot.borrow_mut() = Some(current_sender));
+        send_cli_progress(renderer_event(
+            OperationId::new(68),
+            0,
+            OperationKind::CliCommand,
+            ProgressSubject::Operation,
+            ProgressLifecycle::Queued,
+            ProgressMeasure::Indeterminate,
+        ));
+        assert!(matches!(
+            current_receiver.recv().expect("current progress event"),
+            ProgressMessage::Event(_, None)
+        ));
+        CURRENT_CLI_PROGRESS.with(|slot| *slot.borrow_mut() = None);
+    }
+
+    #[test]
+    fn unenforced_limit_notes_group_only_the_affected_provider_names() {
+        use aplan_evidence::{Cost, Unenforced};
+
+        let spend = [
+            (
+                "mac-one".to_string(),
+                Cost {
+                    unenforced: Some(Unenforced::NoCgroups),
+                    ..Cost::default()
+                },
+            ),
+            (
+                "container".to_string(),
+                Cost {
+                    unenforced: Some(Unenforced::NotDelegated),
+                    ..Cost::default()
+                },
+            ),
+            (
+                "mac-two".to_string(),
+                Cost {
+                    unenforced: Some(Unenforced::NoCgroups),
+                    ..Cost::default()
+                },
+            ),
+            ("measured".to_string(), Cost::default()),
+        ];
+        assert_eq!(
+            named_unenforced(&spend, Unenforced::NoCgroups),
+            "mac-one, mac-two"
+        );
+        assert_eq!(
+            named_unenforced(&spend, Unenforced::NotDelegated),
+            "container"
+        );
+        note_what_could_not_be_held(&spend);
+        note_what_the_run_cost(
+            &[(
+                "large".to_string(),
+                Cost {
+                    peak_processes: 16,
+                    peak_rss_kb: 2 * 1024 * 1024,
+                    measured: true,
+                    ..Cost::default()
+                },
+            )],
+            true,
+        );
+    }
 
     /// **The fixture the banner's digest is computed over really exercises the
     /// renderers it claims to** (`A1-325`, ADR-0037).
@@ -10086,6 +19784,38 @@ mod tests {
     #[test]
     fn the_banner_is_stable_across_calls() {
         assert_eq!(written_by(), written_by());
+    }
+
+    /// `facts.omits_disabled_feature_behaviours`: a headless build must not
+    /// advertise promises made only by code it did not compile.
+    #[test]
+    fn a_disabled_feature_omits_its_behaviours_as_well_as_its_capability() {
+        let standard: serde_json::Value =
+            serde_json::from_str(&facts_for_build(true)).expect("standard facts");
+        let headless: serde_json::Value =
+            serde_json::from_str(&facts_for_build(false)).expect("headless facts");
+        let names = |document: &serde_json::Value| {
+            document["behaviours"]
+                .as_array()
+                .expect("behaviours")
+                .iter()
+                .map(|row| row["name"].as_str().expect("behaviour name").to_string())
+                .collect::<Vec<_>>()
+        };
+
+        assert!(names(&standard).iter().any(|name| name.starts_with("tui.")));
+        assert!(!names(&headless).iter().any(|name| name.starts_with("tui.")));
+        assert!(
+            names(&headless)
+                .iter()
+                .any(|name| name == "facts.omits_disabled_feature_behaviours"),
+            "the cross-build guarantee itself is available in both builds"
+        );
+        assert_eq!(
+            headless["build_capabilities"],
+            serde_json::json!([{"name": "build.tui", "enabled": false}])
+        );
+        assert!(!advertised_names(&headless).contains("build.tui"));
     }
 
     /// **The two readers of `--color` agree, on every shape `clap` accepts.**
@@ -10189,6 +19919,300 @@ mod tests {
         assert_eq!(scan(&["--colorful=always", "check"]), ColorChoice::Auto);
     }
 
+    #[test]
+    fn the_timing_choice_is_read_from_the_raw_arguments() {
+        let scan = |args: &[&str]| timings_from_argv(args.iter().map(std::ffi::OsString::from));
+
+        assert!(!scan(&["ready"]));
+        assert!(scan(&["--timings", "ready"]));
+        assert!(scan(&["ready", "--timings"]));
+        assert!(!scan(&["add", "--", "--timings"]));
+        assert!(!scan(&["--timings=true", "ready"]));
+        assert!(!scan(&["--timing", "ready"]));
+    }
+
+    #[test]
+    fn rendering_tolerates_only_a_closed_downstream_pipe() {
+        let closed = render_tolerant(|| {
+            Err(std::io::Error::new(
+                std::io::ErrorKind::BrokenPipe,
+                "reader closed",
+            ))
+        });
+        assert!(closed.is_ok());
+
+        let other = render_tolerant(|| {
+            Err(std::io::Error::new(
+                std::io::ErrorKind::PermissionDenied,
+                "cannot write",
+            ))
+        })
+        .expect_err("a real output failure must remain visible");
+        assert!(other.to_string().contains("rendering report"));
+    }
+
+    /// The coverage audit found that complete unfiltered, partial, failed and
+    /// empty catalogues rendered in-process, but a successful filtered answer
+    /// was held only by child-process tests.
+    #[test]
+    fn a_filtered_complete_test_catalogue_renders_its_counts() {
+        let answer = aplan_app::TestCatalogue {
+            state: aplan_app::TestCatalogueState::Complete,
+            query: Some("module::proof".to_string()),
+            summary: aplan_app::TestCatalogueSummary {
+                runners: 2,
+                listed_runners: 2,
+                empty_runners: 0,
+                failed_runners: 0,
+                unique_names: 3,
+                runner_name_pairs: 3,
+                matched_names: 1,
+                matched_pairs: 1,
+                ambiguous_names: 0,
+            },
+            runners: Vec::new(),
+            findings: Vec::new(),
+            denied: false,
+        };
+        assert_eq!(
+            test_catalogue_count(answer.summary.matched_names, "unique match"),
+            "1 unique match"
+        );
+        assert_eq!(
+            test_catalogue_count(answer.summary.runners, "runner"),
+            "2 runners"
+        );
+        render_test_catalogue_human(&answer).expect("filtered complete catalogue");
+    }
+
+    #[test]
+    fn every_task_status_has_its_written_spelling() {
+        use aplan_core::Status;
+
+        for (status, spelling) in [
+            (Status::Todo, "todo"),
+            (Status::InProgress, "in_progress"),
+            (Status::Blocked, "blocked"),
+            (Status::Done, "done"),
+            (Status::Dropped, "dropped"),
+        ] {
+            assert_eq!(status_word(status), spelling);
+        }
+    }
+
+    fn blueprint_adapter_fixture() -> (tempfile::TempDir, PathBuf, PathBuf) {
+        let directory = tempfile::Builder::new()
+            .prefix("blueprint-cli-adapter-")
+            .tempdir_in(aplan_core::fixture::fixture_root())
+            .expect("fixture");
+        let plan = directory.path().join("aplan");
+        let tasks = plan.join("tasks");
+        std::fs::create_dir_all(&tasks).expect("task directory");
+        std::fs::write(directory.path().join(".aplan.yml"), "root: aplan\n")
+            .expect("configuration");
+        std::fs::write(
+            tasks.join("A-1.md"),
+            "---\nid: A-1\ntitle: Existing task\nphase: 1\nstatus: todo\neffort_days: 1\npaths: [src/existing.rs]\n---\n",
+        )
+        .expect("existing task");
+        std::fs::write(
+            tasks.join("M-v1.md"),
+            "---\nid: M-v1\ntitle: First cut\nphase: 1\nstatus: todo\nblocked_by: [A-1]\ntags: [milestone]\n---\n",
+        )
+        .expect("cut");
+        let source = directory.path().join("feature.blueprint.yml");
+        std::fs::write(
+            &source,
+            "schema: aplan/blueprint/v1\nname: feature\ntitle: Feature\ndescription: Feature graph.\ntasks:\n  - key: design\n    title: Design\n    effort: 1\n    paths: [src/design.rs]\n",
+        )
+        .expect("blueprint");
+        (directory, plan, source)
+    }
+
+    fn blueprint_apply_args(file: PathBuf, dry_run: bool) -> BlueprintApplyArgs {
+        BlueprintApplyArgs {
+            file,
+            cut: "M-v1".to_string(),
+            bindings: Vec::new(),
+            dry_run,
+            verdict: VerdictFlags {
+                deny_warnings: false,
+                no_deny_warnings: false,
+            },
+        }
+    }
+
+    /// Real-process tests hold the public command contract. This companion
+    /// invokes the adapter in-process so the coverage gate also observes the
+    /// capture, preview, report and guarded-publication paths.
+    #[test]
+    fn blueprint_adapter_previews_and_publishes_in_process() {
+        let (_directory, plan, source) = blueprint_adapter_fixture();
+        let dry_run = BlueprintCommand::Apply(blueprint_apply_args(source.clone(), true));
+        assert_eq!(
+            cmd_blueprint(&plan, &dry_run, "json").expect("preview"),
+            EXIT_OK
+        );
+        assert!(!plan.join("tasks/A-2.md").exists(), "preview wrote a task");
+
+        let apply = BlueprintCommand::Apply(blueprint_apply_args(source.clone(), false));
+        assert_eq!(
+            cmd_blueprint(&plan, &apply, "json").expect("apply"),
+            EXIT_OK
+        );
+        let created = std::fs::read_to_string(plan.join("tasks/A-2.md")).expect("created task");
+        assert!(created.contains("title: Design"), "{created}");
+
+        std::fs::write(
+            &source,
+            "schema: aplan/blueprint/v1\nname: cycle\ntitle: Cycle\ndescription: Invalid graph.\ntasks:\n  - key: one\n    title: One\n    blocked_by: [local:two]\n  - key: two\n    title: Two\n    blocked_by: [local:one]\n",
+        )
+        .expect("cyclic blueprint");
+        let refused = BlueprintCommand::Apply(blueprint_apply_args(source, true));
+        assert_eq!(
+            cmd_blueprint(&plan, &refused, "json").expect("rendered refusal"),
+            EXIT_VIOLATIONS
+        );
+        assert!(!plan.join("tasks/A-3.md").exists(), "refusal wrote a task");
+    }
+
+    #[test]
+    fn blueprint_adapter_handles_typed_noop_and_snapshot_outcomes() {
+        let (directory, plan, source) = blueprint_adapter_fixture();
+        let apply = BlueprintCommand::Apply(blueprint_apply_args(source.clone(), false));
+        let exit = cmd_blueprint_with(
+            &plan,
+            &apply,
+            "json",
+            hermetic_application_context,
+            |_, change| aplan_app::CommitOutcome::NoOp(change),
+        )
+        .expect("typed no-op");
+        assert_eq!(exit, EXIT_OK);
+        assert!(!plan.join("tasks/A-2.md").exists());
+
+        let mut first = true;
+        let dry_run = BlueprintCommand::Apply(blueprint_apply_args(source.clone(), true));
+        let exit = cmd_blueprint_with(
+            &plan,
+            &dry_run,
+            "json",
+            |root, options| {
+                if std::mem::take(&mut first) {
+                    Err(anyhow::Error::new(std::io::Error::other(
+                        aplan_app::PlanSnapshotChanged,
+                    )))
+                } else {
+                    hermetic_application_context(root, options)
+                }
+            },
+            aplan_app::commit_change_set,
+        )
+        .expect("snapshot retry");
+        assert_eq!(exit, EXIT_OK);
+
+        let missing = directory.path().join("missing-plan");
+        let error = cmd_blueprint(&missing, &dry_run, "json").expect_err("missing plan root");
+        assert!(
+            format!("{error:#}").contains("not a directory"),
+            "{error:#}"
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn blueprint_publication_failure_reports_observed_filesystem_state() {
+        use std::os::unix::fs::PermissionsExt as _;
+
+        let (_directory, plan, source) = blueprint_adapter_fixture();
+        let tasks = plan.join("tasks");
+        let original = std::fs::metadata(&tasks)
+            .expect("task directory")
+            .permissions();
+        let mut read_only = original.clone();
+        read_only.set_mode(0o555);
+        std::fs::set_permissions(&tasks, read_only).expect("make publication fail");
+        let apply = BlueprintCommand::Apply(blueprint_apply_args(source, false));
+        let result = cmd_blueprint(&plan, &apply, "json");
+        std::fs::set_permissions(&tasks, original).expect("restore task directory");
+        let error = result.expect_err("read-only publication unexpectedly succeeded");
+        let message = format!("{error:#}");
+        assert!(message.contains("filesystem state"), "{message}");
+        assert!(message.contains("Inspect the affected paths"), "{message}");
+        assert!(!plan.join("tasks/A-2.md").exists());
+    }
+
+    #[test]
+    fn blueprint_capture_refuses_ambiguous_or_non_text_input() {
+        let duplicate = ["feature=one".to_string(), "feature=two".to_string()];
+        assert!(
+            blueprint_bindings(&duplicate)
+                .expect_err("duplicate binding")
+                .to_string()
+                .contains("bound more than once")
+        );
+        assert!(
+            blueprint_bindings(&["feature".to_string()])
+                .expect_err("missing equals")
+                .to_string()
+                .contains("NAME=VALUE")
+        );
+        assert!(
+            blueprint_bindings(&["   =value".to_string()])
+                .expect_err("blank name")
+                .to_string()
+                .contains("visible parameter name")
+        );
+        assert_eq!(
+            blueprint_bindings(&["feature=value=with=equals".to_string()])
+                .expect("one unambiguous binding")["feature"],
+            "value=with=equals"
+        );
+
+        let (directory, _plan, _source) = blueprint_adapter_fixture();
+        let missing = directory.path().join("missing.yml");
+        let Err(error) = capture_blueprint(&blueprint_apply_args(missing, true)) else {
+            panic!("missing blueprint was captured")
+        };
+        assert!(error.to_string().contains("reading blueprint"), "{error}");
+
+        let invalid = directory.path().join("not-utf8.yml");
+        std::fs::write(&invalid, [0xff, 0xfe]).expect("invalid bytes");
+        let Err(error) = capture_blueprint(&blueprint_apply_args(invalid, true)) else {
+            panic!("non-UTF-8 blueprint was captured")
+        };
+        assert!(
+            error.to_string().contains("invalid byte at offset 0"),
+            "{error}"
+        );
+
+        let started = std::time::Instant::now()
+            .checked_sub(ID_RACE_DEADLINE)
+            .expect("deadline fits inside a monotonic clock");
+        let error = wait_for_blueprint_retry(started, 3).expect_err("deadline must be bounded");
+        assert!(error.to_string().contains("nothing was written"), "{error}");
+    }
+
+    #[test]
+    fn every_missing_external_trace_root_is_named_in_one_refusal() {
+        let directory = tempfile::Builder::new()
+            .prefix("external-traces-")
+            .tempdir_in(aplan_core::fixture::fixture_root())
+            .expect("fixture");
+        let options = Options {
+            traces_external: vec![
+                directory.path().join("first"),
+                directory.path().join("second"),
+            ],
+            ..Options::default()
+        };
+        let error = refuse_absent_external_roots(&options).expect_err("missing roots");
+        let message = error.to_string();
+        assert!(message.contains("2 roots"));
+        assert!(message.contains("first"));
+        assert!(message.contains("second"));
+    }
+
     /// What a refusal calls the move it is refusing (`A1-171`).
     ///
     /// Pinned directly because it only reaches a reader through
@@ -10209,10 +20233,118 @@ mod tests {
             "move `A-01` to `M-s1`"
         );
         assert_eq!(describe_move(&one, None, Some(3)), "move `A-01` to phase 3");
+        assert_eq!(describe_move(&one, None, None), "move `A-01`");
         assert_eq!(
             describe_move(&two, Some("M-s1"), Some(3)),
             "move 2 tasks to `M-s1` and phase 3"
         );
+    }
+
+    /// Fallback copy is the product too: missing optional context must remain
+    /// explicit without inventing a file, a cut, or a claim origin.
+    #[test]
+    fn absent_context_has_an_explicit_and_accurate_fallback() {
+        let declared = std::collections::BTreeMap::<&str, &aplan_interop::manifest::Entry>::new();
+        assert_eq!(
+            manifest_cut_refusal("no cut `M`.", "M", false, &declared),
+            "no cut `M`, and this file declares none either"
+        );
+
+        let unknown = format_for("not-a-command", "human").expect_err("unknown command");
+        assert!(
+            unknown
+                .to_string()
+                .contains("`aplan not-a-command` does not take `--format`")
+        );
+        assert_eq!(list_of_str(&["human".to_string()]), "human");
+
+        let reversed_markers = format!(
+            "{}\n{}\n",
+            aplan_output::AGENTS_END,
+            aplan_output::AGENTS_BEGIN
+        );
+        assert_eq!(replace_block(&reversed_markers, "replacement"), None);
+
+        for (origin, expected) in [
+            (
+                aplan_core::ClaimOrigin {
+                    host: Some("host".to_string()),
+                    worktree: Some("worktree".to_string()),
+                },
+                "host `host`, worktree `worktree`",
+            ),
+            (
+                aplan_core::ClaimOrigin {
+                    host: Some("host".to_string()),
+                    worktree: None,
+                },
+                "host `host`",
+            ),
+            (
+                aplan_core::ClaimOrigin {
+                    host: None,
+                    worktree: Some("worktree".to_string()),
+                },
+                "worktree `worktree`",
+            ),
+            (
+                aplan_core::ClaimOrigin {
+                    host: None,
+                    worktree: None,
+                },
+                "unknown local origin",
+            ),
+        ] {
+            assert_eq!(shown_claim_origin(&origin), expected);
+        }
+
+        let mut plan = aplan_core::load::Plan::default();
+        plan.load_diagnostics.push(aplan_core::Diagnostic::error(
+            aplan_core::diagnostic::code::SCHEMA,
+            "invalid task without a known file",
+        ));
+        assert!(!loaded_cleanly(&plan));
+
+        let changed = PhaseEdit {
+            id: "A-01".to_string(),
+            path: PathBuf::from("aplan/tasks/A-01.md"),
+            replacement: Some(aplan_core::save::Replacement {
+                path: PathBuf::from("aplan/tasks/A-01.md"),
+                expected: "before".to_string(),
+                updated: "after".to_string(),
+            }),
+        };
+        let mut report = Vec::new();
+        report_phase(&[changed], 3, &mut report).expect("phase report");
+        assert_eq!(
+            String::from_utf8(report).expect("text report"),
+            "moved A-01 to phase 3 in aplan/tasks/A-01.md\n"
+        );
+
+        let directory = tempfile::Builder::new()
+            .tempdir_in(aplan_core::fixture::fixture_root())
+            .expect("fixture");
+        let mut files = BTreeSet::new();
+        collect_text_files(&directory.path().join("absent"), &mut files);
+        assert!(files.is_empty());
+    }
+
+    /// Proof for `formats.refusal_names_every_rendered_surface`: a format that
+    /// spans diagnostics, catalogues and action results must not describe every
+    /// accepting command as though it emitted only the first kind.
+    #[test]
+    fn format_refusal_names_every_rendered_surface() {
+        let error = format_for("critical-path", "agent").expect_err("unsupported format");
+        let message = error.to_string();
+        assert!(
+            message.contains(
+                "`agent` renders a set of findings, a configured evidence catalogue or an action result"
+            ),
+            "{message}"
+        );
+        for command in ["`check`", "`verify`", "`test`", "`blueprint`"] {
+            assert!(message.contains(command), "{message}");
+        }
     }
 
     fn report(errors: usize, warnings: usize) -> aplan_core::Report {
@@ -10334,6 +20466,34 @@ mod tests {
         assert_eq!(verdict(&report(2, 3), &deny(true)), EXIT_VIOLATIONS);
     }
 
+    /// Several independently complete cuts are all actionable even though
+    /// none of their member tasks belongs in `ready` (`A1-495`).
+    #[test]
+    fn an_empty_ready_list_names_every_closeable_cut() {
+        let task =
+            |source: &str| yaml_compat::from_str::<aplan_core::Task>(source).expect("task fixture");
+        let tasks = [
+            task("id: A\ntitle: member A\nphase: 0\nstatus: done"),
+            task("id: B\ntitle: member B\nphase: 0\nstatus: done"),
+            task(
+                "id: M-b\ntitle: cut B\nphase: 0\nstatus: todo\n\
+                 tags: [milestone]\nblocked_by: [B]",
+            ),
+            task(
+                "id: M-a\ntitle: cut A\nphase: 0\nstatus: todo\n\
+                 tags: [milestone]\nblocked_by: [A]",
+            ),
+        ];
+        let graph = build_graph(tasks.iter());
+
+        assert!(graph.ready().is_empty(), "only checkpoints remain");
+        assert_eq!(
+            why_nothing_is_ready(&graph),
+            "nothing is ready. 2 cuts have all their members done: `M-a`, `M-b`. Close one to \
+             open what follows it.\n"
+        );
+    }
+
     #[test]
     fn an_explicit_flag_wins_over_the_file_in_both_directions() {
         let off = Config::default();
@@ -10348,6 +20508,81 @@ mod tests {
             !resolve_deny_warnings(&on, false, true),
             "--no-deny-warnings must be able to relax a repository policy for one run"
         );
+    }
+
+    /// Every repository-facing tag-family policy maps to the same core policy.
+    ///
+    /// The long config form is the only path to these variants. End-to-end tests
+    /// proved selected combinations but left individual mapping arms unexecuted,
+    /// which made coverage depend on which fixture processes completed under the
+    /// instrumented runner.
+    #[test]
+    fn every_tag_family_policy_maps_into_core() {
+        use aplan_config::{Cardinality, MilestoneScope, StatusScope, TagFamily, TagFamilySpec};
+
+        let mut families = std::collections::BTreeMap::new();
+        for (name, require, status, milestones) in [
+            (
+                "at-most-live-excluding-cuts",
+                Cardinality::AtMostOne,
+                StatusScope::Live,
+                MilestoneScope::Exclude,
+            ),
+            (
+                "at-least-done-only-cuts",
+                Cardinality::AtLeastOne,
+                StatusScope::Done,
+                MilestoneScope::Only,
+            ),
+            (
+                "exactly-dropped",
+                Cardinality::ExactlyOne,
+                StatusScope::Dropped,
+                MilestoneScope::Include,
+            ),
+            (
+                "optional-terminal",
+                Cardinality::Optional,
+                StatusScope::Terminal,
+                MilestoneScope::Include,
+            ),
+        ] {
+            families.insert(
+                name.to_string(),
+                TagFamily::Spec(TagFamilySpec {
+                    members: vec![format!("{name}-tag")],
+                    require: Some(require),
+                    status: Some(status),
+                    milestones: Some(milestones),
+                }),
+            );
+        }
+        let config = Config {
+            tag_families: Some(families),
+            ..Config::default()
+        };
+        let mapped =
+            aplan_app::configured_options(&config, aplan_app::ConfigurationInputs::default())
+                .tag_families;
+
+        let at_most = &mapped["at-most-live-excluding-cuts"];
+        assert_eq!(at_most.require, aplan_core::Cardinality::AtMostOne);
+        assert_eq!(at_most.status, aplan_core::StatusScope::Live);
+        assert_eq!(at_most.milestones, aplan_core::MilestoneScope::Exclude);
+
+        let at_least = &mapped["at-least-done-only-cuts"];
+        assert_eq!(at_least.require, aplan_core::Cardinality::AtLeastOne);
+        assert_eq!(at_least.status, aplan_core::StatusScope::Done);
+        assert_eq!(at_least.milestones, aplan_core::MilestoneScope::Only);
+
+        let exact = &mapped["exactly-dropped"];
+        assert_eq!(exact.require, aplan_core::Cardinality::ExactlyOne);
+        assert_eq!(exact.status, aplan_core::StatusScope::Dropped);
+        assert_eq!(exact.milestones, aplan_core::MilestoneScope::Include);
+
+        let optional = &mapped["optional-terminal"];
+        assert_eq!(optional.require, aplan_core::Cardinality::Optional);
+        assert_eq!(optional.status, aplan_core::StatusScope::Terminal);
     }
 
     /// **A field nothing could learn is left out** (`A1-256`).
@@ -10406,6 +20641,86 @@ mod tests {
         assert_eq!(exit_code_for(&wrapped), EXIT_INTERNAL);
     }
 
+    /// The shared dependency operation keeps its failure category when the CLI
+    /// adds presentation and save advice (`A1-420`, audit).
+    ///
+    /// This is deliberately exhaustive over `aplan_app::Error`: flattening the
+    /// application error to a string made `CloseError::Produced` exit 2 during
+    /// the first extraction even though the existing CLI contract assigns an
+    /// invalid generated document exit 3.
+    #[test]
+    fn the_dependency_adapter_preserves_every_application_error_category() {
+        for error in [
+            aplan_app::Error::Arguments("bad arguments".into()),
+            aplan_app::Error::Plan("bad plan".into()),
+            aplan_app::Error::Refused("refused edit".into()),
+        ] {
+            assert_eq!(
+                exit_code_for(&dependency_error(error, true)),
+                EXIT_USAGE,
+                "an input or state refusal became an internal failure"
+            );
+        }
+
+        let rewrite = dependency_error(
+            aplan_app::Error::Rewrite {
+                id: "A-1".into(),
+                source: aplan_core::CloseError::Produced("invalid frontmatter".into()),
+            },
+            true,
+        );
+        assert_eq!(exit_code_for(&rewrite), EXIT_INTERNAL);
+        assert!(
+            format!("{rewrite:#}").contains("cannot dep `A-1`"),
+            "the typed rewrite lost its task identity: {rewrite:#}"
+        );
+
+        for (adding, command) in [(true, "aplan dep add"), (false, "aplan dep rm")] {
+            let write = dependency_error(
+                aplan_app::Error::Write(aplan_core::save::SaveError::Changed {
+                    path: PathBuf::from("aplan/tasks/A-1.md"),
+                }),
+                adding,
+            );
+            assert_eq!(exit_code_for(&write), EXIT_USAGE);
+            assert!(
+                format!("{write:#}").contains(command),
+                "guarded-write advice omitted the attempted operation: {write:#}"
+            );
+        }
+    }
+
+    /// Proves `portfolio.preserves_rewrite_error_category`: every application
+    /// error retains its published CLI category when parking commands add
+    /// presentation context (`A1-720`).
+    #[test]
+    fn the_portfolio_adapter_preserves_every_application_error_category() {
+        for error in [
+            aplan_app::PortfolioError::Arguments("bad arguments".into()),
+            aplan_app::PortfolioError::Plan("bad plan".into()),
+            aplan_app::PortfolioError::Refused("refused edit".into()),
+        ] {
+            assert_eq!(
+                exit_code_for(&portfolio_error(error, "unpark")),
+                EXIT_USAGE,
+                "an input or state refusal became an internal failure"
+            );
+        }
+
+        let rewrite = portfolio_error(
+            aplan_app::PortfolioError::Rewrite {
+                id: "A-1".into(),
+                source: aplan_core::CloseError::Produced("invalid frontmatter".into()),
+            },
+            "unpark",
+        );
+        assert_eq!(exit_code_for(&rewrite), EXIT_INTERNAL);
+        assert!(
+            format!("{rewrite:#}").contains("cannot unpark `A-1`"),
+            "the typed rewrite lost its operation or task identity: {rewrite:#}"
+        );
+    }
+
     #[test]
     fn root_resolves_flag_then_config_then_default() {
         // No config `root`: the built-in default (`aplan`), namespaced and visible.
@@ -10431,9 +20746,557 @@ mod tests {
         );
     }
 
+    #[cfg(feature = "tui")]
+    fn onboarding_from(launch: aplan_tui::Launch) -> aplan_app::Onboarding {
+        match launch {
+            aplan_tui::Launch::Onboarding(onboarding) => onboarding,
+            aplan_tui::Launch::Loaded(_) => panic!("expected classified onboarding"),
+        }
+    }
+
+    #[cfg(feature = "tui")]
+    fn tree_state(root: &std::path::Path) -> Vec<(PathBuf, Option<Vec<u8>>)> {
+        fn visit(
+            root: &std::path::Path,
+            path: &std::path::Path,
+            out: &mut Vec<(PathBuf, Option<Vec<u8>>)>,
+        ) {
+            let mut entries = std::fs::read_dir(path)
+                .expect("read fixture directory")
+                .map(|entry| entry.expect("fixture entry").path())
+                .collect::<Vec<_>>();
+            entries.sort();
+            for entry in entries {
+                let relative = entry
+                    .strip_prefix(root)
+                    .expect("entry below root")
+                    .to_path_buf();
+                if entry.is_dir() {
+                    out.push((relative, None));
+                    visit(root, &entry, out);
+                } else {
+                    out.push((relative, Some(std::fs::read(&entry).expect("fixture file"))));
+                }
+            }
+        }
+        let mut state = Vec::new();
+        visit(root, root, &mut state);
+        state
+    }
+
+    /// Proof for `tui.onboarding_and_capabilities_are_typed`: the CLI adapter
+    /// classifies every promised launch cause without writing, and its guidance
+    /// keeps config creation separate from plan-root creation.
+    #[cfg(feature = "tui")]
+    #[test]
+    fn tui_launch_classifies_every_onboarding_cause_without_writing() {
+        assert_missing_plan_and_configuration_guidance();
+        assert_missing_config_parent_guidance();
+        assert_unreadable_and_invalid_configuration();
+        assert_missing_configured_root();
+        assert_invalid_plan_local_configuration();
+    }
+
+    #[cfg(feature = "tui")]
+    fn assert_missing_plan_and_configuration_guidance() {
+        let dir = tempfile::Builder::new()
+            .tempdir_in(aplan_core::fixture::fixture_root())
+            .expect("tempdir");
+
+        let before = tree_state(dir.path());
+        let missing_plan = onboarding_from(
+            tui_launch_at(
+                dir.path(),
+                None,
+                &aplan_config::ConfigSource::Discover,
+                false,
+            )
+            .expect("missing plan is a stable launch"),
+        );
+        assert_eq!(missing_plan.cause, aplan_app::OnboardingCause::MissingPlan);
+        assert_eq!(missing_plan.plan_root, dir.path().join("aplan"));
+        assert!(matches!(
+            missing_plan.root_selection,
+            aplan_app::RootSelection::Default
+        ));
+        assert!(missing_plan.commands.iter().any(|command| {
+            command.display == format!("aplan init -- {}", shell_word(dir.path()))
+        }));
+        assert!(
+            missing_plan
+                .commands
+                .iter()
+                .any(|command| command.display.starts_with("mkdir -p -- "))
+        );
+        assert_eq!(
+            tree_state(dir.path()),
+            before,
+            "launch must not run guidance"
+        );
+
+        let selected = dir.path().join("selected.yml");
+        let missing_config = onboarding_from(
+            tui_launch_at(
+                dir.path(),
+                None,
+                &aplan_config::ConfigSource::File(selected.clone()),
+                false,
+            )
+            .expect("missing selected config is classified"),
+        );
+        assert_eq!(
+            missing_config.cause,
+            aplan_app::OnboardingCause::MissingConfiguration
+        );
+        assert!(matches!(
+            missing_config.configuration,
+            aplan_app::ConfigurationSelection::Explicit { ref path } if path == &selected
+        ));
+        assert!(
+            missing_config.commands.is_empty(),
+            "init cannot create an arbitrary explicitly selected filename"
+        );
+        assert!(
+            missing_config
+                .guidance
+                .iter()
+                .any(|line| line.contains("cannot repair this filename"))
+        );
+        assert_eq!(tree_state(dir.path()), before);
+
+        let conventional = dir.path().join(aplan_config::CONFIG_FILE);
+        let conventional_missing = onboarding_from(
+            tui_launch_at(
+                dir.path(),
+                None,
+                &aplan_config::ConfigSource::File(conventional),
+                false,
+            )
+            .expect("missing conventional config is classified"),
+        );
+        assert!(
+            conventional_missing
+                .commands
+                .iter()
+                .any(|command| command.display.starts_with("aplan init -- "))
+        );
+
+        let relative_conventional = onboarding_from(tui_onboarding(
+            aplan_app::OnboardingCause::MissingConfiguration,
+            dir.path(),
+            dir.path().join("aplan"),
+            aplan_app::RootSelection::Default,
+            aplan_app::ConfigurationSelection::Explicit {
+                path: PathBuf::from(aplan_config::CONFIG_FILE),
+            },
+            "missing".to_string(),
+        ));
+        assert!(
+            relative_conventional
+                .commands
+                .iter()
+                .any(|command| command.display == "aplan init -- '.'")
+        );
+    }
+
+    #[cfg(feature = "tui")]
+    fn assert_missing_config_parent_guidance() {
+        let dir = tempfile::Builder::new()
+            .tempdir_in(aplan_core::fixture::fixture_root())
+            .expect("tempdir");
+        let absent_parent = dir.path().join("absent").join(aplan_config::CONFIG_FILE);
+        let before = tree_state(dir.path());
+        let onboarding = onboarding_from(
+            tui_launch_at(
+                dir.path(),
+                None,
+                &aplan_config::ConfigSource::File(absent_parent.clone()),
+                false,
+            )
+            .expect("a selected config below an absent directory is classified"),
+        );
+        assert!(onboarding.commands.is_empty());
+        assert!(onboarding.guidance.iter().any(|line| {
+            line.contains("Create the selected configuration directory")
+                && line.contains(
+                    &absent_parent
+                        .parent()
+                        .expect("parent")
+                        .display()
+                        .to_string(),
+                )
+        }));
+        assert_eq!(tree_state(dir.path()), before);
+    }
+
+    #[cfg(feature = "tui")]
+    fn assert_unreadable_and_invalid_configuration() {
+        let dir = tempfile::Builder::new()
+            .tempdir_in(aplan_core::fixture::fixture_root())
+            .expect("tempdir");
+        let selected = dir.path().join("selected.yml");
+        std::fs::create_dir(&selected).expect("directory-shaped config");
+        let before_unreadable = tree_state(dir.path());
+        let unreadable = onboarding_from(
+            tui_launch_at(
+                dir.path(),
+                None,
+                &aplan_config::ConfigSource::File(selected.clone()),
+                false,
+            )
+            .expect("unreadable config is classified"),
+        );
+        assert_eq!(
+            unreadable.cause,
+            aplan_app::OnboardingCause::UnreadableConfiguration
+        );
+        assert!(unreadable.commands.is_empty());
+        assert_eq!(tree_state(dir.path()), before_unreadable);
+        std::fs::remove_dir(&selected).expect("replace fixture config");
+
+        std::fs::write(&selected, "root: [\n").expect("invalid config");
+        let before_invalid = tree_state(dir.path());
+        let invalid = onboarding_from(
+            tui_launch_at(
+                dir.path(),
+                None,
+                &aplan_config::ConfigSource::File(selected.clone()),
+                false,
+            )
+            .expect("invalid config is classified"),
+        );
+        assert_eq!(
+            invalid.cause,
+            aplan_app::OnboardingCause::InvalidConfiguration
+        );
+        assert!(
+            invalid.commands.is_empty(),
+            "an existing file is never offered init"
+        );
+        assert_eq!(tree_state(dir.path()), before_invalid);
+
+        let explicit_root = dir.path().join("chosen-plan");
+        let invalid_with_root = onboarding_from(
+            tui_launch_at(
+                dir.path(),
+                Some(explicit_root.clone()),
+                &aplan_config::ConfigSource::File(selected.clone()),
+                false,
+            )
+            .expect("an invalid config retains an explicit root"),
+        );
+        assert_eq!(invalid_with_root.plan_root, explicit_root);
+        assert!(matches!(
+            invalid_with_root.root_selection,
+            aplan_app::RootSelection::Explicit
+        ));
+        assert_eq!(tree_state(dir.path()), before_invalid);
+
+        std::fs::remove_file(&selected).expect("remove invalid fixture");
+
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::symlink;
+
+            let dangling = dir.path().join(aplan_config::CONFIG_FILE);
+            symlink("absent-target", &dangling).expect("dangling selected config");
+            let unreadable_link = onboarding_from(
+                tui_launch_at(
+                    dir.path(),
+                    None,
+                    &aplan_config::ConfigSource::File(dangling.clone()),
+                    false,
+                )
+                .expect("a dangling selected config is classified"),
+            );
+            assert_eq!(
+                unreadable_link.cause,
+                aplan_app::OnboardingCause::UnreadableConfiguration
+            );
+            assert!(
+                unreadable_link.commands.is_empty(),
+                "an existing symlink must never be offered init"
+            );
+            assert_eq!(
+                std::fs::read_link(&dangling).expect("launch preserves selected symlink"),
+                PathBuf::from("absent-target")
+            );
+        }
+    }
+
+    #[cfg(feature = "tui")]
+    fn assert_missing_configured_root() {
+        let dir = tempfile::Builder::new()
+            .tempdir_in(aplan_core::fixture::fixture_root())
+            .expect("tempdir");
+        std::fs::write(dir.path().join(".aplan.yml"), "root: absent-plan\n")
+            .expect("valid root config");
+        let before_root = tree_state(dir.path());
+        let missing_root = onboarding_from(
+            tui_launch_at(
+                dir.path(),
+                None,
+                &aplan_config::ConfigSource::Discover,
+                false,
+            )
+            .expect("missing configured root is classified"),
+        );
+        assert_eq!(missing_root.cause, aplan_app::OnboardingCause::MissingRoot);
+        assert!(matches!(
+            missing_root.root_selection,
+            aplan_app::RootSelection::Configuration { .. }
+        ));
+        assert!(
+            missing_root
+                .guidance
+                .iter()
+                .any(|line| line.contains("does not create this directory"))
+        );
+        assert!(
+            missing_root
+                .commands
+                .iter()
+                .all(|command| !command.display.starts_with("aplan init"))
+        );
+        assert_eq!(tree_state(dir.path()), before_root);
+    }
+
+    #[cfg(feature = "tui")]
+    fn assert_invalid_plan_local_configuration() {
+        let dir = tempfile::Builder::new()
+            .tempdir_in(aplan_core::fixture::fixture_root())
+            .expect("tempdir");
+        let plan = dir.path().join("plan");
+        std::fs::create_dir_all(plan.join("tasks")).expect("plan directory");
+        let outer = dir.path().join(aplan_config::CONFIG_FILE);
+        let inner = plan.join(aplan_config::CONFIG_FILE);
+        std::fs::write(&outer, "root: plan\n").expect("invocation config");
+        std::fs::write(&inner, "root: [\n").expect("invalid plan-local config");
+        let before = tree_state(dir.path());
+
+        let onboarding = onboarding_from(
+            tui_launch_at(
+                dir.path(),
+                None,
+                &aplan_config::ConfigSource::Discover,
+                false,
+            )
+            .expect("a bad plan-local policy is classified after root resolution"),
+        );
+        assert_eq!(
+            onboarding.cause,
+            aplan_app::OnboardingCause::InvalidConfiguration
+        );
+        assert_eq!(onboarding.plan_root, plan);
+        assert!(matches!(
+            onboarding.root_selection,
+            aplan_app::RootSelection::Configuration { ref file } if file == &outer
+        ));
+        assert!(matches!(
+            onboarding.configuration,
+            aplan_app::ConfigurationSelection::Discover { ref found, .. }
+                if found.as_ref() == Some(&inner)
+        ));
+        assert!(onboarding.commands.is_empty());
+        assert_eq!(tree_state(dir.path()), before);
+    }
+
+    /// Proof for `tui.onboarding_and_capabilities_are_typed`: discovery and
+    /// loading use one selected configuration path, even if the filesystem
+    /// changes between those two operations.
+    #[cfg(feature = "tui")]
+    #[test]
+    fn tui_configuration_loading_is_bound_to_the_classified_selection() {
+        let dir = tempfile::Builder::new()
+            .tempdir_in(aplan_core::fixture::fixture_root())
+            .expect("tempdir");
+        let selection =
+            tui_configuration_selection(dir.path(), &aplan_config::ConfigSource::Discover);
+        assert!(matches!(
+            selection,
+            aplan_app::ConfigurationSelection::Discover { found: None, .. }
+        ));
+
+        std::fs::write(
+            dir.path().join(aplan_config::CONFIG_FILE),
+            "unknown: true\n",
+        )
+        .expect("racing configuration");
+        let (config, selected_dir) = tui_load_configuration(dir.path(), &selection)
+            .expect("the frozen absent selection stays absent");
+        assert!(selected_dir.is_none());
+        assert!(config.root.is_none());
+    }
+
+    /// Proof for `tui.onboarding_and_capabilities_are_typed`: the three trust
+    /// choices use their exact loader and stay visible as typed launch
+    /// resolution rather than converging on an ambiguous path.
+    #[cfg(feature = "tui")]
+    #[test]
+    fn tui_loaded_launch_names_root_explicit_config_and_no_config_semantics() {
+        let no_config = tempfile::Builder::new()
+            .tempdir_in(aplan_core::fixture::fixture_root())
+            .expect("no-config fixture");
+        let no_config_root = no_config.path().join("plan");
+        std::fs::create_dir_all(no_config_root.join("tasks")).expect("empty plan");
+        let aplan_tui::Launch::Loaded(no_config_launch) = tui_launch_at(
+            no_config.path(),
+            Some(no_config_root.clone()),
+            &aplan_config::ConfigSource::None,
+            false,
+        )
+        .expect("no-config plan loads") else {
+            panic!("no-config plan must load")
+        };
+        assert_eq!(no_config_launch.resolution.plan_root, no_config_root);
+        assert!(matches!(
+            no_config_launch.resolution.root_selection,
+            aplan_app::RootSelection::Explicit
+        ));
+        assert!(matches!(
+            no_config_launch.resolution.configuration,
+            aplan_app::ConfigurationSelection::None
+        ));
+        assert!(
+            no_config_launch
+                .context
+                .identity()
+                .configuration
+                .path
+                .is_none()
+        );
+        assert_eq!(
+            no_config_launch.context.identity().trust,
+            aplan_app::Trust::ConfiguredProcesses,
+            "the interactive host must retain the capability its explicit focused preview offers"
+        );
+
+        let explicit = tempfile::Builder::new()
+            .tempdir_in(aplan_core::fixture::fixture_root())
+            .expect("explicit fixture");
+        std::fs::create_dir_all(explicit.path().join("plan/tasks")).expect("plan");
+        let selected = explicit.path().join("policy.yml");
+        std::fs::write(&selected, "root: plan\n").expect("explicit config");
+        let aplan_tui::Launch::Loaded(explicit_launch) = tui_launch_at(
+            explicit.path(),
+            None,
+            &aplan_config::ConfigSource::File(selected.clone()),
+            false,
+        )
+        .expect("explicit config loads") else {
+            panic!("explicit config plan must load")
+        };
+        assert!(matches!(
+            explicit_launch.resolution.configuration,
+            aplan_app::ConfigurationSelection::Explicit { ref path } if path == &selected
+        ));
+        assert!(matches!(
+            explicit_launch.resolution.root_selection,
+            aplan_app::RootSelection::Configuration { ref file } if file == &selected
+        ));
+        assert_eq!(
+            explicit_launch
+                .context
+                .identity()
+                .configuration
+                .path
+                .as_ref(),
+            Some(&selected)
+        );
+
+        let discovered = tempfile::Builder::new()
+            .tempdir_in(aplan_core::fixture::fixture_root())
+            .expect("discovery fixture");
+        std::fs::create_dir_all(discovered.path().join("plan/tasks")).expect("plan");
+        let discovered_file = discovered.path().join(".aplan.yml");
+        std::fs::write(&discovered_file, "root: plan\n").expect("discovered config");
+        let aplan_tui::Launch::Loaded(discovered_launch) = tui_launch_at(
+            discovered.path(),
+            None,
+            &aplan_config::ConfigSource::Discover,
+            false,
+        )
+        .expect("discovered config loads") else {
+            panic!("discovered config plan must load")
+        };
+        assert!(matches!(
+            discovered_launch.resolution.configuration,
+            aplan_app::ConfigurationSelection::Discover { ref found, .. }
+                if found.as_ref() == Some(&discovered_file)
+        ));
+        assert_eq!(
+            discovered_launch
+                .context
+                .identity()
+                .configuration
+                .path
+                .as_ref(),
+            Some(&discovered_file)
+        );
+    }
+
+    #[test]
+    fn a_nested_plan_root_finds_the_worktree_without_opening_git() {
+        for marker_is_file in [false, true] {
+            let dir = tempfile::Builder::new()
+                .tempdir_in(aplan_core::fixture::fixture_root())
+                .expect("tempdir");
+            let nested = dir.path().join("plans/tasks");
+            std::fs::create_dir_all(&nested).expect("nested plan");
+            if marker_is_file {
+                std::fs::write(dir.path().join(".git"), "gitdir: elsewhere\n")
+                    .expect("worktree marker");
+            } else {
+                std::fs::create_dir(dir.path().join(".git")).expect("git marker");
+            }
+            assert_eq!(plan_repository(&nested), dir.path());
+        }
+    }
+
+    #[test]
+    fn a_plan_outside_git_keeps_the_one_parent_fallback() {
+        let dir = tempfile::Builder::new()
+            .tempdir_in(aplan_core::fixture::fixture_root())
+            .expect("tempdir");
+        let root = dir.path().join("plan");
+        std::fs::create_dir(&root).expect("plan");
+        assert_eq!(plan_repository(&root), dir.path());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn revision_repository_discovery_does_not_need_a_worktree_target() {
+        use std::os::unix::fs::symlink;
+
+        let dir = tempfile::Builder::new()
+            .tempdir_in(aplan_core::fixture::fixture_root())
+            .expect("tempdir");
+        let actual = dir.path().join("actual");
+        std::fs::create_dir(&actual).expect("actual repository");
+        std::fs::create_dir(actual.join(".git")).expect("git marker");
+        let alias = dir.path().join("alias");
+        symlink(&actual, &alias).expect("repository alias");
+        assert_eq!(revision_plan_repository(&alias), alias);
+
+        let outside = dir.path().join("outside/plan");
+        assert_eq!(
+            revision_plan_repository(&outside),
+            dir.path().join("outside")
+        );
+        assert_eq!(
+            revision_plan_repository(std::path::Path::new("/")),
+            PathBuf::from(".")
+        );
+
+        assert_eq!(
+            normalize_path(std::path::Path::new("./a/b/../c")),
+            std::path::Path::new("a/c")
+        );
+    }
+
     #[test]
     fn defaults_apply_with_no_config_and_no_flags() {
-        let o = resolve_check_options(&Config::default(), None, false, None, false);
+        let o = resolve_check_options(&Config::default(), None, false, None, false, None);
         assert!(o.require_effort, "effort required by default");
         assert_eq!(
             o.traces_root,
@@ -10449,7 +21312,7 @@ mod tests {
             traces_root: Some("docs".into()),
             ..Default::default()
         };
-        let o = resolve_check_options(&c, None, false, None, false);
+        let o = resolve_check_options(&c, None, false, None, false, None);
         assert!(!o.require_effort);
         assert_eq!(o.traces_root, Some(PathBuf::from("docs")));
     }
@@ -10462,7 +21325,14 @@ mod tests {
             traces_root: Some("docs".into()),
             ..Default::default()
         };
-        let o = resolve_check_options(&c, Some(std::path::Path::new("/repo")), false, None, false);
+        let o = resolve_check_options(
+            &c,
+            Some(std::path::Path::new("/repo")),
+            false,
+            None,
+            false,
+            None,
+        );
         assert_eq!(o.traces_root, Some(PathBuf::from("/repo/docs")));
         // An absolute config value is left as-is.
         let abs = Config {
@@ -10475,6 +21345,7 @@ mod tests {
             false,
             None,
             false,
+            None,
         );
         assert_eq!(o.traces_root, Some(PathBuf::from("/elsewhere")));
     }
@@ -10488,7 +21359,7 @@ mod tests {
             traces_root: Some("docs".into()),
             ..Default::default()
         };
-        let o = resolve_check_options(&c, None, true, Some(PathBuf::from("src")), false);
+        let o = resolve_check_options(&c, None, true, Some(PathBuf::from("src")), false, None);
         assert!(!o.require_effort, "--no-require-effort overrides the file");
         assert_eq!(
             o.traces_root,
@@ -10501,7 +21372,7 @@ mod tests {
     fn traces_can_be_disabled_from_either_flag_or_file() {
         // From the flag.
         assert_eq!(
-            resolve_check_options(&Config::default(), None, false, None, true).traces_root,
+            resolve_check_options(&Config::default(), None, false, None, true, None).traces_root,
             None
         );
         // From the file.
@@ -10510,8 +21381,670 @@ mod tests {
             ..Default::default()
         };
         assert_eq!(
-            resolve_check_options(&c, None, false, None, false).traces_root,
+            resolve_check_options(&c, None, false, None, false, None).traces_root,
             None
+        );
+    }
+
+    #[test]
+    fn the_shared_interactive_context_uses_named_hermetic_options() {
+        let dir = tempfile::Builder::new()
+            .tempdir_in(aplan_core::fixture::fixture_root())
+            .expect("tempdir");
+        let root = dir.path().join("plan/tasks");
+        std::fs::create_dir_all(&root).expect("plan directory");
+        std::fs::write(
+            root.join("T-001.md"),
+            "---\nid: T-001\ntitle: one\nphase: 1\nstatus: todo\neffort_days: 1\n\
+             paths: [src/**]\ntags: [cross-cutting]\n---\n\n## Why\n\none\n",
+        )
+        .expect("task");
+        let plan_root = dir.path().join("plan");
+
+        let standard = hermetic_application_context(&plan_root, HermeticContextOptions::default())
+            .expect("standard context");
+        assert_eq!(standard.identity().trust, aplan_app::Trust::Hermetic);
+        assert!(standard.options().require_effort);
+        assert!(standard.options().traces_root.is_some());
+
+        let explicit = hermetic_application_context(
+            &plan_root,
+            HermeticContextOptions {
+                no_require_effort: true,
+                traces: TraceSelection::Disabled,
+                verdict: VerdictFlags {
+                    deny_warnings: true,
+                    no_deny_warnings: false,
+                },
+                include_documents: false,
+                retain_sources: true,
+                cache_publication: CachePublication::WithStructuralReport,
+                trust: aplan_app::Trust::Hermetic,
+            },
+        )
+        .expect("explicit context");
+        assert!(!explicit.options().require_effort);
+        assert_eq!(explicit.options().traces_root, None);
+        assert!(explicit.verdict().deny_warnings);
+    }
+
+    /// Proof for `tui.visual_language_is_semantic_and_deterministic`: clap's
+    /// explicit launch choices reach the terminal adapter without being
+    /// reinterpreted as ordinary command-output color.
+    #[cfg(feature = "tui")]
+    #[test]
+    fn tui_cli_appearance_options_reach_the_terminal_adapter() {
+        for (theme, expected) in [
+            (TuiTheme::Dark, aplan_tui::ThemeOverride::Dark),
+            (TuiTheme::Light, aplan_tui::ThemeOverride::Light),
+            (TuiTheme::LowColor, aplan_tui::ThemeOverride::LowColor),
+            (TuiTheme::Monochrome, aplan_tui::ThemeOverride::Monochrome),
+        ] {
+            assert_eq!(
+                tui_appearance(&TuiArgs {
+                    theme: Some(theme),
+                    ascii: true,
+                    reduced_motion: true,
+                }),
+                aplan_tui::AppearanceOptions {
+                    theme: Some(expected),
+                    ascii: true,
+                    reduced_motion: true,
+                }
+            );
+        }
+    }
+
+    /// Proof for `tui.event_loop_is_generation_safe`,
+    /// `tui.startup_feedback_precedes_plan_io` and
+    /// `tui.production_external_probe_avoids_refresh_work`: the observation and
+    /// refresh callbacks each perform a new identified load instead of cloning
+    /// the snapshot supplied at launch.
+    #[cfg(feature = "tui")]
+    #[test]
+    fn the_tui_refresh_reloads_repository_inputs() {
+        let dir = tempfile::Builder::new()
+            .tempdir_in(aplan_core::fixture::fixture_root())
+            .expect("tempdir");
+        let root = dir.path().join("plan/tasks");
+        std::fs::create_dir_all(&root).expect("plan directory");
+        let task = root.join("T-001.md");
+        let body = |title: &str| {
+            format!(
+                "---\nid: T-001\ntitle: {title}\nphase: 1\nstatus: todo\neffort_days: 1\n\
+                 paths: [src/**]\ntags: [cross-cutting]\n---\n\n## Why\n\none\n"
+            )
+        };
+        std::fs::write(&task, body("one")).expect("initial task");
+        let plan_root = dir.path().join("plan");
+        let git = |args: &[&str]| {
+            let output = std::process::Command::new("git")
+                .arg("-C")
+                .arg(dir.path())
+                .args(args)
+                .output()
+                .expect("git runs");
+            assert!(
+                output.status.success(),
+                "git {args:?} failed: {}",
+                String::from_utf8_lossy(&output.stderr)
+            );
+        };
+        git(&["init", "-q"]);
+        git(&["config", "user.email", "test@example.com"]);
+        git(&["config", "user.name", "Test"]);
+        git(&["add", "."]);
+        git(&["commit", "-qm", "fixture"]);
+
+        let status = cmd_tui_in_terminal(
+            &TuiArgs::default(),
+            Some(plan_root.clone()),
+            |launch, session| {
+                let (initial, progress_events) = resolve_initial_load_with_progress(launch);
+                let started_phases = progress_events
+                    .iter()
+                    .filter_map(|event| match (event.lifecycle, event.subject) {
+                        (
+                            aplan_app::ProgressLifecycle::Started,
+                            aplan_app::ProgressSubject::Phase { phase, .. },
+                        ) => Some(phase),
+                        _ => None,
+                    })
+                    .collect::<Vec<_>>();
+                let required = [
+                    aplan_app::ProgressPhase::BuildIdentification,
+                    aplan_app::ProgressPhase::ConfigurationDiscovery,
+                    aplan_app::ProgressPhase::CacheLookup,
+                    aplan_app::ProgressPhase::SourceEnumeration,
+                    aplan_app::ProgressPhase::SourceParsing,
+                    aplan_app::ProgressPhase::SnapshotConfirmation,
+                    aplan_app::ProgressPhase::RepositoryObservation,
+                    aplan_app::ProgressPhase::VerificationPreparation,
+                ];
+                let mut cursor = 0;
+                for phase in &started_phases {
+                    if required.get(cursor) == Some(phase) {
+                        cursor += 1;
+                    }
+                }
+                assert_eq!(
+                    cursor,
+                    required.len(),
+                    "missing ordered phase: {required:?}"
+                );
+                if let Some(publication) = started_phases
+                    .iter()
+                    .position(|phase| *phase == aplan_app::ProgressPhase::CachePublication)
+                {
+                    let confirmation = started_phases
+                        .iter()
+                        .position(|phase| {
+                            *phase == aplan_app::ProgressPhase::SnapshotConfirmation
+                        })
+                        .expect("snapshot confirmation phase");
+                    let repository = started_phases
+                        .iter()
+                        .position(|phase| {
+                            *phase == aplan_app::ProgressPhase::RepositoryObservation
+                        })
+                        .expect("repository observation phase");
+                    assert!(
+                        confirmation < publication && publication < repository,
+                        "cache publication must remain between source confirmation and repository observation: {started_phases:?}"
+                    );
+                }
+                let launch = initial.launch;
+                let build = initial.build;
+                let facts = initial.facts;
+                let aplan_tui::Session {
+                    appearance,
+                    observe,
+                    reload,
+                    retry: _retry,
+                    verify,
+                } = session;
+                let aplan_tui::Launch::Loaded(loaded) = launch else {
+                    panic!("fixture must load")
+                };
+                let aplan_tui::LoadedLaunch {
+                    context: initial,
+                    verification_sheet: sheet,
+                    ..
+                } = *loaded;
+                let initial_input = initial.identity().sha256.clone();
+                assert_eq!(initial.plan().tasks[0].task.title, "one");
+                assert_eq!(build.version, env!("CARGO_PKG_VERSION"));
+                assert_eq!(facts.version, build.version);
+                assert_eq!(appearance, aplan_tui::AppearanceOptions::default());
+                assert_eq!(build.facts_sha256.len(), 64);
+                assert_eq!(build.binary_sha256.len(), 64);
+                let verified = verify(
+                    &sheet.input_sha256,
+                    false,
+                    aplan_app::OperationId::new(1),
+                    &mut |_| {},
+                )
+                .expect("typed verification");
+                assert_eq!(verified.state, aplan_app::VerificationState::Completed);
+                assert_eq!(verified.run.scope, aplan_app::DiagnosticScope::Verify);
+                assert_eq!(verified.sheet.input_sha256, sheet.input_sha256);
+
+                std::fs::write(&task, body("two")).expect("updated task");
+                let observed = observe(&aplan_app::CancellationToken::default())
+                    .expect("observed context");
+                assert_ne!(observed.identity().sha256, initial_input);
+                assert_eq!(observed.plan().tasks[0].task.title, "two");
+                let (refreshed, _) = reload().expect("refreshed context");
+                assert_ne!(refreshed.identity().sha256, initial_input);
+                assert_eq!(refreshed.plan().tasks[0].task.title, "two");
+                Ok(())
+            },
+        )
+        .expect("TUI adapter");
+        assert_eq!(status, EXIT_OK);
+
+        let mut observation_events = Vec::new();
+        let observed_after_launch = {
+            let mut sink = |event| observation_events.push(event);
+            let mut progress = aplan_app::ProgressEmitter::begin(
+                aplan_app::OperationId::new(91),
+                aplan_app::OperationKind::PlanLoad,
+                &mut sink,
+            );
+            let observed = tui_observe_context_at(
+                dir.path(),
+                Some(plan_root),
+                &aplan_config::ConfigSource::None,
+                &mut progress,
+                &aplan_app::CancellationToken::default(),
+            )
+            .expect("production identity observation");
+            progress.complete();
+            observed
+        };
+        assert_eq!(observed_after_launch.plan().tasks[0].task.title, "two");
+        assert!(observation_events.iter().any(|event| matches!(
+            event.subject,
+            aplan_app::ProgressSubject::Phase {
+                phase: aplan_app::ProgressPhase::RepositoryObservation,
+                ..
+            }
+        )));
+        assert!(
+            !observation_events.iter().any(|event| matches!(
+                event.subject,
+                aplan_app::ProgressSubject::Phase {
+                    phase: aplan_app::ProgressPhase::VerificationPreparation,
+                    ..
+                }
+            )),
+            "an identity probe rebuilt refresh-only verification inputs"
+        );
+    }
+
+    #[cfg(feature = "tui")]
+    fn collect_stable_production_measurements(
+        samples: usize,
+        max_attempts: usize,
+        mut measure: impl FnMut() -> Option<(std::time::Duration, std::time::Duration)>,
+    ) -> Result<(Vec<std::time::Duration>, Vec<std::time::Duration>), String> {
+        if samples == 0 {
+            return Ok((Vec::new(), Vec::new()));
+        }
+        let mut observations = Vec::with_capacity(samples);
+        let mut refreshes = Vec::with_capacity(samples);
+        let mut raced = 0;
+        for _ in 0..max_attempts {
+            let Some((observation, refresh)) = measure() else {
+                raced += 1;
+                continue;
+            };
+            observations.push(observation);
+            refreshes.push(refresh);
+            if observations.len() == samples {
+                return Ok((observations, refreshes));
+            }
+        }
+        Err(format!(
+            "production refresh measurement collected {} of {samples} stable sample(s); input moved during {raced} of {max_attempts} attempt(s). Retry when the checkout is stable",
+            observations.len()
+        ))
+    }
+
+    #[cfg(feature = "tui")]
+    fn production_identity_observation_and_complete_refresh(
+        samples: usize,
+    ) -> (Vec<std::time::Duration>, Vec<std::time::Duration>) {
+        let workspace = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .parent()
+            .and_then(std::path::Path::parent)
+            .expect("workspace root");
+        let plan_root = workspace.join("aplan");
+        let build = aplan_app::BuildIdentity {
+            version: "measurement".to_string(),
+            source: "measurement".to_string(),
+            facts_sha256: "measurement".to_string(),
+            binary_sha256: "measurement".to_string(),
+        };
+
+        let max_attempts = samples.saturating_mul(8).max(8);
+        collect_stable_production_measurements(samples, max_attempts, || {
+            let observe = || {
+                let source = CONFIG_SOURCE
+                    .get()
+                    .cloned()
+                    .unwrap_or(aplan_config::ConfigSource::Discover);
+                let mut discard = |_| {};
+                let mut progress = aplan_app::ProgressEmitter::begin(
+                    aplan_app::OperationId::new(0),
+                    aplan_app::OperationKind::PlanLoad,
+                    &mut discard,
+                );
+                let context = tui_observe_context_at(
+                    std::path::Path::new("."),
+                    Some(plan_root.clone()),
+                    &source,
+                    &mut progress,
+                    &aplan_app::CancellationToken::default(),
+                )
+                .expect("production identity observation");
+                progress.complete();
+                context
+            };
+            let started = std::time::Instant::now();
+            let context = observe();
+            std::hint::black_box(context.identity());
+            let observation = started.elapsed();
+
+            let started = std::time::Instant::now();
+            let (context, options) = tui_context_and_verification(&plan_root, false)
+                .expect("production refresh context");
+            let sheet = aplan_app::verification_run_sheet(&context, &options);
+            let snapshot = aplan_tui::prepare_snapshot(&context, &build, sheet);
+            let confirmed = observe();
+            if context.identity().sha256 != confirmed.identity().sha256 {
+                return None;
+            }
+            std::hint::black_box(snapshot);
+            Some((observation, started.elapsed()))
+        })
+        .unwrap_or_else(|error| panic!("{error}"))
+    }
+
+    /// A production timing is evidence only for the exact input it projected.
+    /// Movement is expected in a shared checkout, so raced work is discarded
+    /// rather than counted or mistaken for a product failure.
+    #[cfg(feature = "tui")]
+    #[test]
+    fn production_measurement_retries_movement_and_counts_only_stable_samples() {
+        let mut attempts = 0;
+        let (observations, refreshes) = collect_stable_production_measurements(2, 3, || {
+            attempts += 1;
+            match attempts {
+                1 => None,
+                2 => Some((
+                    std::time::Duration::from_millis(20),
+                    std::time::Duration::from_millis(200),
+                )),
+                3 => Some((
+                    std::time::Duration::from_millis(30),
+                    std::time::Duration::from_millis(300),
+                )),
+                _ => unreachable!("the sample budget is exact"),
+            }
+        })
+        .expect("movement followed by stability is measurable");
+        assert_eq!(attempts, 3);
+        assert_eq!(
+            observations,
+            [
+                std::time::Duration::from_millis(20),
+                std::time::Duration::from_millis(30)
+            ]
+        );
+        assert_eq!(
+            refreshes,
+            [
+                std::time::Duration::from_millis(200),
+                std::time::Duration::from_millis(300)
+            ]
+        );
+    }
+
+    #[cfg(feature = "tui")]
+    #[test]
+    fn production_measurement_exhaustion_names_movement_and_the_retry() {
+        let error = collect_stable_production_measurements(1, 2, || None)
+            .expect_err("continuous movement must remain visible");
+        assert!(error.contains("input moved during 2 of 2 attempt(s)"));
+        assert!(error.contains("Retry when the checkout is stable"));
+    }
+
+    /// The production measurement path is executable in an ordinary test and
+    /// remains exact as the CLI adapter evolves. Timing is deliberately not a
+    /// CI verdict; the ignored sample below owns that host-dependent report.
+    #[cfg(feature = "tui")]
+    #[test]
+    fn production_identity_observation_and_complete_refresh_are_executable() {
+        let (observations, refreshes) = production_identity_observation_and_complete_refresh(1);
+        assert_eq!(observations.len(), 1);
+        assert_eq!(refreshes.len(), 1);
+    }
+
+    /// Manual production-path measurement for `A1-575`.
+    ///
+    /// Both samples use the exact CLI loader, selected policy, configured
+    /// documents and Git observation that production uses. The refresh sample
+    /// also builds every TUI projection and performs the confirmation read.
+    /// Host timings are observations rather than CI thresholds, so this
+    /// remains ignored.
+    #[cfg(feature = "tui")]
+    #[test]
+    #[ignore = "manual A1-575 production-path latency measurement; prints host-dependent samples"]
+    fn measure_production_identity_observation_against_complete_refresh() {
+        let (mut observations, mut refreshes) =
+            production_identity_observation_and_complete_refresh(15);
+
+        observations.sort_unstable();
+        refreshes.sort_unstable();
+        let p95 = |samples: &[std::time::Duration]| samples[(samples.len() * 95).div_ceil(100) - 1];
+        println!(
+            "production observation median={:?} p95={:?}; complete refresh median={:?} p95={:?}",
+            observations[observations.len() / 2],
+            p95(&observations),
+            refreshes[refreshes.len() / 2],
+            p95(&refreshes)
+        );
+        assert!(
+            observations[observations.len() / 2] < refreshes[refreshes.len() / 2],
+            "polling must be revisited when observing identity is not cheaper than a complete refresh"
+        );
+    }
+
+    /// Proof for `tui.verification_execution_is_preview_bound`: a configuration
+    /// edit after the run sheet is reviewed is detected before its replacement
+    /// provider can be launched.
+    #[cfg(feature = "tui")]
+    #[test]
+    fn tui_verification_refuses_changed_provider_before_execution() {
+        let dir = tempfile::Builder::new()
+            .tempdir_in(aplan_core::fixture::fixture_root())
+            .expect("tempdir");
+        let tasks = dir.path().join("plan/tasks");
+        std::fs::create_dir_all(&tasks).expect("plan directory");
+        std::fs::write(
+            tasks.join("T-001.md"),
+            "---\nid: T-001\ntitle: one\nphase: 1\nstatus: todo\neffort_days: 1\n\
+             paths: [src/**]\ntags: [cross-cutting]\n---\n",
+        )
+        .expect("task");
+        let git = |args: &[&str]| {
+            let output = std::process::Command::new("git")
+                .arg("-C")
+                .arg(dir.path())
+                .args(args)
+                .output()
+                .expect("git runs");
+            assert!(output.status.success(), "git {args:?} failed: {output:?}");
+        };
+        git(&["init", "-q"]);
+        git(&["config", "user.email", "test@example.com"]);
+        git(&["config", "user.name", "Test"]);
+        git(&["add", "."]);
+        git(&["commit", "-qm", "fixture"]);
+
+        let marker = dir.path().join("unreviewed-provider-ran");
+        let status = cmd_tui_in_terminal(
+            &TuiArgs::default(),
+            Some(dir.path().join("plan")),
+            |launch, session| {
+                let launch = resolve_initial_load(launch).launch;
+                let verify = session.verify;
+                let aplan_tui::Launch::Loaded(loaded) = launch else {
+                    panic!("fixture must load")
+                };
+                let aplan_tui::LoadedLaunch {
+                    verification_sheet: sheet,
+                    ..
+                } = *loaded;
+                std::fs::write(
+                    dir.path().join(".aplan.yml"),
+                    format!(
+                        "root: plan\ntest:\n  list: [sh, -c, 'touch {}']\n  run: ['true', '{{test}}']\n",
+                        marker.display()
+                    ),
+                )
+                .expect("replacement config");
+
+                let stale = verify(
+                    &sheet.input_sha256,
+                    false,
+                    aplan_app::OperationId::new(1),
+                    &mut |_| {},
+                )
+                    .expect_err("changed provider input must be stale");
+                assert!(matches!(
+                    stale,
+                    aplan_app::VerificationError::Stale { .. }
+                ));
+                assert!(
+                    !marker.exists(),
+                    "a provider added after review ran before the stale-input refusal"
+                );
+
+                std::fs::remove_file(dir.path().join(".aplan.yml")).expect("restore input");
+                let verified = verify(
+                    &sheet.input_sha256,
+                    false,
+                    aplan_app::OperationId::new(2),
+                    &mut |_| {},
+                )
+                    .expect("matching input runs");
+                assert_eq!(verified.sheet.input_sha256, sheet.input_sha256);
+                Ok(())
+            },
+        )
+        .expect("TUI adapter");
+        assert_eq!(status, EXIT_OK);
+    }
+
+    /// Proof for `tui.diagnostic_workbench_retains_complete_runs`: the CLI
+    /// delivery adapter resolves configured document globs and bytes into the
+    /// same immutable application snapshot as the plan, and refresh rereads
+    /// both rather than retaining a stale document result.
+    #[cfg(feature = "tui")]
+    #[test]
+    fn the_tui_context_loads_and_refreshes_configured_document_diagnostics() {
+        let dir = tempfile::Builder::new()
+            .tempdir_in(aplan_core::fixture::fixture_root())
+            .expect("tempdir");
+        let tasks = dir.path().join("aplan/tasks");
+        std::fs::create_dir_all(&tasks).expect("plan directory");
+        std::fs::write(
+            tasks.join("T-001.md"),
+            "---\nid: T-001\ntitle: one\nphase: 1\nstatus: todo\neffort_days: 1\n\
+             paths: [src/**]\ntags: [cross-cutting]\n---\n",
+        )
+        .expect("task");
+        let document = dir.path().join("PLAN.md");
+        std::fs::write(&document, "T-999 is not planned.\n").expect("document");
+        std::fs::write(
+            dir.path().join(".aplan.yml"),
+            "root: aplan\ndocs:\n  paths: [PLAN.md]\n  membership:\n    - doc: PLAN.md\n      declared_by: line\n      marker: 'Tasks:'\n",
+        )
+        .expect("config");
+
+        let status = cmd_tui_in_terminal(
+            &TuiArgs::default(),
+            Some(dir.path().join("aplan")),
+            |launch, session| {
+                let launch = resolve_initial_load(launch).launch;
+                let observe = session.observe;
+                let reload = session.reload;
+                let aplan_tui::Launch::Loaded(loaded) = launch else {
+                    panic!("fixture must load")
+                };
+                let aplan_tui::LoadedLaunch {
+                    context: initial, ..
+                } = *loaded;
+                assert!(matches!(
+                    initial.documents().state,
+                    aplan_app::DocumentInputState::Configured
+                ));
+                assert!(matches!(
+                    initial.documents().documents[0].membership,
+                    Some(aplan_app::DocumentMembership::Line(ref marker)) if marker == "Tasks:"
+                ));
+                let first = aplan_app::task_view(&initial);
+                assert_eq!(first.diagnostics.documents.findings.len(), 1);
+                let finding = &first.diagnostics.documents.findings[0];
+                assert_eq!(finding.code, "DOC-REFERENCE");
+                assert_eq!((finding.line, finding.column), (Some(1), Some(1)));
+                assert_eq!(
+                    finding.source_line.as_deref(),
+                    Some("T-999 is not planned.")
+                );
+                let identity = initial.identity().sha256.clone();
+
+                std::fs::write(&document, "T-001 is planned.\n").expect("repair document");
+                let observed =
+                    observe(&aplan_app::CancellationToken::default()).expect("observed context");
+                assert_ne!(observed.identity().sha256, identity);
+                assert!(matches!(
+                    observed.documents().state,
+                    aplan_app::DocumentInputState::Configured
+                ));
+                let (refreshed, _) = reload().expect("refreshed context");
+                assert_ne!(refreshed.identity().sha256, identity);
+                let second = aplan_app::task_view(&refreshed);
+                assert!(second.diagnostics.documents.findings.is_empty());
+                assert!(matches!(
+                    second.diagnostics.documents.coverage,
+                    aplan_app::DiagnosticCoverage::Complete { subjects: 1 }
+                ));
+                assert!(!second.diagnostics.documents.denied);
+                Ok(())
+            },
+        )
+        .expect("TUI adapter");
+        assert_eq!(status, EXIT_OK);
+    }
+
+    #[cfg(feature = "tui")]
+    #[test]
+    fn configured_document_selection_refuses_vacuity_and_retains_table_membership() {
+        let dir = tempfile::Builder::new()
+            .tempdir_in(aplan_core::fixture::fixture_root())
+            .expect("tempdir");
+        let config_path = dir.path().join(".aplan.yml");
+
+        let empty = aplan_config::Config {
+            docs: Some(aplan_config::DocsConfig {
+                paths: None,
+                membership: None,
+            }),
+            ..aplan_config::Config::default()
+        };
+        let empty_inputs = configured_document_inputs(&empty, Some(dir.path()));
+        assert!(matches!(
+            empty_inputs.state,
+            aplan_app::DocumentInputState::Unavailable(ref reason)
+                if reason.contains("resolved to no files")
+        ));
+
+        let missing =
+            aplan_config::parse_config_bytes(b"docs:\n  paths: [missing.md]\n", &config_path)
+                .expect("missing declaration parses");
+        let missing_inputs = configured_document_inputs(&missing, Some(dir.path()));
+        assert!(matches!(
+            missing_inputs.state,
+            aplan_app::DocumentInputState::Unavailable(ref reason)
+                if reason.contains("missing.md")
+        ));
+
+        std::fs::write(dir.path().join("ROADMAP.md"), "# M-1\n").expect("document");
+        let table = aplan_config::parse_config_bytes(
+            b"docs:\n  membership:\n    - doc: ROADMAP.md\n      declared_by: table\n",
+            &config_path,
+        )
+        .expect("table declaration parses");
+        let table_inputs = configured_document_inputs(&table, Some(dir.path()));
+        assert!(matches!(
+            table_inputs.state,
+            aplan_app::DocumentInputState::Configured
+        ));
+        assert_eq!(table_inputs.documents.len(), 1);
+        assert_eq!(table_inputs.documents[0].label, "ROADMAP.md");
+        assert!(matches!(
+            table_inputs.documents[0].membership,
+            Some(aplan_app::DocumentMembership::Table)
+        ));
+        assert_eq!(
+            table_inputs.documents[0]
+                .content
+                .as_deref()
+                .expect("document bytes"),
+            "# M-1\n"
         );
     }
 }
@@ -10529,6 +22062,10 @@ mod id_race {
         })
     }
 
+    fn changing_snapshot() -> anyhow::Error {
+        anyhow::Error::new(std::io::Error::other(aplan_app::PlanSnapshotChanged))
+    }
+
     /// **A command that gives up still tells a script what to do** (`A1-230`,
     /// criterion 1).
     ///
@@ -10538,15 +22075,41 @@ mod id_race {
     /// that nothing was written, and that running again is the remedy -- and
     /// per ADR-0024 it must learn that without the command recommending
     /// `id_strategy` at it.
+    ///
+    /// Proof of `ids.sequential_survives_concurrent_writers`: deterministic
+    /// deadline exhaustion through the production retry loop.
     #[test]
     fn a_command_that_runs_out_of_deadline_says_what_to_do() {
-        let e = with_id_retry(true, std::time::Duration::from_millis(1), || {
-            Err::<(), _>(taken("plan/v1/A1-001.md"))
-        })
+        let elapsed = std::cell::Cell::new(std::time::Duration::ZERO);
+        let mut attempts = 0;
+        let mut backoff_attempts = Vec::new();
+        let mut waits = Vec::new();
+        let e = with_id_retry_timing(
+            true,
+            ID_RACE_DEADLINE,
+            || {
+                attempts += 1;
+                Err::<(), _>(taken("plan/v1/A1-001.md"))
+            },
+            || elapsed.get(),
+            |attempt| {
+                backoff_attempts.push(attempt);
+                ID_RACE_DEADLINE
+            },
+            |duration| {
+                waits.push(duration);
+                elapsed.set(elapsed.get() + duration);
+            },
+        )
         .expect_err("a writer that never wins must refuse, not loop");
+        assert_eq!(attempts, 2, "deadline exhaustion made the wrong attempts");
+        assert_eq!(backoff_attempts, [1]);
+        assert_eq!(waits, [ID_RACE_DEADLINE]);
+        assert_eq!(elapsed.get(), ID_RACE_DEADLINE);
         let said = format!("{e:#}");
         for needle in [
             "another writer took every id this minted",
+            "2 times over 5000ms",
             "nothing was written",
             "Run the command again",
             // Still carries the mechanical detail underneath, so a human
@@ -10564,6 +22127,187 @@ mod id_race {
         );
     }
 
+    /// A collision re-enters the same attempt through controlled production
+    /// timing rather than through a test-only retry implementation (`A1-599`).
+    ///
+    /// Proof of `ids.sequential_survives_concurrent_writers`: deterministic
+    /// retry success through the production retry loop.
+    #[test]
+    fn a_lost_id_retries_with_controlled_time_and_backoff() {
+        let elapsed = std::cell::Cell::new(std::time::Duration::ZERO);
+        let mut attempts = 0;
+        let mut backoff_attempts = Vec::new();
+        let mut waits = Vec::new();
+        let (value, retries) = with_id_retry_timing(
+            true,
+            ID_RACE_DEADLINE,
+            || {
+                attempts += 1;
+                if attempts < 3 {
+                    Err(taken(&format!("plan/v1/A1-{attempts:03}.md")))
+                } else {
+                    Ok("landed")
+                }
+            },
+            || elapsed.get(),
+            |attempt| {
+                backoff_attempts.push(attempt);
+                std::time::Duration::from_millis(u64::from(attempt) * 7)
+            },
+            |duration| {
+                waits.push(duration);
+                elapsed.set(elapsed.get() + duration);
+            },
+        )
+        .expect("the third freshly minted id lands");
+
+        assert_eq!(value, "landed");
+        assert_eq!(
+            retries,
+            AuthoringRetryStats {
+                attempts: 3,
+                id_collisions: 2,
+                snapshot_changes: 0,
+            }
+        );
+        assert_eq!(attempts, 3);
+        assert_eq!(backoff_attempts, [1, 2]);
+        assert_eq!(
+            waits,
+            [
+                std::time::Duration::from_millis(7),
+                std::time::Duration::from_millis(14),
+            ]
+        );
+        assert_eq!(elapsed.get(), std::time::Duration::from_millis(21));
+    }
+
+    /// Candidate-set instability is typed by the store and re-enters the same
+    /// bounded production policy, including when the caller supplied the id.
+    ///
+    /// Proof of `ids.concurrent_snapshot_instability_is_retried`: deterministic
+    /// recovery from the exact typed store error that escaped the process race.
+    #[test]
+    fn a_transient_plan_snapshot_retries_with_controlled_time_and_backoff() {
+        let elapsed = std::cell::Cell::new(std::time::Duration::ZERO);
+        let mut attempts = 0;
+        let mut waits = Vec::new();
+        let (value, retries) = with_id_retry_timing(
+            false,
+            ID_RACE_DEADLINE,
+            || {
+                attempts += 1;
+                if attempts == 1 {
+                    Err(changing_snapshot())
+                } else {
+                    Ok("stable")
+                }
+            },
+            || elapsed.get(),
+            |_| std::time::Duration::from_millis(11),
+            |duration| {
+                waits.push(duration);
+                elapsed.set(elapsed.get() + duration);
+            },
+        )
+        .expect("the second snapshot stabilizes");
+
+        assert_eq!(value, "stable");
+        assert_eq!(attempts, 2);
+        assert_eq!(waits, [std::time::Duration::from_millis(11)]);
+        assert_eq!(
+            retries,
+            AuthoringRetryStats {
+                attempts: 2,
+                id_collisions: 0,
+                snapshot_changes: 1,
+            }
+        );
+        let note = authoring_contention_note(retries, elapsed.get()).expect("contention note");
+        assert!(
+            note.contains("changed the plan")
+                && note.contains("fresh snapshot")
+                && note.contains("2 attempts over 11ms"),
+            "{note}"
+        );
+        assert!(
+            !note.contains("held the id") && !note.contains("minted"),
+            "{note}"
+        );
+    }
+
+    /// Exhausting the snapshot branch retains the same no-write and retry
+    /// guarantees as exhausting an id collision.
+    ///
+    /// Proof of `ids.concurrent_snapshot_instability_is_retried`: the final
+    /// refusal is actionable without falsely claiming an id was taken.
+    #[test]
+    fn snapshot_instability_at_the_deadline_is_an_actionable_no_write_refusal() {
+        let elapsed = std::cell::Cell::new(std::time::Duration::ZERO);
+        let mut attempts = 0;
+        let error = with_id_retry_timing(
+            true,
+            ID_RACE_DEADLINE,
+            || {
+                attempts += 1;
+                Err::<(), _>(changing_snapshot())
+            },
+            || elapsed.get(),
+            |_| ID_RACE_DEADLINE,
+            |duration| elapsed.set(elapsed.get() + duration),
+        )
+        .expect_err("a snapshot that never stabilizes must refuse");
+
+        assert_eq!(attempts, 2);
+        let said = format!("{error:#}");
+        for needle in [
+            "kept changing the plan before this command could write",
+            "2 attempts over 5000ms",
+            "nothing was written",
+            "Run the command again",
+            "candidate set kept changing while it was read",
+        ] {
+            assert!(
+                said.contains(needle),
+                "the refusal omits `{needle}`:\n{said}"
+            );
+        }
+        assert!(!said.contains("took every id"), "{said}");
+    }
+
+    /// A mixed failure reports the two predicates that actually fired instead
+    /// of attaching the total attempt count to whichever one happened last.
+    #[test]
+    fn mixed_snapshot_and_id_contention_names_both_causes_at_the_deadline() {
+        let elapsed = std::cell::Cell::new(std::time::Duration::ZERO);
+        let mut attempts = 0;
+        let error = with_id_retry_timing(
+            true,
+            ID_RACE_DEADLINE,
+            || {
+                attempts += 1;
+                if attempts == 1 {
+                    Err(changing_snapshot())
+                } else {
+                    Err::<(), _>(taken("plan/v1/A1-001.md"))
+                }
+            },
+            || elapsed.get(),
+            |_| ID_RACE_DEADLINE,
+            |duration| elapsed.set(elapsed.get() + duration),
+        )
+        .expect_err("mixed contention still obeys the deadline");
+
+        let said = format!("{error:#}");
+        assert!(
+            said.contains("changed the plan or took ids this command minted")
+                && said.contains("2 attempts over 5000ms")
+                && said.contains("nothing was written"),
+            "{said}"
+        );
+        assert!(!said.contains("took every id"), "{said}");
+    }
+
     /// **A supplied id is refused at once, not after the deadline** (`A1-230`).
     ///
     /// Retrying re-mints, so it is the remedy for an id this command chose and
@@ -10571,6 +22315,9 @@ mod id_race {
     /// `A1-001` means the same collision however long it waits. Measured as
     /// well as asserted -- the real command refuses a supplied collision in
     /// 43ms -- but this is what keeps it that way.
+    ///
+    /// Proof of `ids.sequential_survives_concurrent_writers`: a caller-owned id
+    /// cannot enter the minting retry path.
     #[test]
     fn a_supplied_id_does_not_wait_out_the_deadline() {
         let mut tries = 0;
@@ -10620,7 +22367,7 @@ mod id_race {
         );
     }
 
-    /// **Only losing an id is retried** (`A1-230`).
+    /// **Only safe pre-write contention is retried** (`A1-230`, `A1-628`).
     ///
     /// `Changed` is somebody editing a file this command had read, and
     /// re-minting does not address it: `save`'s own advice tells the caller to
@@ -10642,6 +22389,23 @@ mod id_race {
         assert_eq!(tries, 1, "a `Changed` was retried as an id race");
     }
 
+    /// Retry classification is typed rather than inferred from user-facing
+    /// prose. An unrelated I/O failure may carry the same words and must still
+    /// be returned on the first attempt.
+    #[test]
+    fn retry_wording_without_the_snapshot_type_is_not_contention() {
+        let mut attempts = 0;
+        let error = with_id_retry(false, std::time::Duration::from_secs(30), || {
+            attempts += 1;
+            Err::<(), _>(anyhow::Error::new(std::io::Error::other(
+                "the plan's candidate set kept changing while it was read; retry the command",
+            )))
+        })
+        .expect_err("untyped I/O remains an ordinary failure");
+        assert_eq!(attempts, 1);
+        assert!(!format!("{error:#}").contains("nothing was written"));
+    }
+
     /// **A run that won on the first attempt says nothing** (`A1-230`).
     ///
     /// The note exists so a fleet can see contention it is paying for. On an
@@ -10651,11 +22415,24 @@ mod id_race {
     #[test]
     fn an_uncontended_run_is_silent_about_the_race_it_did_not_have() {
         assert_eq!(
-            raced_for_the_id(1, std::time::Duration::from_millis(3)),
+            authoring_contention_note(
+                AuthoringRetryStats {
+                    attempts: 1,
+                    ..AuthoringRetryStats::default()
+                },
+                std::time::Duration::from_millis(3)
+            ),
             None
         );
-        let noisy = raced_for_the_id(4, std::time::Duration::from_millis(37))
-            .expect("four attempts is contention worth reporting");
+        let noisy = authoring_contention_note(
+            AuthoringRetryStats {
+                attempts: 4,
+                id_collisions: 3,
+                snapshot_changes: 0,
+            },
+            std::time::Duration::from_millis(37),
+        )
+        .expect("four attempts is contention worth reporting");
         assert!(
             noisy.contains("4 attempts") && noisy.contains("37ms"),
             "{noisy}"

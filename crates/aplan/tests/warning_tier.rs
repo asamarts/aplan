@@ -14,7 +14,7 @@
 
 use std::path::Path;
 
-mod common;
+use crate::common;
 use common::aplan;
 
 /// A plan with one warning and nothing else, under exactly the config given.

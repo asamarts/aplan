@@ -10,13 +10,154 @@ use std::path::{Path, PathBuf};
 use crate::diagnostic::{Diagnostic, Report, code};
 use crate::graph::Graph;
 use crate::load::{LoadedTask, Plan};
-use crate::task::{EvidenceKind, Status};
+use crate::task::{EvidenceCapture, EvidenceKind, Status, is_vacuous_ref};
+
+/// Deterministic traced-document work accumulated on the current thread.
+///
+/// Like [`crate::graph_constructions`], callers measure one synchronous
+/// operation by subtracting the value before it from the value afterwards. The
+/// counters expose work only and retain no document or plan state.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct TraceDocumentWork {
+    /// Successful source reads, including documents that later fail to parse.
+    pub reads: usize,
+    /// UTF-8 source bytes returned by those reads.
+    pub bytes_read: u64,
+    /// Markdown index construction attempts.
+    pub markdown_parses: usize,
+    /// YAML or JSON parse attempts, successful or not.
+    pub structured_parses: usize,
+}
+
+std::thread_local! {
+    static TRACE_DOCUMENT_WORK: std::cell::Cell<TraceDocumentWork> =
+        const { std::cell::Cell::new(TraceDocumentWork {
+            reads: 0,
+            bytes_read: 0,
+            markdown_parses: 0,
+            structured_parses: 0,
+        }) };
+}
+
+/// Cumulative traced-document work on the current thread.
+#[must_use]
+pub fn trace_document_work() -> TraceDocumentWork {
+    TRACE_DOCUMENT_WORK.get()
+}
+
+fn record_trace_document(text: &str, format: Option<crate::structured::Format>) {
+    TRACE_DOCUMENT_WORK.set(TRACE_DOCUMENT_WORK.get().then_one(text, format));
+}
+
+impl TraceDocumentWork {
+    fn then_one(mut self, text: &str, format: Option<crate::structured::Format>) -> Self {
+        self.reads = self.reads.saturating_add(1);
+        self.bytes_read = self
+            .bytes_read
+            .saturating_add(u64::try_from(text.len()).unwrap_or(u64::MAX));
+        match format {
+            Some(_) => self.structured_parses = self.structured_parses.saturating_add(1),
+            None => self.markdown_parses = self.markdown_parses.saturating_add(1),
+        }
+        self
+    }
+}
+
+enum TraceDocument {
+    Unreadable,
+    Markdown(crate::anchor::MarkdownDocument),
+    Structured {
+        format: crate::structured::Format,
+        document: Option<crate::structured::Document>,
+    },
+}
+
+impl TraceDocument {
+    fn fingerprint(&self, anchor: &str) -> Option<String> {
+        match self {
+            Self::Unreadable | Self::Structured { document: None, .. } => None,
+            Self::Markdown(document) => document.fingerprint(anchor),
+            Self::Structured {
+                document: Some(document),
+                ..
+            } => document.fingerprint(&crate::structured::parse_anchor(anchor).ok()?),
+        }
+    }
+
+    fn holds(&self, anchor: &str, stored: &str) -> Option<bool> {
+        match self {
+            Self::Unreadable | Self::Structured { document: None, .. } => None,
+            Self::Markdown(document) => document.holds(anchor, stored),
+            Self::Structured {
+                document: Some(document),
+                ..
+            } => Some(
+                document.fingerprint(&crate::structured::parse_anchor(anchor).ok()?)? == stored,
+            ),
+        }
+    }
+}
+
+#[derive(Default)]
+struct TraceDocuments {
+    by_path: BTreeMap<(PathBuf, Option<crate::structured::Format>), TraceDocument>,
+}
+
+impl TraceDocuments {
+    fn get(&mut self, root: &Path, rel: &str) -> &TraceDocument {
+        let path = root.join(rel);
+        let format = crate::structured::format_for(rel);
+        let key_path = path.canonicalize().unwrap_or_else(|_| comparable(&path));
+        self.by_path.entry((key_path, format)).or_insert_with(|| {
+            let Ok(text) = std::fs::read_to_string(&path) else {
+                return TraceDocument::Unreadable;
+            };
+            record_trace_document(&text, format);
+            match format {
+                Some(format) => TraceDocument::Structured {
+                    format,
+                    document: crate::structured::Document::parse(&text, format),
+                },
+                None => TraceDocument::Markdown(crate::anchor::MarkdownDocument::parse(text)),
+            }
+        })
+    }
+
+    fn fingerprint(&mut self, root: &Path, trace: &str) -> Option<String> {
+        let (rel, anchor) = trace.split_once('#')?;
+        self.get(root, rel).fingerprint(anchor)
+    }
+
+    fn holds(&mut self, root: &Path, trace: &str, stored: &str) -> Option<bool> {
+        let (rel, anchor) = trace.split_once('#')?;
+        self.get(root, rel).holds(anchor, stored)
+    }
+}
+
+struct ValidationContext<'a> {
+    opts: &'a Options,
+    traces: TraceDocuments,
+}
+
+impl<'a> ValidationContext<'a> {
+    fn new(opts: &'a Options) -> Self {
+        Self {
+            opts,
+            traces: TraceDocuments::default(),
+        }
+    }
+}
+
+/// Select the capture rule from the exhaustive evidence-kind model.
+fn capture_detector(kind: EvidenceKind) -> &'static str {
+    kind.capabilities().capture.detector()
+}
 
 /// A declared tag vocabulary as the rules see it.
 ///
 /// The config's two shapes, a bare list and a mapping, arrive here as one type:
 /// a list is `Optional` over every task, which is what it has always meant.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
 pub struct TagFamily {
     /// The tags this family contains, as whole tags.
     pub members: Vec<String>,
@@ -106,7 +247,7 @@ impl TagFamily {
 }
 
 /// How many members of a family a task in scope must carry (`APLAN030`).
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize)]
 pub enum Cardinality {
     /// Any number, including none.
     Optional,
@@ -132,7 +273,7 @@ impl Cardinality {
 }
 
 /// Which statuses a cardinality applies to.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize)]
 pub enum StatusScope {
     /// Every status.
     Any,
@@ -161,7 +302,7 @@ impl StatusScope {
 }
 
 /// Whether milestone tasks are subject to a cardinality.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize)]
 pub enum MilestoneScope {
     /// Milestones are judged like any other task.
     Include,
@@ -175,7 +316,7 @@ pub enum MilestoneScope {
 ///
 /// Two halves of one fact, so a caller cannot supply a block without saying
 /// where it belongs, or a path without what should be in it.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
 pub struct AgentsBlock {
     /// The document carrying the markers, as a reader would name it.
     pub path: std::path::PathBuf,
@@ -188,7 +329,7 @@ pub struct AgentsBlock {
 /// `PartialEq` so a caller can ask whether a switch it was about to flip is
 /// already on: `vacuity` runs the rules once per switch to measure what each is
 /// stopping, and a run that could reveal nothing is pure cost (`A1-269`).
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, serde::Serialize)]
 pub struct Options {
     /// Require an `effort_days` estimate on non-terminal, non-milestone tasks.
     pub require_effort: bool,
@@ -204,7 +345,14 @@ pub struct Options {
     /// Root against which `traces` paths are resolved. `None` disables
     /// [`code::DANGLING_TRACE`] entirely.
     pub traces_root: Option<std::path::PathBuf>,
-    /// Roots outside [`Self::traces_root`] that a `traces` target may name
+    /// Repository boundary used by [`code::EXTERNAL_TRACE`] (`APLAN034`).
+    ///
+    /// This is deliberately separate from [`Self::traces_root`], which says
+    /// where a trace is resolved, and from [`Self::config_file`], which says
+    /// where policy and its diagnostic location came from. `None` retains the
+    /// library-level default of treating `traces_root` as the boundary.
+    pub traces_repository: Option<std::path::PathBuf>,
+    /// Roots outside [`Self::traces_repository`] that a `traces` target may name
     /// (`APLAN034`, `A1-143`). Empty means a trace may not leave the repository,
     /// which is the default.
     pub traces_external: Vec<std::path::PathBuf>,
@@ -231,6 +379,9 @@ pub struct Options {
     /// `APLAN029`, `APLAN030`). Empty means the repository declared none, and
     /// every tag stays legal.
     pub tag_families: BTreeMap<String, TagFamily>,
+    /// Canonical task owners (`APLAN056`). Empty means the repository declared
+    /// no vocabulary and every owner spelling stays legal.
+    pub owners: BTreeSet<String>,
     /// The generated agent-contract block, for [`code::STALE_AGENT_CONTRACT`]
     /// (`APLAN041`). `None` disables the rule, and is what a caller that cannot
     /// render one passes.
@@ -258,6 +409,7 @@ impl Default for Options {
             require_effort: true,
             require_impact: None,
             traces_root: None,
+            traces_repository: None,
             traces_external: Vec::new(),
             require_min_strength: None,
             evidence_scopes: Vec::new(),
@@ -265,6 +417,7 @@ impl Default for Options {
             detect_drift: false,
             require_cut_membership: false,
             tag_families: BTreeMap::new(),
+            owners: BTreeSet::new(),
             agents_block: None,
             config_file: None,
         }
@@ -333,7 +486,7 @@ pub fn locate_findings(diagnostics: &mut [Diagnostic], plan: &Plan) {
 /// Built from `.aplan.yml`'s `policy` list. The selector is the one the command
 /// line uses (`A1-214`, ADR-0026), so a subset means the same thing whether it is
 /// written in a file or typed as flags.
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, serde::Serialize)]
 pub struct EvidenceScope {
     /// The subset this applies to.
     pub selector: crate::select::Selector,
@@ -430,6 +583,19 @@ fn cut_index(plan: &Plan) -> BTreeMap<&str, (&str, &str)> {
 }
 
 pub fn validate(plan: &Plan, opts: &Options) -> Report {
+    let tasks: Vec<_> = plan.tasks.iter().map(|loaded| &loaded.task).collect();
+    let graph = Graph::new(tasks.iter().copied());
+    validate_with_graph(plan, opts, &graph)
+}
+
+/// Validate a plan with graph state the enclosing operation already built.
+///
+/// The graph must describe `plan`. Keeping the borrowing graph at the call site
+/// avoids a self-referential plan owner while letting an operation such as
+/// `show` or the interactive snapshot use the same derived graph for validation
+/// and projection.
+#[must_use]
+pub fn validate_with_graph(plan: &Plan, opts: &Options, graph: &Graph<'_>) -> Report {
     let mut report = Report {
         diagnostics: plan.load_diagnostics.clone(),
         tasks_checked: plan.tasks.len(),
@@ -452,7 +618,6 @@ pub fn validate(plan: &Plan, opts: &Options) -> Report {
     }
 
     let tasks: Vec<_> = plan.tasks.iter().map(|lt| &lt.task).collect();
-    let graph = Graph::new(tasks.iter().copied());
     let file_of: BTreeMap<&str, &Path> = plan
         .tasks
         .iter()
@@ -460,9 +625,17 @@ pub fn validate(plan: &Plan, opts: &Options) -> Report {
         .collect();
 
     let cut_of = cut_index(plan);
+    let mut context = ValidationContext::new(opts);
 
     for lt in &plan.tasks {
-        check_task(lt, plan, &graph, opts, &cut_of, &mut report.diagnostics);
+        check_task(
+            lt,
+            plan,
+            graph,
+            &mut context,
+            &cut_of,
+            &mut report.diagnostics,
+        );
     }
 
     // Cycles. Reported once for the whole graph, not once per member.
@@ -491,62 +664,15 @@ pub fn validate(plan: &Plan, opts: &Options) -> Report {
         report.diagnostics.push(d);
     }
 
-    // APLAN022: membership totality. Every non-milestone task must be a member of
-    // exactly one cut, in exactly one milestone's `blocked_by` (ADR-0008), unless
-    // it is tagged `cross-cutting`. Opt-in, because a plan need not use cuts.
-    if opts.require_cut_membership {
-        let mut cut_count: BTreeMap<&str, usize> = BTreeMap::new();
-        for t in &tasks {
-            if t.is_milestone() {
-                for b in &t.blocked_by {
-                    *cut_count.entry(b.as_str()).or_default() += 1;
-                }
-            }
-        }
-        for lt in &plan.tasks {
-            let t = &lt.task;
-            if t.is_milestone() {
-                continue;
-            }
-            let n = cut_count.get(t.id.as_str()).copied().unwrap_or(0);
-            // **The waiver applies where the tag can mean something** (`A1-212`,
-            // audit). `cross-cutting` means "belongs to no cut", so it answers
-            // for a task in none. Taking it as the answer whatever the count
-            // meant a task in *two* cuts -- an error, and a real defect -- was
-            // downgraded to `APLAN052`'s warning and passed a repository that
-            // had not set `deny_warnings`. The tag now waives the case it
-            // describes and no other; `APLAN052` still reports carrying it in a
-            // cut, because that claim is wrong either way.
-            if n == 0 && t.tags.iter().any(|g| g == "cross-cutting") {
-                continue;
-            }
-            if n != 1 {
-                let msg = if n == 0 {
-                    "belongs to no cut".to_string()
-                } else {
-                    format!("belongs to {n} cuts (a task belongs to exactly one)")
-                };
-                report.diagnostics.push(
-                    Diagnostic::error(code::MEMBERSHIP_TOTALITY, msg)
-                        .with_task(&t.id)
-                        .with_file(&lt.path)
-                        .with_agent_instruction(
-                            "Add the task to exactly one milestone's `blocked_by` (its cut), or \
-                             tag it `cross-cutting` if it deliberately belongs to none.",
-                        ),
-                );
-            }
-        }
-    }
+    check_membership_totality(plan, opts, &tasks, &mut report.diagnostics);
 
     for lt in &plan.tasks {
         check_revisit(lt, &mut report.diagnostics);
     }
-    check_tag_families(plan, opts, &mut report.diagnostics);
-    check_reserved_tags(plan, opts, &mut report.diagnostics);
+    check_vocabularies(plan, opts, &mut report.diagnostics);
     check_agents_block(opts, &mut report.diagnostics);
-    check_cancelled_cuts(plan, &graph, &mut report.diagnostics);
-    check_preference_cycles(plan, &graph, &mut report.diagnostics);
+    check_cancelled_cuts(plan, graph, &mut report.diagnostics);
+    check_preference_cycles(plan, graph, &mut report.diagnostics);
 
     // A finding names the line it is about, not only the file (`A1-202`).
     locate_findings(&mut report.diagnostics, plan);
@@ -563,6 +689,63 @@ pub fn validate(plan: &Plan, opts: &Options) -> Report {
     report
 }
 
+/// APLAN022: every non-milestone task belongs to exactly one cut unless its
+/// `cross-cutting` tag says that it deliberately belongs to none.
+fn check_membership_totality(
+    plan: &Plan,
+    opts: &Options,
+    tasks: &[&crate::task::Task],
+    out: &mut Vec<Diagnostic>,
+) {
+    if !opts.require_cut_membership {
+        return;
+    }
+    let mut cut_count: BTreeMap<&str, usize> = BTreeMap::new();
+    for task in tasks.iter().filter(|task| task.is_milestone()) {
+        for blocker in &task.blocked_by {
+            *cut_count.entry(blocker.as_str()).or_default() += 1;
+        }
+    }
+    for loaded in &plan.tasks {
+        let task = &loaded.task;
+        if task.is_milestone() {
+            continue;
+        }
+        let count = cut_count.get(task.id.as_str()).copied().unwrap_or(0);
+        // The waiver applies only where its claim is true (`A1-212`):
+        // `cross-cutting` means that this task belongs to no cut, not that
+        // duplicate membership is acceptable.
+        if count == 0 && task.tags.iter().any(|tag| tag == "cross-cutting") {
+            continue;
+        }
+        if count != 1 {
+            let message = if count == 0 {
+                "belongs to no cut".to_string()
+            } else {
+                format!("belongs to {count} cuts (a task belongs to exactly one)")
+            };
+            out.push(
+                Diagnostic::error(code::MEMBERSHIP_TOTALITY, message)
+                    .with_task(&task.id)
+                    .with_file(&loaded.path)
+                    .with_agent_instruction(
+                        "Add the task to exactly one milestone's `blocked_by` (its cut), or \
+                         tag it `cross-cutting` if it deliberately belongs to none.",
+                    ),
+            );
+        }
+    }
+}
+
+/// The declared and built-in task vocabularies, kept together so the top-level
+/// validation pass remains an inventory of domains rather than individual
+/// rules.
+fn check_vocabularies(plan: &Plan, opts: &Options, out: &mut Vec<Diagnostic>) {
+    check_tag_families(plan, opts, out);
+    check_owner_vocabulary(plan, opts, out);
+    check_reserved_tags(plan, opts, out);
+}
+
 /// Per-task invariants.
 ///
 /// Split out of [`validate`] so each function stays readable: the graph-wide
@@ -572,11 +755,12 @@ fn check_task(
     lt: &LoadedTask,
     plan: &Plan,
     graph: &Graph<'_>,
-    opts: &Options,
+    context: &mut ValidationContext<'_>,
     cut_of: &BTreeMap<&str, (&str, &str)>,
     out: &mut Vec<Diagnostic>,
 ) {
     let t = &lt.task;
+    let opts = context.opts;
 
     check_edges(lt, graph, &plan.unloadable, out);
     check_evidence(lt, opts, cut_of, out);
@@ -617,7 +801,7 @@ fn check_task(
 
         // APLAN028: a closed task that stamped *some* of its traces. Checked
         // before the drift loop, because the loop is precisely what goes quiet.
-        if let Some(d) = check_trace_stamp(root, t, &traces, opts) {
+        if let Some(d) = check_trace_stamp(root, t, &traces, opts, &mut context.traces) {
             out.push(d.with_task(&t.id).with_file(&lt.path));
         }
 
@@ -629,7 +813,7 @@ fn check_task(
                 out.push(diag.with_task(&t.id).with_file(&lt.path));
                 continue;
             }
-            if let Some(diag) = check_trace(root, tr) {
+            if let Some(diag) = check_trace(root, tr, &mut context.traces) {
                 out.push(diag.with_task(&t.id).with_file(&lt.path));
             }
             // APLAN018: a closed task whose traced section has drifted from the
@@ -638,7 +822,8 @@ fn check_task(
             if opts.detect_drift
                 && t.status == Status::Done
                 && let Some(stamp) = t.trace_fingerprints.get(tr)
-                && let Some(diag) = check_drift(root, tr, stamp, sole_commit(t))
+                && let Some(diag) =
+                    check_drift(root, tr, stamp, sole_commit(t), &mut context.traces)
             {
                 out.push(diag.with_task(&t.id).with_file(&lt.path));
             }
@@ -929,6 +1114,7 @@ fn check_trace_stamp(
     t: &crate::task::Task,
     traces: &BTreeSet<&str>,
     opts: &Options,
+    documents: &mut TraceDocuments,
 ) -> Option<Diagnostic> {
     if !opts.detect_drift || t.status != Status::Done {
         return None;
@@ -959,10 +1145,9 @@ fn check_trace_stamp(
     // one whose anchor matches nothing. The second and third are `APLAN008`'s to
     // report, and the first is `A1-191`'s question. Spelling the predicate out
     // here instead got the first and missed the others.
-    let stampable = crate::close::trace_fingerprints(t, opts.traces_root.as_deref());
     let unstamped: Vec<&str> = candidates
         .into_iter()
-        .filter(|tr| stampable.contains_key(*tr))
+        .filter(|tr| documents.fingerprint(root, tr).is_some())
         .collect();
     if unstamped.is_empty() {
         return None;
@@ -1021,13 +1206,13 @@ fn check_drift(
     trace: &str,
     stamp: &str,
     closed_at: Option<&str>,
+    documents: &mut TraceDocuments,
 ) -> Option<Diagnostic> {
-    let (rel, anchor) = trace.split_once('#')?;
-    let text = std::fs::read_to_string(root.join(rel)).ok()?;
-    // Accepts the pre-`A1-122` form as well as the current one, so a plan whose
-    // stamps predate the trailing-blank fix is not re-flagged wholesale.
-    crate::anchor::fingerprint_in(rel, &text, anchor)?;
-    if crate::anchor::holds_in(rel, &text, anchor, stamp) {
+    let (rel, _) = trace.split_once('#')?;
+    // Markdown accepts the pre-`A1-122` form as well as the current one, so a
+    // plan whose stamps predate the trailing-blank fix is not re-flagged
+    // wholesale. Structured documents compare their canonical node directly.
+    if documents.holds(root, trace, stamp)? {
         return None;
     }
     // Where to look, when the task cites a commit to look *from*. The reader is
@@ -1285,6 +1470,67 @@ fn members_of_any_cut(plan: &Plan) -> BTreeSet<&str> {
         }
     }
     out
+}
+
+/// `APLAN056`: every present owner is in the declared vocabulary.
+///
+/// Unlike a tag family, `owner` has one namespace: once a repository names its
+/// canonical spellings, an unfamiliar value cannot be an unrelated kind of
+/// owner. The vocabulary is opt-in, and an unassigned task remains valid --
+/// assignment is workflow state, not a cardinality requirement.
+fn check_owner_vocabulary(plan: &Plan, opts: &Options, out: &mut Vec<Diagnostic>) {
+    if opts.owners.is_empty() {
+        return;
+    }
+    for lt in &plan.tasks {
+        let Some(owner) = lt.task.owner.as_deref() else {
+            continue;
+        };
+        if opts.owners.contains(owner) {
+            continue;
+        }
+        let near: Vec<&str> = opts
+            .owners
+            .iter()
+            .map(String::as_str)
+            .filter(|known| is_one_edit_apart(known, owner))
+            .collect();
+        let (message, instruction) = match near.as_slice() {
+            [] => (
+                format!("owner `{owner}` is not declared in `owners`"),
+                format!(
+                    "Add `{owner}` to `owners` in `.aplan.yml` if it is a canonical identity, or correct this task's `owner`."
+                ),
+            ),
+            [known] => (
+                format!("owner `{owner}` is not declared in `owners`: did you mean `{known}`?"),
+                format!(
+                    "Change this task's `owner` to `{known}` if that is who it means, or add `{owner}` to `owners` in `.aplan.yml` if it is a distinct identity."
+                ),
+            ),
+            many => {
+                let listed = many
+                    .iter()
+                    .map(|known| format!("`{known}`"))
+                    .collect::<Vec<_>>()
+                    .join(", ");
+                (
+                    format!(
+                        "owner `{owner}` is not declared in `owners` and is one edit from {listed}"
+                    ),
+                    format!(
+                        "Choose the intended declared owner ({listed}), or add `{owner}` to `owners` in `.aplan.yml` if it is a distinct identity."
+                    ),
+                )
+            }
+        };
+        out.push(
+            Diagnostic::warning(code::OWNER_VOCABULARY, message)
+                .with_task(&lt.task.id)
+                .with_file(&lt.path)
+                .with_agent_instruction(instruction),
+        );
+    }
 }
 
 fn check_tag_families(plan: &Plan, opts: &Options, out: &mut Vec<Diagnostic>) {
@@ -2327,8 +2573,10 @@ fn check_uncheckable_evidence(lt: &LoadedTask, out: &mut Vec<Diagnostic>) {
     // `commit` citation mean "a commit that touched this work" by checking the
     // diff against `paths`; with no `paths` there is nothing to check, so the
     // same citation degrades to "a commit exists" with no diagnostic anywhere.
-    // `file` is included for the same reason: without `paths` there is nothing
-    // tying the cited artefact to this task.
+    // Every configuration-independent path-local kind is included for the same
+    // reason. Test locality is configuration-dependent: without a runner making
+    // a coverage claim there is no check to lose, so this hermetic rule stays
+    // silent just as it did before the capability was modelled.
     //
     // Deliberately scoped to `done`. A `todo` task often cannot know its paths
     // yet, and warning there would train people to add `paths: ["**"]` to quiet
@@ -2349,18 +2597,25 @@ fn check_uncheckable_evidence(lt: &LoadedTask, out: &mut Vec<Diagnostic>) {
             .evidence
             .iter()
             .filter(|e| !is_vacuous_ref(&e.reference))
-            .filter_map(|e| match e.kind {
-                EvidenceKind::Commit => Some("commit"),
-                EvidenceKind::File => Some("file"),
-                _ => None,
+            .filter(|e| {
+                e.kind
+                    .capabilities()
+                    .locality
+                    .is_configuration_independent()
             })
+            .map(|e| e.kind.as_str())
             .collect();
         kinds.sort_unstable();
         kinds.dedup();
 
         if !kinds.is_empty() {
             let cited = kinds.join(" and ");
-            let exists = if kinds.len() > 1 { "exist" } else { "exists" };
+            let citation = if kinds.len() > 1 {
+                "citations resolve"
+            } else {
+                "citation resolves"
+            };
+            let referent = if kinds.len() > 1 { "them" } else { "it" };
             // Say which it is: told "no `paths`" when the key is right there, a
             // reader looks for a bug in the rule rather than at their blank entry.
             let missing = if t.paths.is_empty() {
@@ -2372,9 +2627,9 @@ fn check_uncheckable_evidence(lt: &LoadedTask, out: &mut Vec<Diagnostic>) {
                 Diagnostic::warning(
                     code::UNCHECKABLE_EVIDENCE,
                     format!(
-                        "`done` with {cited} evidence but {missing}: the citation resolves, \
-                         but nothing binds it to this task, so it proves only that the \
-                         {cited} {exists}"
+                        "`done` with {cited} evidence but {missing}: even if the {citation}, \
+                         nothing binds {referent} to this task; resolution alone is not \
+                         evidence that the task's files changed"
                     ),
                 )
                 .with_task(&t.id)
@@ -2396,7 +2651,7 @@ fn check_uncheckable_evidence(lt: &LoadedTask, out: &mut Vec<Diagnostic>) {
     }
 }
 
-/// The invariants that read `evidence`: `APLAN005`, `APLAN010`.
+/// The invariants that read `evidence`: `APLAN005`, `APLAN010`, `APLAN055`.
 fn check_evidence(
     lt: &LoadedTask,
     opts: &Options,
@@ -2434,15 +2689,16 @@ fn check_evidence(
         );
     }
 
-    // An undated, or falsely dated, note is a rumour.
+    // A note's authored date is provenance. On a machine-resolved kind the same
+    // field would be unchecked decoration that looks like freshness, so reject
+    // it rather than silently carrying a claim no resolver reads.
     for e in &t.evidence {
-        if e.kind != EvidenceKind::Note {
-            continue;
-        }
-        match &e.captured {
-            None => out.push(
+        let capture = e.kind.capabilities().capture;
+        let detector = capture_detector(e.kind);
+        match (capture, &e.captured) {
+            (EvidenceCapture::AuthoredDate { .. }, None) => out.push(
                 Diagnostic::error(
-                    code::UNDATED_NOTE,
+                    detector,
                     "evidence of kind `note` requires a `captured` date",
                 )
                 .with_task(&t.id)
@@ -2451,9 +2707,9 @@ fn check_evidence(
             ),
             // A present-but-nonsense date defeats the rule's purpose ("a note
             // carries a date") just as an absent one does.
-            Some(d) if !is_iso_date(d) => out.push(
+            (EvidenceCapture::AuthoredDate { .. }, Some(d)) if !is_iso_date(d) => out.push(
                 Diagnostic::error(
-                    code::UNDATED_NOTE,
+                    detector,
                     format!("note evidence `captured: {d}` is not an ISO-8601 date (YYYY-MM-DD)"),
                 )
                 .with_task(&t.id)
@@ -2462,7 +2718,26 @@ fn check_evidence(
                     "Write the note's `captured` date as YYYY-MM-DD (for example 2026-07-18).",
                 ),
             ),
-            Some(_) => {}
+            (EvidenceCapture::NotApplicable { reason, .. }, Some(d)) => out.push(
+                Diagnostic::error(
+                    detector,
+                    format!(
+                        "`{}` evidence carries `captured: {d}`, but that date has no provenance \
+                         semantics for this kind: {reason}",
+                        e.kind.as_str()
+                    ),
+                )
+                .with_task(&t.id)
+                .with_file(&lt.path)
+                .with_agent_instruction(format!(
+                    "Remove `captured` from this `{}` evidence entry. `aplan` accepts the field \
+                     only on authored `note` evidence; use this kind's resolver or freshness \
+                     mechanism instead.",
+                    e.kind.as_str()
+                )),
+            ),
+            (EvidenceCapture::AuthoredDate { .. }, Some(_))
+            | (EvidenceCapture::NotApplicable { .. }, None) => {}
         }
     }
 
@@ -2741,34 +3016,6 @@ fn check_criteria(lt: &crate::load::LoadedTask, out: &mut Vec<Diagnostic>) {
     out.push(d);
 }
 
-/// Whether an evidence `ref` cites nothing: empty, or made up entirely of
-/// whitespace, control, and zero-width / bidi format characters. `str::trim` only
-/// strips `White_Space`, so a `ref` of a single U+200B (zero-width space) would
-/// otherwise count as real proof, the same invisible class the house-style gate
-/// forbids, letting `status: done` pass with no citation.
-pub(crate) fn is_vacuous_ref(reference: &str) -> bool {
-    reference
-        .chars()
-        .all(|c| c.is_whitespace() || c.is_control() || is_zero_width(c))
-}
-
-/// Invisible characters `char::is_whitespace` does not cover: the zero-width
-/// spaces/joiners, the word joiner, the BOM, the soft hyphen, and the bidi marks.
-fn is_zero_width(c: char) -> bool {
-    matches!(
-        c,
-        '\u{200B}'
-            | '\u{200C}'
-            | '\u{200D}'
-            | '\u{2060}'
-            | '\u{FEFF}'
-            | '\u{00AD}'
-            | '\u{200E}'
-            | '\u{200F}'
-            | '\u{061C}'
-    )
-}
-
 /// An RFC 3339 instant as seconds since the epoch, or `None` if it is not one.
 ///
 /// Strict and dependency-free, for the reason [`is_iso_date`] gives: this is a
@@ -2928,17 +3175,13 @@ fn comparable(path: &Path) -> std::path::PathBuf {
 fn check_external_trace(root: &Path, opts: &Options, trace: &str) -> Option<Diagnostic> {
     let (rel, _) = trace.split_once('#').unwrap_or((trace, ""));
     let joined = root.join(rel);
-    // The boundary is the *repository*, which is where `.aplan.yml` sits, not
-    // `traces_root`: under `traces_root: docs` a trace of `../README.md` climbs
-    // out of the root and stays inside the repository, and refusing it would be
-    // this rule answering a different question from the one it is named for
-    // (`A1-143`, found by its audit). With no config to locate, the root is the
-    // only boundary there is.
-    let boundary = opts
-        .config_file
-        .as_deref()
-        .and_then(Path::parent)
-        .unwrap_or(root);
+    // The boundary is the *plan's repository*, not the policy file and not
+    // necessarily `traces_root`. A selected config may deliberately live
+    // outside an untrusted tree (`A1-237`); its directory remains the frame for
+    // relative config values but says nothing about what repository the plan
+    // belongs to. With no repository supplied, the root is the only boundary a
+    // library caller has.
+    let boundary = opts.traces_repository.as_deref().unwrap_or(root);
     let declared = &opts.traces_external;
     let bases: Vec<std::path::PathBuf> = std::iter::once(comparable(boundary))
         .chain(declared.iter().map(|d| comparable(d)))
@@ -2982,7 +3225,7 @@ fn check_external_trace(root: &Path, opts: &Options, trace: &str) -> Option<Diag
     )
 }
 
-fn check_trace(root: &Path, trace: &str) -> Option<Diagnostic> {
+fn check_trace(root: &Path, trace: &str, documents: &mut TraceDocuments) -> Option<Diagnostic> {
     let (rel, anchor) = match trace.split_once('#') {
         Some((r, a)) => (r, Some(a)),
         None => (trace, None),
@@ -3013,32 +3256,37 @@ fn check_trace(root: &Path, trace: &str) -> Option<Diagnostic> {
             )),
         );
     }
-    let Ok(text) = std::fs::read_to_string(&path) else {
-        return None;
-    };
-    if let Some(format) = crate::structured::format_for(rel) {
-        return check_structured_trace(rel, &text, anchor, format);
-    }
-    // GitHub assigns each heading an anchor by slugifying it and disambiguating
-    // repeats with a `-N` suffix. Reproduce that set exactly, then test
-    // membership against the anchor a human copied from the rendered document's
-    // URL. GitHub ids are always lowercase, so fold the anchor's case too.
-    if crate::anchor::resolvable_anchors(&text).contains(anchor.to_lowercase().as_str()) {
-        None
-    } else {
-        Some(
-            Diagnostic::error(
-                code::DANGLING_TRACE,
-                format!("`traces` anchor `#{anchor}` matches no heading or table row in `{rel}`"),
-            )
-            .with_agent_instruction(format!(
-                "Add to `{rel}` a heading, or a table row, whose text slugifies to \
-                 `{anchor}`; or correct the anchor to one the document already has. A **list \
-                 item is not an anchor**, deliberately: a bullet's identity would be its whole \
-                 text, so rewording it would break the reference rather than report drift. Give the item a heading or a table row, which is what an author \
-                 tracking items one by one wants anyway."
-            )),
-        )
+    match documents.get(root, rel) {
+        TraceDocument::Unreadable => None,
+        TraceDocument::Structured { format, document } => {
+            check_structured_trace(rel, document.as_ref(), anchor, *format)
+        }
+        TraceDocument::Markdown(document) => {
+            // GitHub assigns each heading an anchor by slugifying it and
+            // disambiguating repeats with a `-N` suffix. The snapshot index
+            // reproduces that set once, then answers every task from it.
+            if document.resolves(anchor) {
+                None
+            } else {
+                Some(
+                    Diagnostic::error(
+                        code::DANGLING_TRACE,
+                        format!(
+                            "`traces` anchor `#{anchor}` matches no heading or table row in \
+                             `{rel}`"
+                        ),
+                    )
+                    .with_agent_instruction(format!(
+                        "Add to `{rel}` a heading, or a table row, whose text slugifies to \
+                         `{anchor}`; or correct the anchor to one the document already has. A \
+                         **list item is not an anchor**, deliberately: a bullet's identity would \
+                         be its whole text, so rewording it would break the reference rather than \
+                         report drift. Give the item a heading or a table row, which is what an \
+                         author tracking items one by one wants anyway."
+                    )),
+                )
+            }
+        }
     }
 }
 
@@ -3050,17 +3298,17 @@ fn check_trace(root: &Path, trace: &str) -> Option<Diagnostic> {
 /// carries the near miss, offered in whichever spelling they were already using.
 fn check_structured_trace(
     rel: &str,
-    text: &str,
+    document: Option<&crate::structured::Document>,
     anchor: &str,
     format: crate::structured::Format,
 ) -> Option<Diagnostic> {
-    use crate::structured::{Spelling, addresses, parse, parse_anchor, resolve, spelling_of};
+    use crate::structured::{Spelling, parse_anchor, spelling_of};
 
     let kind = match format {
         crate::structured::Format::Yaml => "YAML",
         crate::structured::Format::Json => "JSON",
     };
-    let Some(value) = parse(text, format) else {
+    let Some(document) = document else {
         return Some(
             Diagnostic::error(
                 code::DANGLING_TRACE,
@@ -3104,11 +3352,11 @@ fn check_structured_trace(
             );
         }
     };
-    if resolve(&value, &steps).is_some() {
+    if document.resolve(&steps).is_some() {
         return None;
     }
     let spelling = spelling_of(anchor).unwrap_or(Spelling::Pointer);
-    let near = near_address(&addresses(&value, spelling, 5_000), anchor);
+    let near = near_address(&document.addresses(spelling, 5_000), anchor);
     let suggestion = near.map_or_else(
         || format!("correct the anchor to one `{rel}` has."),
         |n| format!("did you mean `#{n}`?"),
@@ -3301,6 +3549,7 @@ mod tests {
             paths: Vec::new(),
             traces: Vec::new(),
             trace_fingerprints: std::collections::BTreeMap::new(),
+            evidence_fingerprints: std::collections::BTreeMap::new(),
             tags: Vec::new(),
             revisit_at: None,
             version_impact: None,
@@ -4701,6 +4950,70 @@ mod tests {
         assert!(!is_iso_date("2026-02-29")); // 2026 is not a leap year
     }
 
+    #[test]
+    fn a_capture_date_on_machine_resolved_evidence_is_an_error() {
+        for status in Status::ALL {
+            for milestone in [false, true] {
+                for kind in [
+                    EvidenceKind::Commit,
+                    EvidenceKind::Url,
+                    EvidenceKind::File,
+                    EvidenceKind::Test,
+                ] {
+                    let mut task = t("A", *status);
+                    if milestone {
+                        task.tags.push("milestone".into());
+                    }
+                    task.evidence = vec![Evidence {
+                        kind,
+                        reference: "proof".into(),
+                        captured: Some("2026-10-10".into()),
+                    }];
+                    let report = validate(&plan_of(vec![task]), &opts());
+                    let diagnostic = pick(&report, code::INAPPLICABLE_CAPTURE);
+                    assert!(
+                        diagnostic.message.contains(kind.as_str())
+                            && diagnostic.message.contains("2026-10-10")
+                            && diagnostic.message.contains("provenance"),
+                        "the finding must identify the kind, value and false claim for status \
+                         `{status}` (milestone={milestone}): {}",
+                        diagnostic.message
+                    );
+                    assert!(
+                        diagnostic
+                            .agent_instruction
+                            .as_deref()
+                            .is_some_and(|instruction| instruction.contains("Remove `captured`")
+                                && instruction.contains(kind.as_str())
+                                && instruction.contains("`note`")),
+                        "the remedy must distinguish this kind from the one that accepts the \
+                         field for status `{status}` (milestone={milestone}): {:?}",
+                        diagnostic.agent_instruction
+                    );
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn an_authored_note_keeps_its_existing_capture_contract() {
+        let mut task = t("A", Status::Todo);
+        task.evidence = vec![Evidence {
+            kind: EvidenceKind::Note,
+            reference: "reviewed by the operator".into(),
+            captured: Some("2026-10-10".into()),
+        }];
+        let report = validate(&plan_of(vec![task]), &opts());
+        assert!(
+            !report
+                .diagnostics
+                .iter()
+                .any(|d| d.code == code::UNDATED_NOTE || d.code == code::INAPPLICABLE_CAPTURE),
+            "the existing valid-note shape changed: {:?}",
+            report.diagnostics
+        );
+    }
+
     /// Regression: a trace listed twice must produce one diagnostic, not two
     /// identical PR annotations (matching how `blocked_by` is deduplicated).
     #[test]
@@ -5036,6 +5349,144 @@ mod tests {
             TagFamily::members(vec!["kind-b".to_string(), "kind-m".to_string()]),
         );
         f
+    }
+
+    /// `APLAN056` judges every owner only after the repository declares the
+    /// namespace, and its product is the correction it can actually justify.
+    #[test]
+    fn a_declared_owner_vocabulary_reports_only_values_outside_it() {
+        let owned = |id: &str, owner: Option<&str>| {
+            let mut task = t(id, Status::Todo);
+            task.effort_days = Some(1.0);
+            task.owner = owner.map(str::to_string);
+            task
+        };
+        let declared_opts = Options {
+            owners: ["abc", "abe", "kaminsod"]
+                .map(str::to_string)
+                .into_iter()
+                .collect(),
+            ..opts()
+        };
+        let report = validate(
+            &plan_of(vec![
+                owned("EXACT", Some("kaminsod")),
+                owned("TYPO", Some("kaminsdo")),
+                owned("AMBIGUOUS", Some("abd")),
+                owned("UNKNOWN", Some("outsider")),
+                owned("FREE", None),
+            ]),
+            &declared_opts,
+        );
+        let findings: Vec<&Diagnostic> = report
+            .diagnostics
+            .iter()
+            .filter(|diagnostic| diagnostic.code == code::OWNER_VOCABULARY)
+            .collect();
+        assert_eq!(findings.len(), 3, "{:?}", report.diagnostics);
+
+        let typo = findings
+            .iter()
+            .find(|diagnostic| diagnostic.task.as_deref() == Some("TYPO"))
+            .expect("the misspelled owner is reported");
+        assert!(
+            typo.message.contains("owner `kaminsdo`"),
+            "{}",
+            typo.message
+        );
+        assert!(
+            typo.message.contains("did you mean `kaminsod`?"),
+            "{}",
+            typo.message
+        );
+        let fix = typo.agent_instruction.as_deref().expect("a fix line");
+        assert!(fix.contains("Change this task's `owner`"), "{fix}");
+        assert!(fix.contains("add `kaminsdo` to `owners`"), "{fix}");
+
+        let ambiguous = findings
+            .iter()
+            .find(|diagnostic| diagnostic.task.as_deref() == Some("AMBIGUOUS"))
+            .expect("an owner with two neighbours is reported once");
+        assert!(
+            ambiguous.message.contains("`abc`, `abe`"),
+            "{}",
+            ambiguous.message
+        );
+        assert!(
+            ambiguous
+                .agent_instruction
+                .as_deref()
+                .is_some_and(|instruction| instruction.contains("Choose the intended")),
+            "{:?}",
+            ambiguous.agent_instruction
+        );
+
+        let unknown = findings
+            .iter()
+            .find(|diagnostic| diagnostic.task.as_deref() == Some("UNKNOWN"))
+            .expect("a non-near undeclared owner is still outside the vocabulary");
+        assert_eq!(
+            unknown.message,
+            "owner `outsider` is not declared in `owners`"
+        );
+        assert!(
+            unknown
+                .agent_instruction
+                .as_deref()
+                .is_some_and(|instruction| instruction.contains("correct this task's `owner`")),
+            "{:?}",
+            unknown.agent_instruction
+        );
+
+        let open = validate(&plan_of(vec![owned("OPEN", Some("any-spelling"))]), &opts());
+        assert!(
+            open.diagnostics
+                .iter()
+                .all(|diagnostic| diagnostic.code != code::OWNER_VOCABULARY),
+            "an absent vocabulary changed existing owner semantics: {:?}",
+            open.diagnostics
+        );
+    }
+
+    /// `APLAN056` has no status or milestone binding: canonical identity is a
+    /// property of every stored owner, including history and cut checkpoints.
+    /// Keep every lifecycle neighbour in one exact subject audit so a later
+    /// exemption cannot narrow the rule while its ordinary `todo` case passes.
+    #[test]
+    fn owner_vocabulary_applies_to_every_lifecycle_status_and_milestones() {
+        let mut tasks = Vec::new();
+        for status in Status::ALL {
+            let id = format!("STATE-{}", status.as_str());
+            let mut task = t(&id, *status);
+            task.effort_days = Some(1.0);
+            task.owner = Some(format!("undeclared-{}", status.as_str()));
+            tasks.push(task);
+        }
+        let mut milestone = t("M-CUT", Status::Todo);
+        milestone.tags = vec!["milestone".into(), "cut".into()];
+        milestone.owner = Some("undeclared-milestone".into());
+        tasks.push(milestone);
+
+        let expected: BTreeSet<String> = tasks.iter().map(|task| task.id.clone()).collect();
+        let report = validate(
+            &plan_of(tasks),
+            &Options {
+                owners: ["ada".to_string()].into_iter().collect(),
+                ..opts()
+            },
+        );
+        let actual: BTreeSet<String> = report
+            .diagnostics
+            .iter()
+            .filter(|diagnostic| diagnostic.code == code::OWNER_VOCABULARY)
+            .map(|diagnostic| {
+                diagnostic
+                    .task
+                    .clone()
+                    .expect("an owner finding names its task")
+            })
+            .collect();
+        assert_eq!(actual, expected, "{:?}", report.diagnostics);
     }
 
     fn tagged(id: &str, tags: &[&str]) -> Task {
@@ -6358,13 +6809,42 @@ mod tests {
 
         let mut o = opts();
         o.traces_root = Some(docs);
-        o.config_file = Some(dir.path().join(".aplan.yml"));
+        o.traces_repository = Some(dir.path().to_path_buf());
         let mut a = t("A", Status::Todo);
         a.traces = vec!["../README.md#a-section".to_string()];
         let r = validate(&plan_of(vec![a]), &o);
         assert!(
             !r.diagnostics.iter().any(|d| d.code == code::EXTERNAL_TRACE),
             "a trace inside the repository was called external: {:?}",
+            r.diagnostics
+        );
+    }
+
+    /// The config is a diagnostic location and never the repository boundary
+    /// (`A1-237`). A trusted policy outside the tree used to make an ordinary
+    /// trace look external because these two values were conflated.
+    /// Proves the named behaviour `traces.boundary_is_plan_repository`.
+    #[test]
+    fn a_selected_config_does_not_become_the_trace_repository() {
+        let dir = tempfile::Builder::new()
+            .tempdir_in(crate::fixture::fixture_root())
+            .expect("tempdir");
+        let repo = dir.path().join("candidate");
+        let trusted = dir.path().join("trusted");
+        std::fs::create_dir_all(repo.join("docs")).expect("repo");
+        std::fs::create_dir_all(&trusted).expect("trusted");
+        std::fs::write(repo.join("docs/DOC.md"), "# Doc\n\n## One\n\nx\n").expect("doc");
+
+        let mut o = opts();
+        o.traces_root = Some(repo.clone());
+        o.traces_repository = Some(repo);
+        o.config_file = Some(trusted.join("policy.yml"));
+        let mut a = t("A", Status::Todo);
+        a.traces = vec!["docs/DOC.md#one".to_string()];
+        let r = validate(&plan_of(vec![a]), &o);
+        assert!(
+            !r.diagnostics.iter().any(|d| d.code == code::EXTERNAL_TRACE),
+            "a trace inside the plan repository was called external: {:?}",
             r.diagnostics
         );
     }
@@ -6605,7 +7085,8 @@ mod tests {
         assert!(r.is_clean(), "missing effort must not fail the build");
     }
 
-    /// APLAN023: a `done` task's `commit`/`file` citation can be path-checked.
+    /// APLAN023: a `done` task's configuration-independent locality can be
+    /// path-checked.
     fn uncheckable(tasks: Vec<Task>) -> Vec<Diagnostic> {
         validate(&plan_of(tasks), &opts())
             .diagnostics
@@ -6637,6 +7118,24 @@ mod tests {
     }
 
     #[test]
+    fn uncheckable_evidence_scope_comes_from_the_capability_model() {
+        for kind in EvidenceKind::ALL {
+            let mut a = t("A", Status::Done);
+            a.evidence = vec![Evidence {
+                kind: *kind,
+                reference: "citation".into(),
+                captured: (*kind == EvidenceKind::Note).then(|| "2026-10-09".into()),
+            }];
+            assert_eq!(
+                !uncheckable(vec![a]).is_empty(),
+                kind.capabilities().locality.is_configuration_independent(),
+                "{} must follow its declared locality availability",
+                kind.as_str()
+            );
+        }
+    }
+
+    #[test]
     fn uncheckable_evidence_names_both_kinds_and_agrees_with_itself() {
         let mut a = t("A", Status::Done);
         a.evidence = vec![
@@ -6657,8 +7156,14 @@ mod tests {
             d[0].message
         );
         assert!(
-            d[0].message.ends_with("commit and file exist"),
-            "two kinds take a plural verb: {}",
+            d[0].message.contains("citations resolve"),
+            "{}",
+            d[0].message
+        );
+        assert!(
+            d[0].message
+                .ends_with("resolution alone is not evidence that the task's files changed"),
+            "the message must not reduce commit resolution to object existence: {}",
             d[0].message
         );
     }
@@ -6735,7 +7240,25 @@ mod tests {
             // `note` and `url` are not checked against `paths` by anything, so
             // their being unbindable is not this rule's finding.
             let mut a = t("C", Status::Done);
-            a.evidence = vec![note_ev()];
+            a.evidence = vec![
+                note_ev(),
+                Evidence {
+                    kind: EvidenceKind::Url,
+                    reference: "https://example.invalid/proof".into(),
+                    captured: None,
+                },
+            ];
+            a
+        };
+        let configured_locality = {
+            // Test locality uses runner coverage. This hermetic rule has no
+            // runner to ask, so it must not claim a check was lost.
+            let mut a = t("T", Status::Done);
+            a.evidence = vec![Evidence {
+                kind: EvidenceKind::Test,
+                reference: "suite::case".into(),
+                captured: None,
+            }];
             a
         };
         let vacuous = {
@@ -6766,6 +7289,7 @@ mod tests {
             bound,
             unfinished,
             not_path_checkable,
+            configured_locality,
             vacuous,
             milestone,
         ]);
@@ -7170,6 +7694,179 @@ mod tests {
         assert!(
             drifted(&plan_of(vec![stamped(Some(&fp))])),
             "the addressed value changed and nothing said so"
+        );
+    }
+
+    /// A1-322's deterministic performance measurement: 200 stamped traces over
+    /// two documents still perform exactly two reads and one parse of each
+    /// format. Both alternate lexical spellings canonicalize to the same
+    /// document, so the count measures document identity rather than authored
+    /// string identity.
+    #[test]
+    fn each_trace_document_is_read_and_parsed_once_per_validation_snapshot() {
+        let dir = tempfile::Builder::new()
+            .tempdir_in(crate::fixture::fixture_root())
+            .expect("tempdir");
+        std::fs::create_dir(dir.path().join("sub")).expect("alias directory");
+        let markdown = "# Intro\n\nThe fact.\n";
+        let structured = "states:\n  provisioning:\n    timeout_s: 300\n";
+        std::fs::write(dir.path().join("D.md"), markdown).expect("markdown");
+        std::fs::write(dir.path().join("spec.yaml"), structured).expect("yaml");
+        let markdown_stamp = crate::anchor::anchor_fingerprint(markdown, "intro").expect("stamp");
+        let structured_stamp =
+            crate::anchor::fingerprint_in("spec.yaml", structured, "/states/provisioning")
+                .expect("stamp");
+
+        let tasks = (0..200)
+            .map(|number| {
+                let mut task = t(&format!("T-{number:03}"), Status::Done);
+                task.evidence = vec![commit_ev()];
+                let (trace, stamp) = if number % 2 == 0 {
+                    let trace = if number % 4 == 0 {
+                        "D.md#intro"
+                    } else {
+                        "sub/../D.md#intro"
+                    };
+                    (trace, markdown_stamp.as_str())
+                } else {
+                    let trace = if number % 4 == 1 {
+                        "spec.yaml#/states/provisioning"
+                    } else {
+                        "sub/../spec.yaml#/states/provisioning"
+                    };
+                    (trace, structured_stamp.as_str())
+                };
+                task.traces = vec![trace.to_string()];
+                task.trace_fingerprints = BTreeMap::from([(trace.to_string(), stamp.to_string())]);
+                task
+            })
+            .collect();
+        let options = Options {
+            require_effort: false,
+            detect_drift: true,
+            traces_root: Some(dir.path().to_path_buf()),
+            ..Default::default()
+        };
+        let before = trace_document_work();
+        let report = validate(&plan_of(tasks), &options);
+        let after = trace_document_work();
+
+        for code in [
+            code::DANGLING_TRACE,
+            code::TRACE_DRIFT,
+            code::UNSTAMPED_TRACE,
+        ] {
+            assert!(
+                !report
+                    .diagnostics
+                    .iter()
+                    .any(|diagnostic| diagnostic.code == code),
+                "{code} changed while caching documents: {:?}",
+                report.diagnostics
+            );
+        }
+        assert_eq!(after.reads - before.reads, 2);
+        assert_eq!(after.markdown_parses - before.markdown_parses, 1);
+        assert_eq!(after.structured_parses - before.structured_parses, 1);
+        assert_eq!(
+            after.bytes_read - before.bytes_read,
+            u64::try_from(markdown.len() + structured.len()).expect("fixture byte count")
+        );
+    }
+
+    /// A failed parse is cacheable work too. Otherwise a malformed shared
+    /// catalogue would be parsed once per task while still satisfying the happy
+    /// path measurement above, exactly when the author most needs a fast answer.
+    #[test]
+    fn an_invalid_structured_trace_document_is_parsed_once_without_hiding_findings() {
+        let dir = tempfile::Builder::new()
+            .tempdir_in(crate::fixture::fixture_root())
+            .expect("tempdir");
+        let malformed = "states: [unterminated\n";
+        std::fs::write(dir.path().join("spec.yaml"), malformed).expect("yaml");
+        let tasks = (0..25)
+            .map(|number| {
+                let mut task = t(&format!("T-{number:03}"), Status::Done);
+                task.evidence = vec![commit_ev()];
+                let trace = "spec.yaml#/states/provisioning".to_string();
+                task.traces = vec![trace.clone()];
+                if number % 2 == 1 {
+                    task.trace_fingerprints =
+                        BTreeMap::from([(trace, "0000000000000000".to_string())]);
+                }
+                task
+            })
+            .collect();
+        let options = Options {
+            require_effort: false,
+            traces_root: Some(dir.path().to_path_buf()),
+            ..Default::default()
+        };
+        let before = trace_document_work();
+        let report = validate(&plan_of(tasks), &options);
+        let after = trace_document_work();
+
+        assert_eq!(after.reads - before.reads, 1);
+        assert_eq!(after.structured_parses - before.structured_parses, 1);
+        assert_eq!(
+            report
+                .diagnostics
+                .iter()
+                .filter(|diagnostic| diagnostic.code == code::DANGLING_TRACE)
+                .count(),
+            25,
+            "caching the failed parse must not coalesce task-scoped findings"
+        );
+    }
+
+    /// A failed read is cached just like a failed parse, but is not reported as
+    /// successful trace work. Exercise both the stampability and drift paths:
+    /// neither may hide the task-scoped dangling-trace finding or retry the
+    /// unavailable source for every task.
+    #[test]
+    fn an_unreadable_trace_document_is_cached_without_claiming_successful_work() {
+        let dir = tempfile::Builder::new()
+            .tempdir_in(crate::fixture::fixture_root())
+            .expect("tempdir");
+        let tasks = (0..24)
+            .map(|number| {
+                let mut task = t(&format!("T-{number:03}"), Status::Done);
+                task.evidence = vec![commit_ev()];
+                let trace = "missing.md#section".to_string();
+                task.traces = vec![trace.clone()];
+                if number % 2 == 1 {
+                    task.trace_fingerprints =
+                        BTreeMap::from([(trace, "0000000000000000".to_string())]);
+                }
+                task
+            })
+            .collect();
+        let options = Options {
+            require_effort: false,
+            detect_drift: true,
+            traces_root: Some(dir.path().to_path_buf()),
+            ..Default::default()
+        };
+        let before = trace_document_work();
+        let report = validate(&plan_of(tasks), &options);
+        let after = trace_document_work();
+
+        assert_eq!(after, before, "failed reads are not successful trace work");
+        assert_eq!(
+            report
+                .diagnostics
+                .iter()
+                .filter(|diagnostic| diagnostic.code == code::DANGLING_TRACE)
+                .count(),
+            24,
+            "every affected task must retain its own dangling-trace finding"
+        );
+        assert!(
+            report
+                .diagnostics
+                .iter()
+                .all(|diagnostic| diagnostic.code != code::TRACE_DRIFT),
+            "an unreadable source cannot truthfully be called drift"
         );
     }
 

@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
-# Git pre-push hook: run ci/scripts/preflight.sh (the full CI gate bundle)
-# before a push reaches origin, so red never leaves the machine.
+# Git pre-push hook: run the change-aware development validation profile over
+# the exact updates Git is about to send plus the current working tree.
 #
 # Install (opt-in):
 #   git config core.hooksPath ci/githooks
@@ -8,22 +8,30 @@
 # Skip for one push (a WIP branch):
 #   git push --no-verify
 #
-# Skip a specific gate inside the bundle:
-#   PREFLIGHT_SKIP=test git push
-
 set -euo pipefail
 
-# git passes one line per ref on stdin: <local-ref> <local-sha> <remote-ref>
-# <remote-sha>. A delete (push :branch) has the all-zero local-sha and needs no
-# checks; a create/update falls through to preflight.
-deletion_only=1
-while read -r _local_ref local_sha _remote_ref _remote_sha; do
-    if [[ "$local_sha" != "0000000000000000000000000000000000000000" ]]; then
-        deletion_only=0
+# Git passes one line per ref on stdin: <local-ref> <local-sha> <remote-ref>
+# <remote-sha>. Preserve every non-deletion pair: a multi-ref push is one
+# selection over the union, not whichever line happened to arrive first.
+declare -a preflight_args=()
+saw_update=0
+saw_non_deletion=0
+while read -r local_ref local_sha remote_ref remote_sha extra; do
+    [[ -n "$local_ref" && -n "$local_sha" && -n "$remote_ref" && -n "$remote_sha" \
+        && -z "${extra:-}" ]] || {
+        echo "pre-push: malformed ref update from Git; validation did not run" >&2
+        exit 2
+    }
+    saw_update=1
+    if [[ "$local_sha" =~ ^0+$ ]]; then
+        continue
     fi
+    saw_non_deletion=1
+    preflight_args+=(--pre-push "$remote_sha" "$local_sha")
 done
 
-if [[ "$deletion_only" == "1" ]]; then
+if [[ "$saw_update" -eq 1 && "$saw_non_deletion" -eq 0 ]]; then
+    echo "pre-push: deletion-only update; validation not required"
     exit 0
 fi
 
@@ -40,4 +48,7 @@ while IFS= read -r name; do
     fi
 done < <(git rev-parse --local-env-vars)
 
-exec "$REPO_ROOT/ci/scripts/preflight.sh"
+if [[ "$saw_update" -eq 0 ]]; then
+    echo "pre-push: no ref updates supplied; validating the working tree"
+fi
+exec "$REPO_ROOT/ci/scripts/preflight.sh" "${preflight_args[@]}"

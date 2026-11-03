@@ -112,10 +112,19 @@ fn cache_fallback() -> PathBuf {
 /// suite, and lives under a cache root the XDG specification already says may be
 /// deleted at any time.
 fn clear_old_leftovers(root: &Path) {
+    let cutoff = std::time::SystemTime::now() - KEEP_LEFTOVERS_FOR;
+    clear_leftovers_older_than(root, cutoff);
+}
+
+/// Remove directories whose modification time predates `cutoff`.
+///
+/// The cutoff is an input so the age boundary can be proven without sleeping or
+/// changing filesystem timestamps. Production supplies the one-week boundary;
+/// the test supplies times on either side of freshly-created fixtures.
+fn clear_leftovers_older_than(root: &Path, cutoff: std::time::SystemTime) {
     let Ok(entries) = std::fs::read_dir(root) else {
         return;
     };
-    let cutoff = std::time::SystemTime::now() - KEEP_LEFTOVERS_FOR;
     for entry in entries.flatten() {
         let old = entry
             .metadata()
@@ -124,5 +133,38 @@ fn clear_old_leftovers(root: &Path) {
         if old {
             let _ = std::fs::remove_dir_all(entry.path());
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// The runner keeps Cargo's target outside the checkout, while a default
+    /// local build keeps it inside. That changed whether production happened to
+    /// call cleanup and made the crate's coverage floor environment-dependent.
+    /// Drive the policy directly so both layouts measure the same behavior.
+    #[test]
+    fn leftover_cleanup_is_exercised_independently_of_target_location() {
+        let fixture = tempfile::Builder::new()
+            .prefix("leftover-cleanup-")
+            .tempdir_in(fixture_root())
+            .expect("cleanup fixture");
+        let root = fixture.path().join("root");
+        let leftover = root.join("leftover");
+        std::fs::create_dir_all(&leftover).expect("leftover directory");
+
+        // A cutoff before the entry's creation keeps it.
+        clear_leftovers_older_than(&root, std::time::SystemTime::UNIX_EPOCH);
+        assert!(leftover.is_dir(), "a recent fixture was removed");
+
+        // A cutoff after the entry's creation removes it. This avoids changing
+        // mtimes, whose precision and directory support vary by filesystem.
+        clear_leftovers_older_than(&root, std::time::SystemTime::now() + KEEP_LEFTOVERS_FOR);
+        assert!(!leftover.exists(), "an expired fixture was retained");
+
+        // The best-effort production wrapper is silent when there is nothing
+        // to inspect, including a cache root removed by another cleanup.
+        clear_old_leftovers(&root.join("absent"));
     }
 }

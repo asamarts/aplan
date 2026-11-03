@@ -18,8 +18,10 @@
 //! flavor is an addition rather than a refactor, and the policy above has a
 //! single enforcement point.
 
+pub mod blueprint;
 pub mod checklist;
 pub mod cut;
+pub mod dependency_manifest;
 pub mod docs;
 pub mod emit;
 pub mod export;
@@ -154,9 +156,11 @@ pub enum ImplementedAs {
 /// Knobs a caller sets for one import run.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Options {
-    /// `phase` for every emitted task. Proposal repositories have no equivalent
-    /// field, and `phase` is for rollups and ordering rather than gating, so a
-    /// default is safe; the report states which value was used.
+    /// Destination reporting coordinate for every emitted task. Proposal
+    /// repositories have no equivalent aplan field: a source concept also
+    /// called "phase" remains source provenance rather than being mistaken for
+    /// this value. It creates no membership, gate, or execution order
+    /// The report states which value was assigned.
     pub phase: u32,
     /// How to treat a source's "implemented".
     pub implemented_as: ImplementedAs,
@@ -250,6 +254,103 @@ pub trait ProposalSource {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    struct PhaseCase {
+        name: &'static str,
+        parse: fn(&Options) -> Import,
+    }
+
+    fn kep(options: &Options) -> Import {
+        kep::Kep
+            .parse(
+                "kep.yaml",
+                "title: Work\nkep-number: 7\nstatus: provisional\n",
+                options,
+            )
+            .expect("KEP parses")
+    }
+
+    fn checklist(options: &Options) -> Import {
+        checklist::Checklist
+            .parse("ROADMAP.md", "## Work\n\n- [ ] Do it\n", options)
+            .expect("checklist parses")
+    }
+
+    fn roadmap_json(options: &Options) -> Import {
+        roadmap_json::RoadmapJson
+            .parse(
+                "roadmap.json",
+                r#"{"phases":[{"id":"source-1","title":"Source phase"}]}"#,
+                options,
+            )
+            .expect("roadmap JSON parses")
+    }
+
+    fn spec_kit(options: &Options) -> Import {
+        spec_kit::SpecKit
+            .parse("tasks.md", "## Phase 1\n\n- [ ] T001 Do it\n", options)
+            .expect("spec-kit parses")
+    }
+
+    fn openspec(options: &Options) -> Import {
+        spec_kit::OpenSpec
+            .parse("tasks.md", "## 1. Work\n\n- [ ] 1.1 Do it\n", options)
+            .expect("OpenSpec parses")
+    }
+
+    /// The phase decision's importer inventory is an audit, not a prose list.
+    /// Each registry member drives its real parser, so a sixth flavor cannot
+    /// arrive without deciding what destination phase its tasks receive.
+    #[test]
+    fn every_import_flavor_assigns_the_destination_phase() {
+        let cases = [
+            PhaseCase {
+                name: "kep",
+                parse: kep,
+            },
+            PhaseCase {
+                name: "checklist",
+                parse: checklist,
+            },
+            PhaseCase {
+                name: "roadmap-json",
+                parse: roadmap_json,
+            },
+            PhaseCase {
+                name: "spec-kit",
+                parse: spec_kit,
+            },
+            PhaseCase {
+                name: "openspec",
+                parse: openspec,
+            },
+        ];
+        let registered: Vec<&str> = FLAVORS.iter().map(|flavor| flavor.name).collect();
+        let audited: Vec<&str> = cases.iter().map(|case| case.name).collect();
+        assert_eq!(
+            audited, registered,
+            "every registered flavor needs an answer"
+        );
+
+        let options = Options {
+            phase: 7,
+            ..Options::default()
+        };
+        for case in cases {
+            let imported = (case.parse)(&options);
+            assert!(!imported.tasks.is_empty(), "{} drove no tasks", case.name);
+            assert!(
+                imported.tasks.iter().all(|task| task.phase == 7),
+                "{} did not assign destination phase 7: {:?}",
+                case.name,
+                imported
+                    .tasks
+                    .iter()
+                    .map(|task| (&task.id, task.phase))
+                    .collect::<Vec<_>>()
+            );
+        }
+    }
 
     #[test]
     fn the_default_never_asserts_an_unprovable_done() {

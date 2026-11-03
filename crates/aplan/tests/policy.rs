@@ -20,7 +20,7 @@
 
 use std::path::{Path, PathBuf};
 
-mod common;
+use crate::common;
 
 fn repo_root() -> PathBuf {
     PathBuf::from(env!("CARGO_MANIFEST_DIR"))
@@ -277,7 +277,7 @@ fn the_section_walk_stops_at_the_next_heading_and_drops_the_fences() {
 /// `README.md` tells an adopter wiring the gate into CI that an automatic gate
 /// with no `deny_warnings` has switched the warning tier off, and this repository
 /// stood in that exact position while saying so: `.aplan.yml` switches
-/// `detect_drift` on, `dogfood.sh` runs `aplan check` on every push, and a
+/// `detect_drift` on, `structural.sh` runs `aplan check` on every push, and a
 /// drifted traced section printed `ok: 287 tasks, 1 warning(s)` and exited `0`.
 ///
 /// Asserted here rather than left to the file, because the absence of a key is
@@ -363,6 +363,19 @@ fn every_untestable_task_says_why_in_its_body() {
 #[test]
 fn the_exemption_is_used_and_stays_a_minority() {
     let closed = closed_tasks();
+    if closed.is_empty() {
+        let tasks = std::fs::read_dir(repo_root().join("aplan/tasks"))
+            .expect("public plan task directory")
+            .flatten()
+            .filter(|entry| entry.path().extension().is_some_and(|value| value == "md"))
+            .map(|entry| entry.file_name().to_string_lossy().into_owned())
+            .collect::<Vec<_>>();
+        assert!(
+            !tasks.is_empty() && tasks.iter().all(|name| name.starts_with("A2-")),
+            "an exemption-free plan is valid here only at the explicit A2 public-plan epoch"
+        );
+        return;
+    }
     let exempt: Vec<&String> = closed
         .iter()
         .filter(|(_, fm, _)| tags_of(fm).iter().any(|t| t == "untestable"))

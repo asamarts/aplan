@@ -15,7 +15,7 @@
 
 use std::path::Path;
 
-mod common;
+use crate::common;
 use common::aplan;
 
 /// An id that only survives being written if the writer quotes it.

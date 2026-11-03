@@ -1,0 +1,24 @@
++ Plan health -------------------------------------------------------------------------------------+
+| aplan x ERROR  2 tasks  1 error  2 warnings  repo/very-long-root                                 |
++--------------------------------------------------------------------------------------------------+
++ Destinations ------------------------------------------------------------------------------------+
+|[1 Overview] [2 Tasks] [3 Diagnostics] [4 Graph] [5 Reports] [6 Inbox]                            |
++--------------------------------------------------------------------------------------------------+
++> Overview - where attention goes next <-------------++ Snapshot identity ------------------------+
+|> CUTS 0 | DONE 0/0 | [........]                     ||plan: repo/very-long-root sha:plan-identit |
+|  EFFORT 0.0/2.0d | complete estimates               ||config: none selected sha:config-ident     |
+|  READY 0 | [........]                               ||repository: repo/very-long-root            |
+|  REVISIT DUE 0 | LATER 0 | AS-OF 0                  ||repository state: not observed: synthetic >|
+|  FINDINGS E:1 W:2 | DENIED | [!??.....]             ||build: 0.test src:test-source              |
+|  CRITICAL 0.0d | TASKS 0 | [........]               ||facts:facts binary:binary                  |
+|                                                     ||input: identity working_tree Hermetic      |
+|                                                     ||snapshot: current; memory dirty: no        |
+|                                                     ||load: complete                             |
+|                                                     ||work: active work; effort: complete        |
+|                                                     ||                                           |
+|                                                     ||                                           |
++-----------------------------------------------------++-------------------------------------------+
++ Commands ----------------------------------------------------------------------------------------+
+|Esc quit | C-p command palette | ? contextual help | Enter open selected | q/C-c quit | r refresh |
+|Idle                                                                                              |
++--------------------------------------------------------------------------------------------------+

@@ -278,15 +278,8 @@ pub fn current_version(
     declared: &aplan_config::DeclaredCommand,
     repo_root: &Path,
 ) -> Result<String, Error> {
-    let out = crate::resolve::run_declared(
-        declared.command.clone(),
-        declared.wrap.as_deref(),
-        repo_root,
-        "version.current",
-        declared.timeout_seconds.unwrap_or(CURRENT_TIMEOUT_SECS),
-        declared.max_memory.as_deref(),
-        declared.max_processes,
-    )?;
+    let out =
+        crate::resolve::run_declared(declared, repo_root, "version.current", CURRENT_TIMEOUT_SECS)?;
     let line = out
         .lines()
         .map(str::trim)
@@ -336,15 +329,7 @@ pub fn artifact_is_compatible(
     declared: &aplan_config::DeclaredCommand,
     repo_root: &Path,
 ) -> Result<(bool, crate::Cost), Error> {
-    crate::resolve::run_declared_ok(
-        declared.command.clone(),
-        declared.wrap.as_deref(),
-        repo_root,
-        "version.check",
-        declared.timeout_seconds.unwrap_or(CHECK_TIMEOUT_SECS),
-        declared.max_memory.as_deref(),
-        declared.max_processes,
-    )
+    crate::resolve::run_declared_ok(declared, repo_root, "version.check", CHECK_TIMEOUT_SECS)
 }
 
 /// How long `version.check` may take, in seconds.
@@ -1013,6 +998,7 @@ mod tests {
                     timeout_seconds: None,
                     max_memory: None,
                     max_processes: None,
+                    max_output: None,
                     wrap: None,
                 },
                 dir.path(),
@@ -1043,6 +1029,7 @@ mod tests {
                     timeout_seconds: None,
                     max_memory: None,
                     max_processes: None,
+                    max_output: None,
                     wrap: None,
                 },
                 dir.path(),

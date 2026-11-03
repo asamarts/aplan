@@ -10,9 +10,9 @@
 //! ask **which `done` tasks cite only `note` evidence** -- the question closest
 //! to this tool's own thesis, and the first one an auditor asks.
 
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
-mod common;
+use crate::common;
 
 /// One task done on a note alone, one done with a commit beside a note, and one
 /// carrying the other three declared fields.
@@ -48,6 +48,14 @@ fn rows(dir: &Path) -> Vec<serde_json::Value> {
     let out = common::output(dir, &["tasks", "--format", "json"]);
     let doc: serde_json::Value = serde_json::from_slice(&out.stdout).expect("tasks --format json");
     doc["tasks"].as_array().expect("tasks").clone()
+}
+
+fn workspace_file(path: &str) -> PathBuf {
+    Path::new(env!("CARGO_MANIFEST_DIR"))
+        .ancestors()
+        .nth(2)
+        .expect("workspace root")
+        .join(path)
 }
 
 /// The question the task is named for, answered from this surface alone.
@@ -102,6 +110,7 @@ fn paths_traces_and_prefer_after_are_reachable() {
         );
     }
     assert!(row("W-1")["trace_fingerprints"].is_object());
+    assert!(row("W-1")["evidence_fingerprints"].is_object());
 }
 
 /// Everything a task declares reaches the surface, checked against the schema
@@ -223,6 +232,75 @@ fn a_citation_has_the_same_keys_whatever_kind_it_is() {
     );
 }
 
+/// The task-file and task-data DTOs intentionally have different shapes, but
+/// they must not teach different meanings for a field they share (`A1-493`).
+#[test]
+fn both_task_schemas_give_captured_the_same_note_only_meaning() {
+    let read = |path: &str| -> serde_json::Value {
+        serde_json::from_slice(&std::fs::read(workspace_file(path)).expect("committed schema"))
+            .expect("committed schema is JSON")
+    };
+    let task = read("schemas/v1/task.json");
+    let tasks = read("schemas/v1/tasks.json");
+    let authored_evidence = &task["$defs"]["Evidence"];
+    let authored = &authored_evidence["properties"]["captured"];
+    let data = &tasks["$defs"]["EvidenceRow"]["properties"]["captured"];
+
+    assert_eq!(
+        authored["description"], data["description"],
+        "the file and data contracts disagree about capture provenance"
+    );
+    let description = data["description"].as_str().expect("description");
+    for claim in ["inline assertion", "Required for `note`", "APLAN055"] {
+        assert!(
+            description.contains(claim),
+            "the shared description no longer states `{claim}`: {description}"
+        );
+    }
+
+    // The semantics agree without collapsing the two deliberate wire shapes:
+    // authored YAML omits an absent date, while every data row carries null.
+    assert!(
+        !authored_evidence["required"]
+            .as_array()
+            .expect("authored evidence required fields")
+            .iter()
+            .any(|field| field == "captured")
+    );
+    assert!(
+        tasks["$defs"]["EvidenceRow"]["required"]
+            .as_array()
+            .expect("row required fields")
+            .iter()
+            .any(|field| field == "captured")
+    );
+    assert_eq!(data["type"], serde_json::json!(["string", "null"]));
+}
+
+/// `TaskRow` never skips a field while serializing, including an absent
+/// `Option`; the schema must describe that stable-key contract (`A1-493`).
+#[test]
+fn the_schema_requires_every_runtime_row_key() {
+    let tasks: serde_json::Value = serde_json::from_slice(
+        &std::fs::read(workspace_file("schemas/v1/tasks.json")).expect("committed schema"),
+    )
+    .expect("committed schema is JSON");
+    let required = tasks["$defs"]["TaskRow"]["required"]
+        .as_array()
+        .expect("row required fields");
+
+    let dir = tempfile::Builder::new()
+        .tempdir_in(aplan_core::fixture::fixture_root())
+        .expect("tempdir");
+    fixture(dir.path());
+    for key in rows(dir.path())[0].as_object().expect("runtime row").keys() {
+        assert!(
+            required.iter().any(|field| field == key),
+            "runtime always emits `{key}`, but the schema permits it to be absent"
+        );
+    }
+}
+
 /// The surface's rule, checkable in both directions.
 ///
 /// "What a task *is*, plus what the plan derives about it." The other test
@@ -232,6 +310,10 @@ fn a_citation_has_the_same_keys_whatever_kind_it_is() {
 fn every_row_field_is_declared_or_a_named_derivation() {
     /// Derived, and why each is here rather than on the task.
     const DERIVED: &[&str] = &[
+        // Who is acting on it now, from the coherent local ephemeral claim
+        // snapshot carried by the envelope; durable responsibility remains the
+        // task's declared `owner` (`A1-531`).
+        "claim",
         // The label of the cut that lists it, from the roadmap.
         "cut",
         // The id of that cut, since two may share a label.

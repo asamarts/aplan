@@ -4,11 +4,9 @@ set -euo pipefail
 # Build the release artifact: one statically linked Linux x86_64 binary, plus the
 # checksum a consumer needs to pin it (A1-028).
 #
-# Deliberately not `dist` (HLD section 17). That pipeline's value is
-# multi-platform binaries, and macOS and Windows cannot be built on the Linux
-# self-hosted runner: they would need GitHub-hosted runners, reopening the Actions
-# billing the pre-public repository-boundary decision eliminated. This is the slice that runs where every other job
-# already runs.
+# Deliberately not `dist` (HLD section 17). Changing from private self-hosted CI
+# to public hosted CI does not itself decide a multi-platform distribution
+# promise. This remains the one portable asset the release design specifies.
 #
 # Usage:
 #   ci/scripts/release.sh              # build for the workspace version
@@ -18,6 +16,37 @@ set -euo pipefail
 
 REPO_ROOT="$(cd "$(dirname "$0")/../.." && pwd)"
 cd "$REPO_ROOT"
+
+export CARGO_BUILD_WARNINGS=deny
+
+release_started="$(date +%s)"
+why=""
+release_phase_on_exit() {
+    local status=$?
+    local outcome=failed
+    local finished
+    trap - EXIT
+    [[ -z "$why" ]] || rm -f "$why"
+    if [[ "$status" -eq 0 ]]; then
+        outcome=passed
+    fi
+    finished="$(date +%s)"
+    printf 'release: phase=artifact outcome=%s duration_seconds=%s\n' \
+        "$outcome" "$((finished - release_started))"
+    exit "$status"
+}
+trap release_phase_on_exit EXIT
+
+# Bind direct invocations and the workflow to one full commit ID. The workflow
+# supplies github.sha; a local staged build binds its current committed HEAD.
+release_source="$(ci/scripts/release-source.sh "$REPO_ROOT")"
+export APLAN_RELEASE_SHA="$release_source"
+echo "==> Release source ${release_source} is committed, clean, and exact"
+
+# Publication must never inherit a moving hosted default. A1-614 adds the full
+# profile before packaging; this local check independently keeps direct and
+# workflow release invocations on the repository's exact compiler.
+ci/scripts/toolchain.sh verify
 
 TARGET="x86_64-unknown-linux-musl"
 OUT_DIR="${REPO_ROOT}/dist"
@@ -62,8 +91,8 @@ if [[ -n "${TAG:-}" ]]; then
     ci/scripts/check-release-changelog.sh "$version"
 fi
 
-echo "==> Building aplan ${version} for ${TARGET}"
-cargo build --release --locked -p aplan --target "${TARGET}"
+echo "==> Proving the supported headless source build"
+cargo build --release --locked -p aplan --no-default-features --target "${TARGET}"
 
 # Not `target/`: the CI runner image sets `CARGO_TARGET_DIR` to a persistent
 # volume outside the checkout (so builds stay warm across jobs), and hardcoding
@@ -71,6 +100,47 @@ cargo build --release --locked -p aplan --target "${TARGET}"
 binary="${CARGO_TARGET_DIR:-target}/${TARGET}/release/aplan"
 if [[ ! -x "$binary" ]]; then
     echo "ERROR: ${binary} was not produced" >&2
+    exit 1
+fi
+
+# A successful feature-free compile is not dependency isolation: an optional
+# edge accidentally made unconditional compiles just as successfully. Inspect
+# the selected normal/build graph and refuse any terminal-stack package.
+headless_graph="$(cargo tree --locked -p aplan --no-default-features \
+    --edges normal,build --prefix none)"
+if grep -qE '^(aplan-tui|ratatui|ratatui-core|ratatui-crossterm|ratatui-widgets|crossterm) ' \
+    <<<"$headless_graph"; then
+    echo "ERROR: --no-default-features still resolves the terminal stack:" >&2
+    grep -E '^(aplan-tui|ratatui|ratatui-core|ratatui-crossterm|ratatui-widgets|crossterm) ' \
+        <<<"$headless_graph" >&2
+    exit 1
+fi
+set +e
+"$binary" facts --require build.tui >/dev/null 2>&1
+headless_require_status=$?
+set -e
+if [[ "$headless_require_status" -ne 1 ]]; then
+    echo "ERROR: the headless build's build.tui requirement exited ${headless_require_status}, expected 1" >&2
+    exit 1
+fi
+set +e
+headless_error="$("$binary" tui 2>&1)"
+headless_tui_status=$?
+set -e
+if [[ "$headless_tui_status" -ne 2 ]]; then
+    echo "ERROR: the headless aplan tui stub exited ${headless_tui_status}, expected 2" >&2
+    exit 1
+fi
+if [[ "$headless_error" != *"does not include the terminal interface"* ]]; then
+    echo "ERROR: the headless aplan tui stub did not give its enablement advice" >&2
+    echo "$headless_error" >&2
+    exit 1
+fi
+
+echo "==> Building aplan ${version} for ${TARGET} with the release TUI capability"
+cargo build --release --locked -p aplan --features tui --target "${TARGET}"
+if ! "$binary" facts --require build.tui >/dev/null; then
+    echo "ERROR: the release artifact does not advertise build.tui" >&2
     exit 1
 fi
 
@@ -119,7 +189,6 @@ if [[ -n "${TAG:-}" ]]; then
     # demanded the larger number -- the whole difference between a refusal
     # somebody can act on and one they argue with.
     why="$(mktemp)"
-    trap 'rm -f "$why"' EXIT
     if ! required="$("$binary" version 2>"$why")"; then
         echo "ERROR: the plan could not say what the next version must be:" >&2
         sed 's/^/       /' "$why" >&2
@@ -136,6 +205,20 @@ if [[ -n "${TAG:-}" ]]; then
         exit 1
     fi
     echo "==> The plan agrees: ${required}"
+    rm -f "$why"
+    why=""
+fi
+
+# Compilation and version probes must not be able to move or dirty the source
+# whose full validation authorized this artifact. Ignored build output is fine;
+# tracked or untracked source is not.
+source_after="$(ci/scripts/release-source.sh "$REPO_ROOT")" || {
+    echo "ERROR: release source changed during artifact construction" >&2
+    exit 1
+}
+if [[ "$source_after" != "$release_source" ]]; then
+    echo "ERROR: release source identity changed during artifact construction" >&2
+    exit 1
 fi
 
 rm -rf "$OUT_DIR"
@@ -157,5 +240,5 @@ tar --create --gzip \
 (cd "$OUT_DIR" && sha256sum "$archive" > "${archive}.sha256")
 
 echo "==> Built:"
-ls -1 "$OUT_DIR" | sed 's/^/      /'
+find "$OUT_DIR" -mindepth 1 -maxdepth 1 -printf '%f\n' | LC_ALL=C sort | sed 's/^/      /'
 echo "==> sha256: $(cut -d' ' -f1 "${OUT_DIR}/${archive}.sha256")"

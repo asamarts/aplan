@@ -98,8 +98,9 @@ fn the_edited_milestone_reloads_with_the_new_member() {
 
 #[test]
 fn a_settled_cut_is_refused_and_left_untouched() {
-    // The guard an audit added: appending an unfinished task to a `done`
-    // milestone would make it violate APLAN007.
+    // The guard an audit added: ordinary placement cannot append unfinished
+    // work to a `done` milestone. Only the evidence-resolving ledger path may
+    // add a proved `done` member.
     let done = "---\nid: M-v0.6\ntitle: Surfaces\nphase: 1\nstatus: done\ntags: [milestone, v0.6]\nblocked_by: [A1-003]\nevidence:\n  - kind: commit\n    ref: deadbeef\n---\n";
     let dir = plan_dir(done);
     let before = std::fs::read_to_string(dir.path().join("tasks/M-v0.6.md")).unwrap();
@@ -107,13 +108,35 @@ fn a_settled_cut_is_refused_and_left_untouched() {
     let plan = load_plan(dir.path());
     let err = cut::place(&plan, "M-v0.6", &["KEP-3063".to_string()]).expect_err("must refuse");
     assert!(matches!(err, cut::CutError::Settled { .. }), "{err:?}");
-    assert!(err.to_string().contains("APLAN007"), "{err}");
+    assert!(
+        err.to_string()
+            .contains("evidence-resolving ledger workflow"),
+        "{err}"
+    );
 
     assert_eq!(
         std::fs::read_to_string(dir.path().join("tasks/M-v0.6.md")).unwrap(),
         before,
         "a refusal must not write anything"
     );
+}
+
+#[test]
+fn proved_done_members_can_extend_a_done_cut_but_live_members_cannot() {
+    let done = "---\nid: M-v0.6\ntitle: Surfaces\nphase: 1\nstatus: done\ntags: [milestone, v0.6]\nblocked_by: [A1-003]\n---\n";
+    let dir = plan_dir(done);
+    let plan = load_plan(dir.path());
+    let pending =
+        cut::plan_placement_for_members(&plan, "M-v0.6", &[("HIST-1".to_string(), Status::Done)])
+            .expect("done ledger placement");
+    assert_eq!(pending.added, ["HIST-1"]);
+    assert!(pending.replacement().is_some());
+
+    let error =
+        cut::plan_placement_for_members(&plan, "M-v0.6", &[("LIVE-1".to_string(), Status::Todo)])
+            .expect_err("live work cannot invalidate a done cut");
+    assert!(matches!(error, cut::CutError::Settled { .. }));
+    assert!(error.to_string().contains("proved `done` ledger entries"));
 }
 
 #[test]

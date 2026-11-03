@@ -1,0 +1,18 @@
+ aplan x ERROR  2 tasks  1 error  2 warnings  repo/very-long-root
+[1 Overview] [2 Tasks] [3 Diagnostics] [4 Graph] [5 Reports] [6 Inbox]
++> Graph - how work is connected <---------++ A / Summary ---------------------+
+|Overview | COMPLETE 4/4N 4/4E omit 0M/0G  ||[Summary] Work Body Relations Pat>|
+|r1:9/12 c1:35/35 | U0 D3 L0 R0 | readabil>||Graph anchor: A (first task, pres>|
+|g whole | m dep | v auto | o relations    ||> A                               |
+|+ phase 1 ------------------------+      ^||    root                          |
+||#>===#      ++------+      + ----+      #||                                  |
+||!A   !      |B      |      |D    |      #||-- STATE --                       |
+||!TODO!o----->TODO   |o----->TODO |      #||  Status                          |
+||#====#      +-------+      +-----+      |||    [todo]                        |
+||   o                           ^ |      |||  Readiness                       |
+||   |                           | |      |||    [waiting on prerequisites]    |
+||   |                           | |      |||                                  |
+||   v        ++------+          v |      v||-- RESPONSIBILITY --             >|
++------------------------------------------++----------------------------------+
+Esc overview | C-p commands | ? help | Enter open | / search | f filters | H pan
+Idle

@@ -23,7 +23,7 @@
 
 use std::path::Path;
 
-mod common;
+use crate::common;
 
 /// What a probe must see. Deliberately coarse: this file asks whether the
 /// promise is kept, not how the message is worded, which is

@@ -18,6 +18,10 @@ const NOT_A_SWITCH: &[(&str, &str)] = &[
          and resolves against a different directory",
     ),
     (
+        "traces_repository",
+        "the boundary `APLAN034` compares a resolved trace against, not whether that rule runs",
+    ),
+    (
         "traces_external",
         "which outside roots are declared, which changes what `APLAN034` accepts rather than \
          whether it speaks",
@@ -34,6 +38,12 @@ const NOT_A_SWITCH: &[(&str, &str)] = &[
         "tag_families",
         "a vocabulary rather than a switch. Turning it `on` means inventing families, and a \
          family this tool made up would make `APLAN026`'s near-miss report nonsense",
+    ),
+    (
+        "owners",
+        "a vocabulary rather than a switch. Turning it `on` by copying the owners already in \
+         the plan would declare every typo canonical, while inventing a roster would make \
+         `APLAN056` report people the repository may legitimately use",
     ),
     (
         "config_file",

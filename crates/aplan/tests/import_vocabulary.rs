@@ -12,7 +12,7 @@
 
 use std::path::Path;
 
-mod common;
+use crate::common;
 
 /// A plan declaring a mandatory family and requiring cut membership: the shape
 /// an adopter with a real vocabulary has.

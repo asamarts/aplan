@@ -5,15 +5,17 @@ on:
     tags: ["v*"]
   workflow_dispatch:
 
-# Runs on the self-hosted runner like every other job (the pre-public repository-boundary decision), so cutting a
-# release consumes no GitHub-hosted minutes. That is also why this publishes one
-# Linux x86_64 binary rather than the multi-platform set `dist` would build:
-# macOS and Windows cannot be built here, and adding them would mean hosted
-# runners and the billing that decision removed. Multi-platform packaging waits
-# for a real distribution task (HLD Section 17).
+# Runs on the self-hosted runner while private and a standard GitHub-hosted
+# runner when public (the pre-public repository-boundary decision, the pre-public repository-boundary decision). This still publishes one portable
+# Linux x86_64 binary; multi-platform packaging remains a distribution decision,
+# not a side effect of changing CI placement (HLD Section 17).
 env:
   CARGO_TERM_COLOR: always
-  RUSTFLAGS: -D warnings
+  CARGO_BUILD_WARNINGS: deny
+  # Both validation and artifact construction refuse unless this exact full
+  # commit is still checked out. A ref name or another workflow's result cannot
+  # authorize publication.
+  APLAN_RELEASE_SHA: ${{ github.sha }}
 
 permissions:
   contents: write # create the release and upload its asset
@@ -21,27 +23,15 @@ permissions:
 jobs:
   release:
     name: build + publish
-    # **Unreachable by an untrusted event, by refusal rather than by
-    # redirection** (`A1-117`). Routing would keep this job reachable and merely
-    # move it; the property wanted is that it does not run.
-    #
-    # **A job condition, not a step** -- proved, not assumed. Written as a step
-    # first, and a real fork pull request on the proof fixture showed why that is
-    # wrong: a step cannot run until the job has been assigned a runner, so the
-    # job sat queued against the box's label, waiting for the box to pick up
-    # untrusted work in order to refuse it. Here, where that runner is
-    # registered, it would have been picked up. A job-level `if` is evaluated
-    # before any assignment, and the job is skipped without ever being queued.
-    # Stated as an allow-list of the events this workflow is for, not as an
-    # exclusion of the two that are dangerous today. An exclusion admits every
-    # event type nobody has thought of yet; naming what is permitted means a new
-    # trigger is refused until somebody decides it should not be.
+    # A pull request never publishes, regardless of runner placement.
     if: github.event_name == 'push' || github.event_name == 'workflow_dispatch'
-    # Why this one refuses: a pull request has no business publishing a release under any label.
-    runs-on: [self-hosted, linux, aplan]
-    timeout-minutes: 30
+    runs-on: ${{ (github.event.repository.private && fromJSON('["self-hosted","linux","aplan"]')) || fromJSON('["ubuntu-latest"]') }}
+    # Full validation currently takes roughly 15 minutes on the private runner;
+    # artifact construction follows it and reports its own duration. Leave a
+    # bounded margin for cold hosted builds without returning to an unbounded job.
+    timeout-minutes: 90
     steps:
-      - uses: actions/checkout@v7
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         # `aplan version` derives the required release from the last reachable
         # tag and the tasks closed since it. Checkout's one-commit default has
         # neither, so the release gate would correctly refuse the shallow tree
@@ -49,6 +39,28 @@ jobs:
         with:
           fetch-depth: 0
 
+      - name: prepare a GitHub-hosted runner
+        if: runner.environment == 'github-hosted'
+        run: ci/scripts/prepare-hosted.sh release
+
+      # The full profile includes the shared test gate. Verify or install its
+      # exact runner on both private and hosted machines; an image preload is a
+      # speed optimization rather than permission to run an unpinned binary.
+      - name: install the pinned test runner
+        run: ci/scripts/install-nextest.sh install
+      - name: install the pinned supply-chain auditor
+        run: ci/scripts/install-cargo-deny.sh install
+
+      # This is the publication dependency: the same job, checkout and exact
+      # github.sha proceed from all eleven full gates to artifact construction.
+      # A failed, skipped, cancelled or stale validation cannot reach publish.
+      - name: full validation on the exact release source
+        env:
+          TAG: ${{ github.ref_type == 'tag' && github.ref_name || '' }}
+        run: ci/scripts/validate.sh --profile release
+
+      # The script first proves that --no-default-features omits the terminal
+      # stack, then explicitly enables `tui` in the artifact it leaves behind.
       # The artifact is statically linked (musl), so it runs on a consumer's
       # runner whatever glibc that image ships. `release.sh` refuses a tag that
       # disagrees with `[workspace.package].version`, checks the binary is really

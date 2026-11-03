@@ -15,7 +15,7 @@
 
 use std::path::Path;
 
-mod common;
+use crate::common;
 
 fn empty_plan(config: &str) -> tempfile::TempDir {
     let dir = tempfile::Builder::new()

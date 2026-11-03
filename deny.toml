@@ -1,0 +1,72 @@
+[graph]
+all-features = false
+no-default-features = false
+
+[licenses]
+confidence-threshold = 0.8
+allow = [
+  "Apache-2.0",
+  "Apache-2.0 WITH LLVM-exception",
+  "MIT",
+  "MIT-0",
+  "Unicode-3.0",
+  "Zlib",
+]
+
+[licenses.private]
+ignore = false
+
+[bans]
+multiple-versions = "deny"
+wildcards = "deny"
+highlight = "simplest-path"
+workspace-default-features = "allow"
+external-default-features = "allow"
+allow-workspace = true
+skip = [
+  { crate = "getrandom@0.3.4", reason = "A1-450: jsonschema's ahash remains on getrandom 0.3 while aplan and tempfile use 0.4" },
+  { crate = "hashbrown@0.16.1", reason = "A1-450: ratatui's kasuari remains on 0.16 while the general graph uses 0.17" },
+  { crate = "r-efi@5.3.0", reason = "A1-450: follows the admitted getrandom 0.3/0.4 split on non-Linux targets" },
+  { crate = "syn@2.0.119", reason = "A1-450: stable derive crates remain on syn 2 while current clap and darling use syn 3" },
+  { crate = "thiserror@1.0.69", reason = "A1-450: crossterm's filedescriptor remains on 1.x while the workspace uses 2.x" },
+  { crate = "thiserror-impl@1.0.69", reason = "A1-450: proc-macro half of the admitted thiserror 1.x/2.x split" },
+]
+
+[[bans.features]]
+crate = "ratatui@0.30.2"
+allow = ["crossterm", "std"]
+exact = true
+
+[[bans.features]]
+crate = "ratatui-crossterm@0.1.2"
+allow = ["crossterm_0_29", "default", "underline-color"]
+exact = true
+
+[[bans.features]]
+crate = "crossterm@0.29.0"
+allow = [
+  "bracketed-paste",
+  "default",
+  "derive-more",
+  "events",
+  "filedescriptor",
+  "use-dev-tty",
+  "windows",
+]
+exact = true
+
+[[bans.features]]
+crate = "graphlay@0.3.1"
+allow = []
+exact = true
+
+[[bans.features]]
+crate = "termlens@0.11.6"
+allow = []
+exact = true
+
+[sources]
+unknown-registry = "deny"
+unknown-git = "deny"
+allow-registry = ["https://github.com/rust-lang/crates.io-index"]
+allow-git = []

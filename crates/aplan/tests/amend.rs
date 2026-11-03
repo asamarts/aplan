@@ -13,11 +13,31 @@
 //! resolves the replacement, and that is the half this task could most easily
 //! have got wrong.
 
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
-mod common;
+use crate::common;
+
+fn source_delta_plan(source: &str) -> (tempfile::TempDir, PathBuf) {
+    let dir = tempfile::Builder::new()
+        .tempdir_in(aplan_core::fixture::fixture_root())
+        .expect("tempdir");
+    std::fs::create_dir_all(dir.path().join("aplan/tasks")).expect("tasks");
+    std::fs::write(dir.path().join(".aplan.yml"), "root: aplan\n").expect("config");
+    let path = dir.path().join("aplan/tasks/W-1.md");
+    std::fs::write(&path, source).expect("task");
+    common::git(dir.path(), &["init", "-q", "."]);
+    common::git(dir.path(), &["config", "user.email", "t@example.com"]);
+    common::git(dir.path(), &["config", "user.name", "t"]);
+    common::git(dir.path(), &["add", "-A"]);
+    common::git(dir.path(), &["commit", "-q", "-m", "fixture"]);
+    (dir, path)
+}
+
 /// **A citation is named by `kind:ref`, and that is what removal matches**
-/// (`A1-361`).
+/// (`A1-361`). This also proves
+/// `amend.policy_reads_rewritten_evidence_candidate`: replacement policy is
+/// evaluated against what the core actually rewrote, including when the
+/// source citation carries a date the command syntax cannot name (`A1-717`).
 ///
 /// Two defects met here. The shared `kind:ref` parser refused `note` for every
 /// mode, though only the modes that *write* a citation have anything to say
@@ -44,6 +64,11 @@ fn a_dated_note_citation_can_be_removed_and_replaced() {
          \x20   captured: 2026-08-15\n---\n\n## Why\n\nBecause.\n",
     )
     .expect("task");
+    common::git(dir.path(), &["init", "-q", "."]);
+    common::git(dir.path(), &["config", "user.email", "t@example.com"]);
+    common::git(dir.path(), &["config", "user.name", "t"]);
+    common::git(dir.path(), &["add", "-A"]);
+    common::git(dir.path(), &["commit", "-q", "-m", "fixture"]);
 
     // Removal names what is already there, so the kind `close` refuses to write
     // is still a kind this can take away.
@@ -56,6 +81,33 @@ fn a_dated_note_citation_can_be_removed_and_replaced() {
         0,
         "a dated note could not be removed: {}",
         out.text()
+    );
+
+    // The replacement's candidate, not a separately reconstructed vector, is
+    // what the resolver must judge. Full-record equality does not match this
+    // dated note to the undated `kind:ref` flag and used to make the delta look
+    // empty, allowing the missing file to bypass resolution.
+    let before = std::fs::read_to_string(dir.path().join("aplan/tasks/W-1.md")).expect("task");
+    let out = common::run(
+        dir.path(),
+        &[
+            "amend",
+            "W-1",
+            "--replace-evidence",
+            "note:second",
+            "file:missing.md",
+        ],
+    );
+    assert_ne!(
+        out.code,
+        0,
+        "a missing replacement was accepted: {}",
+        out.text()
+    );
+    assert_eq!(
+        std::fs::read_to_string(dir.path().join("aplan/tasks/W-1.md")).expect("task"),
+        before,
+        "the unresolved replacement was written"
     );
 
     // The `from` side of a replacement is the same: nothing is recorded by it.
@@ -107,6 +159,107 @@ fn a_dated_note_citation_can_be_removed_and_replaced() {
         "refused for some other reason: {}",
         out.text()
     );
+}
+
+/// Proves `amend.preserves_evidence_sequence_source_deltas` through the real
+/// command: add, remove and replace keep every unaddressed citation byte,
+/// authored comment and line ending instead of merely round-tripping the same
+/// typed values (`A1-722`).
+#[test]
+fn ordinary_evidence_amendments_are_exact_source_deltas() {
+    let source = concat!(
+        "---\n",
+        "id: W-1\n",
+        "title: source-preserving evidence\n",
+        "phase: 1\n",
+        "status: done\n",
+        "effort_days: 1\n",
+        "evidence : # evidence boundary\n",
+        "- kind : 'test' # first kind\n",
+        "  ref : \"alpha\" # first ref\n",
+        "# target follows\n",
+        "- ref : 'docs/old.md' # target ref\n",
+        "  kind : file # target kind\n",
+        "  captured: 2026-10-30 # target date\n",
+        "# retained citation follows\n",
+        "- kind: note # retained kind\n",
+        "  ref: reviewed # retained ref\n",
+        "  captured : '2026-10-31' # retained date\n",
+        "# after evidence\n",
+        "owner: alice\n",
+        "---\n\n",
+        "Body stays exact.\n",
+    );
+
+    for crlf in [false, true] {
+        let source = if crlf {
+            source.replace('\n', "\r\n")
+        } else {
+            source.to_string()
+        };
+        let nl = if crlf { "\r\n" } else { "\n" };
+
+        let (dir, path) = source_delta_plan(&source);
+        let out = common::run(
+            dir.path(),
+            &[
+                "amend",
+                "W-1",
+                "--add-evidence",
+                "commit:abc123",
+                "--no-resolve",
+            ],
+        );
+        assert_eq!(out.code, 0, "add failed: {}", out.text());
+        let expected = source.replace(
+            &format!("  captured : '2026-10-31' # retained date{nl}"),
+            &format!(
+                "  captured : '2026-10-31' # retained date{nl}- kind: commit{nl}  ref: abc123{nl}"
+            ),
+        );
+        assert_eq!(std::fs::read_to_string(path).expect("added task"), expected);
+
+        let (dir, path) = source_delta_plan(&source);
+        let out = common::run(
+            dir.path(),
+            &[
+                "amend",
+                "W-1",
+                "--replace-evidence",
+                "file:docs/old.md",
+                "test:beta",
+                "--no-resolve",
+            ],
+        );
+        assert_eq!(out.code, 0, "replace failed: {}", out.text());
+        let expected = source.replace(
+            &format!(
+                "- ref : 'docs/old.md' # target ref{nl}  kind : file # target kind{nl}  captured: 2026-10-30 # target date{nl}"
+            ),
+            &format!("- ref : 'beta' # target ref{nl}  kind : test # target kind{nl}"),
+        );
+        assert_eq!(
+            std::fs::read_to_string(path).expect("replaced task"),
+            expected
+        );
+
+        let (dir, path) = source_delta_plan(&source);
+        let out = common::run(
+            dir.path(),
+            &["amend", "W-1", "--remove-evidence", "file:docs/old.md"],
+        );
+        assert_eq!(out.code, 0, "remove failed: {}", out.text());
+        let expected = source.replace(
+            &format!(
+                "- ref : 'docs/old.md' # target ref{nl}  kind : file # target kind{nl}  captured: 2026-10-30 # target date{nl}"
+            ),
+            "",
+        );
+        assert_eq!(
+            std::fs::read_to_string(path).expect("removed task"),
+            expected
+        );
+    }
 }
 
 /// The third shape: proof that was never proof (`A1-137`).
@@ -218,7 +371,7 @@ fn fixture(dir: &Path) {
     std::fs::write(
         dir.join(".aplan.yml"),
         "root: aplan\ntest:\n  \
-         list: [\"printf\", \"each_rail_appears_exactly_once_named_by_its_vector\\n\"]\n  \
+         list: [\"printf\", \"each_rail_appears_exactly_once_named_by_its_vector\\nsuite::each_rail_appears_exactly_once\\n\"]\n  \
          run: [\"true\", \"{test}\"]\n",
     )
     .expect("config");
@@ -264,8 +417,245 @@ fn task(dir: &Path, id: &str) -> String {
     std::fs::read_to_string(dir.join(format!("aplan/tasks/{id}.md"))).expect("read")
 }
 
+/// Evidence freshness follows the citation through every amend shape. A new or
+/// replacement citation gets a baseline only after resolution; removal cannot
+/// leave an orphaned baseline, and `--no-resolve` cannot claim content was
+/// reviewed when the command deliberately did not read it (`A1-196`).
+#[test]
+fn amend_maintains_only_resolved_mutable_evidence_fingerprints() {
+    let dir = tempfile::Builder::new()
+        .tempdir_in(aplan_core::fixture::fixture_root())
+        .expect("tempdir");
+    std::fs::create_dir_all(dir.path().join("aplan/tasks")).expect("tasks");
+    std::fs::create_dir_all(dir.path().join("docs")).expect("docs");
+    std::fs::write(
+        dir.path().join(".aplan.yml"),
+        "root: aplan\ndetect_drift: true\n",
+    )
+    .expect("config");
+    std::fs::write(dir.path().join("docs/one.md"), "# Proof\n\none\n").expect("proof one");
+    std::fs::write(dir.path().join("docs/two.md"), "# Proof\n\ntwo\n").expect("proof two");
+    std::fs::write(
+        dir.path().join("aplan/tasks/T-1.md"),
+        "---\nid: T-1\ntitle: mutable proof\nphase: 1\nstatus: done\neffort_days: 1\n\
+         paths: [docs/**]\ntags: [cross-cutting]\nevidence:\n  - kind: note\n    ref: reviewed\n\
+         \x20   captured: 2026-10-10\n---\n\nbody\n",
+    )
+    .expect("task");
+    for args in [
+        vec!["init", "-q", "."],
+        vec!["config", "user.email", "t@example.com"],
+        vec!["config", "user.name", "t"],
+        vec!["add", "-A"],
+        vec!["commit", "-q", "-m", "fixture"],
+    ] {
+        let out = std::process::Command::new("git")
+            .args(&args)
+            .current_dir(dir.path())
+            .output()
+            .expect("git runs");
+        assert!(out.status.success(), "git {args:?} failed");
+    }
+
+    let (out, err, ok) = run(
+        dir.path(),
+        &["amend", "T-1", "--add-evidence", "file:docs/one.md"],
+    );
+    assert!(ok, "{out}{err}");
+    let added = task(dir.path(), "T-1");
+    assert!(added.contains("evidence_fingerprints:"), "{added}");
+    assert!(added.contains("file:docs/one.md"), "{added}");
+
+    // Turning the detector off controls findings and new capture; it must not
+    // erase a baseline an unrelated edit did not supersede.
+    std::fs::write(
+        dir.path().join(".aplan.yml"),
+        "root: aplan\ndetect_drift: false\n",
+    )
+    .expect("disable drift");
+    let (out, err, ok) = run(
+        dir.path(),
+        &[
+            "amend",
+            "T-1",
+            "--add-evidence",
+            "test:deferred_test",
+            "--no-resolve",
+        ],
+    );
+    assert!(ok, "{out}{err}");
+    let disabled = task(dir.path(), "T-1");
+    assert!(
+        disabled.contains("evidence_fingerprints:") && disabled.contains("file:docs/one.md"),
+        "disabling the detector erased an unrelated baseline: {disabled}"
+    );
+    std::fs::write(
+        dir.path().join(".aplan.yml"),
+        "root: aplan\ndetect_drift: true\n",
+    )
+    .expect("restore drift");
+
+    let (out, err, ok) = run(
+        dir.path(),
+        &[
+            "amend",
+            "T-1",
+            "--replace-evidence",
+            "file:docs/one.md",
+            "file:docs/two.md",
+        ],
+    );
+    assert!(ok, "{out}{err}");
+    let replaced = task(dir.path(), "T-1");
+    let fingerprint_block = replaced
+        .split("evidence_fingerprints:")
+        .nth(1)
+        .expect("fingerprint block");
+    assert!(
+        !fingerprint_block.contains("file:docs/one.md"),
+        "{replaced}"
+    );
+    assert!(fingerprint_block.contains("file:docs/two.md"), "{replaced}");
+
+    let (out, err, ok) = run(
+        dir.path(),
+        &["amend", "T-1", "--remove-evidence", "file:docs/two.md"],
+    );
+    assert!(ok, "{out}{err}");
+    assert!(
+        !task(dir.path(), "T-1").contains("evidence_fingerprints:"),
+        "removal left an orphaned freshness claim"
+    );
+
+    let (out, err, ok) = run(
+        dir.path(),
+        &[
+            "amend",
+            "T-1",
+            "--add-evidence",
+            "file:docs/one.md",
+            "--no-resolve",
+        ],
+    );
+    assert!(ok, "{out}{err}");
+    let unresolved = task(dir.path(), "T-1");
+    assert!(unresolved.contains("ref: docs/one.md"), "{unresolved}");
+    assert!(
+        !unresolved.contains("evidence_fingerprints:"),
+        "an unresolved citation was presented as fingerprinted: {unresolved}"
+    );
+}
+
+fn runner_mutates_sibling(mutation: &str) -> tempfile::TempDir {
+    let dir = tempfile::Builder::new()
+        .tempdir_in(aplan_core::fixture::fixture_root())
+        .expect("tempdir");
+    std::fs::create_dir_all(dir.path().join("aplan/tasks")).expect("tasks");
+    std::fs::create_dir_all(dir.path().join("src")).expect("src");
+    std::fs::write(dir.path().join("src/a.rs"), "pub fn a() {}\n").expect("source");
+    std::fs::write(
+        dir.path().join("aplan/tasks/T-1.md"),
+        "---\nid: T-1\ntitle: repairable\nphase: 1\nstatus: done\neffort_days: 1\n\
+         paths: [src/**]\ntags: [cross-cutting]\nevidence:\n  - kind: test\n    ref: known\n\
+         ---\n\nbody\n",
+    )
+    .expect("repairable task");
+    std::fs::write(
+        dir.path().join("aplan/tasks/T-2.md"),
+        "---\nid: T-2\ntitle: runner changes this sibling\nphase: 1\nstatus: todo\n\
+         effort_days: 1\npaths: [src/**]\ntags: [cross-cutting]\n---\n\nbody\n",
+    )
+    .expect("sibling task");
+    std::fs::write(
+        dir.path().join("mutate-list.sh"),
+        format!("#!/bin/sh\n{mutation}\nprintf 'suite::known\\n'\n"),
+    )
+    .expect("runner");
+    std::fs::write(
+        dir.path().join(".aplan.yml"),
+        "root: aplan\ntest:\n  list: [sh, mutate-list.sh]\n  run: ['true', '{test}']\n",
+    )
+    .expect("config");
+    for args in [
+        vec!["init", "-q", "."],
+        vec!["config", "user.email", "t@example.com"],
+        vec!["config", "user.name", "t"],
+        vec!["add", "-A"],
+        vec!["commit", "-q", "-m", "fixture"],
+    ] {
+        let out = std::process::Command::new("git")
+            .args(&args)
+            .current_dir(dir.path())
+            .output()
+            .expect("git runs");
+        assert!(out.status.success(), "git {args:?} failed");
+    }
+    dir
+}
+
+fn runner_mutates_sibling_on_second_list(mutation: &str) -> tempfile::TempDir {
+    let dir = runner_mutates_sibling("");
+    std::fs::write(
+        dir.path().join("mutate-list.sh"),
+        format!(
+            "#!/bin/sh\ncount=0\n[ ! -f list-count ] || count=$(cat list-count)\n\
+             count=$((count + 1))\nprintf '%s\\n' \"$count\" > list-count\n\
+             if [ \"$count\" -eq 2 ]; then\n  {mutation}\nfi\nprintf 'suite::known\\n'\n"
+        ),
+    )
+    .expect("runner");
+    dir
+}
+
+fn runner_rewrites_config(config_name: &str) -> tempfile::TempDir {
+    let dir = tempfile::Builder::new()
+        .tempdir_in(aplan_core::fixture::fixture_root())
+        .expect("tempdir");
+    std::fs::create_dir_all(dir.path().join("aplan/tasks")).expect("tasks");
+    std::fs::create_dir_all(dir.path().join("src")).expect("src");
+    std::fs::write(dir.path().join("src/a.rs"), "pub fn a() {}\n").expect("source");
+    std::fs::write(
+        dir.path().join("aplan/tasks/T-1.md"),
+        "---\nid: T-1\ntitle: repairable\nphase: 1\nstatus: done\neffort_days: 1\n\
+         paths: [src/**]\ntags: [cross-cutting]\nevidence:\n  - kind: test\n    ref: known\n\
+         ---\n\nbody\n",
+    )
+    .expect("task");
+    std::fs::write(
+        dir.path().join("mutate-list.sh"),
+        format!(
+            "#!/bin/sh\nprintf '%s\\n' 'root: aplan' 'test:' \
+             \x20 '  list: [printf, suite::different\\n]' \
+             \x20 \x20 '  run: ['\"'\"'true'\"'\"', '\"'\"'{{test}}'\"'\"']' > {config_name}\n\
+             printf 'suite::known\\n'\n"
+        ),
+    )
+    .expect("runner");
+    std::fs::write(
+        dir.path().join(config_name),
+        "root: aplan\ntest:\n  list: [sh, mutate-list.sh]\n  run: ['true', '{test}']\n",
+    )
+    .expect("config");
+    for args in [
+        vec!["init", "-q", "."],
+        vec!["config", "user.email", "t@example.com"],
+        vec!["config", "user.name", "t"],
+        vec!["add", "-A"],
+        vec!["commit", "-q", "-m", "fixture"],
+    ] {
+        let out = std::process::Command::new("git")
+            .args(&args)
+            .current_dir(dir.path())
+            .output()
+            .expect("git runs");
+        assert!(out.status.success(), "git {args:?} failed");
+    }
+    dir
+}
+
 const OLD: &str = "test:each_rail_appears_exactly_once";
 const NEW: &str = "test:each_rail_appears_exactly_once_named_by_its_vector";
+const COMPUTED: &str = "suite::each_rail_appears_exactly_once";
 
 #[test]
 fn the_pilots_case_is_repaired_and_verify_goes_green() {
@@ -295,6 +685,817 @@ fn the_pilots_case_is_repaired_and_verify_goes_green() {
     assert!(task(dir.path(), "AL1-25").contains("status: done"));
     // The untouched citation survives: this replaces one, not the block.
     assert!(task(dir.path(), "AL1-25").contains("ref: tests/t.rs"));
+}
+
+/// Proves the named behaviour `diagnostics.machine_applicable_repairs`: the
+/// ordinary report exposes exact typed data, and the explicit flag applies all
+/// of it as one mutation before verifying the state that now exists (`A1-199`).
+#[test]
+fn computed_repairs_are_reviewable_and_applied_as_one_guarded_batch() {
+    let dir = tempfile::Builder::new()
+        .tempdir_in(aplan_core::fixture::fixture_root())
+        .expect("tempdir");
+    fixture(dir.path());
+
+    let (human, stderr, ok) = run(dir.path(), &["verify"]);
+    assert!(!ok, "the fixture must start red: {human}{stderr}");
+    assert_eq!(
+        human.matches("repair: replace evidence").count(),
+        2,
+        "each computed edit remains reviewable even when prose fixes are folded: {human}"
+    );
+    assert!(human.contains("aplan verify --fix"), "{human}");
+
+    let (json, stderr, ok) = run(dir.path(), &["verify", "--format", "json"]);
+    assert!(
+        !ok,
+        "the machine report must retain the finding: {json}{stderr}"
+    );
+    let report: serde_json::Value = serde_json::from_str(&json).expect("report JSON");
+    let repairs: Vec<&serde_json::Value> = report["diagnostics"]
+        .as_array()
+        .expect("diagnostics")
+        .iter()
+        .filter_map(|d| d.get("repair"))
+        .collect();
+    assert_eq!(repairs.len(), 2, "{json}");
+    for repair in repairs {
+        assert_eq!(repair["operation"], "replace_evidence");
+        assert_eq!(repair["from"]["kind"], "test");
+        assert_eq!(repair["from"]["ref"], "each_rail_appears_exactly_once");
+        assert_eq!(repair["to"]["kind"], "test");
+        assert_eq!(repair["to"]["ref"], COMPUTED);
+    }
+
+    let (agent, stderr, ok) = run(dir.path(), &["verify", "--format", "agent"]);
+    assert!(!ok, "the agent report lost the finding: {agent}{stderr}");
+    let agent: serde_json::Value = serde_json::from_str(&agent).expect("agent JSON");
+    let agent_repairs: Vec<&serde_json::Value> = agent["diagnostics"]
+        .as_array()
+        .expect("agent diagnostics")
+        .iter()
+        .filter_map(|diagnostic| diagnostic.get("repair"))
+        .collect();
+    assert_eq!(agent_repairs.len(), 2, "{agent}");
+    assert!(
+        agent_repairs
+            .iter()
+            .all(|repair| repair["operation"] == "replace_evidence"),
+        "agent repairs are not typed: {agent}"
+    );
+
+    let (shown, stderr, ok) = run(
+        dir.path(),
+        &["show", "AL1-25", "--format", "json", "--refresh-evidence"],
+    );
+    assert!(ok, "show could not expose the repair: {shown}{stderr}");
+    let shown: serde_json::Value = serde_json::from_str(&shown).expect("show JSON");
+    let shown_repair = shown["findings"]
+        .as_array()
+        .expect("show findings")
+        .iter()
+        .find_map(|finding| finding.get("repair"))
+        .expect("typed repair in show");
+    assert_eq!(shown_repair["operation"], "replace_evidence");
+    assert_eq!(shown_repair["to"]["ref"], COMPUTED);
+
+    let (stdout, stderr, ok) = run(dir.path(), &["verify", "--fix"]);
+    assert!(ok, "the guarded repair must finish green: {stdout}{stderr}");
+    assert_eq!(stdout.matches("repaired ").count(), 2, "{stdout}");
+    assert!(
+        stdout.contains("ok: 2 tasks"),
+        "post-state was not verified: {stdout}"
+    );
+    for id in ["AL1-25", "AL1-26"] {
+        let repaired = task(dir.path(), id);
+        assert!(repaired.contains("status: done"), "{repaired}");
+        assert!(repaired.contains("ref: tests/t.rs"), "{repaired}");
+        assert!(repaired.contains(&format!("ref: {COMPUTED}")), "{repaired}");
+        assert!(!repaired.contains("ref: each_rail_appears_exactly_once\n"));
+    }
+}
+
+/// Proves `close.refuses_structural_evidence_sequences` for a computed batch:
+/// the same structural-source refusal as explicit `amend`. A safe repair
+/// ordered before the structural task remains only a candidate in memory when
+/// the later rewrite is refused, so no prefix reaches disk (`A1-717`).
+#[test]
+fn computed_repairs_refuse_structural_evidence_as_one_unwritten_batch() {
+    let dir = tempfile::Builder::new()
+        .tempdir_in(aplan_core::fixture::fixture_root())
+        .expect("tempdir");
+    fixture(dir.path());
+    let path = dir.path().join("aplan/tasks/AL1-26.md");
+    let structural = task(dir.path(), "AL1-26")
+        .replace("owner: t\n", "")
+        .replacen(
+            "ref: each_rail_appears_exactly_once",
+            "ref: &shared each_rail_appears_exactly_once",
+            1,
+        )
+        .replace(
+            "    ref: tests/t.rs\n---",
+            "    ref: tests/t.rs\nowner: *shared\n---",
+        );
+    std::fs::write(&path, structural).expect("structural repair task");
+
+    let before: Vec<(String, String, aplan_core::Task)> = ["AL1-25", "AL1-26"]
+        .into_iter()
+        .map(|id| {
+            let source = task(dir.path(), id);
+            let (frontmatter, _) =
+                aplan_core::load::split_frontmatter(&source).expect("frontmatter");
+            let parsed = yaml_compat::from_str(frontmatter).expect("task loads before repair");
+            (id.to_string(), source, parsed)
+        })
+        .collect();
+
+    let (stdout, stderr, ok) = run(dir.path(), &["verify", "--fix"]);
+    let said = format!("{stdout}{stderr}");
+    assert!(!ok, "a structural batch was applied: {said}");
+    assert!(said.contains("evidence"), "{said}");
+    assert!(said.contains("simplify that field by hand"), "{said}");
+    assert!(!said.contains("bug in aplan"), "{said}");
+
+    for (id, original, parsed_before) in before {
+        let after = task(dir.path(), &id);
+        assert_eq!(after, original, "the batch partly wrote {id}");
+        let (frontmatter, _) =
+            aplan_core::load::split_frontmatter(&after).expect("frontmatter after refusal");
+        let parsed_after: aplan_core::Task =
+            yaml_compat::from_str(frontmatter).expect("task loads after refusal");
+        assert_eq!(
+            parsed_after, parsed_before,
+            "the parsed task changed for {id}"
+        );
+    }
+}
+
+/// A candidate spelling is not machine-applicable when two runners claim it.
+/// The useful suggestion remains prose, while an unrelated exact proposal in
+/// the same report can still be reviewed and applied (`A1-458`,
+/// `diagnostics.repair_requires_unique_resolver`).
+#[test]
+fn a_shared_near_match_is_not_published_as_a_typed_repair() {
+    let dir = tempfile::Builder::new()
+        .tempdir_in(aplan_core::fixture::fixture_root())
+        .expect("tempdir");
+    std::fs::create_dir_all(dir.path().join("aplan/tasks")).expect("tasks");
+    std::fs::create_dir_all(dir.path().join("tests")).expect("tests");
+    std::fs::write(
+        dir.path().join(".aplan.yml"),
+        "root: aplan\ntest:\n  - name: libs\n    \
+         list: [printf, 'suite::known_name\\nsuite::other_name\\n']\n    \
+         run: ['true', '{test}']\n  - name: web\n    \
+         list: [printf, 'suite::known_name\\n']\n    run: ['true', '{test}']\n",
+    )
+    .expect("config");
+    for (id, cited) in [("T-ambiguous", "known_name"), ("T-exact", "other_name")] {
+        std::fs::write(
+            dir.path().join(format!("aplan/tasks/{id}.md")),
+            format!(
+                "---\nid: {id}\ntitle: near match\nphase: 1\nstatus: done\neffort_days: 1\n\
+                 paths: [tests/**]\nevidence:\n  - kind: test\n    ref: {cited}\n---\n\nbody\n"
+            ),
+        )
+        .expect("task");
+    }
+    std::fs::write(dir.path().join("tests/t.rs"), "fn main() {}\n").expect("test file");
+    for args in [
+        vec!["init", "-q", "."],
+        vec!["config", "user.email", "t@example.com"],
+        vec!["config", "user.name", "t"],
+        vec!["add", "-A"],
+        vec!["commit", "-q", "-m", "fixture"],
+    ] {
+        let out = std::process::Command::new("git")
+            .args(&args)
+            .current_dir(dir.path())
+            .output()
+            .expect("git");
+        assert!(out.status.success(), "git {args:?}");
+    }
+
+    let (json, stderr, ok) = run(dir.path(), &["verify", "--format", "json"]);
+    assert!(
+        !ok,
+        "the misspellings unexpectedly resolved: {json}{stderr}"
+    );
+    let report: serde_json::Value = serde_json::from_str(&json).expect("report JSON");
+    let diagnostics = report["diagnostics"].as_array().expect("diagnostics");
+    let ambiguous = diagnostics
+        .iter()
+        .find(|finding| finding["task"] == "T-ambiguous")
+        .expect("ambiguous finding");
+    assert!(
+        ambiguous["message"]
+            .as_str()
+            .is_some_and(|message| message.contains("suite::known_name")),
+        "the suggestion disappeared: {ambiguous}"
+    );
+    assert!(
+        ambiguous.get("repair").is_none(),
+        "two runners supplied one spelling: {ambiguous}"
+    );
+    let exact = diagnostics
+        .iter()
+        .find(|finding| finding["task"] == "T-exact")
+        .expect("exact finding");
+    assert_eq!(exact["repair"]["to"]["ref"], "suite::other_name");
+
+    let (stdout, stderr, ok) = run(dir.path(), &["verify", "--fix"]);
+    assert!(
+        !ok,
+        "the unresolved runner ambiguity must remain visible: {stdout}{stderr}"
+    );
+    assert!(stdout.contains("repaired T-exact"), "{stdout}");
+    assert!(stdout.contains("APLAN013"), "{stdout}");
+    assert!(
+        task(dir.path(), "T-ambiguous").contains("ref: known_name\n"),
+        "the ambiguous proposal was applied"
+    );
+    assert!(
+        task(dir.path(), "T-exact").contains("ref: suite::other_name\n"),
+        "the independent exact repair was not applied"
+    );
+}
+
+/// The other `A1-199` producer through the shipped command: a binary blob has
+/// no anchor to resolve, and the exact edit removes only that anchor while
+/// retaining the historical revision (`A1-461`).
+#[test]
+fn a_binary_file_anchor_is_repaired_end_to_end_without_losing_its_revision() {
+    let dir = tempfile::Builder::new()
+        .tempdir_in(aplan_core::fixture::fixture_root())
+        .expect("tempdir");
+    std::fs::create_dir_all(dir.path().join("aplan/tasks")).expect("tasks");
+    std::fs::create_dir_all(dir.path().join("docs")).expect("docs");
+    std::fs::write(dir.path().join(".aplan.yml"), "root: aplan\n").expect("config");
+    std::fs::write(dir.path().join("docs/scan.bin"), [0xff, 0xfe, 0x00, 0x01]).expect("binary");
+    for args in [
+        vec!["init", "-q", "."],
+        vec!["config", "user.email", "t@example.com"],
+        vec!["config", "user.name", "t"],
+        vec!["add", ".aplan.yml", "docs/scan.bin"],
+        vec!["commit", "-q", "-m", "binary"],
+    ] {
+        let out = std::process::Command::new("git")
+            .args(&args)
+            .current_dir(dir.path())
+            .output()
+            .expect("git runs");
+        assert!(out.status.success(), "git {args:?} failed");
+    }
+    let rev = std::process::Command::new("git")
+        .args(["rev-parse", "HEAD"])
+        .current_dir(dir.path())
+        .output()
+        .expect("git rev-parse");
+    assert!(rev.status.success());
+    let rev = String::from_utf8(rev.stdout)
+        .expect("UTF-8 revision")
+        .trim()
+        .to_string();
+    std::fs::write(
+        dir.path().join("aplan/tasks/T-1.md"),
+        format!(
+            "---\nid: T-1\ntitle: binary evidence\nphase: 1\nstatus: done\neffort_days: 1\n\
+             paths: [docs/**]\ntags: [cross-cutting]\nevidence:\n  - kind: file\n    \
+             ref: docs/scan.bin#result@{rev}\n---\n\nbody\n"
+        ),
+    )
+    .expect("task");
+    for args in [
+        vec!["add", "aplan/tasks/T-1.md"],
+        vec!["commit", "-q", "-m", "task"],
+    ] {
+        let out = std::process::Command::new("git")
+            .args(&args)
+            .current_dir(dir.path())
+            .output()
+            .expect("git runs");
+        assert!(out.status.success(), "git {args:?} failed");
+    }
+
+    let (before, stderr, ok) = run(dir.path(), &["verify"]);
+    assert!(
+        !ok,
+        "the anchored binary unexpectedly resolved: {before}{stderr}"
+    );
+    assert!(before.contains("repair: replace evidence"), "{before}");
+
+    let (fixed, stderr, ok) = run(dir.path(), &["verify", "--fix"]);
+    assert!(ok, "the exact binary repair failed: {fixed}{stderr}");
+    assert!(fixed.contains("repaired T-1"), "{fixed}");
+    assert!(fixed.contains("ok: 1 tasks"), "{fixed}");
+    let repaired = task(dir.path(), "T-1");
+    assert!(repaired.contains("status: done"), "{repaired}");
+    assert!(
+        repaired.contains(&format!("ref: docs/scan.bin@{rev}\n")),
+        "the revision was lost or changed: {repaired}"
+    );
+    assert!(!repaired.contains("#result"), "{repaired}");
+
+    let (verified, stderr, ok) = run(dir.path(), &["verify"]);
+    assert!(
+        ok,
+        "the repaired citation did not stay green: {verified}{stderr}"
+    );
+}
+
+/// A computed evidence replacement is the same mutation as explicit `amend`,
+/// including the freshness baseline a newly introduced mutable file citation
+/// needs (`A1-196`).
+#[test]
+fn verify_fix_stamps_the_mutable_file_citation_it_repairs() {
+    let dir = tempfile::Builder::new()
+        .tempdir_in(aplan_core::fixture::fixture_root())
+        .expect("tempdir");
+    std::fs::create_dir_all(dir.path().join("aplan/tasks")).expect("tasks");
+    std::fs::create_dir_all(dir.path().join("docs")).expect("docs");
+    std::fs::write(
+        dir.path().join(".aplan.yml"),
+        "root: aplan\ndetect_drift: true\n",
+    )
+    .expect("config");
+    std::fs::write(dir.path().join("docs/scan.bin"), [0xff, 0xfe, 0x00, 0x01]).expect("binary");
+    std::fs::write(
+        dir.path().join("aplan/tasks/T-1.md"),
+        "---\nid: T-1\ntitle: mutable binary evidence\nphase: 1\nstatus: done\neffort_days: 1\n\
+         paths: [docs/**]\ntags: [cross-cutting]\nevidence:\n  - kind: file\n    \
+         ref: docs/scan.bin#result\n---\n\nbody\n",
+    )
+    .expect("task");
+    for args in [
+        vec!["init", "-q", "."],
+        vec!["config", "user.email", "t@example.com"],
+        vec!["config", "user.name", "t"],
+        vec!["add", "-A"],
+        vec!["commit", "-q", "-m", "fixture"],
+    ] {
+        let out = std::process::Command::new("git")
+            .args(&args)
+            .current_dir(dir.path())
+            .output()
+            .expect("git runs");
+        assert!(out.status.success(), "git {args:?} failed");
+    }
+
+    let (fixed, stderr, ok) = run(dir.path(), &["verify", "--fix"]);
+    assert!(ok, "repair failed: {fixed}{stderr}");
+    let repaired = task(dir.path(), "T-1");
+    assert!(repaired.contains("ref: docs/scan.bin\n"), "{repaired}");
+    assert!(repaired.contains("evidence_fingerprints:"), "{repaired}");
+    assert!(repaired.contains("file:docs/scan.bin"), "{repaired}");
+
+    std::fs::write(dir.path().join("docs/scan.bin"), [0xff, 0xfe, 0x00, 0x02]).expect("rewrite");
+    for args in [
+        vec!["add", "-A"],
+        vec!["commit", "-q", "-m", "rewrite proof"],
+    ] {
+        let out = std::process::Command::new("git")
+            .args(&args)
+            .current_dir(dir.path())
+            .output()
+            .expect("git runs");
+        assert!(out.status.success(), "git {args:?} failed");
+    }
+    let (verified, stderr, ok) = run(dir.path(), &["verify"]);
+    assert!(ok, "a warning is advisory by default: {verified}{stderr}");
+    assert!(verified.contains("APLAN054"), "{verified}{stderr}");
+}
+
+/// The typed edit is a proposal, not authority. If applying it reveals a
+/// relevance failure, the same gate as `amend` refuses the whole batch and no
+/// earlier repair leaks onto disk. This proves
+/// `diagnostics.machine_applicable_repairs` fails closed (`A1-199`).
+#[test]
+fn a_computed_repair_the_evidence_gate_refuses_writes_none_of_the_batch() {
+    let dir = tempfile::Builder::new()
+        .tempdir_in(aplan_core::fixture::fixture_root())
+        .expect("tempdir");
+    fixture(dir.path());
+    std::fs::create_dir_all(dir.path().join("docs")).expect("docs");
+    std::fs::create_dir_all(dir.path().join("src")).expect("src");
+    std::fs::write(dir.path().join("docs/scan.bin"), [0xff, 0xfe, 0x00, 0x01])
+        .expect("binary proof");
+    std::fs::write(dir.path().join("src/lib.rs"), "pub fn kept() {}\n").expect("owned source");
+    std::fs::write(
+        dir.path().join("aplan/tasks/AL1-27.md"),
+        "---\nid: AL1-27\ntitle: binary proof outside the owned path\nphase: 1\nstatus: done\n\
+         effort_days: 1\npaths:\n- src/**\nevidence:\n  - kind: file\n    ref: docs/scan.bin#result\n\
+         ---\n\nbody\n",
+    )
+    .expect("task");
+    for args in [
+        vec!["add", "-A"],
+        vec!["commit", "-q", "-m", "binary proof"],
+    ] {
+        let out = std::process::Command::new("git")
+            .args(&args)
+            .current_dir(dir.path())
+            .output()
+            .expect("git runs");
+        assert!(out.status.success(), "git {args:?} failed");
+    }
+    let before: Vec<(String, String)> = ["AL1-25", "AL1-26", "AL1-27"]
+        .into_iter()
+        .map(|id| (id.to_string(), task(dir.path(), id)))
+        .collect();
+
+    let (stdout, stderr, ok) = run(dir.path(), &["verify", "--fix"]);
+    assert!(
+        !ok,
+        "an irrelevant replacement was accepted: {stdout}{stderr}"
+    );
+    assert!(stdout.contains("APLAN031"), "{stdout}");
+    assert!(stdout.contains("nothing was written"), "{stdout}");
+    for (id, original) in before {
+        assert_eq!(
+            task(dir.path(), &id),
+            original,
+            "the batch partly wrote {id}"
+        );
+    }
+}
+
+/// A runner is external code and can race the task file while `verify` is
+/// computing its report. The repair must be judged against the bytes it is
+/// actually about to replace, not the stale task loaded before that command
+/// ran; otherwise changed `paths` can make irrelevant evidence land and only
+/// the post-write verification notices (`A1-199`, audit).
+#[test]
+fn a_computed_repair_rechecks_the_task_context_changed_by_its_runner() {
+    let dir = tempfile::Builder::new()
+        .tempdir_in(aplan_core::fixture::fixture_root())
+        .expect("tempdir");
+    std::fs::create_dir_all(dir.path().join("aplan/tasks")).expect("tasks");
+    std::fs::create_dir_all(dir.path().join("src")).expect("src");
+    std::fs::create_dir_all(dir.path().join("docs")).expect("docs");
+    std::fs::write(dir.path().join("src/a.rs"), "pub fn a() {}\n").expect("source");
+    std::fs::write(dir.path().join("docs/a.md"), "# Other ownership\n").expect("doc");
+    std::fs::write(
+        dir.path().join("aplan/tasks/T-1.md"),
+        concat!(
+            "---\n",
+            "id: T-1\n",
+            "title: runner races the task\n",
+            "phase: 1\n",
+            "status: done\n",
+            "effort_days: 1\n",
+            "paths:\n",
+            "- src/**\n",
+            "tags: [cross-cutting]\n",
+            "evidence:\n",
+            "  - kind: test\n",
+            "    ref: known\n",
+            "---\n\n",
+            "body\n",
+        ),
+    )
+    .expect("task");
+    std::fs::write(
+        dir.path().join("mutate-list.sh"),
+        "#!/bin/sh\nsed -i 's|- src/\\*\\*|- docs/**|' aplan/tasks/T-1.md\n\
+         printf 'suite::known\\n'\n",
+    )
+    .expect("runner");
+    std::fs::write(
+        dir.path().join(".aplan.yml"),
+        "root: aplan\ntest:\n  list: [sh, mutate-list.sh]\n  run: ['true', '{test}']\n  \
+         covers: [src/**]\n",
+    )
+    .expect("config");
+    for args in [
+        vec!["init", "-q", "."],
+        vec!["config", "user.email", "t@example.com"],
+        vec!["config", "user.name", "t"],
+        vec!["add", "-A"],
+        vec!["commit", "-q", "-m", "fixture"],
+    ] {
+        let out = std::process::Command::new("git")
+            .args(&args)
+            .current_dir(dir.path())
+            .output()
+            .expect("git runs");
+        assert!(out.status.success(), "git {args:?} failed");
+    }
+
+    let (stdout, stderr, ok) = run(dir.path(), &["verify", "--fix"]);
+    assert!(!ok, "the stale task context was accepted: {stdout}{stderr}");
+    assert!(stdout.contains("APLAN025"), "{stdout}");
+    assert!(stdout.contains("nothing was written"), "{stdout}");
+    let after = task(dir.path(), "T-1");
+    assert!(
+        after.contains("- docs/**"),
+        "the runner's edit was lost: {after}"
+    );
+    assert!(
+        after.contains("ref: known\n"),
+        "the repair partly landed: {after}"
+    );
+    assert!(!after.contains("ref: suite::known"), "{after}");
+}
+
+/// Re-reading only the task that carries a repair is not a plan snapshot. A
+/// configured runner can change a sibling before the mutation gate runs; the
+/// candidate must include that state or the command writes first and discovers
+/// the new finding only in its post-write verification (`A1-459`,
+/// `verify_fix.post_runner_plan_is_gated`).
+#[test]
+fn a_computed_repair_gates_the_sibling_state_changed_by_its_runner() {
+    let dir = tempfile::Builder::new()
+        .tempdir_in(aplan_core::fixture::fixture_root())
+        .expect("tempdir");
+    std::fs::create_dir_all(dir.path().join("aplan/tasks")).expect("tasks");
+    std::fs::create_dir_all(dir.path().join("src")).expect("src");
+    std::fs::write(dir.path().join("src/a.rs"), "pub fn a() {}\n").expect("source");
+    std::fs::write(
+        dir.path().join("aplan/tasks/T-1.md"),
+        "---\nid: T-1\ntitle: repairable\nphase: 1\nstatus: done\neffort_days: 1\n\
+         paths: [src/**]\ntags: [cross-cutting]\nevidence:\n  - kind: test\n    ref: known\n\
+         ---\n\nbody\n",
+    )
+    .expect("repairable task");
+    std::fs::write(
+        dir.path().join("aplan/tasks/T-2.md"),
+        "---\nid: T-2\ntitle: runner changes this sibling\nphase: 1\nstatus: todo\n\
+         effort_days: 1\npaths: [src/**]\ntags: [cross-cutting]\n---\n\nbody\n",
+    )
+    .expect("sibling task");
+    std::fs::write(
+        dir.path().join("mutate-list.sh"),
+        "#!/bin/sh\nsed -i 's/status: todo/status: done/' aplan/tasks/T-2.md\n\
+         printf 'suite::known\\n'\n",
+    )
+    .expect("runner");
+    std::fs::write(
+        dir.path().join(".aplan.yml"),
+        "root: aplan\ntest:\n  list: [sh, mutate-list.sh]\n  run: ['true', '{test}']\n",
+    )
+    .expect("config");
+    for args in [
+        vec!["init", "-q", "."],
+        vec!["config", "user.email", "t@example.com"],
+        vec!["config", "user.name", "t"],
+        vec!["add", "-A"],
+        vec!["commit", "-q", "-m", "fixture"],
+    ] {
+        let out = std::process::Command::new("git")
+            .args(&args)
+            .current_dir(dir.path())
+            .output()
+            .expect("git runs");
+        assert!(out.status.success(), "git {args:?} failed");
+    }
+
+    let (stdout, stderr, ok) = run(dir.path(), &["verify", "--fix"]);
+    assert!(
+        !ok,
+        "the invalid sibling state was accepted: {stdout}{stderr}"
+    );
+    let said = format!("{stdout}{stderr}");
+    assert!(said.contains("APLAN005"), "{said}");
+    assert!(
+        !said.contains("repaired T-1"),
+        "the gate ran after the write: {said}"
+    );
+    let repaired = task(dir.path(), "T-1");
+    assert!(
+        repaired.contains("ref: known\n"),
+        "the repair landed before the sibling was judged: {repaired}"
+    );
+    assert!(!repaired.contains("ref: suite::known"), "{repaired}");
+}
+
+/// The post-run snapshot is not a blanket concurrency refusal. A valid sibling
+/// edit is part of the candidate, survives the repair, and does not make the
+/// command write that sibling (`A1-459`,
+/// `verify_fix.post_runner_plan_is_gated`).
+#[test]
+fn a_computed_repair_preserves_a_valid_sibling_edit_from_its_runner() {
+    let dir = runner_mutates_sibling(
+        "sed -i 's/runner changes this sibling/updated by runner/' aplan/tasks/T-2.md",
+    );
+
+    let (stdout, stderr, ok) = run(dir.path(), &["verify", "--fix"]);
+    assert!(ok, "the valid combined state was refused: {stdout}{stderr}");
+    assert!(stdout.contains("repaired T-1"), "{stdout}");
+    assert!(
+        task(dir.path(), "T-1").contains("ref: suite::known\n"),
+        "the exact repair did not land"
+    );
+    assert!(
+        task(dir.path(), "T-2").contains("title: updated by runner"),
+        "the sibling edit was lost"
+    );
+}
+
+/// A task that stops loading cannot be represented in a mutation candidate at
+/// all. The reload therefore refuses before applying a repair instead of
+/// dropping that task from the plan the gate sees (`A1-459`).
+#[test]
+fn a_computed_repair_refuses_a_sibling_its_runner_makes_unloadable() {
+    let dir = runner_mutates_sibling(
+        "printf '%s\\n' '---' 'id: T-2' 'title: [' '---' > aplan/tasks/T-2.md",
+    );
+
+    let (stdout, stderr, ok) = run(dir.path(), &["verify", "--fix"]);
+    assert!(!ok, "the incomplete plan was accepted: {stdout}{stderr}");
+    assert!(stdout.contains("no longer load"), "{stdout}{stderr}");
+    assert!(stdout.contains("nothing was written"), "{stdout}{stderr}");
+    assert!(
+        task(dir.path(), "T-1").contains("ref: known\n"),
+        "the repair landed before the load failure was judged"
+    );
+}
+
+/// The selected configuration is part of the post-run snapshot too. A runner
+/// that removes the route which resolved its suggested name cannot have the
+/// edit accepted under the stale pre-run runner and rejected only after the
+/// write (`A1-460`, `verify_fix.post_runner_config_is_gated`).
+#[test]
+fn a_computed_repair_reloads_configuration_changed_by_its_runner() {
+    for config_name in [".aplan.yml", "policy.yml"] {
+        let dir = runner_rewrites_config(config_name);
+        let args: Vec<&str> = if config_name == ".aplan.yml" {
+            vec!["verify", "--fix"]
+        } else {
+            vec![
+                "--root",
+                "aplan",
+                "--config",
+                config_name,
+                "verify",
+                "--fix",
+            ]
+        };
+        let (stdout, stderr, ok) = run(dir.path(), &args);
+        assert!(
+            !ok,
+            "the stale configuration was accepted: {stdout}{stderr}"
+        );
+        let said = format!("{stdout}{stderr}");
+        assert!(said.contains("suite::known"), "{said}");
+        assert!(
+            !said.contains("repaired T-1"),
+            "the current config was loaded only after the write: {said}"
+        );
+        let task = task(dir.path(), "T-1");
+        assert!(task.contains("ref: known\n"), "{task}");
+        assert!(!task.contains("ref: suite::known"), "{task}");
+    }
+}
+
+/// `verify` discovers its policy from the repository it was asked to resolve.
+/// The mutation half must not start a second discovery at the plan root: that
+/// would make one invocation use two policies (`A1-462`,
+/// `verify_fix.one_post_runner_config_source`).
+#[test]
+fn a_computed_repair_keeps_the_repositorys_configuration_through_its_mutation_gate() {
+    let fixture = tempfile::Builder::new()
+        .tempdir_in(aplan_core::fixture::fixture_root())
+        .expect("tempdir");
+    let plan_repo = fixture.path().join("plan-repo");
+    let evidence_repo = fixture.path().join("evidence-repo");
+    let neutral = fixture.path().join("neutral");
+    std::fs::create_dir_all(plan_repo.join("aplan/tasks")).expect("tasks");
+    std::fs::create_dir_all(plan_repo.join("src")).expect("source directory");
+    std::fs::create_dir_all(&evidence_repo).expect("evidence repository");
+    std::fs::create_dir_all(&neutral).expect("neutral working directory");
+
+    // This file is deliberately invalid. It belongs to neither the resolver
+    // policy discovered from `--repo` nor the subsequent post-verification.
+    std::fs::write(plan_repo.join(".aplan.yml"), "not_a_config_key: true\n")
+        .expect("hostile plan-side config");
+    std::fs::write(plan_repo.join("src/a.rs"), "pub fn a() {}\n").expect("source");
+    std::fs::write(
+        plan_repo.join("aplan/tasks/T-1.md"),
+        "---\nid: T-1\ntitle: repairable\nphase: 1\nstatus: done\neffort_days: 1\n\
+         paths: [src/**]\ntags: [cross-cutting]\nevidence:\n  - kind: test\n    ref: known\n\
+         ---\n\nbody\n",
+    )
+    .expect("task");
+    std::fs::write(
+        evidence_repo.join(".aplan.yml"),
+        "test:\n  list: [printf, 'suite::known\\n']\n  run: ['true', '{test}']\n",
+    )
+    .expect("repository policy");
+    for repo in [&plan_repo, &evidence_repo] {
+        common::git(repo, &["init", "-q", "."]);
+        common::git(repo, &["config", "user.email", "t@example.com"]);
+        common::git(repo, &["config", "user.name", "t"]);
+        common::git(repo, &["add", "-A"]);
+        common::git(repo, &["commit", "-q", "-m", "fixture"]);
+    }
+
+    let root = plan_repo.join("aplan").display().to_string();
+    let repo = evidence_repo.display().to_string();
+    let out = common::output(
+        &neutral,
+        &["--root", &root, "verify", "--repo", &repo, "--fix"],
+    );
+    let said = format!(
+        "{}{}",
+        String::from_utf8_lossy(&out.stdout),
+        String::from_utf8_lossy(&out.stderr)
+    );
+    assert!(
+        out.status.success(),
+        "the policy root changed mid-command: {said}"
+    );
+    assert!(said.contains("repaired T-1"), "{said}");
+    assert!(said.contains("ok: 1 tasks"), "{said}");
+    let repaired = task(&plan_repo, "T-1");
+    assert!(repaired.contains("ref: suite::known\n"), "{repaired}");
+}
+
+/// Replacement validation invokes the configured runner after the first
+/// post-run snapshot. A sibling it invalidates on that later invocation must
+/// still reach the mutation gate (`A1-463`,
+/// `verify_fix.revalidation_side_effects_are_gated`).
+#[test]
+fn a_computed_repair_gates_a_sibling_changed_during_revalidation() {
+    let dir = runner_mutates_sibling_on_second_list(
+        "sed -i 's/status: todo/status: done/' aplan/tasks/T-2.md",
+    );
+
+    let (stdout, stderr, ok) = run(dir.path(), &["verify", "--fix"]);
+    let said = format!("{stdout}{stderr}");
+    assert!(!ok, "the later invalid sibling state was accepted: {said}");
+    assert!(said.contains("APLAN005"), "{said}");
+    assert!(
+        !said.contains("repaired T-1"),
+        "the later resolver change was gated only after writing: {said}"
+    );
+    assert!(task(dir.path(), "T-1").contains("ref: known\n"));
+}
+
+/// The later snapshot is complete-or-nothing: an unloadable sibling cannot
+/// disappear from the candidate merely because there is no task value to put
+/// into it (`A1-463`, `verify_fix.revalidation_side_effects_are_gated`).
+#[test]
+fn a_computed_repair_refuses_a_sibling_made_unloadable_during_revalidation() {
+    let dir = runner_mutates_sibling_on_second_list(
+        "printf '%s\\n' '---' 'id: T-2' 'title: [' '---' > aplan/tasks/T-2.md",
+    );
+
+    let (stdout, stderr, ok) = run(dir.path(), &["verify", "--fix"]);
+    let said = format!("{stdout}{stderr}");
+    assert!(!ok, "the incomplete later plan was accepted: {said}");
+    assert!(said.contains("being resolved and no longer load"), "{said}");
+    assert!(said.contains("nothing was written"), "{said}");
+    assert!(!said.contains("repaired T-1"), "{said}");
+    assert!(task(dir.path(), "T-1").contains("ref: known\n"));
+}
+
+/// A valid edit from the same later resolver remains on disk and the repaired
+/// state verifies. Reloading is a snapshot, not an assertion that external
+/// resolvers are read-only (`A1-463`).
+#[test]
+fn a_computed_repair_preserves_a_valid_sibling_change_during_revalidation() {
+    let dir = runner_mutates_sibling_on_second_list(
+        "sed -i 's/runner changes this sibling/updated on the second list/' aplan/tasks/T-2.md",
+    );
+
+    let (stdout, stderr, ok) = run(dir.path(), &["verify", "--fix"]);
+    assert!(
+        ok,
+        "the valid post-resolution state was refused: {stdout}{stderr}"
+    );
+    assert!(stdout.contains("repaired T-1"), "{stdout}");
+    assert!(
+        task(dir.path(), "T-2").contains("title: updated on the second list"),
+        "the later sibling edit was lost"
+    );
+}
+
+/// A runner can also change the policy while `replacement_resolves` is using
+/// it. That proposal was never checked by the new policy, so the safe result is
+/// a refusal and a fresh run, not a write followed by a red post-verification
+/// (`A1-463`, `verify_fix.revalidation_side_effects_are_gated`).
+#[test]
+fn a_computed_repair_refuses_configuration_changed_during_revalidation() {
+    let dir = runner_mutates_sibling("");
+    std::fs::write(
+        dir.path().join("mutate-list.sh"),
+        "#!/bin/sh\ncount=0\n[ ! -f list-count ] || count=$(cat list-count)\n\
+         count=$((count + 1))\nprintf '%s\\n' \"$count\" > list-count\n\
+         if [ \"$count\" -eq 2 ]; then\n\
+           printf '%s\\n' 'root: aplan' 'test:' \\
+             '  list: [printf, suite::different\\n]' \\
+             '  run: ['\"'\"'true'\"'\"', '\"'\"'{test}'\"'\"']' > .aplan.yml\n\
+         fi\nprintf 'suite::known\\n'\n",
+    )
+    .expect("runner");
+
+    let (stdout, stderr, ok) = run(dir.path(), &["verify", "--fix"]);
+    let said = format!("{stdout}{stderr}");
+    assert!(!ok, "the changing policy was accepted: {said}");
+    assert!(said.contains("configuration changed"), "{said}");
+    assert!(said.contains("nothing was written"), "{said}");
+    assert!(!said.contains("repaired T-1"), "{said}");
+    assert!(task(dir.path(), "T-1").contains("ref: known\n"));
 }
 
 #[test]

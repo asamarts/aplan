@@ -7,7 +7,7 @@
 
 use std::path::Path;
 
-mod common;
+use crate::common;
 
 /// Two tasks carrying a required family member and a word to migrate.
 fn fixture(dir: &Path) {
@@ -65,6 +65,118 @@ fn a_tag_can_be_added_and_removed() {
         0
     );
     assert!(!tags_of(dir.path(), "W-1").contains(&"cli".to_string()));
+}
+
+/// Proves `tag.preserves_scalar_sequence_source_deltas`: add, remove and
+/// whole-plan rename retain every surviving member byte and refuse structural
+/// aliases as plan input rather than constructing invalid YAML.
+#[test]
+fn tag_edits_preserve_source_sequences_and_refuse_structural_aliases() {
+    let dir = tmp();
+    let root = dir.path();
+    std::fs::create_dir_all(root.join("aplan/tasks")).expect("mkdir");
+    std::fs::write(root.join(".aplan.yml"), "root: aplan\n").expect("config");
+
+    let block = "---\nid: W-1\ntitle: work 1\nphase: 0\nstatus: todo\neffort_days: 1\ntags: # vocabulary\n- 'family' # retained\n# migration context\n- \"legacy\" # rename this\n- keep # stable\n---\n\nbody\n".replace('\n', "\r\n");
+    let flow = "---\nid: W-2\ntitle: work 2\nphase: 0\nstatus: todo\neffort_days: 1\ntags: [ family , 'legacy' , keep ] # vocabulary\n---\n\nbody\n";
+    let block_path = root.join("aplan/tasks/W-1.md");
+    let flow_path = root.join("aplan/tasks/W-2.md");
+    std::fs::write(&block_path, &block).expect("block task");
+    std::fs::write(&flow_path, flow).expect("flow task");
+
+    let added_block = block.replace("- keep # stable\r\n", "- keep # stable\r\n- docs\r\n");
+    let out = common::run(root, &["tag", "add", "W-1", "docs"]);
+    assert_eq!(out.code, 0, "{}", out.text());
+    assert_eq!(
+        std::fs::read_to_string(&block_path).expect("added block"),
+        added_block
+    );
+    let out = common::run(root, &["tag", "rm", "W-1", "docs"]);
+    assert_eq!(out.code, 0, "{}", out.text());
+    assert_eq!(std::fs::read_to_string(&block_path).expect("block"), block);
+
+    let added_flow = flow.replace(
+        "tags: [ family , 'legacy' , keep ] # vocabulary\n",
+        "tags: [ family , 'legacy' , keep , docs ] # vocabulary\n",
+    );
+    let out = common::run(root, &["tag", "add", "W-2", "docs"]);
+    assert_eq!(out.code, 0, "{}", out.text());
+    assert_eq!(
+        std::fs::read_to_string(&flow_path).expect("added flow"),
+        added_flow
+    );
+    let out = common::run(root, &["tag", "rm", "W-2", "docs"]);
+    assert_eq!(out.code, 0, "{}", out.text());
+    assert_eq!(std::fs::read_to_string(&flow_path).expect("flow"), flow);
+
+    let out = common::run(root, &["tag", "rename", "legacy", "archived"]);
+    assert_eq!(out.code, 0, "{}", out.text());
+    assert_eq!(
+        std::fs::read_to_string(&block_path).expect("renamed block"),
+        block.replace("- \"legacy\" # rename this", "- \"archived\" # rename this")
+    );
+    assert_eq!(
+        std::fs::read_to_string(&flow_path).expect("renamed flow"),
+        flow.replace("'legacy'", "'archived'")
+    );
+
+    for args in [
+        vec!["tag", "add", "T-1", "new-tag"],
+        vec!["tag", "rm", "T-1", "T-2"],
+        vec!["tag", "rename", "T-2", "renamed"],
+    ] {
+        let structural = tmp();
+        let root = structural.path();
+        std::fs::create_dir_all(root.join("aplan/tasks")).expect("mkdir");
+        std::fs::write(root.join(".aplan.yml"), "root: aplan\n").expect("config");
+        let target = "---\nid: T-1\ntitle: target\nphase: 0\nstatus: todo\neffort_days: 1\ntags: &shared\n  - T-2 # shared source\nblocked_by: *shared\n---\n\nbody\n";
+        let dependency = "---\nid: T-2\ntitle: dependency\nphase: 0\nstatus: todo\neffort_days: 1\ntags: [T-2] # an ordinary file rename must not publish first\n---\n";
+        std::fs::write(root.join("aplan/tasks/T-1.md"), target).expect("target");
+        std::fs::write(root.join("aplan/tasks/T-2.md"), dependency).expect("dependency");
+
+        let out = common::run(root, &args);
+        assert_eq!(out.code, 2, "{args:?}: {}", out.text());
+        assert!(
+            out.text().contains("source-preserving delta"),
+            "{args:?}: {}",
+            out.text()
+        );
+        assert_eq!(
+            std::fs::read_to_string(root.join("aplan/tasks/T-1.md")).expect("unchanged"),
+            target,
+            "{args:?} wrote the structural source"
+        );
+        assert_eq!(
+            std::fs::read_to_string(root.join("aplan/tasks/T-2.md")).expect("unchanged sibling"),
+            dependency,
+            "{args:?} partially published a plan-wide rename"
+        );
+        assert_eq!(common::run(root, &["check"]).code, 0, "{args:?}");
+    }
+
+    // The parsed field, not only the literal spelling `tags:`, establishes
+    // that an existing sequence must be edited in place. A quoted key used to
+    // look absent to the source pass, which appended a duplicate key and
+    // reached the internal round-trip error instead of this refusal.
+    let structural_key = tmp();
+    let root = structural_key.path();
+    std::fs::create_dir_all(root.join("aplan/tasks")).expect("mkdir");
+    std::fs::write(root.join(".aplan.yml"), "root: aplan\n").expect("config");
+    let target = "---\nid: T-1\ntitle: target\nphase: 0\nstatus: todo\neffort_days: 1\n\
+                  'tags': [cli]\n---\n\nbody\n";
+    std::fs::write(root.join("aplan/tasks/T-1.md"), target).expect("target");
+    let out = common::run(root, &["tag", "add", "T-1", "docs"]);
+    assert_eq!(out.code, 2, "{}", out.text());
+    assert!(
+        out.text().contains("source-preserving delta"),
+        "{}",
+        out.text()
+    );
+    assert_eq!(
+        std::fs::read_to_string(root.join("aplan/tasks/T-1.md")).expect("unchanged"),
+        target,
+        "the structural key was reconstructed instead of refused"
+    );
 }
 
 /// **The whole value over hand editing**: judged before it writes, so an edit

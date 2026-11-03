@@ -106,12 +106,12 @@ pub enum Error {
         /// Which file.
         path: PathBuf,
         /// Why not.
-        source: serde_yaml_ng::Error,
+        source: yaml_compat::Error,
     },
 }
 
 /// The sentence a reader who used the wrong file needs, and nothing otherwise.
-fn wrong_file_hint(source: &serde_yaml_ng::Error) -> &'static str {
+fn wrong_file_hint(source: &yaml_compat::Error) -> &'static str {
     if source.to_string().contains("unknown field") {
         ". This file holds per-user settings and never a repository's policy, so the keys \
          `.aplan.yml` takes are not accepted here"
@@ -195,7 +195,7 @@ pub fn load_from(path: &Path) -> Result<UserConfig, Error> {
             });
         }
     };
-    serde_yaml_ng::from_str(&text).map_err(|source| Error::Parse {
+    yaml_compat::from_str(&text).map_err(|source| Error::Parse {
         path: path.to_path_buf(),
         source,
     })

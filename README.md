@@ -78,11 +78,15 @@ table, and a gate checks each marker against the code that declares it:
 | `APLAN051` | A tag one edit away from one of the five words that change what this tool does: `milestone` makes a task a cut, `release` makes it a checkpoint over cuts, `deprecation` and `removal` drive the runway rules, and `cross-cutting` waives `APLAN022`. A typo does not misname anything -- `milestne` dissolves the cut, and `deprecatoin` makes `aplan deprecations` answer that the plan declares no runway, at exit 0. Also reported the other way: a `tag_families` entry that lists one of the five is declaring a vocabulary over a word the tool already acts on *(warning, `check`)* |
 | `APLAN052` | `cross-cutting` on a task that *is* a member of a cut. The tag is `APLAN022`'s escape hatch and means "belongs to no cut", so on a task in one it cannot mean what the rule reads it as -- and it switches that check off, so the task could fall out of its cut or into two and the plan would still be clean. On a task in no cut the same tag is what the rule reads it as, and is silent: that asymmetry is deliberate *(warning, `check`)* |
 | `APLAN053` | A task that is `in_progress` and whose declared `paths` match nothing the repository tracks: it says work has started and there is nothing to show for it. The one status the product's own argument could not otherwise defend -- `done` is believed because `verify` resolves what it cites, and a stored `in_progress` has nothing to resolve against, so it is checked rather than trusted. Read from the index, so a file written and staged counts; silent where the task declares no `paths`, since there is then nothing to judge the claim by *(warning, `verify`)* |
+| `APLAN054` | A `done` task's mutable `file` evidence has changed since it was recorded, or is missing from an otherwise present evidence baseline. `APLAN015` catches a reference that no longer resolves; this catches the same reference silently naming different proof. Whole-file citations compare the exact committed blob, including binary files; anchored citations compare only the cited section. Dirty worktree bytes do not count as evidence until committed. An `@rev` that resolves as the object id it spells is immutable; `@HEAD`, branch and tag names (including hex-named refs) are stamped because they can move. Historical tasks with no stamps remain silent *(warning, `verify`, opt-in via `detect_drift`)* |
+| `APLAN055` | A `captured` date appears only on authored `note` evidence. On a `commit`, `file`, `url`, or `test`, the date is not bound to immutable identity, reviewed content, a resolver observation, or an executed subject, so accepting it would make ignored metadata look like freshness proof *(error, `check`)* |
+| `APLAN056` | A task's `owner` belongs to the repository's declared `owners` vocabulary. With no declaration, owners remain free text. Once declared, every present value must match exactly; an unfamiliar value is reported and a one-edit spelling gets a correction. Unassigned tasks remain valid *(warning, `check`, opt-in)* |
+| `APLAN057` | Every `.inbox` entry is one canonical, valid and cross-record-consistent `aplan/capture/v1` record. Syntax, filename/id agreement, UTC whole-second instants, configured kinds, lifecycle fields and source uniqueness are checked without printing opaque source keys. Captures are never tasks or graph nodes *(error, `check` and `verify`)* |
 
 `APLAN023` is the one the first outside pilot produced. `paths` is optional, and `APLAN012`
 binds a cited `commit` to a task by checking its diff against those globs, so a task with no
-`paths` has nothing to compare against: the citation resolves and proves only that some commit
-exists. That happened on seventeen of thirty-three tasks in a real repository while `check`
+`paths` has nothing to compare against: the citation resolves and proves only that `HEAD` reaches
+some commit. That happened on seventeen of thirty-three tasks in a real repository while `check`
 reported zero warnings, so the warning exists to make the gap visible rather than to forbid it.
 
 `APLAN024` is what the second pilot produced, and it extends `APLAN012` rather than repeating
@@ -120,16 +124,18 @@ follows that one, and the members of the later cut inherit the edge, so `ready` 
 `critical-path` are right on a sequential plan without an edge on every task (ADR-0013). A plan
 whose milestones do not block one another is unaffected.
 
-`aplan` models **one** grouping level, the cut, and a second level is a declared tag family
-rather than model surface (ADR-0014): a stage, a lifecycle, or a per-group state is a tag such as
-`artifact:accepted`, because `Status` carries a verdict about work and a stage does not.
+`aplan` models **one task-membership level**, the cut. A project-specific second dimension is a
+declared tag family rather than another containment field (ADR-0014), while the built-in numeric
+phase is only an ordered reporting coordinate (ADR-0046). A stage, a lifecycle, or a per-group
+state is a tag such as `artifact:accepted`, because `Status` carries a verdict about work and a
+stage does not.
 
 Where a project has that second level, `roadmap.group_by` names the family and each cut renders
 under its headings, with an explicit `(no group)` section for tasks carrying none, since putting
 them under a heading they do not have would be a lie. A plan that declares nothing renders exactly
 as it did before the option existed.
 
-`APLAN026` is opt-in and exists because a second grouping level always ends up in tags. ADR-0008
+`APLAN026` is opt-in and exists because a second task-membership dimension ends up in tags. ADR-0008
 rejected tags for cut membership precisely because a typo is silent, and then a pilot put 22 epics
 there anyway, with a build/measure/review taxonomy beside them: one validated grouping level and
 one unvalidated one in the same frontmatter, indistinguishable by eye. Declaring the vocabulary in
@@ -184,19 +190,22 @@ was abandoned can never legitimately start, and every tracker will happily let i
 sit there forever. `APLAN021` keeps the `milestone` tag honest (milestones group a
 release cut; see [self-hosting](#self-hosting)). (`APLAN011`-`APLAN015` are the
 evidence-ladder rules below, run by `aplan verify`, not `check`; `APLAN017`,
-`APLAN018`, and `APLAN022` are the opt-in rules below; `APLAN016` (url reachability)
+`APLAN018`, `APLAN022`, and `APLAN054` are the opt-in rules below; `APLAN016` (url reachability)
 and `APLAN019` (`paths` globs match a tracked file, once the task cites evidence) run
 under `verify`, the first
 only where `.aplan.yml` sets `url.check`. A rule code is a
 contract, so it is not renumbered for tidiness.)
 
-Four more `check` rules are **opt-in**, off unless `.aplan.yml` turns them on.
+The following policy rules are **opt-in**, off unless `.aplan.yml` turns them on.
 `APLAN017` requires a `done` task's evidence to meet a configured minimum strength,
 so a real project can decree that a bare `note` does not close a task the way a
 `commit` or a `test` does. `APLAN018` detects *stale-`done` drift*: `aplan close`
 stamps a content fingerprint of each traced section, and `check` warns (advisory)
 when a closed task's traced section changes afterward, cleared by re-reviewing and
-`aplan close --restamp`. `APLAN022` requires every task to be a member of exactly one
+`aplan close --restamp` (which refuses while drift detection is disabled rather than erasing the
+baselines it cannot refresh). With the same `detect_drift` switch, `APLAN054` stamps each
+mutable `file` citation and `verify` warns when the committed referent changes under
+the same citation. `APLAN022` requires every task to be a member of exactly one
 release cut (or tagged `cross-cutting`), so a milestone's `done` proves the cut is
 exhaustively complete. `APLAN028` rides with `detect_drift`: `trace_fingerprints` is keyed
 by the trace string, so *editing* a `traces` entry on a closed task leaves the new trace
@@ -263,7 +272,7 @@ Not "I finished it."
 
 | Kind | Meaning |
 |------|---------|
-| `commit` | A git SHA in this repository |
+| `commit` | An immutable git SHA reachable from this repository's `HEAD` |
 | `url` | An external URL, a filing receipt, a regulator page, a vendor quote |
 | `file` | A repo-relative path to a committed artefact, optionally naming the section that proves it (`docs/report.md#result`) |
 | `test` | A named test that must pass |
@@ -272,6 +281,13 @@ Not "I finished it."
 An undated note is a rumour, so `APLAN010` rejects it. `commit`, `file`, and
 `test` are the kinds `aplan verify` resolves against the repository (below); the
 rest are checked structurally.
+
+`captured` is deliberately note-only (`APLAN055`). Its author or importer records when the inline
+human assertion was made. `close` and the resolvers do not invent that provenance. A commit already
+has immutable identity; a mutable file is tied to reviewed content by its `APLAN054` fingerprint;
+and URL or test resolution describes the current run. A past test execution needs a subject-bound,
+digest-addressed report with producer and execution identity, not an editable date beside the test
+name.
 
 A `file` citation may name a section, and `verify` then checks that the section
 is in that document -- the same heading-and-table-row reader `traces` uses, so an
@@ -294,9 +310,9 @@ property is tested, not hoped for.
 | Rung | Question | Command |
 |------|----------|---------|
 | **L0** Asserted | Is the evidence present and well-formed? | `aplan check` |
-| **L1** Resolved | Does the referent *exist*? | `aplan verify` |
+| **L1** Resolved | Does the referent resolve for the verified subject? | `aplan verify` |
 | **L2** Relevant | Does it connect to *this* task? | `aplan verify` |
-| **L3** Executed | Does the cited test *pass*, now? | `aplan verify --execute` |
+| **L3** Executed | Does the cited test *pass*, now? | `aplan verify --execute`; focused `aplan close --execute` |
 
 **`verify` is a superset of `check`, and runs the L0 rules too.** The ladder is
 cumulative: a plan that fails L0 has nothing worth resolving, so `verify` reports the
@@ -311,16 +327,149 @@ about the plan. An adopter who wired the deeper-sounding command into CI got a
 permanently green build on a plan `check` rejected, and nothing in the output hinted
 that a second command existed (`A1-058`, found in the `p00025` pilot).
 
-A `commit` SHA must resolve to a real commit (`APLAN011`), and its diff must
-touch at least one of the task's declared `paths` (`APLAN012`); a `file` must
-exist at the cited rev, or at `HEAD` (`APLAN015`); a `test` must be one the
-configured runner lists (`APLAN013`), and under `--execute` it must pass
-(`APLAN014`).
+A `commit` SHA must resolve to `HEAD` or one of its ancestors (`APLAN011`), and
+its diff must touch at least one of the task's declared `paths` (`APLAN012`).
+An object that exists only through an unmerged branch, linked worktree or
+reflog is not evidence about the verified tree. This local ancestry check does
+not contact a remote or prove that `HEAD` has been pushed. A `file` must exist
+at the cited rev, or at `HEAD` (`APLAN015`); a `test` must be one the configured
+runner lists (`APLAN013`), and under `--execute` it must pass (`APLAN014`).
 
 A runner that *skips* the cited test exits zero too, and a zero exit is what
 `--execute` reads as a pass. Declare `test.skipped` on the runner -- argv that
 prints the tests it will not run -- and a task whose every test citation is one
 of them is reported rather than believed (`APLAN014` again).
+
+Discover the exact names before closing a task rather than reconstructing a
+runner command by hand:
+
+```console
+$ aplan test list widget
+runner #1 `python-unittest`: 1 of 184 matching
+  test:package.tests.WidgetTests.test_handles_case
+```
+
+`aplan test list [query]` asks every configured runner through the evidence
+resolver itself, using the same repository-relative `dir`, wrapper, timeout,
+capture bound and name normalization as `close` and `verify`. The optional query
+is a case-insensitive substring. Human, JSON and agent formats distinguish no
+configured runners, a runner that answered with no tests, a failed runner and a
+complete search with no match. A shared name is shown with every runner that
+listed it and marked invalid as bare evidence; a runner failure makes the
+catalogue partial and exits 1, so an absent result is never presented as proof
+that the test does not exist. As on `verify`, a repository can explicitly put
+`APLAN013` in `advisory`; the catalogue remains visibly partial but that
+repository policy makes the finding non-blocking and the exit status zero.
+
+When a component job already owns a complete test provider, it can export that execution as a
+portable provider receipt instead of asking a later job to run the same tests merely to establish
+L3 again:
+
+```sh
+aplan test receipt backend \
+  --output backend.test-evidence.json \
+  --producer-repository "$CI_REPOSITORY" \
+  --producer-workflow "$CI_WORKFLOW:$CI_JOB" \
+  --producer-run-id "$CI_RUN_ID" \
+  --producer-event "$CI_EVENT" \
+  --producer-privilege trusted
+```
+
+The runner is its one-based index or exact configured label. Receipt creation requires exhaustive
+`evidence.observation_inputs`, lists the complete provider namespace, executes every listed
+identity, and publishes only when every request has an attributable typed outcome and its material
+and repository observations stayed stable. Use `--output -` for canonical JSON on stdout.
+
+This is an in-toto-style `aplan/test-evidence/v1` provider statement, not a cached plan verdict.
+It binds the runner/adapter, catalogue, exact input declaration and matched bytes/modes, inherited
+environment, toolchain, executable and existing file-argument bytes (including wrapper scripts),
+aplan build identity, producer and audit timestamps. It deliberately contains no plan identity: a
+consumer must derive the current plan verdict again. Only an unconditional pass proves L3; skips,
+expected failures, retries, flakes, cancellation, timeouts, resource stops, framework crashes and
+incomplete output remain distinct non-passing outcomes. A successful invocation indistinguishable
+from the runner's exact-name miss sentinel stays `unproven_selection`, so receipt-backed
+verification reproduces the direct `APLAN037` refusal rather than upgrading a false green.
+
+The producer fields in the JSON do not authenticate themselves. A local caller may trust a file it
+controls; CI must separately bind the artifact digest and authenticated repository, workflow, run,
+event and privilege, or authenticate a DSSE envelope. A digest is integrity, not producer identity,
+and an untrusted pull-request job must use `--producer-privilege untrusted`. Receipt consumption by
+whole-plan verification is explicit and current-only. Trusted orchestration writes one import set
+entry per configured provider, for example for locally controlled files:
+
+```json
+{
+  "schema": "aplan/test-evidence-import-set/v1",
+  "receipts": [
+    {
+      "provider": "backend",
+      "path": "backend.test-evidence.json",
+      "trust": { "mode": "local_file" }
+    }
+  ]
+}
+```
+
+```sh
+aplan verify --test-receipts test-evidence.import.json
+```
+
+The import set is not self-authenticating. Do not accept trust claims from a manifest supplied by
+untrusted repository or pull-request code; create it from authenticated artifact or signature facts
+inside the trusted consumer job. Verification requires one row for every configured provider,
+recomputes current provider/material/tool/repository identity, and derives a new verdict over the
+exact current plan. It starts no provider command and never silently falls back. Missing, stale,
+partial, untrusted or incompatible observations are typed findings; choose `--execute` explicitly
+for full direct replay. The derived import-set schema is
+`schemas/v1/test-evidence-import-set.json`.
+
+To refresh a locally controlled receipt set without narrowing the plan verdict, give `verify` an
+explicit Git boundary:
+
+```sh
+aplan verify --refresh-test-receipts test-evidence.import.json \
+  --refresh-base origin/main --refresh-head HEAD
+# Or include HEAD, index, tracked edits and untracked files explicitly:
+aplan verify --refresh-test-receipts test-evidence.import.json \
+  --refresh-base HEAD --refresh-working-tree
+```
+
+The safe default refreshes a complete invalidated provider. A runner can opt into exact-test
+selection with `inputs_by_test`, an exhaustive dependency claim separate from proof coverage:
+
+```yaml
+test:
+  name: workspace
+  list: [cargo, test, --workspace, --, --list]
+  run: [cargo, test, --workspace, --, --exact, '{test}']
+  inputs_by_test:
+    - tests: ['core::*', 'integration::core_*']
+      paths: ['crates/core/**', 'fixtures/core/**']
+    - tests: ['web::*']
+      paths: ['crates/web/**', 'fixtures/web/**']
+```
+
+Every listed test and every relevant changed input must have exactly one owner. Missing or
+overlapping ownership, a new test or path, config/runner/toolchain/material movement, or another
+unknown edge widens visibly to the complete provider. Plan-only edits outside declared provider
+material still re-derive every current citation without rerunning unchanged outcomes. Refreshed
+documents are published under content-derived names and the complete manifest is replaced last;
+failure leaves the previous manifest in place. Put that set outside the checkout, or in a
+Git-ignored directory outside `evidence.observation_inputs`, so its own publication cannot become
+the next change boundary. The mode reports reused, refreshed, widened and
+unavailable providers plus selected-test counts in human and machine output. It refreshes only
+`local_file` rows; authenticated artifacts and signed receipts must be regenerated inside their
+authenticated producer. `--refresh-shadow` compares the answer with complete direct execution for
+rollout evaluation, but does not turn the incremental result into release evidence (ADR-0058).
+
+This repository's rollout audit is an executable example rather than a generic GitHub-specific
+product requirement. `.github/workflows/evidence-rollout.yml` produces receipts and a direct oracle
+in one trusted job, then a dependent job validates a bounded artifact and reconstructs
+`same_workflow` trust from authenticated workflow context. Its one `APLAN_EVIDENCE_ROUTE` value
+switches receipt consumption back to direct execution. Other CI systems should preserve those
+boundaries - independently invocable production and direct routes, authenticated producer context,
+content-bound transport, zero-provider receipt verification and a retained periodic direct oracle -
+without copying GitHub's artifact mechanism as part of the receipt format.
 
 `APLAN012` is the one that matters. A careless or dishonest agent cites a real
 commit that has nothing to do with the task, so a tool that only checks the
@@ -398,9 +547,9 @@ something stronger does exist". **0 of its 72 tasks carry an exempt tag.**
 
 **What none of this claims.** That the cited section is a *good* decision, or says what the task
 needed it to say. `aplan` proves the artefact exists, sits inside the work this task owns, and --
-with a `traces` anchor on the same section and `detect_drift: true` -- has not silently changed
-since (`APLAN018`, opt-in). Whether the decision was right is a review, and no tool here pretends
-otherwise.
+with `detect_drift: true` -- reports if a mutable `file` citation changes under the same
+reference (`APLAN054`, opt-in). A `traces` anchor independently watches the premise named by the
+task (`APLAN018`). Whether the decision was right is a review, and no tool here pretends otherwise.
 
 Pin the anchored form with `aplan facts --require evidence.file_names_a_section`.
 
@@ -473,14 +622,44 @@ ok: 3 tasks, 0 warning(s), DAG acyclic
 
 Every later cut has the same shape, and there are three of them:
 
+An `add --from` entry may also make existing or explicitly named same-file work wait on it with
+`blocks`. That reverse edge and every created task are one publication:
+
+```yaml
+- id: T-003
+  title: Implement the shared gate
+  effort: 2
+  blocks: [T-existing-gate, T-004]
+- id: T-004
+  title: Exercise the gate end to end
+  effort: 1
+```
+
+Blueprint V1 has the same reverse relationship, using its explicit reference namespaces:
+`blocks: [task:T-existing-gate, local:exercise]` makes an existing task and the entry whose key is
+`exercise` wait on the declaring entry.
+
 | the new cut holds | how |
 |---|---|
 | work that does not exist yet | another `--from` file, the milestone entry and its tasks together |
 | work the plan has, in no cut | one command: `aplan add "Second cut" --id M-v0.2 --tag milestone --blocked-by T-003` |
-| work that is in another cut | create the cut around its own new work first, then `aplan mv T-002 --cut M-v0.2` |
+| work that is in another cut | one guarded move: `aplan add "Second cut" --id M-v0.2 --phase 2 --tag milestone --member T-002` |
 
-An entry takes the fields `aplan add` takes as flags, plus `body` for the task's prose, so a plan
-authored from a document lands closeable rather than needing a second edit per task.
+`--member` is deliberately narrower than `--blocked-by`. Each repeated member must be live work
+in exactly one existing cut; `add` removes it there and creates the destination milestone listing
+it in one compare-and-swap batch. In that mode `--blocked-by` names only milestone predecessors,
+so `--blocked-by M-v0.1` sequences the new cut without confusing sequencing with membership. The
+new cut's `--id`, `--phase` and `milestone` tag are required decisions. A duplicate, terminal,
+cross-cutting, unowned, multiply-owned or milestone member is refused, as is a move which would
+leave a source cut with no live work.
+
+An entry takes the fields `aplan add` takes as flags, plus `evidence` and `body`: live `status`,
+`prefer_after`, `ratified_by`, `contains`, `revisit_at`, `version_impact` and its reason all land in
+the same atomic post-state. A `done` entry is a historical-ledger correction, not ordinary forward
+authoring: it needs evidence which resolves before any file is written and may then join a `done`
+cut without reopening it. `dropped` is deliberately refused at creation because it records a later
+decision about work which existed; use `drop` for that decision. Recorded release `version` and
+fingerprint maps remain derived rather than authored.
 
 **Order is for reading, not for resolving.** An entry may wait on, or join, any id the file
 declares, above it or below it: the milestone above lists work written under it, and it would have
@@ -499,8 +678,13 @@ aplan check --format sarif     # SARIF 2.1.0, for code-scanning dashboards
 aplan check --no-traces        # skip APLAN008 (opt out; never silent)
 aplan verify                   # resolve evidence against the git repo (L1/L2)
 aplan verify --execute         # also run cited tests (L3; off by default)
+aplan verify --test-receipts receipts.import.json # current L1/L2/L3, zero provider spawns
+aplan verify --refresh-test-receipts receipts.import.json --refresh-base origin/main --refresh-head HEAD # selective provider work, whole-plan verdict
+aplan verify --fix             # apply exact computed evidence repairs as one guarded batch, then verify again
+aplan test list widget         # discover exact configured test: evidence names and their runners
 aplan ready                    # workable tasks whose blockers are all done, best first
 aplan ready --explain          # and why each one is where it is
+aplan ready --phase 2          # narrow a report by phase; cut, tag, owner and status work too
 aplan why P1-003               # what blocks a task: its own blockers, and any unfinished cut
 aplan version M-v0.9      # what that cut owes the released version: fix, feature, breaking
 aplan why P1-003 --all         # ... walking through those cuts into their membership too
@@ -510,40 +694,58 @@ aplan due --as-of 2026-09-10T06:00:00Z   # parked tasks whose `revisit_at` has a
 aplan vacuity                  # per rule: what it checked, and what it could not have failed on
 aplan deprecations             # runways: announced in one cut, removed in a later one
 aplan attest                   # what this plan proved, bound to the commit it proved it at
-aplan check-docs ROADMAP.md    # does this document name tasks that exist?
+aplan check-docs               # check the documents declared by `docs.paths`
+aplan check-docs NOTES.md      # one-off override: check exactly this document
 aplan export-roadmap-json roadmap.json  # regenerate a foreign status contract from the plan
 aplan export-agents-md         # the agent contract your policy implies, fenced
 aplan export-agents-md --check AGENTS.md   # ... and the gate that keeps it true
-aplan summary                  # tasks, effort, and ready count rolled up by phase
+aplan summary                  # tasks, effort, and ready count by phase, or summary.group_by
 aplan summary --format json    # the same, machine-readable
+aplan summary --at v0.4.0      # the committed plan and discovered config at a revision; resolved SHA on stderr
 aplan tasks --format json      # the plan as data, so any other rollup is a `jq` line
+aplan explain rule APLAN012    # the stable meaning and severity behind a diagnostic code
 aplan critical-path            # the longest effort-weighted chain of dependent tasks
 aplan critical-path M-v0.9     # ... and what must finish before one checkpoint can,
                                #     with how much of that chain is not yet done
 aplan roadmap                  # the plan grouped by cut: rollups + per-cut critical path
 aplan roadmap --format markdown # the committed ROADMAP.status.md companion (ADR-0009)
 aplan roadmap --format markdown --regenerate-with 'make roadmap'  # when a wrapper generates it
+aplan capture "Follow up on pilot friction" --label pilot --body-file notes.md # guarded durable intake, not a task
+aplan inbox                    # actionable open captures; deferred intake is counted separately
+aplan inbox show I-01K8Z3A4    # focused review accepts one unambiguous human id prefix
+aplan inbox discard I-01K8Z3A4 --reason 'Already addressed' # retain an explicit terminal disposition
 aplan add "Second cut" --id M-v0.2 --tag milestone --blocked-by T-003  # a cut is created with its work
+aplan add "Public CI" --id M-public --phase 2 --tag milestone --member T-003  # move existing work into a new cut atomically
 aplan add "Wire the sequencer" # scaffold the next task file, in this plan's own id convention
 aplan add "Fix what the log found" --traces pre-public-adoption-evidence#24-a-finding   # and record what caused it
 aplan add "Ship it" --cut M-v0.6 --effort 2 --paths 'src/**'   # and place it in a cut
-aplan add --from plan.yml      # a written plan as one change: every task, its cut, and its body
+aplan add "Wait for review" --status blocked --revisit-at 2027-01-15T12:00:00Z # live state and scheduling at creation
+aplan add --from plan.yml      # a written plan or proved historical ledger as one atomic change
+aplan blueprint apply --file feature.yml --cut M-v0.9 --set feature=bulk-close --dry-run # predicted ids, exact input digest, no write
+aplan blueprint apply --file feature.yml --cut M-v0.9 --set feature=bulk-close --format agent # apply once; report exact published ids
 aplan close P1-003             # set done + attach the HEAD commit, in place
 aplan close P1-003 --evidence commit:d213c9a --evidence test:mod::name
+aplan close P1-003 --evidence test:mod::name --execute # run only this proposed closure's tests; require L3
 aplan amend P1-003 --replace-evidence test:old_name test:new_name   # repair a closed task's citation
-aplan supersede P1-003 "Re-fix the rail"  # the successor to a closed task whose outcome stopped holding
+aplan supersede P1-003 "Re-fix the rail" --clear-traces --body '## Why ...' # control inherited successor scope and prose
 aplan dep add P1-004 --after P1-003     # P1-004 comes after P1-003; `dep rm` takes it back, and a cut's membership stays `mv`'s
+aplan dep add P1-004 --after P1-003 --after P1-002  # repeat an operation for one atomic target rewrite
+aplan dep apply --from edges.yml --dry-run --format json # mixed multi-target add/remove, judged as one final graph
 aplan tag add P1-004 cli                # put a tag on an existing task; `tag rm` takes it off
 aplan tag rename epic-a epic-b          # ... and rename one across every task that carries it, as one change
 aplan drop P1-003              # cancel a task, recording the decision rather than deleting it
 aplan drop --cut M-v0.6        # cancel a whole cut: its members, then the milestone
+aplan park P1-003 M-v0.7 --reason 'Waiting for a funding decision' --revisit-at 2027-01-15T12:00:00Z --tag post-mvp
+aplan unpark P1-003 M-v0.7     # return all named parked work to todo, preserving history and tags
 aplan mv P1-003 P1-004 --cut M-v0.7   # move tasks between cuts, editing both milestones or neither
-aplan claim P1-003             # record that you are on it: a compare-and-swap, so two actors cannot both win
-aplan claim P1-003 --from ada  # take a task somebody holds, naming them; the name is checked
-aplan release P1-003           # drop the claim, naming whose it was; anybody may run it
+aplan mv P1-003 --phase 2      # change its reporting coordinate, never its stable id
+aplan rekey P1-003 P1-103      # change one stable id and every structured reference atomically
+aplan claim P1-003             # local ephemeral claim shared by this repository's linked worktrees
+aplan claim P1-003 --from ada  # checked takeover; task owner remains unchanged
+aplan release P1-003           # explicit recovery; claims never expire silently
 aplan start P1-003             # record that work has begun; APLAN053 reports one the repo contradicts
 aplan stop P1-003              # record that it has stopped, back to todo (not a closure)
-aplan ready --unclaimed        # ... and only the work nobody holds
+aplan ready --unclaimed        # ... and only work with no observed active claim
 aplan import kep.yaml          # read a Kubernetes KEP into a task (lossy, and says so)
 aplan import ROADMAP.md --format checklist     # a markdown `- [ ]` roadmap, the commonest shape
 aplan import roadmap.json --format roadmap-json # a status contract, depends_on -> blocked_by
@@ -553,22 +755,106 @@ aplan export --format checklist --check ROADMAP.md  # ... and the gate that keep
 aplan mcp                      # MCP server over stdio: identity, ready, why, check, verify,
                                #   add, show, dep, close, claim, release, start, stop
 aplan init                     # scaffold a starter .aplan.yml (never overwrites)
-aplan graph                    # generated Mermaid dependency graph; `--cut v0.8`/`--tag output` scope it
+aplan graph                    # attended layered graph; a redirect stays Mermaid for compatibility
+aplan graph --format text --width 120  # deterministic redirected layered document
+aplan graph --format text --focus A1-126  # emphasize one visible task and its direct neighbours
+aplan graph --format text --critical      # overlay the deterministic whole-plan critical route
+aplan tui                      # overview/tasks/diagnostics/graph/reports/inbox; Ctrl-N captures
 aplan tree A1-126              # one task's neighbourhood: what precedes it, what it releases (`--depth N`)
-aplan show A1-126              # one task whole: fields, edges both ways, and the findings on it
+aplan show A1-126              # one task whole; reads observations and never starts providers
+aplan show A1-126 --refresh-evidence       # explicit slow provider refresh; progress is on stderr
+aplan show A1-126 --require-current-evidence # render, then exit 1 unless every observation is current
+aplan show A1-126 --no-resolve             # skip stored and repository evidence resolution too
 aplan schema                   # the JSON Schema, derived from the Rust types
 aplan facts                    # the tool's rules/formats/commands as JSON (see facts.json)
 ```
+
+Use a blueprint when a reviewed task shape has recurring fields or sibling topology, not as a
+substitute for authoring a plan from its evidence. V1 reads one explicit local file: repeat
+`--set` exactly once for each parameter it declares, use `local:<key>` for a new sibling and
+`task:<id>` for an existing task, and select one existing cut for the complete graph. The file is
+plan-authoring data rather than an executable program, but it can still propose every task and
+relationship in that graph. Review the dry run's source path and digest, predicted tasks, ids,
+files and findings before rerunning the same command without `--dry-run`; only the successful
+apply makes its reported ids durable. V1 has no discovery, catalogue, composition, replay, built-in
+methodology, installation or fetch path.
+
+### TUI quick start
+
+The standard binary includes the interactive interface:
+
+```sh
+aplan facts --require build.tui
+aplan tui
+```
+
+Use `1` through `6` for Overview, Tasks, Diagnostics, Graph, Reports and Inbox, `Ctrl-N` for a
+minimal capture without leaving the current destination, `Ctrl-P` to find actions, `?` for
+contextual help, `Enter` to open, and `Esc` to reverse one layer. Mutations use
+typed forms, exact previews and guarded confirmation; they edit the working tree but never create
+a Git commit. The [TUI user guide](docs/tui.md) covers the complete work loop, bounded graph
+traversal, progress, responsive layouts, accessibility and recovery. The generated
+[action reference](docs/tui-reference.md) lists every binding, native mutation and deliberate
+CLI-only boundary.
+
+The `check-docs` reference vocabulary comes from the plan. Alongside numeric and dotted families
+such as `A1-042` and `M-v0.8`, it learns when the numeric core continues through hyphen-separated
+suffixes: a plan containing `M-p0-design` and `M-p0-build` resolves those complete ids and reports
+an unknown `M-p0-review` whole, rather than inventing a dangling `M-p0`. Require that scanner
+contract before depending on it with `aplan facts --require check_docs.complete_multi_hyphen_ids`.
+Word-only ids and ULIDs still teach no safe prose pattern, so a plan containing only those makes
+the command refuse instead of claiming it checked text it could not distinguish.
+
+The same longest-family rule applies when `check-docs` recognizes a one-digit typo in a family
+prefix: an overlapping `A11-999` candidate is never shortened to an invented fragment. Consumers
+that depend on the exact diagnostic subject can require
+`check_docs.near_prefixes_prefer_longest_family` through `aplan facts --require`.
+
+`ready`, `tasks`, `summary`, `due`, `stale`, `vacuity`, `paths`, and `graph` share five repeatable
+selectors: `--cut`, `--phase`, `--tag`, `--owner`, and `--status`. Values within one dimension
+widen (`--phase 1 --phase 2`); different dimensions narrow. `--unclaimed` additionally asks for
+work with no observed ephemeral claim. It is independent of `--owner`: a team can remain
+responsible for work nobody is actively doing. Claim state is private to the local Git common
+directory, shared by linked worktrees, and has no automatic expiry; a non-Git plan stays readable
+but `--unclaimed` refuses because unavailable coordination is not evidence that work is free.
+Selection changes what is shown, never what is computed, so a task selected by phase remains
+blocked by a prerequisite outside that phase. `check` and `verify` accept these flags only to
+refuse a qualified gate rather than let a partial plan read as clean. The same durable equality
+model scopes repository policy under `policy[].when`.
+
+The text graph keeps scope and emphasis separate. `--focus <ID>` marks an already visible task,
+its visible direct dependency blockers (`B`) and dependents (`R`); it never pulls the task through
+a selector. `--critical` projects core's deterministic whole-plan route (`C`) onto the current
+view, with `>` on the node entered by each exact highlighted step. Status remains an exact word,
+and a legend explains every mark, so colour adds hierarchy but no information. A terminal receives
+Unicode box drawing and stream-resolved colour; a redirect receives deterministic ASCII and plain
+text unless colour was explicitly forced. These two presentation flags require `--format text`.
+Use JSON, DOT or Mermaid when another program needs the graph rather than parsing the drawing.
 
 Commands that mutate a plan write into the working tree for you to review and stage; they never
 create a commit. Commands with a different write target say so in their own help: exports can
 write the output path you name, and `attest --attach-note` writes an explicit Git note. This is a
 shared safety guarantee, not an exhaustive hand-maintained list of writers.
 
+`verify` normally only reports. Where a finding has one exact evidence replacement, it prints a
+separate `repair:` line and the JSON and agent forms carry the structured operation. `--fix` is the
+explicit write: it resolves every replacement as `amend` would, judges the combined post-state,
+publishes all affected task files or none, then reruns `verify`. Advice that still needs a choice
+has no typed repair and is never changed: choosing a new id, correcting versus removing a document
+anchor, choosing between several near matches, collapsing duplicate citations, superseding an
+outcome, and accepting a changed trace premise remain human decisions.
+
 `close` changes one task file in place, the `status:` line and a new `evidence:` block, and leaves
 the rest byte-for-byte untouched; it refuses to author a false record: an unknown or still-blocked
 task, one already `done` or already carrying evidence, or a `note` (which needs a `captured` date it
-cannot invent). `init` refuses to overwrite an existing `.aplan.yml`, so it never clobbers a policy
+cannot invent). Ordinary close resolves test names at L2 and never runs them. Explicit
+`close --execute` runs exactly the proposed task's distinct test citations, not historical plan
+evidence, and requires every typed outcome to be an unconditional L3 pass. It binds the preview to
+the plan, changed repository material, selected configuration and selected provider runtime;
+movement or any failed, skipped, ambiguous, missing, non-selecting, stopped or unavailable result
+causes aplan to publish no plan mutation. The configured test command is trusted code and its own
+effects are not rolled back; inspect the working tree after it runs. The MCP close tool remains
+L2-only. `init` refuses to overwrite an existing `.aplan.yml`, so it never clobbers a policy
 you have already committed to.
 
 `import` reads someone else's plan, and is **lossy by design, and says so** (ADR-0012):
@@ -590,6 +876,29 @@ commands, output formats, and exit codes are pinned by a black-box corpus in
 not merely written down; the flags not yet in that corpus (`--traces-root`,
 `--no-require-effort`, `--execute`, `--repo`) are exercised by unit tests.
 
+For a local performance diagnosis, the global `--timings` flag appends one line of phase timings and
+non-sensitive deterministic work counters to stderr. It does not change stdout or the command's exit
+status. The counters describe configuration and plan loads, candidate/read/parsed task files, retained
+source bytes, graph constructions, persistent-cache hits/reuse/bytes, and traced-document reads,
+bytes and Markdown/structured parse attempts. Actual output bytes and time to first byte belong to the external
+`ci/scripts/read-performance.py` harness so every output path is measured rather than estimated.
+
+Read commands use a disposable per-user cache by default. It lives in the operating system's cache
+directory (or `APLAN_CACHE_DIR` for a hermetic host/test override), never in the repository, and is
+only an optimization: incompatible, corrupt, unavailable or contended state is a quiet miss. Use
+global `--cache=off` to read and write no persistent cache state, or `--cache=refresh` to ignore the
+old generation and publish a replacement. Cache files are private, bounded, checksummed and safe to
+delete. Their checksum detects corruption; it is not authentication against another process running
+as the same user.
+
+Evidence-provider observations use a separate private cache namespace and never replace the
+authoritative gate. Plain `show` reads a complete current raw test catalogue if one exists and
+otherwise reports typed `not_observed`, `stale`, `refresh_failed` or `unsupported` state promptly;
+it does not start `test.list` or `url.check`. Use `--refresh-evidence` when waiting for configured
+providers is intended, `--require-current-evidence` when a script requires freshness, and `verify`
+for the authoritative whole-plan answer. JSON consumers must accept `aplan/show/v3`; its retained
+`resolved` field is true exactly when the aggregate observation is `current`.
+
 `ready` lists only *workable* tasks: a task parked at `status: blocked` has no
 unmet blockers in the graph, but the plan says do not work on it, so it is not
 offered.
@@ -601,8 +910,10 @@ what each waits on is a judgement no tool can evaluate: "no named consumer
 exists", "three models confirm the pattern", "no external authors have
 surfaced". A field for it would be a claim nothing checks, which is the one
 thing this format refuses. So the reason lives in the task body, `aplan why`
-says a parked task is parked and points there, and unparking is a human
-editing `status`. Every command that reports on the plan (`ready`, `why`, `graph`, `summary`,
+says a parked task is parked and points there, and `aplan park`/`aplan unpark` make the human
+decision as one guarded all-or-none change. Parking accepts only unclaimed `todo` tasks and
+milestones; unparking clears `revisit_at` but preserves body history and tags, and unfinished graph
+blockers continue to govern `ready`. Every command that reports on the plan (`ready`, `why`, `graph`, `summary`,
 `critical-path`, `roadmap`) refuses to answer at all if a task file failed to load: a partial
 answer that looks whole is the failure this tool exists to prevent.
 
@@ -616,11 +927,18 @@ answer that looks whole is the failure this tool exists to prevent.
   prints, and the machine formats below are byte-identical at every setting.
 - **CI** gets `--format github` annotations, `--format sarif` for a code-scanning
   dashboard, or a `1` exit code and nothing else.
-- **Agents** get `--format agent`, or `aplan mcp`, an MCP server over stdio with a
-  deliberately small nine-tool surface (`identity`, `ready`, `why`, `check`, `verify`, `add`, `show`, `dep`, `close`). Its `close`
-  goes through the same evidence gate as the CLI's, and takes no score, confidence, or
-  completeness input: an agent supplies a *citation*, never an assessment of its own
-  work. Refusing that is the point, and it is pinned by a test.
+- **Agents** get `--format agent`, where every diagnostic carries an
+  `agent_instruction` string that can be acted on without reading the source, or `aplan mcp`, an
+  MCP server over stdio with a deliberately bounded tool surface. The exact inventory in `aplan
+  mcp --help` is checked against the executable server registry; `aplan facts` exposes the same
+  inventory to machines. The surface covers server identity, selecting and inspecting work,
+  validation, bounded task and edge mutations, evidence-gated closure, and coordination. Broad
+  rollups, host operations and mutations that require human judgement remain CLI-only by an
+  executable command census.
+
+  Its `close` goes through the same evidence gate as the CLI's, and takes no score, confidence, or
+  completeness input: an agent supplies a *citation*, never an assessment of its own work.
+  Refusing that is the point, and it is pinned by a test.
 
   `identity` is the one that answers about the *server* rather than about a plan, and it
   exists because **asking an installed CLI does not identify a configured MCP process**:
@@ -628,8 +946,39 @@ answer that looks whole is the failure this tool exists to prevent.
   own checkout had already fixed. It returns the same document `aplan facts --identity`
   prints, and needs no plan, no repository and no clean tree -- the reason to ask is
   usually that something else did not work.
-- **Agents** get `--format agent`, where every diagnostic carries an
-  `agent_instruction` string that can be acted on without reading the source.
+
+  Every plan tool's optional `root` selects a complete context, not just another directory of
+  Markdown. Pass either a repository directory containing `.aplan.yml` or that repository's
+  configured plan directory; a nested partial directory is refused. The server resolves that
+  selection's plan root, configuration-relative traces, warning and vocabulary policy, evidence
+  providers, ID strategy and Git worktree together. An explicit-root result is wrapped as
+  `{ "context": ..., "result": ... }`; its context paths are repository-relative and state
+  whether a symlink was resolved. Omitting `root` preserves the launch context and its historical
+  payload shape. A root containing `..` and a symlink both mean their canonical target; a missing
+  path, non-directory, mismatched configured root, or ambiguous config-free subdirectory fails
+  closed and never borrows the launch repository's policy.
+
+  Treat an explicit repository root as a trust choice. Its validated `.aplan.yml` is the policy in
+  force. `aplan_show` never starts configured providers; `aplan_verify` may run configured
+  test-list, URL and version providers but still never executes a cited test. Do not let an
+  untrusted caller select arbitrary host directories. In a config-free Git worktree only the
+  worktree root (using its `aplan/` child) and
+  that child are accepted. An existing directory outside Git remains a config-free plan root, with
+  its parent as the repository fallback. The launch context and every explicit context honour
+  `traces_root` and `no_traces`; `aplan_show` resolves historical traced-document findings in that
+  same frame.
+
+  A server that entered identity-only mode because its launch configuration could not be read
+  still refuses every plan tool. An explicit `root` is not a way to bypass that startup refusal;
+  call `aplan_identity`, correct or upgrade the configured server, and restart it.
+
+Slow human CLI commands use one delayed stderr progress row across plan loading, repository work,
+configured providers and final projection. `--progress auto` shows it only when both streams are
+attended terminals outside CI; `always` opts in beside redirected or structured stdout, and
+`never` is the explicit zero-byte contract for agents and scripts. Concurrent providers appear as
+one bounded count without exposing configured names or output. `NO_COLOR`, `TERM=dumb` and
+`--color never` retain meaningful plain or non-animated forms, and progress never changes stdout
+or the command verdict.
 
 ## Spec-driven
 
@@ -658,15 +1007,114 @@ no_traces: false                # or switch trace checking off entirely
 test:                           # the runner for `aplan verify --execute`
   list: ["cargo", "test", "--", "--list"]
   run:  ["cargo", "test", "--", "--exact", "{test}"]
+  batch:                       # optional one-process adapter; `run` stays as fallback
+    protocol: 1
+    run: ["./ci/aplan-test-batch", "{manifest}", "{result}"]
+  inputs_by_test:              # optional exhaustive refresh dependency map; not proof coverage
+    - tests: ['unit::*']
+      paths: ['src/**', 'fixtures/unit/**']
   skipped: ["cargo", "test", "--", "--list", "--ignored"]   # tests it will not run (APLAN014)
   timeout_seconds: 600          # how long `list` may take before the runner is reported
+  max_output: 1M                # bytes retained from each output stream; default 1M
+docs:                           # the default input to `aplan check-docs`
+  paths: [README.md, 'docs/*.md'] # literals or globs; relative values use this file
+  membership:                   # these documents join `paths` automatically
+    - doc: ROADMAP.md
+      declared_by: line
+      marker: "**Tasks:**"
+owners: [ada, grace]            # canonical task owners (APLAN056); unassigned stays valid
+capture:                        # repository-portable intake organization; no user-local defaults
+  kinds: [question]             # appends to built-in task, idea and note
+  profiles:
+    triage:                     # selected explicitly by a capture creation command
+      kind: idea
+      labels: [inbox]
+      body: "## Context"
+      promotion:                # inert defaults; ordinary task validation still applies later
+        phase: 2
+        effort_days: 1
+        tags: [feature]
 evidence:                       # minimum evidence strength for `done` (APLAN017)
   require_min_strength: [commit, test, file]  # a note alone is not enough...
   exempt_tags: [phone]          # ...except on tasks tagged thus, where it is
+  observation_inputs: [Cargo.toml, Cargo.lock, 'src/**', 'tests/**'] # exhaustive test-list inputs
 deny_warnings: false            # make a warning a finding, so every gate blocks
 advisory: [APLAN022]            # hear these rules in full, without being stopped by them
 id_strategy: sequential         # or `ulid`, for authors who mint ids offline in parallel
 ```
+
+`docs.paths` makes the document gate a repository decision instead of an argument list copied
+into CI. `aplan check-docs` with no paths expands every declaration deterministically; each
+literal must be a file and each glob must match at least one file, so a misspelling or a directory
+that became empty cannot produce a vacuous green run. A single `*` stays within one directory and
+`**` crosses directories. A document named by `docs.membership[].doc` is already declared and need
+not be repeated. Passing paths explicitly overrides the declaration for a narrow one-off check.
+Directories are not implicit inputs: declare a glob so additions to the intended set join the gate.
+
+`owners` turns the task model's free-text `owner` into an opt-in repository vocabulary. With no
+list, every spelling remains legal. With one, `APLAN056` reports any present owner outside it and
+offers a correction when a declared value is one edit away; a task with no owner remains valid.
+The same vocabulary validates `policy[].when.owner`, so one configuration cannot call a spelling
+non-canonical and also use it as a policy boundary. The list is field-specific on purpose: `owner`
+is currently the only free-text categorical scalar, so a generic string-field vocabulary would add
+a second schema with one real member. An unused listed owner is silent because a team roster may
+legitimately contain someone with no current task, and scalar/optional `owner` already supplies the
+useful cardinality.
+
+Capture intake is separate repository data below the resolved plan root: one strict YAML file at
+`.inbox/I-<26-character ULID>.yml`. A missing directory is an empty inbox. `check` and `verify`
+report malformed records as `APLAN057`, but task graph reads such as `ready`, summary and roadmap
+prune the whole reserved subtree and never reinterpret an idea or note as work. The generated
+contract is [`schemas/v1/capture.json`](schemas/v1/capture.json). Timestamps are UTC RFC 3339 at
+whole-second precision; open, promoted and discarded are the complete lifecycle vocabulary.
+
+`capture.kinds` adds lower-case ASCII kebab-case organization keys to the built-ins `task`, `idea`
+and `note`. A named profile can default capture kind, labels and body plus promotion phase, cut,
+effort, owner, paths and task tags. It cannot set identity, source, lifecycle, status, dependencies,
+evidence, traces or commands. Applied effective values are snapshotted into each record, so a later
+config edit cannot silently change promotion or source-retry equivalence. This is committed shared
+policy; per-user config has no capture keys.
+
+The shortest intake path creates one open `task`-kind capture without putting it in the task graph:
+
+```sh
+aplan capture "Investigate incremental graph layout"
+aplan capture "Could this be simpler?" --kind idea --label ux
+printf '%s' "$DETAILS" | aplan capture "Renderer edges" --body-file -
+```
+
+`--body`, `--body-file`, `--edit`, `--profile`, `--source namespace:key`, `--revisit-at` and
+snapshotted `--promotion-*` defaults are optional. `--edit` parses `VISUAL` or `EDITOR` into an
+executable and arguments and launches it directly, without a shell. Capture and disposition clocks
+are supplied by aplan; only the review hint `revisit_at` is user-authored. Use `--` before a title
+that begins with `-`.
+
+`aplan inbox` lists actionable open captures newest first and always reports how many open captures
+are deferred. `--kind`, `--state`, `--label`, `--revisit`, bounded `--search` and `--limit` filters
+have stable JSON equivalents. `inbox show`, `amend`, `discard` and `restore` accept a canonical
+unambiguous `I-...` prefix for a human, but every result carries the full id. Amend applies only to
+open records; discard records an injected disposition instant and optional reason; restore applies
+only to discarded records and clears that disposition.
+
+`aplan inbox promote I-... --cut M-next --effort 1 --path 'src/**'` creates an ordinary `todo`
+task from the capture title and body, then retains the capture as an immutable origin snapshot.
+Snapshotted profile values are defaults: explicit phase, cut, effort, owner, paths and tags win.
+The ordinary typed `add` constructor and complete post-state warning policy still decide whether
+the task is valid. A dry run previews the task, cut and capture files and reports both full ids.
+Publication holds the plan and complete inbox snapshot together; a race or late write failure
+leaves neither side changed. Repeating an equivalent request returns the original task id without
+creating another task, while a conflicting retry refuses. Promoted records are irreversible. V1
+has no purge, delete, archive or automatic expiry command. Every mutation supports `--dry-run`,
+uses the shared application `ChangeSet`, and rechecks complete inbox membership under one
+publication lock so concurrent source retries and prefix changes cannot select or create the wrong
+record.
+
+An `owner` is durable responsibility, not a lock and not necessarily the person working now.
+`aplan claim` records that shorter-lived fact outside the plan, under Git's common administrative
+directory, so linked worktrees see one compare-and-swap record without dirtying task files.
+`claim` and `release` never change `owner`; `--owner team --unclaimed` therefore usefully means
+"team is responsible, but nobody has claimed it locally." See ADR-0051 for the failure and recovery
+contract.
 
 `evidence.require_min_strength` is a **progression, not a preference**, and the two ends of it
 look like disagreement if nobody says so. **Start at the widest setting with an exempt tag you
@@ -695,12 +1143,78 @@ minute has not answered. A timeout is reported as its own outcome -- *not checke
 answer" -- because nothing was learned. `test.run` under `--execute` is deliberately unbounded: a
 long test run is the point rather than a symptom, and that limit belongs to your harness.
 
+There are three separate layers of bounds because they constrain three separate things.
+`max_memory` and `max_processes` constrain the child command through cgroups where the platform
+permits it.
+`output_lines` constrains how much of a failed test reaches a finding. `max_output` constrains the
+bytes **aplan itself retains** while draining a configured command, defaults to 1 MiB for each of
+stdout and stderr, and works on every platform. The reader keeps the first and last halves of that
+budget and drains everything between them, so a chatty child neither grows the parent without bound
+nor blocks on a full pipe; a failed-test excerpt still gets the tail where runners usually explain
+the failure. When capture drops bytes, the diagnostic names their count and `test.max_output`.
+Commands whose stdout is their answer (`test.list`, `test.skipped`, and `version.current`) fail
+loudly on truncation rather than treating a partial catalogue or value as complete. The same
+`max_output` key is available under `url` and each declared version command.
+
+**Batch execution is optional and adapter-owned.** A runner with `batch.protocol: 1` receives a
+private `aplan/test-batch-manifest/v1` JSON document at the whole-argument `{manifest}` path and
+must publish `aplan/test-batch-result/v1` at the initially absent `{result}` path. The manifest
+contains a nonce, a digest identifying the runner and every distinct cited identity that runner
+owns. The result repeats the nonce and provider, declares `complete: true`, and reports exactly one
+`passed`, `failed`, `skipped`, `stopped` or `unavailable` row for every request. Missing, duplicate,
+extra, malformed or non-passing rows fail closed; a nonzero adapter exit cannot be overruled by a
+file claiming passes. Names never enter argv, and aplan starts at most one adapter process for that
+runner. The configured adapter owns framework selection and native report parsing; it should write
+a sibling temporary file and rename it to `{result}` only when the complete answer is ready.
+
+Legacy `run: ... {test}` remains required and has no deprecation date. It is used when `batch` is
+absent and is the rollback path if an adapter must be removed. ADR-0054 specifies the bounded JSON
+contract and maps pytest node ids, Vitest file/full-name selectors and Playwright file/title
+selection without putting framework parsers in aplan.
+
+**Provider concurrency is explicit, weighted and local to one aplan invocation.** The original
+single-runner mapping and runner sequence remain serial. To overlap independent catalogue commands
+and, under `--execute`, independent runners' skipped-list/batch stages, opt into the scheduled form:
+
+```yaml
+test:
+  schedule: {capacity: 4}
+  runners:
+    - name: rust
+      weight: 2                    # this runner consumes two capacity units
+      exclusive: [compiler-cache] # capacity-one names, acquired together
+      list: [cargo, test, --workspace, --, --list]
+      run: [cargo, test, --workspace, --, --exact, '{test}']
+    - name: web
+      weight: 1
+      exclusive: [browser-port]
+      dir: web
+      list: [pnpm, test, --list]
+      run: [pnpm, test, '{test}']
+```
+
+`capacity` and every `weight` are positive integers; a runner defaults to weight one and cannot
+weigh more than the schedule. `exclusive` is an optional nonempty set of exact, case-sensitive
+names. A job starts only when its complete weight and every named resource are free, so it never
+holds one resource while waiting for another. Weight is admission accounting for harnesses that
+fan out internally, not a second OS limit: `max_memory` and `max_processes` still constrain each
+child command independently. Named resources coordinate only provider work in this process; they
+are not a machine-wide or distributed lock. Results, findings and cost rows retain configured
+runner order even when commands finish in another order. ADR-0055 records the scheduling and
+cancellation contract.
+
 `id_strategy` is the one key whose cost is paid by everyone who reads the plan. `aplan add`
 normally continues the sequence a plan already uses (`A1-046` -> `A1-047`), which is what
 makes it fit a repository rather than impose a format on one, and it has dstask's documented
 failure: two people working offline both derive `A1-047` and find out at the merge.
 `APLAN002` catches the collision there, so a plan cannot end up holding two tasks under one
-id, but the repair is a manual renumber and every reference to the loser moves with it.
+id. After preserving both sides of Git's add/add conflict, repair the losing allocation with
+`aplan rekey OLD NEW`: it changes the frontmatter id, the conventional filename, every structured
+task reference, and an id-based milestone policy as one guarded write. It never rewrites prose,
+because the same spelling may correctly name the other branch's task; instead it reports each
+possible occurrence by path and line for review. Git history, published links, external documents
+and other repositories remain outside that boundary. A `done` or `dropped` task therefore needs
+the explicit `--allow-terminal` acknowledgement.
 
 Setting `ulid` removes the collision instead of detecting it: the counter is replaced by a
 ULID, 48 bits of timestamp and 80 random bits, so two authors offline cannot derive the same
@@ -738,8 +1252,9 @@ build does not know is refused rather than ignored, since a typo would downgrade
 while reading like a repository that had made a choice.
 
 Two things it deliberately cannot do. It cannot make `close` and `verify` disagree: a
-citation this policy tolerates is one `close` records, because `close` refuses exactly
-what `verify` rejects and reads the same policy to decide. And it cannot make a plan that
+citation this policy tolerates is one ordinary close records at L2, because close refuses exactly
+what ordinary verify rejects and reads the same policy to decide. Focused `close --execute` raises
+that same proposed citation to L3 and refuses unless it passed. And it cannot make a plan that
 did not *load* acceptable: a file the loader could not read leaves every other rule's
 silence about that file meaningless, so `check`, `verify`, `ready` and `why` all refuse
 it whatever `advisory:` says.
@@ -764,6 +1279,11 @@ A citation resolves if exactly one runner lists it, and `--execute` runs it with
 If two runners list the same name the citation does not identify a test, so `APLAN013` fails
 and names both rather than picking by config order.
 
+Runner `dir` is always relative to the selected repository root. This remains
+true when `--config` selects a trusted policy file outside the checkout: the
+policy chooses what may run, while the command inspects the repository under
+review.
+
 Three properties make the file trustworthy:
 
 - **Schema-derived, like the task schema.** `schemas/v1/config.json` is *derived*
@@ -787,7 +1307,7 @@ the checkout. There is a second, optional file for the other kind of setting, th
 
 ```yaml
 # ~/.config/aplan/config.yml  (or $XDG_CONFIG_HOME/aplan/config.yml)
-me: ada          # who `aplan claim` records, for every repository on this machine
+me: ada          # unauthenticated label `aplan claim` records on this machine
 ```
 
 That is the whole file today. **It deliberately cannot hold anything `.aplan.yml` holds**, and the
@@ -803,6 +1323,10 @@ there would be the right one for at most one of them. And the file has to be *ou
 repository for the same reason: both `XDG_CONFIG_HOME` and `HOME` are required to be absolute, so a
 checkout cannot supply one by leaving `HOME` empty. Pin the behaviour with
 `aplan facts --require identity.reads_a_per_user_file`.
+
+The label is attribution, not authentication. Each claim records whether it came from `--as`,
+`APLAN_OWNER`, this file, Git, or the operating-system fallback, and warns on common machine/test
+placeholders. Use distinct labels for distinct actors sharing a host.
 
 `--no-config` does not suppress this file, and that is deliberate: the flag exists so a tree under review cannot say what a run may do, and this file is yours rather than the tree's. It holds nothing a repository can require, so there is nothing in it for that flag to protect you from.
 
@@ -825,14 +1349,19 @@ Build from source. **Rust 1.88 or newer**, which is `rust-version` in
 actually builds with rather than an aspiration:
 
 ```sh
-cargo build --release        # binary at target/release/aplan
+cargo build --release        # standard binary with the default-on TUI
+cargo build --release --no-default-features # explicit headless binary
 ```
+
+The headless shape omits `aplan-tui`, Ratatui and Crossterm but keeps an actionable `aplan tui`
+stub. Assert the package shape instead of guessing it with
+`aplan facts --require build.tui`.
 
 Or take the released binary, a statically linked Linux x86_64 build published with
 its `sha256` (`v0.1.0` onward), so it runs whatever glibc the host ships. `cargo
 install aplan` will work once the crate is released.
 
-A build from `main` reports a pre-release version (`0.4.0-dev`), never the version
+A build from `main` reports a pre-release version (`0.5.0-dev`), never the version
 of a published release, so a staged build can never be mistaken for one. Pin a
 *capability* rather than a name where you can:
 
@@ -853,7 +1382,7 @@ a plan you have not touched.
 
 ```yaml
 - uses: actions/checkout@v7
-- uses: asamarts/aplan@v0.3.0    # pinning the action pins the binary
+- uses: asamarts/aplan@v0.4.0    # pinning the action pins the binary
 ```
 
 That installs the release matching the tag you pinned, verifies it against the
@@ -863,7 +1392,7 @@ becomes an inline annotation on the pull request. Policy comes from your
 resolves evidence against git instead (check out with `fetch-depth: 0` for that).
 
 **Automating the gate turns the warning tier off.** Both commands exit `0` with warnings
-outstanding, by design -- and **25 of this tool's 53 rules are warnings**, among them
+outstanding, by design -- and **27 of this tool's 57 rules are warnings**, among them
 most of what it says about evidence: a task `done` over its own unticked acceptance
 criteria (`APLAN038`), a traced section that moved after closure (`APLAN018`), and,
 under `verify`, a commit so broad it would have overlapped almost any task's `paths`
@@ -903,25 +1432,26 @@ planning real work with the tool, which is a measurement rather than a wait
 
 ### Changing a plan without breaking it
 
-`add`, `close` and `import` create and complete; the rest of a plan's life is
-editing YAML, which is fine for an estimate and not fine where hand-editing can
-break an invariant. Two mutations qualify:
+`add`, `close` and `import` create and complete; the rest of a plan's life includes
+edits for which hand-written YAML can break a cross-file invariant. Those edits
+have guarded commands, including:
 
 ```sh
 aplan mv RD1-04 --cut M-s0     # edits both milestones, or neither
+aplan mv RD1-04 --phase 2      # changes the rollup coordinate, not the stable id
 aplan drop RD3-01              # records the cancellation rather than deleting it
 aplan drop M-s3 --cut          # the whole cut: its members, then the milestone
 ```
 
-Both resolve everything before writing anything, so a refusal leaves the plan
-exactly as it was, and both parse back what they wrote before saving it, on
+They resolve everything before writing anything, so a refusal leaves the plan
+exactly as it was, and parse back what they wrote before saving it, on
 `close`'s standard that a rewrite the tool cannot read again is a corrupted file.
 `drop` refuses a task that is already `done` or `dropped`: those record a
 decision, and rewriting one silently would launder it.
 
-Everything else is still YAML on purpose. Changing an estimate or a `paths` glob
-breaks nothing that `check` will not catch on the next run, and a command for it
-would be write surface bought with no invariant to maintain.
+Fields such as an estimate or a `paths` glob remain YAML on purpose: changing
+one breaks nothing that `check` will not catch on the next run, and a command for
+it would be write surface bought with no invariant to maintain.
 
 ### Announcing a removal, and keeping the promise
 
@@ -965,11 +1495,40 @@ notice you want published. None of this fails a build: the report is where
 somebody who has a runway goes looking, and a plan without one is not a plan with
 a problem.
 
-### Rollups this tool does not have
+### Rollups beyond the built-in views
 
-`summary` rolls up by phase. Anything else is `aplan tasks`, which emits the plan
-as data with the awkward parts already resolved (the cut a task belongs to,
-whether it is ready), so a consumer is not re-implementing the graph:
+`summary` rolls up by phase by default. A plan with a declared tag family can
+make that family the view without changing the roadmap's independent grouping:
+
+```yaml
+tag_families:
+  kind: [kind-build, kind-measure, kind-review]
+summary:
+  group_by: kind
+```
+
+These are three independent concepts, not nested spellings for the same thing
+(ADR-0046). A **phase** is the required ordered number used by the default
+summary and as a hint when minting a new id; it gates nothing and changing it
+does not rekey the task. A **cut** is the only membership level and owns work
+through its milestone. A **tag family** is a repository-declared vocabulary for
+a view such as kind, epic, team, or stage. A cut may span phases, and
+cross-cutting work with no cut still has a phase.
+
+A task carrying several members appears in every matching row, and the report
+says those rows overlap; totals still count it once. A task carrying none lands
+in `(no group)`. `APLAN026` validates member spelling but does not impose
+cardinality; declare an `APLAN030` policy on the family if multiple membership
+is invalid for the plan.
+
+The human report names the family and quotes member labels. The quotes are
+semantic rather than decoration: a real member called `(no group)` or `total`
+stays distinct from the table's synthetic rows, and whitespace is escaped
+rather than flattened into a different member. JSON keeps the raw strings.
+
+Any other or ad hoc rollup is `aplan tasks`, which emits the plan as data with
+the awkward parts already resolved (the cut a task belongs to, whether it is
+ready), so a consumer is not re-implementing the graph:
 
 ```sh
 # effort by cut, live work only
@@ -984,11 +1543,11 @@ aplan tasks --format json | jq -r '
   | "\(.[0].tags[0] // "untyped")\t\(map(.effort_days // 0)|add)d"'
 ```
 
-The second is the rollup a pilot kept by hand, in a table that was wrong twice
-during its own audit, because 20 of its 105.5 days were wall-clock bound and no
-command could say so. `status` is carried rather than filtered, so cancelled work
-is the consumer's decision. The document's shape is `schemas/v1/tasks.json`,
-derived from the Rust types and gated like the others.
+The second is the rollup that motivated `summary.group_by`; the `jq` form remains
+useful when a one-off view should not become repository policy. `status` is
+carried rather than filtered, so cancelled work is the consumer's decision. The
+document's shape is `schemas/v1/tasks.json`, derived from the Rust types and
+gated like the others.
 
 ## Self-hosting
 

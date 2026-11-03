@@ -55,6 +55,35 @@ pub struct PhaseSummary {
     pub done_effort_days: f64,
 }
 
+/// A summary rolled up by one declared tag family rather than by phase.
+///
+/// Group rows may overlap: tags are a vocabulary, not containment, and a task
+/// may carry more than one member unless the repository separately declares an
+/// `APLAN030` cardinality policy. `overall` is consequently computed from the
+/// selected plan tasks themselves, never by summing these rows (`A1-186`).
+#[derive(Debug, Clone, PartialEq)]
+pub struct GroupedSummary {
+    /// The declared family name, as written in `summary.group_by`.
+    pub family: String,
+    /// Non-empty member rows in declaration order, then the ungrouped row.
+    pub groups: Vec<GroupSummary>,
+    overall: Summary,
+}
+
+/// One tag-family member's rollup. `label: None` is the tasks carrying no
+/// member of the family.
+#[derive(Debug, Clone, PartialEq)]
+pub struct GroupSummary {
+    pub label: Option<String>,
+    pub tasks: usize,
+    pub done: usize,
+    pub ready: usize,
+    pub effort_days: f64,
+    pub dropped: usize,
+    pub dropped_effort_days: f64,
+    pub done_effort_days: f64,
+}
+
 /// Weeks of work `effort` represents at `per_week`, or `None` when the
 /// repository declared no throughput (`A1-147`, ADR-0023).
 ///
@@ -140,6 +169,68 @@ impl Summary {
     }
 }
 
+impl GroupedSummary {
+    /// Attach the same repository throughput as the ordinary phase summary.
+    #[must_use]
+    pub fn with_throughput(mut self, effort_days_per_week: Option<f64>) -> Self {
+        self.overall = self.overall.with_throughput(effort_days_per_week);
+        self
+    }
+
+    pub fn ready(&self) -> usize {
+        self.overall.ready
+    }
+
+    pub fn effort_days_per_week(&self) -> Option<f64> {
+        self.overall.effort_days_per_week
+    }
+
+    pub fn total_tasks(&self) -> usize {
+        self.overall.total_tasks()
+    }
+
+    pub fn total_done(&self) -> usize {
+        self.overall.total_done()
+    }
+
+    pub fn total_effort_days(&self) -> f64 {
+        self.overall.total_effort_days()
+    }
+
+    pub fn total_dropped(&self) -> usize {
+        self.overall.total_dropped()
+    }
+
+    pub fn total_dropped_effort_days(&self) -> f64 {
+        self.overall.total_dropped_effort_days()
+    }
+
+    pub fn total_done_effort_days(&self) -> f64 {
+        self.overall.total_done_effort_days()
+    }
+
+    pub fn total_weeks(&self) -> Option<f64> {
+        self.overall.total_weeks()
+    }
+
+    pub fn remaining_weeks(&self) -> Option<f64> {
+        self.overall.remaining_weeks()
+    }
+
+    /// Whether at least one selected task appears in more than one group row.
+    ///
+    /// Every selected task appears in one or more rows: unmatched tasks land in
+    /// the ungrouped row. A larger row sum can therefore only be overlap.
+    pub fn groups_overlap(&self) -> bool {
+        let row_memberships: usize = self
+            .groups
+            .iter()
+            .map(|group| group.tasks + group.dropped)
+            .sum();
+        row_memberships > self.total_tasks() + self.total_dropped()
+    }
+}
+
 impl Graph<'_> {
     /// Roll the plan up by phase, with the count of ready tasks. Phases come out
     /// in ascending order (`BTreeMap`), so the output is deterministic.
@@ -196,6 +287,100 @@ impl Graph<'_> {
             effort_days_per_week: None,
         }
     }
+
+    /// Roll the plan up by the members of one declared tag family.
+    #[must_use]
+    pub fn summary_grouped_by(&self, family: &str, members: &[String]) -> GroupedSummary {
+        self.summary_grouped_by_of(family, members, &|_| true)
+    }
+
+    /// The grouped rollup over the tasks `keep` admits.
+    ///
+    /// Readiness is computed over the whole graph before the selection, for the
+    /// same reason [`Graph::summary_of`] does so: excluding a blocker must not
+    /// turn the task it blocks into ready work.
+    #[must_use]
+    pub fn summary_grouped_by_of(
+        &self,
+        family: &str,
+        members: &[String],
+        keep: &dyn Fn(&str) -> bool,
+    ) -> GroupedSummary {
+        let ready: std::collections::BTreeSet<&str> = self
+            .ready()
+            .into_iter()
+            .filter(|task| keep(task.id.as_str()))
+            .map(|task| task.id.as_str())
+            .collect();
+        let tasks: Vec<_> = self
+            .by_id
+            .values()
+            .copied()
+            .filter(|task| keep(task.id.as_str()) && !task.is_milestone())
+            .collect();
+        let mut groups = Vec::new();
+        for label in members {
+            let matching: Vec<_> = tasks
+                .iter()
+                .copied()
+                .filter(|task| task.tags.iter().any(|tag| tag == label))
+                .collect();
+            if !matching.is_empty() {
+                groups.push(group_summary(Some(label.clone()), matching, &ready));
+            }
+        }
+        let ungrouped: Vec<_> = tasks
+            .iter()
+            .copied()
+            .filter(|task| {
+                !members
+                    .iter()
+                    .any(|member| task.tags.iter().any(|tag| tag == member))
+            })
+            .collect();
+        if !ungrouped.is_empty() {
+            groups.push(group_summary(None, ungrouped, &ready));
+        }
+        GroupedSummary {
+            family: family.to_string(),
+            groups,
+            overall: self.summary_of(keep),
+        }
+    }
+}
+
+fn group_summary(
+    label: Option<String>,
+    tasks: Vec<&crate::task::Task>,
+    ready: &std::collections::BTreeSet<&str>,
+) -> GroupSummary {
+    let mut out = GroupSummary {
+        label,
+        tasks: 0,
+        done: 0,
+        ready: 0,
+        effort_days: 0.0,
+        dropped: 0,
+        dropped_effort_days: 0.0,
+        done_effort_days: 0.0,
+    };
+    for task in tasks {
+        if task.status == Status::Dropped {
+            out.dropped += 1;
+            out.dropped_effort_days += task.effort_days.unwrap_or(0.0);
+            continue;
+        }
+        out.tasks += 1;
+        out.done += usize::from(task.status == Status::Done);
+        out.ready += usize::from(ready.contains(task.id.as_str()));
+        if let Some(days) = task.effort_days {
+            out.effort_days += days;
+            if task.status == Status::Done {
+                out.done_effort_days += days;
+            }
+        }
+    }
+    out
 }
 
 #[cfg(test)]
@@ -225,6 +410,7 @@ mod tests {
             paths: Vec::new(),
             traces: Vec::new(),
             trace_fingerprints: std::collections::BTreeMap::new(),
+            evidence_fingerprints: std::collections::BTreeMap::new(),
             tags: Vec::new(),
             revisit_at: None,
             version_impact: None,
@@ -357,6 +543,77 @@ mod tests {
         assert_eq!(summary.ready, 0);
         assert!(summary.total_effort_days().abs() < 1e-9);
     }
+
+    #[test]
+    fn a_declared_family_rolls_up_overlaps_without_double_counting_the_total() {
+        let mut both = task("A", 0, Status::Done, Some(2.0), &[]);
+        both.tags = vec!["kind-build".into(), "kind-review".into()];
+        let mut review = task("B", 1, Status::Todo, Some(3.0), &[]);
+        review.tags = vec!["kind-review".into()];
+        let ungrouped = task("C", 1, Status::Todo, Some(4.0), &["B"]);
+        let mut dropped = task("D", 1, Status::Dropped, Some(5.0), &[]);
+        dropped.tags = vec!["kind-build".into()];
+        let graph = Graph::new([&both, &review, &ungrouped, &dropped]);
+
+        let summary = graph.summary_grouped_by(
+            "kind",
+            &["kind-build".to_string(), "kind-review".to_string()],
+        );
+
+        assert_eq!(summary.family, "kind");
+        assert_eq!(summary.groups.len(), 3);
+        assert_eq!(summary.groups[0].label.as_deref(), Some("kind-build"));
+        assert_eq!(
+            (
+                summary.groups[0].tasks,
+                summary.groups[0].done,
+                summary.groups[0].ready,
+                summary.groups[0].dropped,
+            ),
+            (1, 1, 0, 1)
+        );
+        assert!((summary.groups[0].effort_days - 2.0).abs() < f64::EPSILON);
+        assert!((summary.groups[0].dropped_effort_days - 5.0).abs() < f64::EPSILON);
+
+        assert_eq!(summary.groups[1].label.as_deref(), Some("kind-review"));
+        assert_eq!(
+            (
+                summary.groups[1].tasks,
+                summary.groups[1].done,
+                summary.groups[1].ready,
+            ),
+            (2, 1, 1)
+        );
+        assert!((summary.groups[1].effort_days - 5.0).abs() < f64::EPSILON);
+
+        assert_eq!(summary.groups[2].label, None);
+        assert_eq!((summary.groups[2].tasks, summary.groups[2].ready), (1, 0));
+        assert!((summary.groups[2].effort_days - 4.0).abs() < f64::EPSILON);
+
+        // A is in two rows, but it is one task in the plan. The total is a
+        // distinct rollup, not the sum of overlapping group rows.
+        assert_eq!(summary.total_tasks(), 3);
+        assert_eq!(summary.total_done(), 1);
+        assert_eq!(summary.ready(), 1);
+        assert!((summary.total_effort_days() - 9.0).abs() < f64::EPSILON);
+        assert_eq!(summary.total_dropped(), 1);
+        assert!((summary.total_dropped_effort_days() - 5.0).abs() < f64::EPSILON);
+        assert!(summary.groups_overlap());
+    }
+
+    #[test]
+    fn a_grouped_selection_does_not_recompute_readiness_inside_the_subset() {
+        let blocker = task("A", 0, Status::Todo, Some(1.0), &[]);
+        let mut dependent = task("B", 0, Status::Todo, Some(2.0), &["A"]);
+        dependent.tags = vec!["kind-build".into()];
+        let graph = Graph::new([&blocker, &dependent]);
+        let summary =
+            graph.summary_grouped_by_of("kind", &["kind-build".to_string()], &|id| id == "B");
+
+        assert_eq!(summary.groups[0].tasks, 1);
+        assert_eq!(summary.groups[0].ready, 0);
+        assert_eq!(summary.ready(), 0);
+    }
 }
 
 #[cfg(test)]
@@ -380,6 +637,7 @@ mod duration_tests {
             paths: Vec::new(),
             traces: Vec::new(),
             trace_fingerprints: std::collections::BTreeMap::new(),
+            evidence_fingerprints: std::collections::BTreeMap::new(),
             tags: Vec::new(),
             revisit_at: None,
             version_impact: None,

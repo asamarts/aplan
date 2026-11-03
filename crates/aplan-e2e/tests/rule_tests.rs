@@ -20,7 +20,7 @@
 //! The audit's job is narrower: make "I only wrote the happy path" impossible to
 //! do by accident.
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::path::{Path, PathBuf};
 
 /// `crates/aplan-e2e/..` -> the workspace root.
@@ -113,6 +113,7 @@ fn every_rule_is_unit_tested_in_the_crate_that_raises_it() {
     }
 
     let constants = rule_constants(&root);
+    let capability_selectors = capability_detector_selectors(&constants);
     let mut missing: Vec<String> = Vec::new();
     let mut unemitted: Vec<&str> = Vec::new();
     for rule in aplan_core::Rule::ALL {
@@ -127,7 +128,12 @@ fn every_rule_is_unit_tested_in_the_crate_that_raises_it() {
             .clone();
         let emitters: Vec<&String> = production
             .iter()
-            .filter(|(_, text)| mentions(&raising_only(text), &konst))
+            .filter(|(_, text)| {
+                mentions(&raising_only(text), &konst)
+                    || capability_selectors.get(&konst).is_some_and(|selectors| {
+                        selectors.iter().any(|selector| text.contains(selector))
+                    })
+            })
             .map(|(name, _)| name)
             .collect();
         if emitters.is_empty() {
@@ -155,6 +161,49 @@ fn every_rule_is_unit_tested_in_the_crate_that_raises_it() {
         "these rules are in Rule::ALL but nothing outside diagnostic.rs raises them, so they \
          cannot fire: {unemitted:?}"
     );
+}
+
+/// Rule constants selected indirectly by an evidence capability, and the
+/// production method call that proves a crate consumes that selection.
+///
+/// Most diagnostics spell `code::CONSTANT` at their construction site, which
+/// is exactly what the source audit above should look for. Locality and dilution
+/// deliberately do not: `EvidenceKind::ALL` owns the detector and the resolver
+/// asks that model for it. Deriving both sides here keeps the audit useful after
+/// that indirection without adding a second hand-written rule list beside it.
+fn capability_detector_selectors(
+    constants: &BTreeMap<String, String>,
+) -> BTreeMap<String, BTreeSet<&'static str>> {
+    let mut out: BTreeMap<String, BTreeSet<&'static str>> = BTreeMap::new();
+    for kind in aplan_core::EvidenceKind::ALL {
+        for (detector, selector) in [
+            (
+                Some(kind.capabilities().capture.detector()),
+                "capture_detector(",
+            ),
+            (
+                kind.capabilities().freshness.detector(),
+                "freshness_detector(",
+            ),
+            (
+                kind.capabilities().locality.detector(),
+                ".detector_for_locator(",
+            ),
+            (
+                kind.capabilities().dilution.detector(),
+                ".detector_for_measure(",
+            ),
+        ] {
+            let Some(detector) = detector else {
+                continue;
+            };
+            let konst = constants.get(detector).unwrap_or_else(|| {
+                panic!("evidence capability names unknown detector `{detector}`")
+            });
+            out.entry(konst.clone()).or_default().insert(selector);
+        }
+    }
+    out
 }
 
 /// Whether `text` names `konst` as a whole word, so `WEAK_EVIDENCE` is not

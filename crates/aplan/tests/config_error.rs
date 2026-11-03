@@ -16,7 +16,7 @@
 
 use std::process::Command;
 
-mod common;
+use crate::common;
 use common::aplan;
 
 /// An empty plan and the given `.aplan.yml`.

@@ -6,7 +6,7 @@
 //! tasks tagged `epic:a`, where the documented shape is the whole tag, and every
 //! layer accepted it (pre-public adoption evidence, item 9).
 
-mod common;
+use crate::common;
 use common::aplan;
 
 /// One task carrying `tag`, under the given `.aplan.yml`.

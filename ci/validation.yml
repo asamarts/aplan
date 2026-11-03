@@ -1,0 +1,146 @@
+schema: 1
+profiles:
+  development:
+    assurance: selected
+  full:
+    assurance: full
+  release:
+    assurance: release
+    requires: full
+    same_source: true
+selection:
+  schema: 1
+  rust:
+    gates: [clippy, doc, test, spec]
+    cross_cutting_packages: [aplan, aplan-e2e, xtask]
+    global_basenames: [Cargo.toml, build.rs]
+  global_gates: [clippy, doc, test, spec, msrv-build, supply-chain]
+  paths:
+    - name: build-and-ci
+      disposition: global
+      gates: [clippy, doc, test, spec, msrv-build, supply-chain]
+      exact:
+        - .containerignore
+        - .config/nextest.toml
+        - Cargo.lock
+        - Cargo.toml
+        - deny.toml
+        - action.yml
+        - rust-toolchain.toml
+      prefixes: [.cargo/, .github/, ci/, tools/]
+    - name: plan-and-generated-contracts
+      disposition: selected
+      gates: [spec]
+      exact:
+        - .aplan.yml
+        - AGENTS.md
+        - ROADMAP.md
+        - ROADMAP.status.md
+      prefixes: [aplan/]
+    - name: generated-contracts
+      disposition: global
+      gates: [clippy, doc, test, spec, msrv-build, supply-chain]
+      exact:
+        - cli-surface.json
+        - coverage.json
+        - facts.json
+      prefixes: [schemas/]
+    - name: documentation-and-policy
+      disposition: selected
+      gates: [spec]
+      exact:
+        - .github-account
+        - .gitignore
+        - .house-style.yml
+        - CHANGELOG.md
+        - CLAUDE.md
+        - CODE_OF_CONDUCT.md
+        - CONTRIBUTING.md
+        - HLD.md
+        - LICENSE-APACHE
+        - LICENSE-MIT
+        - README.md
+        - SECURITY.md
+      prefixes: [docs/]
+    - name: executable-examples
+      disposition: selected
+      gates: [test, spec]
+      prefixes: [examples/]
+gates:
+  - name: fmt
+    command: ci/scripts/fmt.sh
+    input_class: repository
+    isolation: [none]
+    development: always
+    full: required
+    release: inherited
+  - name: clippy
+    command: ci/scripts/clippy.sh
+    input_class: rust-workspace
+    isolation: [shared-cargo-target]
+    development: selectable
+    full: required
+    release: inherited
+  - name: doc
+    command: ci/scripts/doc.sh
+    input_class: rust-workspace
+    isolation: [shared-cargo-target]
+    development: selectable
+    full: required
+    release: inherited
+  - name: test
+    command: ci/scripts/test.sh
+    input_class: rust-workspace
+    isolation: [shared-cargo-target, isolated-aplan-cache]
+    development: selectable
+    full: required
+    release: inherited
+  - name: spec
+    command: ci/scripts/spec.sh
+    input_class: generated-contracts
+    isolation: [shared-cargo-target]
+    development: selectable
+    full: required
+    release: inherited
+  - name: msrv-build
+    command: ci/scripts/msrv-build.sh
+    input_class: declared-msrv
+    isolation: [isolated-cargo-target]
+    development: selectable
+    full: required
+    release: inherited
+  - name: style
+    command: ci/scripts/style.sh
+    input_class: repository
+    isolation: [none]
+    development: always
+    full: required
+    release: inherited
+  - name: supply-chain
+    command: ci/scripts/supply-chain.sh
+    input_class: dependency-policy
+    isolation: [shared-cargo-target, network-advisory-db]
+    development: selectable
+    full: required
+    release: inherited
+  - name: coverage
+    command: ci/scripts/coverage.sh
+    input_class: rust-workspace
+    isolation: [isolated-coverage-target]
+    development: deferred
+    full: required
+    release: inherited
+  - name: structural
+    command: ci/scripts/structural.sh
+    input_class: plan-structure
+    isolation: [shared-cargo-target]
+    development: always
+    full: required
+    release: inherited
+  - name: evidence
+    command: ci/scripts/evidence.sh
+    input_class: plan-and-evidence
+    isolation: [shared-cargo-target, full-git-history]
+    development: deferred
+    full: required
+    release: inherited

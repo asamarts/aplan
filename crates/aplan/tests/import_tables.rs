@@ -18,7 +18,7 @@ use std::fmt::Write as _;
 use std::path::Path;
 use std::process::Command;
 
-mod common;
+use crate::common;
 use common::aplan;
 
 fn fixture() -> &'static Path {
@@ -296,7 +296,8 @@ fn an_import_with_no_long_titles_says_nothing_about_rewriting() {
 /// A proposal repository has no equivalent field, so every imported task takes
 /// the one the flag names. Left unexercised, an import that silently filed
 /// everything at the default phase would look exactly like a working one, and
-/// `phase` is what `summary` and `roadmap` group the plan by.
+/// `phase` is the destination reporting coordinate and `summary`'s default row
+/// key; roadmap independently groups by cut.
 #[test]
 fn imported_tasks_take_the_phase_they_are_given() {
     let dir = tempfile::Builder::new()

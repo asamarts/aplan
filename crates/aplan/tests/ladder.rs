@@ -13,7 +13,7 @@
 use std::path::Path;
 use std::process::Command;
 
-mod common;
+use crate::common;
 use common::aplan;
 
 fn git(dir: &Path, args: &[&str]) {
@@ -49,6 +49,32 @@ fn head(dir: &Path) -> String {
         .output()
         .expect("rev-parse");
     String::from_utf8_lossy(&out.stdout).trim().to_string()
+}
+
+/// Exercise the shared mutation post-state resolver separately from `close`'s
+/// citation preflight (`A1-572`).
+fn assert_amend_refuses_unreachable(dir: &Path, unreachable: &str) {
+    let reachable_task = dir.join("aplan/tasks/T-301.md");
+    let before = std::fs::read_to_string(&reachable_task).expect("reachable task");
+    let (amended, code) = aplan(
+        dir,
+        &[
+            "amend",
+            "T-301",
+            "--add-evidence",
+            &format!("commit:{unreachable}"),
+        ],
+    );
+    assert_eq!(code, 1, "amend wrote locally-only evidence:\n{amended}");
+    assert!(
+        amended.contains("APLAN011") && amended.contains("T-301"),
+        "{amended}"
+    );
+    assert_eq!(
+        std::fs::read_to_string(reachable_task).expect("unchanged reachable task"),
+        before,
+        "the refused post-state mutation wrote anyway"
+    );
 }
 
 /// A `done` task citing a real commit but declaring no `paths`: `APLAN023`
@@ -180,6 +206,117 @@ fn evidence_rules_still_run_and_are_reported_together() {
     // And `check` alone cannot see it, which is what keeps both commands useful.
     let (check, _) = aplan(dir.path(), &["check"]);
     assert!(!check.contains("APLAN011"), "check is hermetic: {check}");
+}
+
+/// Proves `evidence.commit_requires_head_reachability` end to end (`A1-572`):
+/// an ordinary ancestor is reproducible from the verified tree, while neither
+/// an unmerged branch nor a dangling object left by a removed linked worktree
+/// is. `close` goes through the same post-state resolver and must not write the
+/// latter citation.
+#[test]
+fn only_commits_reachable_from_head_can_be_commit_evidence() {
+    let dir = repo();
+    let reachable = head(dir.path());
+    let branch = Command::new("git")
+        .args(["branch", "--show-current"])
+        .current_dir(dir.path())
+        .output()
+        .expect("current branch");
+    let branch = String::from_utf8_lossy(&branch.stdout).trim().to_string();
+
+    git(dir.path(), &["checkout", "-qb", "unmerged"]);
+    std::fs::write(dir.path().join("f.txt"), "unmerged\n").expect("side work");
+    git(dir.path(), &["add", "f.txt"]);
+    git(dir.path(), &["commit", "-qm", "unmerged work"]);
+    let unmerged = head(dir.path());
+    git(dir.path(), &["checkout", "-q", &branch]);
+
+    let linked_parent = tempfile::Builder::new()
+        .tempdir_in(aplan_core::fixture::fixture_root())
+        .expect("linked worktree parent");
+    let linked = linked_parent.path().join("worktree");
+    let linked_arg = linked.to_str().expect("UTF-8 fixture path");
+    git(
+        dir.path(),
+        &["worktree", "add", "-qb", "abandoned", linked_arg, "HEAD"],
+    );
+    std::fs::write(linked.join("f.txt"), "abandoned\n").expect("worktree work");
+    git(&linked, &["add", "f.txt"]);
+    git(&linked, &["commit", "-qm", "abandoned worktree work"]);
+    let abandoned = head(&linked);
+    git(dir.path(), &["worktree", "remove", "--force", linked_arg]);
+    git(dir.path(), &["branch", "-D", "abandoned"]);
+
+    for (id, reference) in [
+        ("T-301", &reachable),
+        ("T-302", &unmerged),
+        ("T-303", &abandoned),
+    ] {
+        std::fs::write(
+            dir.path().join(format!("aplan/tasks/{id}.md")),
+            format!(
+                "---\nid: {id}\ntitle: reachability fixture\nphase: 1\nstatus: done\n\
+                 paths: [f.txt]\nevidence:\n  - kind: commit\n    ref: '{reference}'\n---\n"
+            ),
+        )
+        .expect("task");
+    }
+    std::fs::write(
+        dir.path().join("aplan/tasks/T-304.md"),
+        "---\nid: T-304\ntitle: mutation fixture\nphase: 1\nstatus: todo\n\
+         effort_days: 1\npaths: [f.txt]\n---\n",
+    )
+    .expect("todo task");
+    git(dir.path(), &["add", "-A"]);
+    git(
+        dir.path(),
+        &["commit", "-qm", "record reachability fixtures"],
+    );
+
+    let (out, code) = aplan(dir.path(), &["verify"]);
+    assert_eq!(code, 1, "locally-only citations must fail:\n{out}");
+    assert_eq!(
+        out.matches("APLAN011").count(),
+        2,
+        "only the unmerged and abandoned citations fail:\n{out}"
+    );
+    assert!(out.contains("T-302") && out.contains("T-303"), "{out}");
+    assert!(
+        !out.lines()
+            .any(|line| line.contains("APLAN011") && line.contains("T-301")),
+        "the reachable ancestor was rejected:\n{out}"
+    );
+    assert!(
+        out.contains("resolves locally") && out.contains("not reachable"),
+        "the diagnostic conflated local reachability with absence:\n{out}"
+    );
+
+    let (closed, code) = aplan(
+        dir.path(),
+        &[
+            "close",
+            "T-304",
+            "--evidence",
+            &format!("commit:{abandoned}"),
+        ],
+    );
+    assert_eq!(code, 1, "close wrote locally-only evidence:\n{closed}");
+    assert!(
+        closed.contains("APLAN011") && closed.contains("T-304"),
+        "{closed}"
+    );
+    let task =
+        std::fs::read_to_string(dir.path().join("aplan/tasks/T-304.md")).expect("unchanged task");
+    assert!(
+        task.contains("status: todo"),
+        "the refused close wrote status: {task}"
+    );
+    assert!(
+        !task.contains(&abandoned),
+        "the refused close wrote evidence: {task}"
+    );
+
+    assert_amend_refuses_unreachable(dir.path(), &abandoned);
 }
 
 // --- one task's defect must not silence the plan (`A1-066`) ------------------

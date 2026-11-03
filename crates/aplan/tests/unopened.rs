@@ -19,7 +19,7 @@
 use std::path::Path;
 use std::process::Command;
 
-mod common;
+use crate::common;
 
 fn git(dir: &Path, args: &[&str]) {
     let out = Command::new("git")
@@ -219,12 +219,14 @@ fn the_two_surfaces_report_it_identically() {
             options: aplan_core::validate::Options::default(),
             verdict: aplan_core::Verdict::default(),
             verify: aplan_evidence::VerifyOptions {
+                detect_drift: false,
                 version: None,
                 traces_root: None,
                 config_file: None,
                 execute: false,
                 test_runner: None,
                 max_unrelated_files: None,
+                observation_inputs: None,
                 url_check: None,
             },
             repo_root: dir.path().to_path_buf(),

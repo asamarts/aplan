@@ -8,7 +8,7 @@
 
 use std::path::Path;
 
-mod common;
+use crate::common;
 use common::aplan;
 
 fn write(dir: &Path, rel: &str, body: &str) {
@@ -51,6 +51,312 @@ fn plan() -> tempfile::TempDir {
          tags: [milestone, s1]\nblocked_by: [B-01, B-02, M-s0]\n---\n",
     );
     dir
+}
+
+fn git_plan() -> tempfile::TempDir {
+    let dir = plan();
+    let output = std::process::Command::new("git")
+        .args(["init", "-q"])
+        .current_dir(dir.path())
+        .output()
+        .expect("git init");
+    assert!(output.status.success());
+    dir
+}
+
+#[test]
+fn portfolio_parking_is_atomic_scheduled_claim_aware_and_reversible() {
+    let dir = git_plan();
+    let (out, code) = aplan(
+        dir.path(),
+        &[
+            "park",
+            "A-01",
+            "M-s0",
+            "--reason",
+            "Wait for the post-MVP funding decision.",
+            "--revisit-at",
+            "2030-01-02T03:04:05Z",
+            "--tag",
+            "post-mvp",
+        ],
+    );
+    assert_eq!(code, 0, "{out}");
+    assert!(out.contains("parked 2 task(s): A-01, M-s0"), "{out}");
+    for id in ["A-01", "M-s0"] {
+        let task = std::fs::read_to_string(dir.path().join(format!("aplan/tasks/{id}.md")))
+            .expect("parked task");
+        assert!(task.contains("status: blocked"), "{id}: {task}");
+        assert!(
+            task.contains("revisit_at: 2030-01-02T03:04:05Z"),
+            "{id}: {task}"
+        );
+        assert!(task.contains("post-mvp"), "{id}: {task}");
+        assert!(task.contains("## Parked"), "{id}: {task}");
+        assert!(task.contains("funding decision"), "{id}: {task}");
+    }
+
+    let (out, code) = aplan(dir.path(), &["unpark", "A-01", "M-s0"]);
+    assert_eq!(code, 0, "{out}");
+    for id in ["A-01", "M-s0"] {
+        let task = std::fs::read_to_string(dir.path().join(format!("aplan/tasks/{id}.md")))
+            .expect("unparked task");
+        assert!(task.contains("status: todo"), "{id}: {task}");
+        assert!(!task.contains("revisit_at:"), "{id}: {task}");
+        assert!(task.contains("post-mvp"), "{id}: {task}");
+        assert!(task.contains("## Parked"), "{id}: {task}");
+    }
+
+    let (out, code) = aplan(dir.path(), &["start", "B-01"]);
+    assert_eq!(code, 0, "{out}");
+    let a_before =
+        std::fs::read_to_string(dir.path().join("aplan/tasks/A-01.md")).expect("A before");
+    let b_before =
+        std::fs::read_to_string(dir.path().join("aplan/tasks/B-01.md")).expect("B before");
+    let (out, code) = aplan(
+        dir.path(),
+        &["park", "A-01", "B-01", "--reason", "One target is active."],
+    );
+    assert_eq!(code, 2, "{out}");
+    assert!(out.contains("stop active work"), "{out}");
+    assert_eq!(
+        std::fs::read_to_string(dir.path().join("aplan/tasks/A-01.md")).expect("A after"),
+        a_before
+    );
+    assert_eq!(
+        std::fs::read_to_string(dir.path().join("aplan/tasks/B-01.md")).expect("B after"),
+        b_before
+    );
+
+    let (out, code) = aplan(dir.path(), &["claim", "A-02", "--as", "tester"]);
+    assert_eq!(code, 0, "{out}");
+    let (out, code) = aplan(
+        dir.path(),
+        &[
+            "park",
+            "A-02",
+            "--reason",
+            "Claimed work must stay visible.",
+        ],
+    );
+    assert_eq!(code, 2, "{out}");
+    assert!(out.contains("claimed by `tester`"), "{out}");
+    let claimed =
+        std::fs::read_to_string(dir.path().join("aplan/tasks/A-02.md")).expect("claimed task");
+    assert!(claimed.contains("status: todo"), "{claimed}");
+}
+
+/// Proves `portfolio.refuses_alternate_optional_scalar_keys`: a quoted
+/// `revisit_at` is recognised before `unpark` builds a candidate, reported as
+/// actionable plan input, and prevents every earlier target in the batch from
+/// reaching disk. The ordinary CRLF path still changes only status and the one
+/// scheduling line (`A1-721`).
+#[test]
+fn unpark_refuses_alternate_revisit_keys_atomically_and_clears_ordinary_source_exactly() {
+    let ordinary = git_plan();
+    let path = ordinary.path().join("aplan/tasks/A-01.md");
+    let source = std::fs::read_to_string(&path)
+        .expect("ordinary source")
+        .replace(
+            "status: todo\n",
+            "status: blocked\nrevisit_at : 2030-01-02T03:04:05Z # schedule\n",
+        )
+        .replace('\n', "\r\n");
+    std::fs::write(&path, &source).expect("ordinary parked task");
+    let (out, code) = aplan(ordinary.path(), &["unpark", "A-01"]);
+    assert_eq!(code, 0, "{out}");
+    let expected = source
+        .replace("status: blocked", "status: todo")
+        .replace("revisit_at : 2030-01-02T03:04:05Z # schedule\r\n", "");
+    assert_eq!(
+        std::fs::read_to_string(&path).expect("ordinary unparked task"),
+        expected,
+        "ordinary unpark changed an unrelated byte"
+    );
+
+    let structural = git_plan();
+    let first = structural.path().join("aplan/tasks/A-01.md");
+    let second = structural.path().join("aplan/tasks/A-02.md");
+    let first_before = std::fs::read_to_string(&first)
+        .expect("first source")
+        .replace(
+            "status: todo\n",
+            "status: blocked\nrevisit_at: 2030-01-02T03:04:05Z\n",
+        );
+    let second_before = std::fs::read_to_string(&second)
+        .expect("second source")
+        .replace(
+            "status: todo\n",
+            "status: blocked\n'revisit_at': 2030-01-02T03:04:05Z\n",
+        );
+    std::fs::write(&first, &first_before).expect("first parked task");
+    std::fs::write(&second, &second_before).expect("second parked task");
+
+    let (out, code) = aplan(structural.path(), &["unpark", "A-01", "A-02"]);
+    assert_eq!(code, 2, "{out}");
+    assert!(out.contains("revisit_at"), "{out}");
+    assert!(out.contains("change it by hand"), "{out}");
+    assert!(!out.contains("bug in aplan"), "{out}");
+    assert_eq!(
+        std::fs::read_to_string(first).expect("first after refusal"),
+        first_before,
+        "a safe batch prefix was written"
+    );
+    assert_eq!(
+        std::fs::read_to_string(second).expect("second after refusal"),
+        second_before,
+        "the structural target was written"
+    );
+}
+
+/// Proves `mutation.refuses_multiline_plain_scalar_rewrites` for optional
+/// scalar replacement, clearing and multi-task atomicity.
+#[test]
+fn portfolio_refuses_multiline_plain_revisit_values_atomically() {
+    let clearing = git_plan();
+    let first = clearing.path().join("aplan/tasks/A-01.md");
+    let second = clearing.path().join("aplan/tasks/A-02.md");
+    let first_before = std::fs::read_to_string(&first)
+        .expect("first source")
+        .replace(
+            "status: todo\n",
+            "status: blocked\nrevisit_at: 2030-01-02T03:04:05Z\n",
+        );
+    let second_before = std::fs::read_to_string(&second)
+        .expect("second source")
+        .replace(
+            "status: todo\n",
+            "status: blocked\nrevisit_at: 2030-01-02T03:04:05Z\n  after-review\n",
+        );
+    std::fs::write(&first, &first_before).expect("first parked task");
+    std::fs::write(&second, &second_before).expect("second parked task");
+
+    let (out, code) = aplan(clearing.path(), &["unpark", "A-01", "A-02"]);
+    assert_eq!(code, 2, "the clear reached an internal exit: {out}");
+    assert!(
+        out.contains("revisit_at") && out.contains("change it by hand"),
+        "{out}"
+    );
+    assert!(!out.contains("bug in aplan"), "{out}");
+    assert_eq!(
+        std::fs::read_to_string(&first).expect("first after refusal"),
+        first_before,
+        "an earlier safe batch member was written"
+    );
+    assert_eq!(
+        std::fs::read_to_string(&second).expect("second after refusal"),
+        second_before,
+        "the multiline clear target was written"
+    );
+
+    let setting = git_plan();
+    let path = setting.path().join("aplan/tasks/A-01.md");
+    let before = std::fs::read_to_string(&path).expect("source").replace(
+        "status: todo\n",
+        "status: todo\nrevisit_at: 2029-01-02T03:04:05Z\n  after-review\n",
+    );
+    std::fs::write(&path, &before).expect("scheduled todo task");
+    let (out, code) = aplan(
+        setting.path(),
+        &[
+            "park",
+            "A-01",
+            "--reason",
+            "Defer after review.",
+            "--revisit-at",
+            "2030-01-02T03:04:05Z",
+        ],
+    );
+    assert_eq!(code, 2, "the replacement reached an internal exit: {out}");
+    assert!(
+        out.contains("revisit_at") && out.contains("change it by hand"),
+        "{out}"
+    );
+    assert!(!out.contains("bug in aplan"), "{out}");
+    assert_eq!(
+        std::fs::read_to_string(&path).expect("task after refusal"),
+        before,
+        "park changed the multiline source before refusing"
+    );
+}
+
+#[test]
+fn portfolio_transition_refusals_cover_every_status_and_argument_neighbour() {
+    let todo = git_plan();
+    let path = todo.path().join("aplan/tasks/A-01.md");
+    let before = std::fs::read_to_string(&path).expect("todo before");
+    let (out, code) = aplan(todo.path(), &["unpark", "A-01"]);
+    assert_eq!(code, 2, "{out}");
+    assert!(out.contains("not parked"), "{out}");
+    assert_eq!(std::fs::read_to_string(&path).expect("todo after"), before);
+
+    for status in ["done", "dropped"] {
+        let terminal = git_plan();
+        let path = terminal.path().join("aplan/tasks/A-01.md");
+        let text = std::fs::read_to_string(&path).expect("terminal source");
+        let replacement = if status == "done" {
+            "status: done\nevidence:\n- kind: note\n  ref: reviewed\n  captured: 2026-10-30"
+        } else {
+            "status: dropped"
+        };
+        std::fs::write(&path, text.replace("status: todo", replacement)).expect("terminal state");
+        let before = std::fs::read_to_string(&path).expect("terminal before");
+        for command in [
+            vec!["park", "A-01", "--reason", "later"],
+            vec!["unpark", "A-01"],
+        ] {
+            let (out, code) = aplan(terminal.path(), &command);
+            assert_eq!(code, 2, "{status} {command:?}: {out}");
+            assert!(out.contains("terminal"), "{out}");
+            assert_eq!(
+                std::fs::read_to_string(&path).expect("terminal after"),
+                before
+            );
+        }
+    }
+
+    let parked = git_plan();
+    let (out, code) = aplan(
+        parked.path(),
+        &["park", "A-01", "--reason", "first decision"],
+    );
+    assert_eq!(code, 0, "{out}");
+    let path = parked.path().join("aplan/tasks/A-01.md");
+    let before = std::fs::read_to_string(&path).expect("parked before");
+    let (out, code) = aplan(
+        parked.path(),
+        &["park", "A-01", "--reason", "second decision"],
+    );
+    assert_eq!(code, 2, "{out}");
+    assert!(out.contains("already parked"), "{out}");
+    assert_eq!(
+        std::fs::read_to_string(&path).expect("parked after"),
+        before
+    );
+
+    for args in [
+        vec!["park", "A-01", "A-01", "--reason", "duplicate"],
+        vec!["park", "A-01", "--reason", "\u{200b}"],
+        vec![
+            "park",
+            "A-01",
+            "--reason",
+            "scheduled",
+            "--revisit-at",
+            "2030-01-02",
+        ],
+        vec!["park", "A-01", "--reason", "tagged", "--tag", "\u{200b}"],
+    ] {
+        let invalid = git_plan();
+        let path = invalid.path().join("aplan/tasks/A-01.md");
+        let before = std::fs::read_to_string(&path).expect("invalid before");
+        let (out, code) = aplan(invalid.path(), &args);
+        assert_eq!(code, 2, "{args:?}: {out}");
+        assert_eq!(
+            std::fs::read_to_string(&path).expect("invalid after"),
+            before
+        );
+    }
 }
 
 /// A cut can be created, filled and sequenced without opening an editor

@@ -17,10 +17,11 @@
 
 use std::path::Path;
 
-mod common;
+use crate::common;
 
 /// A repository with one closed task and one live task that already cites
-/// something, which are the two refusals that have a remedy.
+/// something. Only the closed task can use evidence amendment; the live task
+/// has to reconcile the pre-existing field before close can own its first proof.
 fn repo(dir: &Path) -> String {
     std::fs::create_dir_all(dir.join("aplan/tasks")).expect("mkdir");
     std::fs::create_dir_all(dir.join("src")).expect("src");
@@ -68,8 +69,8 @@ fn invocations(text: &str) -> Vec<Vec<String>> {
         .collect()
 }
 
-/// **Both refusals name `amend --add-evidence`, and clap accepts what they
-/// name.**
+/// **The closed-task refusal names `amend --add-evidence`, and clap accepts what
+/// it names.**
 ///
 /// The placeholders are substituted with real values first, so this asserts the
 /// *shape* is runnable rather than that the literal string parses.
@@ -81,10 +82,7 @@ fn a_refusal_that_has_a_remedy_names_a_command_that_runs() {
         .expect("tempdir");
     repo(dir.path());
 
-    for (id, why) in [
-        ("T-1", "a task that is already closed"),
-        ("T-2", "a live task that already cites something"),
-    ] {
+    for (id, why) in [("T-1", "a task that is already closed")] {
         let out = common::run(dir.path(), &["close", id, "--evidence", "file:src/a.rs"]);
         assert_eq!(out.code, 2, "{why} was not refused: {out:?}");
         assert!(
@@ -121,6 +119,23 @@ fn a_refusal_that_has_a_remedy_names_a_command_that_runs() {
                 });
         }
     }
+}
+
+#[test]
+fn a_live_task_with_evidence_is_not_sent_to_a_done_only_command() {
+    let dir = tempfile::Builder::new()
+        .prefix("close-live-evidence-advice-")
+        .tempdir_in(aplan_core::fixture::fixture_root())
+        .expect("tempdir");
+    repo(dir.path());
+
+    let out = common::run(dir.path(), &["close", "T-2", "--evidence", "file:src/a.rs"]);
+    assert_eq!(out.code, 2, "the live task was not refused: {out:?}");
+    assert!(!out.text().contains("aplan amend"), "{out:?}");
+    assert!(
+        out.text().contains("Review") && out.text().contains("reconcile or remove"),
+        "the refusal does not say what state must be reconciled: {out:?}"
+    );
 }
 
 /// **And the command it names does the thing.**
@@ -193,6 +208,10 @@ fn a_hand_edit_is_only_suggested_where_no_command_does_it() {
         (
             "`note` evidence needs a `captured` date",
             "neither surface invents a date, and both refuse it identically",
+        ),
+        (
+            "the top-level `evidence:` value is not one source-local ordinary citation sequence",
+            "no command can decide how an anchor, alias or tag shared outside the field should be simplified",
         ),
     ];
 

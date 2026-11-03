@@ -1,0 +1,128 @@
+== LOCAL PARTIAL ==
+FORM: Edit task
+> Title [required; one value] - What needs doing
+    * 1: |
+    LOCAL title: a value is required
+  Dependencies [optional; ordered list] - Task ids
+      1: A-1
+    * 2: 
+    LOCAL ids: list entry 2 is incomplete
+  Tags [optional; ordered list] - Classification
+    * 1: 
+  Paths [optional; ordered list] - Owned files
+    * 1: 
+  Traces [optional; ordered list] - Design facts
+    * 1: 
+  Evidence [optional; ordered list] - Proof citations
+    * 1: 
+Controls:  Cancel   Review
+== DOMAIN INVALID ==
+FORM: Edit task
+  Title [required; one value] - What needs doing
+    * 1: A complete title
+  Dependencies [optional; ordered list] - Task ids
+    * 1: 
+  Tags [optional; ordered list] - Classification
+    * 1: 
+  Paths [optional; ordered list] - Owned files
+    * 1: 
+  Traces [optional; ordered list] - Design facts
+    * 1: 
+  Evidence [optional; ordered list] - Proof citations
+    * 1: 
+PLAN: typed service refused the request
+  the selected task no longer exists
+Controls:  Cancel  >Review
+== ACCEPTED ==
+PREVIEW: Edit task
+Verdict: READY
+Preview input: <input-digest>
+Affected tasks (1)
+TASK 1/1: A-2
+Impact: 1 task(s), 1 file(s); focused; confirmation requires one fresh k
+ey press
+Files (1)
+FILE 1/1 [replace]: tasks/A-2.md
+--- 85 byte(s)
+---0001|---
+---0002|id: A-2
+---0003|title: second
+---0004|phase: 1
+---0005|status: todo
+---0006|effort_days: 1
+---0007|blocked_by: [A-1]
+---0008|---
+--- ends with newline
++++ 67 byte(s)
++++0001|---
++++0002|id: A-2
++++0003|title: second
++++0004|phase: 1
++++0005|status: todo
++++0006|effort_days: 1
++++0007|---
++++ ends with newline
+Semantic changes (1)
+  remove dependency: A-2 after A-1
+Findings (0)
+Evidence: not required
+Controls: >Cancel   Recompute   Confirm
+== NO-OP ==
+PREVIEW: Edit task
+Verdict: NO-OP
+Preview input: <input-digest>
+Affected tasks (0)
+Impact: 0 task(s), 0 file(s); none; confirmation is disabled
+Files (0)
+Semantic changes (0)
+Findings (0)
+Evidence: not required
+Controls: >Cancel   Recompute   Confirm disabled
+== DENIED ==
+PREVIEW: Edit task
+Verdict: DENIED
+Preview input: <input-digest>
+Affected tasks (1)
+TASK 1/1: A-1
+Impact: 1 task(s), 1 file(s); focused; confirmation requires one fresh k
+ey press
+Files (1)
+FILE 1/1 [replace]: tasks/A-1.md
+--- 66 byte(s)
+---0001|---
+---0002|id: A-1
+---0003|title: first
+---0004|phase: 1
+---0005|status: todo
+---0006|effort_days: 1
+---0007|---
+--- ends with newline
++++ 86 byte(s)
++++0001|---
++++0002|id: A-1
++++0003|title: first
++++0004|phase: 1
++++0005|status: todo
++++0006|effort_days: 1
++++0007|blocked_by:
++++0008|  - A-2
++++0009|---
++++ ends with newline
+Semantic changes (1)
+  add dependency: A-1 after A-2
+Findings (1)
+  error APLAN004 A-1: dependency cycle: A-1 -> A-2 -> A-1
+    fix: Break the cycle by removing one `blocked_by` edge; a plan with 
+a cycle has no valid execution order.
+Evidence: not required
+Controls: >Cancel   Recompute   Confirm disabled
+== STALE WINDOW ==
+PREVIEW: Edit task
+Verdict: STALE
+Preview input: <input-digest>
+Current input: new-input-digest
+Confirmation disabled: recompute from the curren
+t snapshot.
+Affected tasks (1)
+TASK 1/1: A-2
+Rows 1-9/37

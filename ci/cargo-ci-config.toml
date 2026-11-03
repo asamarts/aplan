@@ -1,0 +1,13 @@
+# One immutable-checkout build profile for both private and GitHub-hosted CI.
+# Keep this out of `.cargo/`: local debugging retains the workspace defaults.
+[build]
+incremental = false
+
+[profile.dev]
+debug = "line-tables-only"
+
+[profile.dev.package."*"]
+debug = false
+
+[profile.test]
+debug = "line-tables-only"

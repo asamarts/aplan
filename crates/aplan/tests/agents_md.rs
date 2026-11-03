@@ -10,7 +10,7 @@
 
 use std::path::Path;
 
-mod common;
+use crate::common;
 
 #[test]
 fn a_file_with_no_markers_keeps_its_prose_and_gains_a_block() {
@@ -121,6 +121,29 @@ fn a_hand_edited_block_is_reported_and_repaired() {
     run(dir.path(), &["export-agents-md", "--write", "AGENTS.md"]);
     let (_, _, ok) = run(dir.path(), &["export-agents-md", "--check", "AGENTS.md"]);
     assert!(ok, "the named repair repairs it");
+}
+
+/// This repository's committed contract must come from the binary built from
+/// this repository (`A1-625`).
+///
+/// The original repair cited a roadmap-banner test, which remained green while
+/// a stale executable rewrote both this block's surface digest and policy text.
+/// Exercise the actual generator check against the actual committed file: a
+/// fixture proves the command in isolation, but only this case proves the copy
+/// contributors and agents read agrees with this build.
+#[test]
+fn this_repositorys_committed_agent_contract_matches_this_build() {
+    let root = Path::new(env!("CARGO_MANIFEST_DIR"))
+        .parent()
+        .and_then(Path::parent)
+        .expect("workspace root");
+    let output = common::output(root, &["export-agents-md", "--check", "AGENTS.md"]);
+    assert!(
+        output.status.success(),
+        "committed AGENTS.md disagrees with this build:\n{}{}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
 }
 
 /// A file with no markers at all is a disagreement, not a pass.

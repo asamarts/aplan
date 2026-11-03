@@ -5,8 +5,24 @@
 //! testable without standing up a server. The `rmcp` handler is a thin adapter
 //! over these.
 //!
-//! The surface is **small on purpose** (`ready`, `why`, `check`, `verify`, `show`, `add`,
-//! `dep`, `close`).
+//! The surface is **bounded on purpose**. A CLI command earns a tool only when
+//! it is on the repository-scoped loop an agent must complete and the operation
+//! is narrow enough for the same implementation and gates as the CLI to judge:
+//! select or explain work, inspect one task, run the gates, create or order one
+//! piece of work, close it with evidence, or coordinate who is working on it.
+//!
+//! [`MCP_COMMAND_POLICY`] records every CLI command beside the tool or tools
+//! that project it, or the reason it remains CLI-only. Broad or alternate read
+//! views (including every rollup) stay on the CLI rather than making each
+//! presentation a tool; consequential rewrites whose correctness needs human
+//! judgement stay with a person; and repository bootstrap, interchange,
+//! signing, generation and process administration stay with the host. The
+//! cross-crate census compares the policy with both the clap command tree and
+//! [`TOOLS`], so neither a command nor a tool can be omitted by accident.
+//! `aplan_identity` is the bounded `facts --identity` projection: it answers
+//! about the configured server process while the rest of `facts` stays on the
+//! host.
+//!
 //! task-master ships ~36 tools costing ~21k tokens of context by default and had
 //! to add an env var to trim them (RESEARCH section 6); an ETH Zurich study over
 //! 138 repositories found context files raise inference cost by more than 20% and
@@ -28,7 +44,7 @@
 //! A person runs `aplan amend`. Recorded here rather than left to be noticed, so
 //! `A1-104`'s audit is not quietly narrower than the CLI.
 
-use std::path::{Path, PathBuf};
+use std::path::Path;
 
 use aplan_core::{Graph, Status, load_plan, validate};
 use serde::{Deserialize, Serialize};
@@ -65,24 +81,29 @@ pub const TOOLS: &[ToolSpec] = &[
     ToolSpec {
         name: "aplan_verify",
         description: "Resolve the plan's evidence against the repository (L1/L2): a cited \
-                      commit must exist and touch the task's `paths`, a cited file must \
-                      exist. Opens git. Never runs tests.",
+                      commit must be reachable from HEAD and touch the task's `paths`, a cited \
+                      file must exist. Opens git and may run configured discovery/check providers, \
+                      but never executes a cited test.",
     },
     ToolSpec {
         name: "aplan_add",
-        description: "Create a task: the next id in this plan's own convention (or its prefix \
-                      and a ULID, where the repository set `id_strategy: ulid`), placed in a \
-                      cut, whose `phase` it takes. Refuses before writing what `check` would reject after, by running \
-                      the rules on the plan this would produce; what it would only warn about \
-                      is named in `notes` instead.",
+        description: "Create a task with an explicit id and phase, or mint the next id in this \
+                      plan's own convention (including its configured ULID strategy) and derive \
+                      the phase from its cut. It accepts live initial states, every creation-time \
+                      relationship, revisit scheduling and version impact; terminal history uses \
+                      the CLI's evidence-resolving manifest ledger. With `members`, both identity fields are required: \
+                      create that milestone and move existing live work from its source cuts in \
+                      one guarded batch. Refuses before writing what `check` would reject after, \
+                      by running the rules on the plan this would produce; what it would only \
+                      warn about is named in `notes` instead.",
     },
     ToolSpec {
         name: "aplan_show",
         description: "One task whole: its `paths`, `traces` and `evidence`, which no other tool \
                       returns, plus what the graph resolves (its cut, whether it is ready, what \
                       it waits on and what it releases) and every finding attached to it. Reads \
-                      the evidence ladder, so a closed task whose citation rotted looks different \
-                      from a healthy one.",
+                      repository-backed evidence and retained typed provider observations without \
+                      starting configured processes; `aplan_verify` explicitly refreshes providers.",
     },
     ToolSpec {
         name: "aplan_dep",
@@ -103,32 +124,33 @@ pub const TOOLS: &[ToolSpec] = &[
         // "Recorded here, not resolved: run `aplan_verify`", which was true until
         // `A1-109` made close resolve before writing and false afterwards, so the
         // words told an agent to distrust a gate that had already run (`A1-131`).
-        description: "Close a task with evidence, resolved before it is written: a cited \
-                      commit must exist and touch the task's `paths`, a cited file must \
-                      exist, and a cited test must be one a configured runner lists. \
+        description: "Close a task with evidence, resolved at L2 before it is written: a cited \
+                      commit must be reachable from HEAD and touch the task's `paths`, a cited \
+                      file must exist, and a cited test must be one a configured runner lists. \
                       Refuses exactly what the CLI refuses; evidence is a citation to be \
-                      resolved, never a score the caller asserts. It never runs a test and \
-                      never fetches a url, and whatever nothing here could check is named \
+                      resolved, never a score the caller asserts. This agent tool never runs a \
+                      test; it never starts `test.run` or `test.batch`. Focused L3 closure is an explicit trusted CLI \
+                      or interactive action. It never fetches a url, and whatever nothing here could check is named \
                       in `unchecked` rather than left looking like a pass. `aplan_verify` \
                       resolves the whole plan.",
     },
     ToolSpec {
         name: "aplan_claim",
         description: "Record that you are working on a task, so other agents sharing this \
-                      repository can see it and `aplan_ready` can be filtered to what nobody \
-                      holds. Two agents cannot both be told they hold one task: the write is \
-                      a compare-and-swap, and the second is refused rather than overwriting \
-                      the first. Taking a task somebody holds needs `from` naming them, which \
-                      is checked. The name comes from `as`, else `APLAN_OWNER`, else the \
-                      repository's git user, else the operating system's; it is never read \
-                      from `.aplan.yml`, because several actors share one repository.",
+                      Git repository and all of its linked worktrees can see the same local \
+                      ephemeral claim. It never edits the task or its durable `owner`. Two \
+                      agents cannot both be told they hold one task: the common-directory \
+                      record is a compare-and-swap. Taking a held task needs `from` naming \
+                      the displaced holder. Labels are attribution, not authentication; the \
+                      response includes time, origin, source and coordination scope.",
     },
     ToolSpec {
         name: "aplan_release",
         description: "Drop a claim, reporting whose it was. Any caller may release, because a \
                       claim lasts until it is released or taken over and an abandoned one has \
-                      to be clearable by somebody else; the record of who held it is in the \
-                      diff. Releasing a task nobody holds changes nothing and says so.",
+                      to be clearable by somebody else. A missing task's orphaned local claim \
+                      can still be released explicitly. Releasing a visible task nobody holds \
+                      changes nothing and says so.",
     },
     ToolSpec {
         name: "aplan_start",
@@ -155,6 +177,211 @@ pub struct ToolSpec {
     /// One line, because a description is context an agent pays for.
     pub description: &'static str,
 }
+
+/// Why a CLI command deliberately has no MCP tool.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+pub enum CliOnlyReason {
+    /// A broad, scheduled, derived or presentation-specific read. The bounded
+    /// loop uses `ready`, `why`, `show`, `check` and `verify`; arbitrary rollups
+    /// remain available as CLI machine output without consuming tool context.
+    AlternateView,
+    /// A plan-history, membership, identity or taxonomy decision whose semantic
+    /// correctness cannot be established by the post-state validation gate.
+    HumanJudgement,
+    /// Repository bootstrap, bulk interchange, artifact generation, signing,
+    /// capability inspection or process administration owned by the host.
+    HostOperation,
+    /// A one-shot caller-selected local file whose exact bytes and digest are
+    /// the request identity. The stdio server has no attachment channel or
+    /// caller-relative path trust boundary for that input.
+    ExplicitLocalInput,
+    /// The shared application operation exists, but its separately gated MCP
+    /// adapter has not shipped yet. This is an explicit temporary boundary,
+    /// not an assertion that the operation is unsuitable for agents.
+    AdapterBoundary,
+}
+
+impl CliOnlyReason {
+    /// Stable explanation used by audits and documentation.
+    #[must_use]
+    pub const fn explanation(self) -> &'static str {
+        match self {
+            Self::AlternateView => {
+                "a broad, scheduled, derived or presentation-specific read; keep it as CLI \
+                 machine output instead of spending tool context on another view"
+            }
+            Self::HumanJudgement => {
+                "a consequential rewrite whose semantic correctness requires human judgement"
+            }
+            Self::HostOperation => {
+                "repository bootstrap, interchange, generation, signing, capability or process \
+                 administration owned by the host"
+            }
+            Self::ExplicitLocalInput => {
+                "a one-shot caller-selected local file with no MCP attachment or caller-relative \
+                 path trust boundary; use the CLI agent format, which reports the selected path, \
+                 digest and complete guarded result"
+            }
+            Self::AdapterBoundary => {
+                "the shared operation has landed ahead of its separately gated MCP adapter; use \
+                 CLI machine output until that adapter ships"
+            }
+        }
+    }
+}
+
+/// How one CLI command is represented on the bounded MCP surface.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum McpCommandDisposition {
+    /// The command's semantic operation is available as the named tool or
+    /// tools. Transport-level choices such as human versus JSON rendering are
+    /// not separate operations.
+    Mirrored { tools: &'static [&'static str] },
+    /// A deliberately narrower operation is exposed. `boundary` names what
+    /// remains on the CLI, so a partial counterpart cannot masquerade as the
+    /// whole command.
+    Projected {
+        tools: &'static [&'static str],
+        boundary: &'static str,
+    },
+    /// No part of the command is exposed as a tool.
+    Excluded { reason: CliOnlyReason },
+}
+
+impl McpCommandDisposition {
+    /// Tools driven by this command, empty only for an excluded command.
+    #[must_use]
+    pub const fn tools(self) -> &'static [&'static str] {
+        match self {
+            Self::Mirrored { tools } | Self::Projected { tools, .. } => tools,
+            Self::Excluded { .. } => &[],
+        }
+    }
+}
+
+/// One row in the executable CLI-to-MCP selection policy.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct McpCommandPolicy {
+    /// Clap subcommand name.
+    pub command: &'static str,
+    /// Whether it is mirrored, projected or deliberately excluded.
+    pub disposition: McpCommandDisposition,
+}
+
+impl McpCommandPolicy {
+    const fn mirrored(command: &'static str, tools: &'static [&'static str]) -> Self {
+        Self {
+            command,
+            disposition: McpCommandDisposition::Mirrored { tools },
+        }
+    }
+
+    const fn projected(
+        command: &'static str,
+        tools: &'static [&'static str],
+        boundary: &'static str,
+    ) -> Self {
+        Self {
+            command,
+            disposition: McpCommandDisposition::Projected { tools, boundary },
+        }
+    }
+
+    const fn excluded(command: &'static str, reason: CliOnlyReason) -> Self {
+        Self {
+            command,
+            disposition: McpCommandDisposition::Excluded { reason },
+        }
+    }
+}
+
+/// The complete CLI-to-MCP selection policy.
+///
+/// A cross-crate audit compares this with both the live clap tree and [`TOOLS`]
+/// in both directions. The rows distinguish a whole semantic counterpart from
+/// a bounded projection: notably, `aplan_identity` is `facts --identity`, not a
+/// server-only exception, while capability inspection remains host-owned.
+pub const MCP_COMMAND_POLICY: &[McpCommandPolicy] = &[
+    McpCommandPolicy::projected(
+        "check",
+        &["aplan_check"],
+        "the server's configured policy and JSON verdict are fixed; CLI rendering and per-run policy overrides remain on the CLI",
+    ),
+    McpCommandPolicy::projected(
+        "verify",
+        &["aplan_verify"],
+        "the tool resolves L1/L2 evidence only; test execution, automatic repair and per-run policy overrides remain on the CLI",
+    ),
+    // A complete catalogue can contain thousands of names (2,929 in this
+    // repository). Agents can use the queryable CLI machine shape without
+    // making that broad provider view another always-advertised MCP tool.
+    McpCommandPolicy::excluded("test", CliOnlyReason::AlternateView),
+    McpCommandPolicy::projected(
+        "ready",
+        &["aplan_ready"],
+        "the tool returns the whole derived JSON result; CLI selection and presentation switches remain on the CLI",
+    ),
+    McpCommandPolicy::excluded("due", CliOnlyReason::AlternateView),
+    McpCommandPolicy::mirrored("why", &["aplan_why"]),
+    McpCommandPolicy::excluded("version", CliOnlyReason::AlternateView),
+    McpCommandPolicy::excluded("graph", CliOnlyReason::AlternateView),
+    McpCommandPolicy::excluded("tui", CliOnlyReason::AlternateView),
+    McpCommandPolicy::projected(
+        "show",
+        &["aplan_show"],
+        "the tool returns the structured task with typed current or non-current evidence observations without its prose body; explicit refresh and human views remain on the CLI",
+    ),
+    McpCommandPolicy::excluded("explain", CliOnlyReason::AlternateView),
+    McpCommandPolicy::excluded("tree", CliOnlyReason::AlternateView),
+    McpCommandPolicy::excluded("paths", CliOnlyReason::AlternateView),
+    McpCommandPolicy::excluded("vacuity", CliOnlyReason::AlternateView),
+    McpCommandPolicy::excluded("stale", CliOnlyReason::AlternateView),
+    McpCommandPolicy::excluded("deprecations", CliOnlyReason::AlternateView),
+    McpCommandPolicy::excluded("attest", CliOnlyReason::HostOperation),
+    McpCommandPolicy::excluded("export-agents-md", CliOnlyReason::HostOperation),
+    McpCommandPolicy::excluded("export-roadmap-json", CliOnlyReason::HostOperation),
+    McpCommandPolicy::excluded("export", CliOnlyReason::HostOperation),
+    McpCommandPolicy::excluded("check-docs", CliOnlyReason::AlternateView),
+    McpCommandPolicy::excluded("summary", CliOnlyReason::AlternateView),
+    McpCommandPolicy::excluded("capture", CliOnlyReason::AdapterBoundary),
+    McpCommandPolicy::excluded("inbox", CliOnlyReason::AdapterBoundary),
+    McpCommandPolicy::excluded("drop", CliOnlyReason::HumanJudgement),
+    McpCommandPolicy::excluded("park", CliOnlyReason::HumanJudgement),
+    McpCommandPolicy::excluded("unpark", CliOnlyReason::HumanJudgement),
+    McpCommandPolicy::mirrored("claim", &["aplan_claim"]),
+    McpCommandPolicy::mirrored("release", &["aplan_release"]),
+    McpCommandPolicy::mirrored("start", &["aplan_start"]),
+    McpCommandPolicy::mirrored("stop", &["aplan_stop"]),
+    McpCommandPolicy::excluded("mv", CliOnlyReason::HumanJudgement),
+    McpCommandPolicy::excluded("rekey", CliOnlyReason::HumanJudgement),
+    McpCommandPolicy::excluded("tasks", CliOnlyReason::AlternateView),
+    McpCommandPolicy::excluded("critical-path", CliOnlyReason::AlternateView),
+    McpCommandPolicy::excluded("roadmap", CliOnlyReason::AlternateView),
+    McpCommandPolicy::projected(
+        "close",
+        &["aplan_close"],
+        "the tool requires explicit resolved evidence; deriving HEAD, bypassing resolution and trace restamping remain on the CLI",
+    ),
+    McpCommandPolicy::excluded("amend", CliOnlyReason::HumanJudgement),
+    McpCommandPolicy::excluded("supersede", CliOnlyReason::HumanJudgement),
+    McpCommandPolicy::mirrored("dep", &["aplan_dep"]),
+    McpCommandPolicy::excluded("tag", CliOnlyReason::HumanJudgement),
+    McpCommandPolicy::excluded("import", CliOnlyReason::HostOperation),
+    McpCommandPolicy::excluded("blueprint", CliOnlyReason::ExplicitLocalInput),
+    McpCommandPolicy::projected(
+        "add",
+        &["aplan_add"],
+        "the tool authors one live task or one cut around existing work; bulk input, terminal ledger correction, previews and output overrides remain on the CLI",
+    ),
+    McpCommandPolicy::excluded("mcp", CliOnlyReason::HostOperation),
+    McpCommandPolicy::excluded("init", CliOnlyReason::HostOperation),
+    McpCommandPolicy::projected(
+        "facts",
+        &["aplan_identity"],
+        "only the --identity document is exposed; capability inventory and requirement checks remain host operations",
+    ),
+    McpCommandPolicy::excluded("schema", CliOnlyReason::HostOperation),
+];
 
 /// Why a tool call could not be served.
 #[derive(Debug, thiserror::Error)]
@@ -191,6 +418,11 @@ fn save_task(path: &Path, expected: &str, updated: &str, tool: &str) -> Result<(
 /// What `ready` answers: the work, and the cuts that could be closed.
 #[derive(Debug, serde::Serialize)]
 pub struct Ready {
+    /// The local coordination boundary observed for every row below.
+    pub coordination: aplan_core::ClaimScope,
+    /// Clock shared by every claim row, so consumers can derive age without
+    /// sampling a different instant for each task.
+    pub claim_observed_at_epoch_seconds: i64,
     /// Work an agent can pick up now.
     pub ready: Vec<ReadyTask>,
     /// Milestones whose members are all done. Empty on an ordinary run; the
@@ -205,6 +437,9 @@ pub struct ReadyTask {
     pub id: String,
     /// One-line title.
     pub title: String,
+    /// Stable task responsibility, independent of the active claim below.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub owner: Option<String>,
     /// Estimated effort, when the task carries one.
     pub effort_days: Option<f64>,
     /// Unfinished tasks that become ready when this one is done, and whether it
@@ -247,10 +482,15 @@ pub struct ReadyTask {
     /// payload it reads. `ready --unclaimed` filters on the same value, so the
     /// list and the filter cannot disagree (`A1-182`).
     ///
-    /// Absent rather than empty when nobody holds it, because that is how the
-    /// model spells unassigned.
+    /// Absent rather than empty when nobody holds an active claim. Durable
+    /// assignment remains the task's separate `owner` field.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub held_by: Option<String>,
+    /// The complete ephemeral record, including time and unauthenticated
+    /// origin. `held_by` is retained as a compatibility convenience and is
+    /// always derived from this value.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub claim: Option<aplan_core::ClaimRecord>,
 }
 
 /// What `why` reports about one blocker.
@@ -279,7 +519,10 @@ pub struct Blocker {
 
 /// Tasks that can be started now.
 pub fn ready(root: &Path) -> Result<Ready, ToolError> {
-    Ok(ready_of(&load_plan(root)))
+    let plan = load_plan(root);
+    let claims = aplan_app::claims::snapshot(root, &plan)
+        .map_err(|error| ToolError::Plan(error.to_string()))?;
+    Ok(ready_of(&plan, &claims))
 }
 
 /// The same answer, over a plan the caller already has.
@@ -289,28 +532,33 @@ pub fn ready(root: &Path) -> Result<Ready, ToolError> {
 /// returned fields while the CLI could only be regular-expressed -- and two
 /// builders that must agree are two builders that eventually do not.
 #[must_use]
-pub fn ready_of(plan: &aplan_core::load::Plan) -> Ready {
+pub fn ready_of(plan: &aplan_core::load::Plan, claims: &aplan_core::ClaimSnapshot) -> Ready {
     let tasks: Vec<_> = plan.tasks.iter().map(|lt| &lt.task).collect();
     let graph = Graph::new(tasks.iter().copied());
     // `closeable_cuts` reuses this, and a cut's own chain is not a number a
     // reader of that list is asking for: it is offered because its members are
     // done, not because of what waits behind it.
-    let to_task = |t: &aplan_core::Task| ReadyTask {
-        downstream_depth: 0,
-        id: t.id.clone(),
-        title: t.title.clone(),
-        effort_days: t.effort_days,
-        // Overridden for the ranked list below. A cut is not ranked work and is
-        // never on the reported spine, but what closing it *releases* is the most
-        // useful number at a cut boundary: it is the moment `ready` is empty and
-        // the next cut's members are all waiting on this checkpoint (`A1-105`).
-        // Zero here would have read as "closing this releases nothing".
-        releases: 0,
-        critical: false,
-        prefers_to_follow: Vec::new(),
-        // Set for every row, including a closeable cut: a cut a repository has
-        // given an owner is a cut somebody is answerable for closing.
-        held_by: t.owner.clone(),
+    let to_task = |t: &aplan_core::Task| {
+        let claim = claims.claim(&t.id).cloned();
+        ReadyTask {
+            downstream_depth: 0,
+            id: t.id.clone(),
+            title: t.title.clone(),
+            owner: t.owner.clone(),
+            effort_days: t.effort_days,
+            // Overridden for the ranked list below. A cut is not ranked work and is
+            // never on the reported spine, but what closing it *releases* is the most
+            // useful number at a cut boundary: it is the moment `ready` is empty and
+            // the next cut's members are all waiting on this checkpoint (`A1-105`).
+            // Zero here would have read as "closing this releases nothing".
+            releases: 0,
+            critical: false,
+            prefers_to_follow: Vec::new(),
+            // Set for every row, including a closeable cut: active coordination
+            // is independent of whether the row represents work or a checkpoint.
+            held_by: claim.as_ref().map(|record| record.holder.clone()),
+            claim,
+        }
     };
     let releases = graph.releases_all();
     let ranked = graph.ready_ranked();
@@ -318,6 +566,8 @@ pub fn ready_of(plan: &aplan_core::load::Plan) -> Ready {
     let offered: std::collections::BTreeSet<&str> =
         ranked.iter().map(|(t, _)| t.id.as_str()).collect();
     Ready {
+        coordination: claims.scope.clone(),
+        claim_observed_at_epoch_seconds: claims.observed_at_epoch_seconds,
         ready: ranked
             .iter()
             .map(|(t, rank)| ReadyTask {
@@ -476,7 +726,7 @@ pub fn why_of(
             })
             .collect(),
         unknown: graph
-            .direct_unknown_blockers(id)
+            .unknown_blockers(id, walk)
             .into_iter()
             .map(ToString::to_string)
             .collect(),
@@ -504,10 +754,31 @@ pub fn why_of(
 /// resolvable citation reads as it always did, and the field's presence is
 /// itself the signal.
 pub fn check(root: &Path, policy: &crate::Policy) -> Result<serde_json::Value, ToolError> {
-    let plan = load_plan(root);
-    let report = validate(&plan, &policy.options);
-    let mut payload = report_payload(&report, &policy.verdict);
-    let left = aplan_core::unresolved_by_check(&plan);
+    let plan = aplan_core::load_plan_identified(root);
+    check_of(plan, policy)
+}
+
+/// The check answer over the shared application store's identified snapshot.
+pub fn check_of(
+    plan: aplan_core::IdentifiedPlan,
+    policy: &crate::Policy,
+) -> Result<serde_json::Value, ToolError> {
+    check_of_cached(plan, policy, None)
+}
+
+/// The check answer with structural reuse owned by the shared plan store.
+pub fn check_of_cached(
+    plan: aplan_core::IdentifiedPlan,
+    policy: &crate::Policy,
+    cache: Option<aplan_app::StructuralReportCache>,
+) -> Result<serde_json::Value, ToolError> {
+    let mut context = application_context(plan, policy);
+    if let Some(cache) = cache {
+        context = context.with_structural_report_cache(cache);
+    }
+    let response = aplan_app::check(&context, aplan_app::CheckRequest);
+    let mut payload = report_payload(&response.report, &policy.verdict, response.denied);
+    let left = response.evidence_unresolved;
     if left.any()
         && let Some(map) = payload.as_object_mut()
     {
@@ -527,7 +798,11 @@ pub fn check(root: &Path, policy: &crate::Policy) -> Result<serde_json::Value, T
 ///
 /// Shared so the two cannot describe the same plan differently, which is the
 /// whole lesson of `A1-100` and `A1-101`: a second rendering of one fact drifts.
-fn report_payload(report: &aplan_core::Report, policy: &aplan_core::Verdict) -> serde_json::Value {
+fn report_payload(
+    report: &aplan_core::Report,
+    policy: &aplan_core::Verdict,
+    denied: bool,
+) -> serde_json::Value {
     serde_json::json!({
         "tasks_checked": report.tasks_checked,
         // The blocking counts, so they agree with `denied` beside them and with
@@ -539,7 +814,7 @@ fn report_payload(report: &aplan_core::Report, policy: &aplan_core::Verdict) -> 
         // is the same distinction ADR-0007 draws between exit codes 1 and 2: a
         // violation is not a malfunction, and an agent that cannot tell them
         // apart retries the wrong one (`A1-101`).
-        "denied": report.denied_by(policy),
+        "denied": denied,
         // Named, so an agent cannot read a passing verdict without seeing what
         // the repository chose to hear rather than stop for (`A1-112`).
         "advisory": report.advisory_count(policy),
@@ -604,11 +879,64 @@ fn report_payload(report: &aplan_core::Report, policy: &aplan_core::Verdict) -> 
 /// which is the one thing `close` will refuse it for. The alternative is reading
 /// the file, and a file cannot say whether its own citations still resolve.
 ///
-/// Resolves by default, like `close` (`A1-109`), and never executes a test, like
-/// `verify` (`A1-102`): running a repository's tests because an agent asked is a
-/// different trust question from reading its history.
+/// Recomputes repository-backed evidence and reads typed retained provider
+/// observations, but never starts a configured provider. `aplan_verify` owns
+/// explicit provider refresh for this agent surface (`A1-590`).
 pub fn show(root: &Path, id: &str, policy: &crate::Policy) -> Result<serde_json::Value, ToolError> {
     let plan = load_plan(root);
+    let claims = aplan_app::claims::snapshot(root, &plan)
+        .map_err(|error| ToolError::Plan(error.to_string()))?;
+    show_of_cached_with_claims(&plan, id, policy, None, &claims).map(|(value, _)| value)
+}
+
+/// The show answer over the shared application store's snapshot.
+pub fn show_of(
+    plan: &aplan_core::Plan,
+    id: &str,
+    policy: &crate::Policy,
+) -> Result<serde_json::Value, ToolError> {
+    show_of_cached(plan, id, policy, None).map(|(value, _)| value)
+}
+
+/// The show answer with an optional structural report from the shared store.
+/// The returned report excludes evidence diagnostics and is safe to publish
+/// under the store key that supplied `cached`.
+pub fn show_of_cached(
+    plan: &aplan_core::Plan,
+    id: &str,
+    policy: &crate::Policy,
+    cached: Option<aplan_core::Report>,
+) -> Result<(serde_json::Value, aplan_core::Report), ToolError> {
+    let claims = aplan_app::claims::snapshot(&policy.repo_root, plan)
+        .map_err(|error| ToolError::Plan(error.to_string()))?;
+    show_of_cached_with_claims(plan, id, policy, cached, &claims)
+}
+
+pub fn show_of_cached_with_claims(
+    plan: &aplan_core::Plan,
+    id: &str,
+    policy: &crate::Policy,
+    cached: Option<aplan_core::Report>,
+    claims: &aplan_core::ClaimSnapshot,
+) -> Result<(serde_json::Value, aplan_core::Report), ToolError> {
+    show_of_cached_with_claims_and_observations(
+        plan,
+        id,
+        policy,
+        cached,
+        claims,
+        &aplan_app::EvidenceObservationOptions::default(),
+    )
+}
+
+fn show_of_cached_with_claims_and_observations(
+    plan: &aplan_core::Plan,
+    id: &str,
+    policy: &crate::Policy,
+    cached: Option<aplan_core::Report>,
+    claims: &aplan_core::ClaimSnapshot,
+    observation_options: &aplan_app::EvidenceObservationOptions,
+) -> Result<(serde_json::Value, aplan_core::Report), ToolError> {
     // A task read out of a plan that did not load whole is a task whose blockers
     // and findings may be missing, and this surface exists to be trusted about
     // exactly those (`A1-102`).
@@ -617,38 +945,81 @@ pub fn show(root: &Path, id: &str, policy: &crate::Policy) -> Result<serde_json:
             "the plan does not load cleanly; `aplan_check` says what failed".to_string(),
         ));
     }
-    let mut report = validate(&plan, &policy.options);
+    let tasks: Vec<_> = plan.tasks.iter().map(|loaded| &loaded.task).collect();
+    let graph = Graph::new(tasks.iter().copied());
+    let structural =
+        cached.unwrap_or_else(|| aplan_core::validate_with_graph(plan, &policy.options, &graph));
+    let mut report = structural.clone();
     let opts = aplan_evidence::VerifyOptions {
         version: None,
-        traces_root: None,
-        config_file: None,
         execute: false,
         ..policy.verify.clone()
     };
-    // A plan outside a repository is a real situation, and the answer is the one
-    // `close` gives: say the ladder did not run rather than refuse to answer.
-    let mut resolved = true;
-    let one = aplan_core::show::only(&plan, id);
-    match aplan_evidence::verify(&one, &policy.repo_root, &opts) {
-        Ok(evidence) => report.diagnostics.extend(evidence.diagnostics),
+    let one = aplan_core::show::only(plan, id);
+    let inspection = match aplan_app::inspect_evidence(
+        &one,
+        &policy.repo_root,
+        &opts,
+        aplan_app::EvidenceInspectionMode::Stored,
+        observation_options,
+        |_| {},
+    ) {
+        Ok(inspection) => inspection,
         Err(aplan_evidence::Error::NotARepository(_) | aplan_evidence::Error::NoCommits(_)) => {
-            resolved = false;
+            aplan_app::inspect_evidence(
+                &one,
+                &policy.repo_root,
+                &opts,
+                aplan_app::EvidenceInspectionMode::Skip,
+                observation_options,
+                |_| {},
+            )
+            .expect("skipping evidence performs no repository operation")
         }
-        Err(e) => return Err(ToolError::Plan(format!("resolving evidence: {e}"))),
-    }
+        Err(error) => {
+            return Err(ToolError::Plan(format!(
+                "reading evidence observations: {error}"
+            )));
+        }
+    };
+    report
+        .diagnostics
+        .extend(inspection.report.diagnostics.iter().cloned());
 
-    let tasks: Vec<_> = plan.tasks.iter().map(|lt| &lt.task).collect();
-    let graph = Graph::new(tasks.iter().copied());
     let rows = graph.task_rows();
-    let view = aplan_core::Show::assemble(&graph, &rows, &report.diagnostics, id, resolved, None)
-        .ok_or_else(|| ToolError::Args(format!("no task `{id}` in this plan")))?;
-    serde_json::to_value(&view).map_err(|e| ToolError::Plan(format!("rendering `{id}`: {e}")))
+    let mut view = aplan_core::Show::assemble(
+        aplan_core::ShowSources {
+            graph: &graph,
+            rows: &rows,
+            diagnostics: &report.diagnostics,
+            unloadable: &plan.unloadable,
+            claims,
+        },
+        id,
+        false,
+        None,
+    )
+    .ok_or_else(|| ToolError::Args(format!("no task `{id}` in this plan")))?;
+    aplan_app::apply_evidence_inspection(&mut view, &inspection);
+    serde_json::to_value(&view)
+        .map(|value| (value, structural))
+        .map_err(|e| ToolError::Plan(format!("rendering `{id}`: {e}")))
 }
 
 /// different trust question from reading its history.
 pub fn verify(root: &Path, policy: &crate::Policy) -> Result<serde_json::Value, ToolError> {
     let plan = load_plan(root);
-    let mut report = validate(&plan, &policy.options);
+    verify_of_cached(&plan, policy, None).map(|(value, _)| value)
+}
+
+/// Resolve evidence over a shared plan snapshot and optional structural row.
+pub fn verify_of_cached(
+    plan: &aplan_core::Plan,
+    policy: &crate::Policy,
+    cached: Option<aplan_core::Report>,
+) -> Result<(serde_json::Value, aplan_core::Report), ToolError> {
+    let structural = cached.unwrap_or_else(|| validate(plan, &policy.options));
+    let mut report = structural.clone();
     // A plan that did not load whole gets the check report and nothing more, the
     // stance the CLI takes: "verify cannot speak honestly about a plan that did
     // not load". A task in the unreadable file may be the blocker, the owner of
@@ -656,19 +1027,37 @@ pub fn verify(root: &Path, policy: &crate::Policy) -> Result<serde_json::Value, 
     // produces findings that read as complete and are not. Copying the happy path
     // without this guard is how the two surfaces began to disagree (`A1-102`).
     if !plan.unloadable.is_empty() {
-        return Ok(report_payload(&report, &policy.verdict));
+        return Ok((
+            report_payload(&report, &policy.verdict, report.denied_by(&policy.verdict)),
+            structural,
+        ));
     }
     let opts = aplan_evidence::VerifyOptions {
-        version: None,
-        traces_root: None,
-        config_file: None,
         execute: false,
         ..policy.verify.clone()
     };
-    let evidence = aplan_evidence::verify(&plan, &policy.repo_root, &opts)
-        .map_err(|e| ToolError::Plan(format!("resolving evidence: {e}")))?;
-    report.diagnostics.extend(evidence.diagnostics);
-    let mut payload = report_payload(&report, &policy.verdict);
+    let evidence = aplan_app::inspect_evidence(
+        plan,
+        &policy.repo_root,
+        &opts,
+        aplan_app::EvidenceInspectionMode::Refresh,
+        &aplan_app::EvidenceObservationOptions::default(),
+        |_| {},
+    )
+    .map_err(|e| ToolError::Plan(format!("resolving evidence: {e}")))?;
+    report
+        .diagnostics
+        .extend(evidence.report.diagnostics.iter().cloned());
+    let mut payload = report_payload(&report, &policy.verdict, report.denied_by(&policy.verdict));
+    if let Some(map) = payload.as_object_mut() {
+        let mut observation = evidence.observation.clone();
+        observation.scope = aplan_app::EvidenceObservationScope::WholePlan;
+        map.insert(
+            "evidence_observation".to_string(),
+            serde_json::to_value(observation)
+                .expect("an evidence observation is always serializable"),
+        );
+    }
     // The same field, for the same reader, one rung up (`A1-253`). A resolver
     // joins only when `.aplan.yml` declares it, so a `test` citation under no
     // runner is recorded and never opened. The CLI says so in a note on stderr
@@ -678,7 +1067,7 @@ pub fn verify(root: &Path, policy: &crate::Policy) -> Result<serde_json::Value, 
     //
     // Absent rather than zero when everything was opened, so a plan whose
     // configuration covers it reads exactly as it did.
-    let left = aplan_evidence::unresolved_by_verify(&plan, &policy.repo_root, &opts);
+    let left = aplan_evidence::unresolved_by_verify(plan, &policy.repo_root, &opts);
     if left.any()
         && let Some(map) = payload.as_object_mut()
     {
@@ -695,7 +1084,7 @@ pub fn verify(root: &Path, policy: &crate::Policy) -> Result<serde_json::Value, 
             }),
         );
     }
-    Ok(payload)
+    Ok((payload, structural))
 }
 
 /// The one task an id names, refusing a plan where more than one declares it
@@ -804,18 +1193,20 @@ pub fn close(
     // note (`A1-173`).
     let recorded = recorded_version(&plan, &target.task, policy);
     let number = recorded.as_ref().and_then(|r| r.as_ref().ok());
-    let updated = aplan_core::close(&source, &parsed, &fingerprints, number.map(String::as_str))
-        .map_err(|e| {
-            // The same remedy the command gives, from the same place: an agent
-            // cannot close through MCP what the command refuses, and that includes
-            // being told the same way (`A1-131`, `A1-265`). The invocation named is
-            // the command's, because `amend` has no tool -- which is the honest
-            // answer rather than inventing one.
-            ToolError::Refused(match aplan_core::close::advice(&e, id) {
-                Some(advice) => format!("{e}. {advice}"),
-                None => e.to_string(),
-            })
-        })?;
+    let mut updated =
+        aplan_core::close(&source, &parsed, &fingerprints, number.map(String::as_str)).map_err(
+            |e| {
+                // The same remedy the command gives, from the same place: an agent
+                // cannot close through MCP what the command refuses, and that includes
+                // being told the same way (`A1-131`, `A1-265`). The invocation named is
+                // the command's, because `amend` has no tool -- which is the honest
+                // answer rather than inventing one.
+                ToolError::Refused(match aplan_core::close::advice(&e, id) {
+                    Some(advice) => format!("{e}. {advice}"),
+                    None => e.to_string(),
+                })
+            },
+        )?;
 
     // The same gate the CLI applies, through the same function, for the reason
     // this whole surface exists to respect: an agent must not be able to close
@@ -830,10 +1221,12 @@ pub fn close(
     // "An agent cannot close through MCP what it could not close here" has to
     // hold in both directions (`A1-131`).
     let closing = aplan_evidence::VerifyOptions {
+        detect_drift: false,
         version: None,
         traces_root: None,
-        config_file: None,
+        execute: false,
         url_check: None,
+        config_file: None,
         ..policy.verify.clone()
     };
     let resolution = aplan_evidence::resolve_proposed(
@@ -856,6 +1249,21 @@ pub fn close(
                 .join("; ")
         )));
     }
+
+    let evidence_fingerprints = if options.detect_drift {
+        aplan_evidence::update_evidence_fingerprints(
+            &target.task.evidence,
+            &target.task.evidence_fingerprints,
+            &parsed,
+            &policy.repo_root,
+            false,
+        )
+        .map_err(|e| ToolError::Plan(format!("stamping the evidence: {e}")))?
+    } else {
+        std::collections::BTreeMap::new()
+    };
+    updated = aplan_core::set_evidence_fingerprints(&updated, &evidence_fingerprints)
+        .map_err(|e| ToolError::Plan(format!("stamping the evidence: {e}")))?;
 
     // The same post-state check the command runs, or this surface keeps the old
     // behaviour and `A1-104`'s audit fails (`A1-113`).
@@ -886,6 +1294,7 @@ pub fn close(
         // Named rather than implied: a caller cannot tell a citation that was
         // checked from one nothing could check, and silence reads as passed.
         "unchecked": resolution.unchecked_names(),
+        "evidence_fingerprints": evidence_fingerprints.len(),
         // What the closure cost, when it did not cost enough to refuse it. The
         // same `delta.lines()` `add` and `dep` have always returned under this
         // name, and the same the command prints as `note: this adds N
@@ -918,64 +1327,72 @@ pub fn dep(
     add: bool,
     policy: &crate::Policy,
 ) -> Result<serde_json::Value, ToolError> {
-    if id == after {
-        return Err(ToolError::Args(format!("`{id}` cannot come after itself")));
-    }
-    let plan = load_plan(root);
-    // Never edit ordering inside a plan that does not load: the task in the file
-    // that failed is exactly the one that could make this edge a cycle, an
-    // unknown id or a second cut, and `mutation::clone_of` documents that every
-    // mutating command has refused before reaching it. `close` guards here and
-    // the command guards there; this tool shipped without it (`A1-124`).
-    if !plan.load_diagnostics.is_empty() {
-        return Err(ToolError::Plan(
-            "the plan does not load cleanly; fix it before changing what comes after what"
-                .to_string(),
-        ));
-    }
-    let target = locate(&plan, id)?;
-    if let Some(why) = aplan_core::mutation::membership_edit(&plan, id, after, add) {
-        return Err(ToolError::Refused(why));
-    }
-
-    let mut edges = target.task.blocked_by.clone();
-    let present = edges.iter().any(|b| b == after);
-    match (add, present) {
-        (true, true) | (false, false) => {
-            return Ok(serde_json::json!({ "id": id, "after": after, "changed": false }));
-        }
-        (true, false) => edges.push(after.to_string()),
-        (false, true) => edges.retain(|b| b != after),
-    }
-
-    let original = std::fs::read_to_string(&target.path)
-        .map_err(|e| ToolError::Plan(format!("reading {}: {e}", target.path.display())))?;
-    let updated = aplan_core::close::set_blocked_by(&original, &edges)
-        .map_err(|e| ToolError::Plan(format!("`{id}`: {e}")))?;
-    let produced = aplan_core::mutation::task_of(&updated)
-        .map_err(|e| ToolError::Plan(format!("`{id}`: {e}")))?;
-
-    let after_plan = aplan_core::mutation::with_replaced(&plan, id, produced);
-    let delta = aplan_core::mutation::delta(&plan, &after_plan, &policy.options);
-    if delta.refuses(&policy.verdict) {
+    let plan = aplan_core::load_plan_identified(root);
+    let context = application_context(plan, policy);
+    let operation = if add {
+        aplan_app::DependencyOperation::Add
+    } else {
+        aplan_app::DependencyOperation::Remove
+    };
+    let response = aplan_app::edit_dependency(
+        &context,
+        &aplan_app::DependencyRequest {
+            id: id.to_string(),
+            after: after.to_string(),
+            operation,
+        },
+    )
+    .map_err(|error| application_error(error, "aplan_dep"))?;
+    if response.denied {
         return Err(ToolError::Refused(format!(
             "cannot change what `{id}` comes after: it would add {} finding(s) `check` reports: {}",
-            delta.added.len(),
-            delta.lines().join("; ")
+            response.diagnostics.added.len(),
+            response.diagnostics.lines().join("; ")
         )));
     }
-
-    save_task(&target.path, &original, &updated, "aplan_dep")?;
+    if !response.changed {
+        return Ok(serde_json::json!({ "id": id, "after": after, "changed": false }));
+    }
+    let file = response
+        .file
+        .as_ref()
+        .expect("a changed dependency edit names its file");
     Ok(serde_json::json!({
         "id": id,
         "after": after,
         "changed": true,
-        "file": target.path.display().to_string(),
-        "notes": delta.lines(),
+        "file": file.display().to_string(),
+        "notes": response.diagnostics.lines(),
     }))
 }
 
-/// `aplan_claim`: record who holds a task (`A1-359`).
+fn application_context(
+    plan: aplan_core::IdentifiedPlan,
+    policy: &crate::Policy,
+) -> aplan_app::PlanContext {
+    aplan_app::PlanContext::new(
+        plan,
+        aplan_app::ContextInputs {
+            repository_root: policy.repo_root.clone(),
+            configuration_file: policy.verify.config_file.clone(),
+            trust: aplan_app::Trust::Hermetic,
+            options: policy.options.clone(),
+            verdict: policy.verdict.clone(),
+        },
+    )
+}
+
+fn application_error(error: aplan_app::Error, retry: &str) -> ToolError {
+    match error {
+        aplan_app::Error::Arguments(message) => ToolError::Args(message),
+        aplan_app::Error::Plan(message) => ToolError::Plan(message),
+        aplan_app::Error::Refused(message) => ToolError::Refused(message),
+        aplan_app::Error::Rewrite { id, source } => ToolError::Plan(format!("`{id}`: {source}")),
+        aplan_app::Error::Write(error) => ToolError::Plan(aplan_core::save::advice(&error, retry)),
+    }
+}
+
+/// `aplan_claim`: record an ephemeral holder (`A1-531`).
 ///
 /// **This tool is why `start` and `stop` exist at all.** `A1-077` refused a
 /// status setter as "write surface bought with no invariant to maintain", and
@@ -984,16 +1401,14 @@ pub fn dep(
 /// "hand-editing is fine as it is" is simply false. The commands and the tools
 /// therefore land together rather than CLI-first.
 ///
-/// The mutual exclusion is the compare-and-swap in `save_task`, exactly as in
-/// the CLI: two agents that both read "unassigned" cannot both be told they
-/// hold it. The holder is read from the bytes about to be swapped rather than from
-/// the plan snapshot, which is the race the CLI's own concurrency test caught.
+/// The Git-common store is the same one the CLI uses, so linked worktrees
+/// contend on one guarded record and durable task `owner` remains untouched.
 pub fn claim(
     root: &Path,
     id: &str,
     as_name: Option<&str>,
     from: Option<&str>,
-    policy: &crate::Policy,
+    _policy: &crate::Policy,
 ) -> Result<serde_json::Value, ToolError> {
     let plan = load_plan(root);
     if !plan.load_diagnostics.is_empty() {
@@ -1002,45 +1417,40 @@ pub fn claim(
         ));
     }
     let target = locate(&plan, id)?;
-    let who =
-        aplan_interop::identity::resolve(&aplan_interop::identity::from_environment(as_name, root))
-            .map_err(|e| ToolError::Args(e.to_string()))?;
-
-    let original = std::fs::read_to_string(&target.path)
-        .map_err(|e| ToolError::Plan(format!("reading {}: {e}", target.path.display())))?;
-    let current = aplan_core::mutation::task_of(&original)
-        .map_err(|e| ToolError::Plan(format!("`{id}`: {e}")))?;
-    match (current.owner.as_deref(), from) {
-        (Some(holder), None) => {
-            return Err(ToolError::Refused(format!(
-                "`{id}` is held by `{holder}`; pass `from` naming them to take it, or \
-                 release it first"
-            )));
-        }
-        (Some(holder), Some(named)) if holder != named => {
-            return Err(ToolError::Refused(format!(
-                "`{id}` is held by `{holder}`, not `{named}`; `from` is checked rather \
-                 than taken on trust"
-            )));
-        }
-        (None, Some(named)) => {
-            return Err(ToolError::Args(format!(
-                "`{id}` is held by nobody, so there is nothing to take it from `{named}`"
-            )));
-        }
-        _ => {}
+    if target.task.status.is_terminal() {
+        return Err(ToolError::Refused(format!(
+            "cannot claim `{id}` because it is `{}`; claims name work happening now",
+            target.task.status
+        )));
     }
-
-    let updated = aplan_core::close::set_owner(&original, Some(&who))
-        .map_err(|e| ToolError::Plan(format!("`{id}`: {e}")))?;
-    let notes = refuse_if_worse(&plan, id, &updated, policy, &format!("claim `{id}`"))?;
-    save_task(&target.path, &original, &updated, "aplan_claim")?;
+    let who = aplan_interop::identity::resolve_detailed(
+        &aplan_interop::identity::from_environment(as_name, root),
+    )
+    .map_err(|e| ToolError::Args(e.to_string()))?;
+    let change = aplan_app::claims::claim(
+        root,
+        &plan,
+        id,
+        &who,
+        from,
+        aplan_app::claims::now_epoch_seconds(),
+    )
+    .map_err(|error| claim_error(&error))?;
+    let taken_from = change
+        .displaced
+        .as_ref()
+        .map(|record| record.holder.clone());
     Ok(serde_json::json!({
         "id": id,
-        "held_by": who,
-        "taken_from": current.owner,
-        "file": target.path.display().to_string(),
-        "notes": notes,
+        "held_by": change.current.holder,
+        "claim": change.current,
+        // The holder-only field is retained for consumers of the pre-A1-531
+        // shape; `displaced` is the complete record added by this behaviour.
+        "taken_from": taken_from,
+        "displaced": change.displaced,
+        "coordination": change.scope,
+        "stable_owner": target.task.owner,
+        "warnings": change.warnings,
     }))
 }
 
@@ -1048,46 +1458,50 @@ pub fn claim(
 ///
 /// Any caller may release, for the reason the CLI does: a claim with no expiry
 /// needs a way out that does not depend on the holder being reachable, and the
-/// record of who held it is in the diff and in this answer.
+/// complete record of who held it is returned in this answer.
 pub fn release(
     root: &Path,
     id: &str,
-    policy: &crate::Policy,
+    _policy: &crate::Policy,
 ) -> Result<serde_json::Value, ToolError> {
     let plan = load_plan(root);
-    if !plan.load_diagnostics.is_empty() {
-        return Err(ToolError::Plan(
-            "the plan does not load cleanly; fix it before recording who holds what".to_string(),
-        ));
-    }
-    let target = locate(&plan, id)?;
-    let original = std::fs::read_to_string(&target.path)
-        .map_err(|e| ToolError::Plan(format!("reading {}: {e}", target.path.display())))?;
-    let current = aplan_core::mutation::task_of(&original)
-        .map_err(|e| ToolError::Plan(format!("`{id}`: {e}")))?;
-    let Some(holder) = current.owner.clone() else {
+    let task_exists = plan.tasks.iter().any(|loaded| loaded.task.id == id);
+    let change = aplan_app::claims::release(root, id).map_err(|error| claim_error(&error))?;
+    let Some(released) = change.released else {
+        if !task_exists {
+            return Err(ToolError::Args(format!(
+                "no task or local claim has id `{id}`"
+            )));
+        }
         // The outcome the caller asked for, reported rather than refused.
-        return Ok(serde_json::json!({ "id": id, "changed": false, "held_by": null }));
+        return Ok(serde_json::json!({
+            "id": id,
+            "changed": false,
+            "held_by": null,
+            "coordination": change.scope,
+        }));
     };
-
-    let updated = aplan_core::close::set_owner(&original, None)
-        .map_err(|e| ToolError::Plan(format!("`{id}`: {e}")))?;
-    let notes = refuse_if_worse(&plan, id, &updated, policy, &format!("release `{id}`"))?;
-    save_task(&target.path, &original, &updated, "aplan_release")?;
     Ok(serde_json::json!({
         "id": id,
         "changed": true,
-        "was_held_by": holder,
-        "file": target.path.display().to_string(),
-        "notes": notes,
+        "was_held_by": released.holder,
+        "released": released,
+        "coordination": change.scope,
     }))
+}
+
+fn claim_error(error: &aplan_app::claims::ClaimError) -> ToolError {
+    match error {
+        aplan_app::claims::ClaimError::Invalid { .. } => ToolError::Refused(error.to_string()),
+        _ => ToolError::Plan(error.to_string()),
+    }
 }
 
 /// `aplan_start` and `aplan_stop`: set and clear `in_progress` (`A1-359`).
 ///
-/// A stored claim, and `APLAN053` is what keeps it honest: `verify` reports an
-/// `in_progress` the repository holds nothing for. The premise is not "do not
-/// store claims", it is "do not take claims on trust".
+/// The stored status is independently checked: `APLAN053` reports an
+/// `in_progress` task whose declared repository paths match nothing. A local
+/// ephemeral claim is reported when observable but never gates the transition.
 pub fn working(
     root: &Path,
     id: &str,
@@ -1131,23 +1545,28 @@ pub fn working(
     let verb = if starting { "start" } else { "stop" };
     let notes = refuse_if_worse(&plan, id, &updated, policy, &format!("{verb} `{id}`"))?;
     save_task(&target.path, &original, &updated, "aplan_working")?;
+    let claims = aplan_app::claims::snapshot(root, &plan).unwrap_or_else(|error| {
+        aplan_core::ClaimSnapshot::unavailable(
+            aplan_app::claims::now_epoch_seconds(),
+            error.to_string(),
+        )
+    });
     Ok(serde_json::json!({
         "id": id,
         "status": want.to_string(),
         "changed": true,
-        "held_by": current.owner,
+        "held_by": claims.claim(id).map(|claim| claim.holder.clone()),
+        "claim": claims.claim(id),
+        "coordination": claims.scope,
         "file": target.path.display().to_string(),
         "notes": notes,
     }))
 }
 
-/// The post-state gate, as the four coordination tools need it (`A1-359`).
+/// The post-state gate for status coordination (`A1-359`).
 ///
-/// The same judgement every writing tool makes, in one place because four of
-/// them make it identically: run the rules against the plan this edit would
-/// produce and refuse one that adds a finding. It is not a formality here --
-/// a `policy` scope may select on `owner`, so a claim can move a task into a
-/// stricter evidence standard.
+/// Run the rules against the plan this edit would produce and refuse one that
+/// adds a finding, identically to the command surface.
 fn refuse_if_worse(
     plan: &aplan_core::load::Plan,
     id: &str,
@@ -1227,11 +1646,6 @@ fn status_word(s: Status) -> &'static str {
     }
 }
 
-/// The plan root a request applies to.
-pub fn resolve_root(explicit: Option<&str>, default_root: &Path) -> PathBuf {
-    explicit.map_or_else(|| default_root.to_path_buf(), PathBuf::from)
-}
-
 #[cfg(test)]
 /// The policy `aplan mcp` would build, for a test that only cares about a field
 /// or two of it. At file scope so every test module reaches it through
@@ -1241,6 +1655,7 @@ fn test_policy(
     deny_warnings: bool,
     options: validate::Options,
 ) -> crate::Policy {
+    let detect_drift = options.detect_drift;
     crate::Policy {
         id_strategy: aplan_core::IdStrategy::Sequential,
         options,
@@ -1249,12 +1664,14 @@ fn test_policy(
             advisory: Vec::new(),
         },
         verify: aplan_evidence::VerifyOptions {
+            detect_drift,
             version: None,
             traces_root: None,
             config_file: None,
             execute: false,
             test_runner: None,
             max_unrelated_files: None,
+            observation_inputs: None,
             url_check: None,
         },
         repo_root: root.to_path_buf(),
@@ -1320,6 +1737,7 @@ mod tests {
     /// whose resolver was never built. An agent gating on this payload sees
     /// `errors: 0` and concludes the evidence resolved.
     /// Proves the named behaviour `verify.reports_what_nothing_checked` (`A1-253`).
+    /// Proves `evidence.verification_reports_provider_provenance` (`A1-645`).
     #[test]
     fn verify_says_which_kinds_nothing_is_configured_to_check() {
         let dir = plan_dir();
@@ -1348,18 +1766,23 @@ mod tests {
             options: aplan_core::validate::Options::default(),
             verdict: aplan_core::Verdict::default(),
             verify: aplan_evidence::VerifyOptions {
+                detect_drift: false,
                 version: None,
                 traces_root: None,
                 config_file: None,
                 execute: false,
                 test_runner: runner,
                 max_unrelated_files: None,
+                observation_inputs: None,
                 url_check: None,
             },
             repo_root: root.to_path_buf(),
         };
 
         let out = verify(root, &policy(None)).expect("verifies");
+        assert_eq!(out["evidence_observation"]["scope"], "whole_plan");
+        assert_eq!(out["evidence_observation"]["provider_source"], "deferred");
+        assert_eq!(out["evidence_observation"]["completeness"], "partial");
         assert_eq!(
             out["evidence_unresolved"]["citations"],
             serde_json::json!(1),
@@ -1374,9 +1797,12 @@ mod tests {
         // Absent rather than zero once the configuration covers it, so a plan
         // that was always fine reads exactly as it did.
         let runner = aplan_evidence::TestRunners::One(aplan_evidence::TestRunner {
+            weight: None,
+            exclusive: None,
             output_lines: None,
             max_memory: None,
             max_processes: None,
+            max_output: None,
             wrap: None,
             expect_tests: None,
             skipped: None,
@@ -1384,10 +1810,12 @@ mod tests {
             timeout_seconds: None,
             covers: None,
             covers_by_test: None,
+            inputs_by_test: None,
             name: None,
             dir: None,
             list: vec!["echo".into(), "some_name".into()],
             run: vec!["true".into(), "{test}".into()],
+            batch: None,
         });
         let covered = verify(root, &policy(Some(runner))).expect("verifies");
         assert!(
@@ -1406,12 +1834,14 @@ mod tests {
             options: aplan_core::validate::Options::default(),
             verdict: aplan_core::Verdict::default(),
             verify: aplan_evidence::VerifyOptions {
+                detect_drift: false,
                 version: None,
                 traces_root: None,
                 config_file: None,
                 execute: false,
                 test_runner: None,
                 max_unrelated_files: None,
+                observation_inputs: None,
                 url_check: None,
             },
             repo_root: root.to_path_buf(),
@@ -1457,12 +1887,14 @@ mod tests {
             options: aplan_core::validate::Options::default(),
             verdict: aplan_core::Verdict::default(),
             verify: aplan_evidence::VerifyOptions {
+                detect_drift: false,
                 version: None,
                 traces_root: None,
                 config_file: None,
                 execute: false,
                 test_runner: None,
                 max_unrelated_files: None,
+                observation_inputs: None,
                 url_check: None,
             },
             repo_root: root.to_path_buf(),
@@ -1542,6 +1974,45 @@ mod tests {
         }
     }
 
+    /// The policy table is consumed from the CLI crate, but its constructors
+    /// belong to this crate. Exercise each shape here as a value rather than
+    /// relying on compile-time construction of the constants to look covered.
+    #[test]
+    fn command_policy_rows_preserve_their_disposition() {
+        static ONE_TOOL: &[&str] = &["aplan_one"];
+        let command = std::hint::black_box("one");
+        let tools = std::hint::black_box(ONE_TOOL);
+
+        let mirrored = McpCommandPolicy::mirrored(command, tools);
+        assert_eq!(mirrored.command, command);
+        assert_eq!(mirrored.disposition.tools(), tools);
+        assert!(matches!(
+            mirrored.disposition,
+            McpCommandDisposition::Mirrored { .. }
+        ));
+
+        let projected = McpCommandPolicy::projected(command, tools, "the rest stays local");
+        assert_eq!(projected.command, command);
+        assert_eq!(projected.disposition.tools(), tools);
+        assert!(matches!(
+            projected.disposition,
+            McpCommandDisposition::Projected {
+                boundary: "the rest stays local",
+                ..
+            }
+        ));
+
+        let excluded = McpCommandPolicy::excluded(command, CliOnlyReason::HostOperation);
+        assert_eq!(excluded.command, command);
+        assert!(excluded.disposition.tools().is_empty());
+        assert!(matches!(
+            excluded.disposition,
+            McpCommandDisposition::Excluded {
+                reason: CliOnlyReason::HostOperation
+            }
+        ));
+    }
+
     /// The headline guarantee of this crate. `mcp-shrimp-task-manager`'s
     /// `verify_task` accepts a completion score from the calling agent and
     /// auto-completes at 80 or above. Nothing here may resemble that.
@@ -1615,12 +2086,14 @@ mod tests {
             options: aplan_core::validate::Options::default(),
             verdict: aplan_core::Verdict::default(),
             verify: aplan_evidence::VerifyOptions {
+                detect_drift: false,
                 version: None,
                 traces_root: None,
                 config_file: None,
                 execute: false,
                 test_runner: None,
                 max_unrelated_files: None,
+                observation_inputs: None,
                 url_check: None,
             },
             repo_root: root.to_path_buf(),
@@ -1681,12 +2154,14 @@ mod tests {
             options: aplan_core::validate::Options::default(),
             verdict: aplan_core::Verdict::default(),
             verify: aplan_evidence::VerifyOptions {
+                detect_drift: false,
                 version: None,
                 traces_root: None,
                 config_file: None,
                 execute: false,
                 test_runner: None,
                 max_unrelated_files: None,
+                observation_inputs: None,
                 url_check: None,
             },
             repo_root: root.to_path_buf(),
@@ -1710,6 +2185,120 @@ mod tests {
             Some(0),
             "{other}"
         );
+    }
+
+    /// Proof for `show.evidence_observations_are_nonblocking`: a repair is part
+    /// of the shared `Show` projection, not CLI-only
+    /// decoration. An agent must receive the same typed operation it would have
+    /// reviewed in JSON before deciding whether to invoke a writing surface
+    /// (`A1-199`).
+    #[test]
+    fn show_carries_machine_applicable_repairs_to_mcp() {
+        let dir = plan_dir();
+        let root = dir.path();
+        std::fs::write(
+            root.join("tasks/A-1.md"),
+            "---\nid: A-1\ntitle: stale test name\nphase: 1\nstatus: done\neffort_days: 1\n\
+             paths: [tasks/**]\nevidence:\n  - kind: test\n    ref: known_name\n---\n\nbody\n",
+        )
+        .expect("task");
+        for args in [
+            vec!["init", "-q", "."],
+            vec!["config", "user.email", "t@example.com"],
+            vec!["config", "user.name", "t"],
+            vec!["add", "-A"],
+            vec!["commit", "-q", "-m", "fixture"],
+        ] {
+            let out = std::process::Command::new("git")
+                .args(&args)
+                .current_dir(root)
+                .output()
+                .expect("git");
+            assert!(out.status.success(), "git {args:?}");
+        }
+
+        let mut policy = test_policy(root, false, validate::Options::default());
+        let provider_log = root.join("provider-runs.txt");
+        policy.verify.test_runner = Some(aplan_evidence::TestRunners::One(
+            aplan_evidence::TestRunner {
+                weight: None,
+                exclusive: None,
+                output_lines: None,
+                max_memory: None,
+                max_processes: None,
+                max_output: None,
+                wrap: None,
+                expect_tests: None,
+                skipped: None,
+                run_selects: None,
+                timeout_seconds: None,
+                covers: None,
+                covers_by_test: None,
+                inputs_by_test: None,
+                name: None,
+                dir: None,
+                list: vec![
+                    "sh".into(),
+                    "-c".into(),
+                    "printf 'suite::known_name\\n'; printf 'run\\n' >> \"$1\"".into(),
+                    "aplan-mcp-show-fixture".into(),
+                    provider_log.display().to_string(),
+                ],
+                run: vec!["true".into(), "{test}".into()],
+                batch: None,
+            },
+        ));
+        policy.verify.observation_inputs = Some(vec!["tasks/**".to_string()]);
+
+        let cache = tempfile::Builder::new()
+            .prefix("mcp-show-observation-")
+            .tempdir_in(aplan_core::fixture::fixture_root())
+            .expect("observation cache");
+        let observation_options = aplan_app::EvidenceObservationOptions {
+            cache_root: Some(cache.path().to_path_buf()),
+        };
+        let plan = load_plan(root);
+        let refreshed = aplan_app::inspect_evidence(
+            &plan,
+            root,
+            &policy.verify,
+            aplan_app::EvidenceInspectionMode::Refresh,
+            &observation_options,
+            |_| {},
+        )
+        .expect("explicit refresh");
+        assert_eq!(
+            refreshed.observation.state,
+            aplan_core::show::EvidenceObservationState::Current
+        );
+        let claims = aplan_app::claims::snapshot(root, &plan).expect("claims");
+
+        let (out, _) = show_of_cached_with_claims_and_observations(
+            &plan,
+            "A-1",
+            &policy,
+            None,
+            &claims,
+            &observation_options,
+        )
+        .expect("show");
+        assert_eq!(
+            std::fs::read_to_string(&provider_log)
+                .expect("provider log")
+                .lines()
+                .count(),
+            1,
+            "aplan_show reran the provider instead of reading the observation"
+        );
+        let repair = out["findings"]
+            .as_array()
+            .expect("findings")
+            .iter()
+            .find_map(|finding| finding.get("repair"))
+            .expect("typed repair");
+        assert_eq!(repair["operation"], "replace_evidence", "{out}");
+        assert_eq!(repair["from"]["ref"], "known_name", "{out}");
+        assert_eq!(repair["to"]["ref"], "suite::known_name", "{out}");
     }
 
     /// The agent surface can record what caused the task it files (`A1-116`).
@@ -1738,12 +2327,14 @@ mod tests {
             },
             verdict: aplan_core::Verdict::default(),
             verify: aplan_evidence::VerifyOptions {
+                detect_drift: false,
                 version: None,
                 traces_root: None,
                 config_file: None,
                 execute: false,
                 test_runner: None,
                 max_unrelated_files: None,
+                observation_inputs: None,
                 url_check: None,
             },
             repo_root: root.to_path_buf(),
@@ -1835,12 +2426,14 @@ mod tests {
             options: aplan_core::validate::Options::default(),
             verdict: aplan_core::Verdict::default(),
             verify: aplan_evidence::VerifyOptions {
+                detect_drift: false,
                 version: None,
                 traces_root: None,
                 config_file: None,
                 execute: false,
                 test_runner: None,
                 max_unrelated_files: None,
+                observation_inputs: None,
                 url_check: None,
             },
             repo_root: root.to_path_buf(),
@@ -1942,6 +2535,55 @@ mod tests {
 
         let err = why(dir.path(), "NOPE", false).unwrap_err();
         assert!(matches!(err, ToolError::Args(_)), "{err:?}");
+    }
+
+    /// Proof for `why.complete_retains_nested_undefined_blockers`: the agent
+    /// surface observes the same cut boundary and complete unresolved leaf as
+    /// the CLI adapters.
+    #[test]
+    fn mcp_why_retains_nested_undefined_blockers_at_the_requested_boundary() {
+        let dir = plan_dir();
+        let tasks = dir.path().join("tasks");
+        std::fs::write(
+            tasks.join("LEAF.md"),
+            "---\nid: LEAF\ntitle: Leaf with ghost\nphase: 1\nstatus: todo\n\
+             effort_days: 1\nblocked_by: [GHOST]\n---\n\n## Why\n\nx\n",
+        )
+        .expect("leaf");
+        std::fs::write(
+            tasks.join("CUT.md"),
+            "---\nid: CUT\ntitle: Cut boundary\nphase: 1\nstatus: todo\n\
+             blocked_by: [LEAF]\ntags: [milestone]\n---\n\n## Why\n\nx\n",
+        )
+        .expect("cut");
+        std::fs::write(
+            tasks.join("SUBJECT.md"),
+            "---\nid: SUBJECT\ntitle: Waits on cut\nphase: 1\nstatus: todo\n\
+             effort_days: 1\nblocked_by: [CUT]\n---\n\n## Why\n\nx\n",
+        )
+        .expect("subject");
+
+        let bounded = why(dir.path(), "SUBJECT", false).expect("bounded why");
+        assert_eq!(
+            bounded
+                .blocked_by
+                .iter()
+                .map(|blocker| blocker.id.as_str())
+                .collect::<Vec<_>>(),
+            vec!["CUT"]
+        );
+        assert!(bounded.unknown.is_empty());
+
+        let complete = why(dir.path(), "SUBJECT", true).expect("complete why");
+        assert_eq!(
+            complete
+                .blocked_by
+                .iter()
+                .map(|blocker| blocker.id.as_str())
+                .collect::<Vec<_>>(),
+            vec!["CUT", "LEAF"]
+        );
+        assert_eq!(complete.unknown, vec!["GHOST"]);
     }
 
     #[test]
@@ -2162,9 +2804,12 @@ mod tests {
         let mut policy = super::test_policy(dir.path(), false, validate::Options::default());
         policy.verify.test_runner = Some(aplan_evidence::TestRunners::One(
             aplan_evidence::TestRunner {
+                weight: None,
+                exclusive: None,
                 output_lines: None,
                 max_memory: None,
                 max_processes: None,
+                max_output: None,
                 wrap: None,
                 expect_tests: None,
                 skipped: None,
@@ -2172,10 +2817,12 @@ mod tests {
                 timeout_seconds: None,
                 covers: None,
                 covers_by_test: None,
+                inputs_by_test: None,
                 name: None,
                 dir: None,
                 list: vec![tamper.display().to_string()],
                 run: vec!["true".into(), "{test}".into()],
+                batch: None,
             },
         ));
 
@@ -2394,6 +3041,77 @@ mod stamping {
     }
 
     #[test]
+    fn closing_stamps_mutable_file_evidence_from_the_repository() {
+        let dir = tempfile::Builder::new()
+            .tempdir_in(aplan_core::fixture::fixture_root())
+            .expect("tempdir");
+        std::fs::write(dir.path().join("DOC.md"), "# Intro\n\nproof\n").expect("doc");
+        plan(&dir.path().join("aplan"), "DOC.md#intro");
+        for args in [
+            vec!["init", "-q", "."],
+            vec!["config", "user.email", "t@example.com"],
+            vec!["config", "user.name", "t"],
+            vec!["add", "-A"],
+            vec!["commit", "-q", "-m", "fixture"],
+        ] {
+            let out = std::process::Command::new("git")
+                .args(&args)
+                .current_dir(dir.path())
+                .output()
+                .expect("git runs");
+            assert!(out.status.success(), "git {args:?} failed");
+        }
+
+        let policy = super::test_policy(dir.path(), false, opts(dir.path()));
+        let out = close(
+            &dir.path().join("aplan"),
+            "A-1",
+            &["file:DOC.md".into()],
+            &policy,
+        )
+        .expect("closes");
+        assert_eq!(out["evidence_fingerprints"], 1);
+
+        let written =
+            std::fs::read_to_string(dir.path().join("aplan/tasks/A-1.md")).expect("read task");
+        assert!(written.contains("evidence_fingerprints:"), "{written}");
+        assert!(written.contains("file:DOC.md"), "{written}");
+
+        std::fs::write(dir.path().join("DOC.md"), "# Intro\n\nchanged\n").expect("rewrite");
+        for args in [
+            vec!["add", "-A"],
+            vec!["commit", "-q", "-m", "rewrite proof"],
+        ] {
+            let out = std::process::Command::new("git")
+                .args(&args)
+                .current_dir(dir.path())
+                .output()
+                .expect("git runs");
+            assert!(out.status.success(), "git {args:?} failed");
+        }
+        let verified = verify(&dir.path().join("aplan"), &policy).expect("verify payload");
+        assert_eq!(verified["evidence_observation"]["scope"], "whole_plan");
+        // Mutable-file drift is fully resolved repository evidence. No test
+        // provider is involved, so reporting deferred/partial provider work
+        // would invent an observation the plan never requested.
+        assert_eq!(verified["evidence_observation"]["provider_source"], "none");
+        assert_eq!(verified["evidence_observation"]["completeness"], "complete");
+        assert!(
+            verified["diagnostics"]
+                .as_array()
+                .is_some_and(|all| all.iter().any(|d| d["code"] == "APLAN054")),
+            "MCP verify hid evidence drift: {verified}"
+        );
+        let shown = show(&dir.path().join("aplan"), "A-1", &policy).expect("show payload");
+        assert!(
+            shown["findings"]
+                .as_array()
+                .is_some_and(|all| all.iter().any(|d| d["code"] == "APLAN054")),
+            "MCP show hid evidence drift: {shown}"
+        );
+    }
+
+    #[test]
     fn a_trace_it_cannot_read_is_left_unstamped_rather_than_guessed_at() {
         // The traced document is missing, which is `APLAN008`'s finding and not
         // something to invent a fingerprint for. Stamping it would record that a
@@ -2493,14 +3211,19 @@ mod verdict {
 
 /// What `aplan_add` was asked to create.
 ///
-/// No `id`: it follows the plan's own convention, which is the reason `add` exists
-/// rather than a template. No `out` or `dry_run` either: a directory override and
-/// a preview are things a person wants at a terminal, and neither keeps a plan
-/// valid.
-#[derive(Debug, Default, serde::Deserialize)]
+/// Ordinary adds may omit `id` and `phase` to follow the plan's convention. A
+/// create-around-existing-members request supplies both explicitly because the
+/// new cut's identity and reporting coordinate are decisions, not values an
+/// agent may invent. There is no `out` or `dry_run`: the tool returns its exact
+/// guarded file batch as versioned machine output.
+#[derive(Debug, Default, serde::Deserialize, schemars::JsonSchema)]
 #[serde(deny_unknown_fields)]
 pub struct AddArgs {
     pub title: String,
+    #[serde(default)]
+    pub id: Option<String>,
+    #[serde(default)]
+    pub phase: Option<u32>,
     #[serde(default)]
     pub cut: Option<String>,
     #[serde(default)]
@@ -2516,50 +3239,218 @@ pub struct AddArgs {
     pub tags: Vec<String>,
     #[serde(default)]
     pub blocked_by: Vec<String>,
+    /// Existing live work moved from its current cut into the new milestone
+    /// this request creates.
+    #[serde(default)]
+    pub members: Vec<String>,
     #[serde(default)]
     pub owner: Option<String>,
+    /// Initial live state. Terminal history belongs to the manifest ledger.
+    #[serde(default)]
+    pub status: Option<Status>,
+    #[serde(default)]
+    pub prefer_after: Vec<String>,
+    #[serde(default)]
+    pub ratified_by: Vec<String>,
+    #[serde(default)]
+    pub contains: Vec<String>,
+    #[serde(default)]
+    pub revisit_at: Option<String>,
+    #[serde(default)]
+    pub version_impact: Option<aplan_core::task::VersionImpact>,
+    #[serde(default)]
+    pub version_impact_reason: Option<String>,
 }
 
-/// The refusals `add` can make from the arguments and the plan alone, in the
-/// order the command makes them, and all of them before anything is written.
-fn refuse_unusable_args(
-    plan: &aplan_core::Plan,
-    id: &str,
+fn add_preview(
+    root: &Path,
     args: &AddArgs,
-) -> Result<(), ToolError> {
-    if args.title.trim().is_empty() {
-        return Err(ToolError::Args(
-            "a task needs a title: it is how anyone finds this task again".into(),
-        ));
-    }
+    policy: &crate::Policy,
+) -> Result<(aplan_app::PlanContext, aplan_app::AuthoringPreview), ToolError> {
     if let Some(days) = args.effort_days
         && (!days.is_finite() || days < 0.0)
     {
         return Err(ToolError::Args(format!(
-            "`effort_days: {days}` is not a number of days; give a finite, non-negative \
-             estimate or omit it"
+            "`effort_days: {days}` is not a number of days; give a finite, non-negative estimate or omit it"
         )));
     }
-    if let Some(existing) = plan.tasks.iter().find(|lt| lt.task.id == id) {
-        return Err(ToolError::Plan(format!(
-            "task `{id}` already exists in {}; refusing to overwrite it",
-            existing.path.display()
-        )));
-    }
-    let unknown: Vec<&str> = args
+    let context = aplan_app::PlanContext::new(
+        aplan_core::load_plan_identified(root),
+        aplan_app::ContextInputs {
+            repository_root: policy.repo_root.clone(),
+            configuration_file: policy.verify.config_file.clone(),
+            trust: aplan_app::Trust::Hermetic,
+            options: policy.options.clone(),
+            verdict: policy.verdict.clone(),
+        },
+    )
+    .with_report_config(aplan_config::Config {
+        id_strategy: Some(policy.id_strategy),
+        ..aplan_config::Config::default()
+    });
+    let unknown = args
         .blocked_by
         .iter()
-        .map(String::as_str)
-        .filter(|b| !plan.tasks.iter().any(|lt| lt.task.id == *b))
-        .collect();
+        .filter(|id| {
+            !context
+                .plan()
+                .tasks
+                .iter()
+                .any(|loaded| &loaded.task.id == *id)
+        })
+        .cloned()
+        .collect::<Vec<_>>();
     if !unknown.is_empty() {
         return Err(ToolError::Args(format!(
-            "blocked by task(s) that do not exist: {}. `APLAN003` would reject the file, \
-             so the id is checked before the file is written.",
+            "blocked by task(s) that do not exist: {}. `APLAN003` would reject the file, so the id is checked before the file is written.",
             unknown.join(", ")
         )));
     }
-    Ok(())
+    let request = aplan_app::AddRequest {
+        title: args.title.clone(),
+        id: args.id.clone(),
+        phase: args.phase,
+        cut: args.cut.clone(),
+        effort_days: args.effort_days,
+        owner: args.owner.clone(),
+        status: args.status,
+        blocked_by: args.blocked_by.clone(),
+        prefer_after: args.prefer_after.clone(),
+        ratified_by: args.ratified_by.clone(),
+        contains: args.contains.clone(),
+        members: args.members.clone(),
+        tags: args.tags.clone(),
+        paths: args.paths.clone(),
+        traces: args.traces.clone(),
+        revisit_at: args.revisit_at.clone(),
+        version_impact: args.version_impact,
+        version_impact_reason: args.version_impact_reason.clone(),
+        evidence: Vec::new(),
+        body: None,
+    };
+    let preview = aplan_app::preview_add(&context, &request).map_err(|error| match error {
+        aplan_app::AuthoringError::Arguments(message) => ToolError::Args(message),
+        other => ToolError::Refused(other.to_string()),
+    })?;
+    Ok((context, preview))
+}
+
+struct AddReport {
+    id: String,
+    created_file: String,
+    cut: Option<String>,
+    milestone_file: Option<String>,
+    files: Vec<serde_json::Value>,
+    membership_added: Vec<serde_json::Value>,
+    membership_removed: Vec<serde_json::Value>,
+    notes: Vec<String>,
+}
+
+impl AddReport {
+    fn from_preview(
+        context: &aplan_app::PlanContext,
+        preview: &aplan_app::AuthoringPreview,
+    ) -> Result<Self, ToolError> {
+        let id = preview
+            .created()
+            .first()
+            .cloned()
+            .ok_or_else(|| ToolError::Plan("add preview created no task".to_string()))?;
+        let created_file = preview
+            .change_set()
+            .files()
+            .iter()
+            .find(|file| file.before().is_none())
+            .map(|file| file.path().display().to_string())
+            .ok_or_else(|| ToolError::Plan("add preview omitted the created file".to_string()))?;
+        let files = preview
+            .change_set()
+            .files()
+            .iter()
+            .map(|file| {
+                serde_json::json!({
+                    "path": file.path().display().to_string(),
+                    "change": if file.before().is_none() { "create" } else { "replace" },
+                })
+            })
+            .collect();
+        let mut membership_added = Vec::new();
+        let mut membership_removed = Vec::new();
+        for effect in preview.change_set().effects() {
+            match effect {
+                aplan_app::SemanticEffect::CutMembershipAdded { cut, tasks } => {
+                    membership_added.push(serde_json::json!({"cut": cut, "tasks": tasks}));
+                }
+                aplan_app::SemanticEffect::CutMembershipRemoved { cut, tasks } => {
+                    membership_removed.push(serde_json::json!({"cut": cut, "tasks": tasks}));
+                }
+                _ => {}
+            }
+        }
+        let cut = membership_added
+            .first()
+            .and_then(|entry| entry["cut"].as_str())
+            .map(str::to_string);
+        let milestone_file = cut.as_ref().and_then(|cut| {
+            if cut == &id {
+                Some(created_file.clone())
+            } else {
+                context
+                    .plan()
+                    .tasks
+                    .iter()
+                    .find(|loaded| loaded.task.id == *cut)
+                    .map(|loaded| loaded.path.display().to_string())
+            }
+        });
+        Ok(Self {
+            id,
+            created_file,
+            cut,
+            milestone_file,
+            files,
+            membership_added,
+            membership_removed,
+            notes: preview.change_set().diagnostics().lines(),
+        })
+    }
+
+    fn into_value(self) -> serde_json::Value {
+        serde_json::json!({
+            "schema_version": "v1",
+            "created": self.id,
+            "file": self.created_file,
+            "cut": self.cut,
+            "milestone_file": self.milestone_file,
+            "files": self.files,
+            "membership_added": self.membership_added,
+            "membership_removed": self.membership_removed,
+            "notes": self.notes,
+        })
+    }
+}
+
+fn publish_add(
+    context: &aplan_app::PlanContext,
+    preview: aplan_app::AuthoringPreview,
+    id: &str,
+) -> Result<(), ToolError> {
+    match aplan_app::commit_change_set(context, preview.into_change_set()) {
+        aplan_app::CommitOutcome::Applied(_) => Ok(()),
+        aplan_app::CommitOutcome::Denied(_) => Err(ToolError::Refused(format!(
+            "cannot add `{id}` under this plan's policy"
+        ))),
+        aplan_app::CommitOutcome::NoOp(_) => Err(ToolError::Plan(format!(
+            "add `{id}` unexpectedly produced no change"
+        ))),
+        aplan_app::CommitOutcome::Stale { .. } => Err(ToolError::Plan(
+            "the plan changed while aplan_add was preparing its batch; nothing was written; run aplan_add again"
+                .to_string(),
+        )),
+        aplan_app::CommitOutcome::PublicationFailed { error, .. } => Err(ToolError::Plan(
+            aplan_core::save::advice(&error, "aplan_add"),
+        )),
+    }
 }
 
 /// Create a task, the way the CLI's `add` creates one.
@@ -2581,102 +3472,22 @@ pub fn add(
     args: &AddArgs,
     policy: &crate::Policy,
 ) -> Result<serde_json::Value, ToolError> {
-    use aplan_interop::{cut, emit, ids};
-
-    let options = &policy.options;
-
-    let plan = load_plan(root);
-    // The same derivation the command uses (`A1-108`): a placement beats a guess.
-    let phase = ids::phase_for(&plan, args.cut.as_deref());
-    let id =
-        ids::mint(&plan, phase, policy.id_strategy).map_err(|e| ToolError::Plan(e.to_string()))?;
-
-    refuse_unusable_args(&plan, &id, args)?;
-    // Id or label, the same vocabulary the CLI takes, resolved through the same
-    // function so the two surfaces cannot answer differently (`A1-139`,
-    // `A1-104`).
-    let cut = match &args.cut {
-        Some(name) => {
-            Some(cut::resolve_id(&plan, name).map_err(|e| ToolError::Args(e.to_string()))?)
-        }
-        None => None,
-    };
-    if let Some(cut_id) = cut.as_deref() {
-        cut::check_target(&plan, cut_id).map_err(|e| ToolError::Args(e.to_string()))?;
-    }
-
-    let task = aplan_core::Task {
-        id: id.clone(),
-        title: args.title.clone(),
-        phase,
-        status: aplan_core::Status::Todo,
-        owner: args.owner.clone(),
-        effort_days: args.effort_days,
-        blocked_by: args.blocked_by.clone(),
-        prefer_after: Vec::new(),
-        ratified_by: Vec::new(),
-        contains: Vec::new(),
-        evidence: Vec::new(),
-        // Repeats removed on both surfaces, in one place (`A1-116`).
-        paths: emit::deduped(&args.paths),
-        traces: emit::deduped(&args.traces),
-        trace_fingerprints: std::collections::BTreeMap::new(),
-        tags: emit::deduped(&args.tags),
-        revisit_at: None,
-        version_impact: None,
-        version_impact_reason: None,
-        version: None,
-    };
-
-    // The whole post-state, through the same shared path the command uses, or
-    // this surface keeps the old behaviour and `A1-104`'s audit fails (`A1-113`).
-    let mut after = aplan_core::mutation::with_added(
-        &plan,
-        std::path::PathBuf::from(format!("{id}.md")),
-        task.clone(),
-    );
-    if let Some(cut_id) = cut.as_deref()
-        && let Some(slot) = after.tasks.iter_mut().find(|lt| lt.task.id == cut_id)
+    let (context, preview) = add_preview(root, args, policy)?;
+    let report = AddReport::from_preview(&context, &preview)?;
+    let milestone_with_work = args.tags.iter().any(|tag| tag == "milestone")
+        && (args.effort_days.is_some() || !args.paths.is_empty());
+    if milestone_with_work
+        || preview.change_set().disposition() == aplan_app::ChangeDisposition::Denied
     {
-        slot.task.blocked_by.push(id.clone());
-    }
-    let delta = aplan_core::mutation::delta(&plan, &after, options);
-    if delta.refuses(&policy.verdict) {
         return Err(ToolError::Refused(format!(
-            "cannot add `{id}`: it would add {} finding(s) `check` reports: {}",
-            delta.added.len(),
-            delta.lines().join("; ")
+            "cannot add `{}`: it would add {} finding(s) `check` reports: {}",
+            report.id,
+            preview.change_set().diagnostics().added.len(),
+            report.notes.join("; ")
         )));
     }
-
-    let out_dir = {
-        let conventional = root.join("tasks");
-        if conventional.is_dir() {
-            conventional
-        } else {
-            root.to_path_buf()
-        }
-    };
-    // Created *and* placed, or nothing: a task written and left in no cut is a
-    // plan `require_cut_membership` rejects, and both surfaces produced exactly
-    // that when the milestone could not be written (`A1-103`).
-    let placed_in = emit::write_task_placed(&out_dir, root, &task, emit::ADD_BODY, cut.as_deref())
-        .map_err(|e| ToolError::Plan(e.to_string()))?
-        .map(|p| p.display().to_string());
-
-    // What was written that `check` will still reject. The command says this to a
-    // human and the payload said nothing to an agent, so the surface that exists
-    // for agents was the one that did not mention the plan it had just broken
-    // (`A1-131`, and the shape `A1-101` names).
-    let notes: Vec<String> = delta.lines();
-
-    Ok(serde_json::json!({
-        "created": id,
-        "file": emit::task_path(&out_dir, &id).display().to_string(),
-        "cut": cut,
-        "milestone_file": placed_in,
-        "notes": notes,
-    }))
+    publish_add(&context, preview, &report.id)?;
+    Ok(report.into_value())
 }
 
 #[cfg(test)]
@@ -2797,12 +3608,14 @@ mod adding {
                 },
                 verdict: aplan_core::Verdict::default(),
                 verify: aplan_evidence::VerifyOptions {
+                    detect_drift: false,
                     version: None,
                     traces_root: None,
                     config_file: None,
                     execute: false,
                     test_runner: None,
                     max_unrelated_files: None,
+                    observation_inputs: None,
                     url_check: None,
                 },
                 repo_root: std::path::PathBuf::from("."),
@@ -2890,12 +3703,14 @@ mod adding {
             options: aplan_core::validate::Options::default(),
             verdict: aplan_core::Verdict::default(),
             verify: aplan_evidence::VerifyOptions {
+                detect_drift: false,
                 version: None,
                 traces_root: None,
                 config_file: None,
                 execute: false,
                 test_runner: None,
                 max_unrelated_files: None,
+                observation_inputs: None,
                 url_check: None,
             },
             repo_root: std::path::PathBuf::from("."),
@@ -2928,6 +3743,114 @@ mod adding {
             milestone.contains("A-2"),
             "the membership edit is why `add` is a command and not a template: {milestone}"
         );
+    }
+
+    #[test]
+    fn add_tool_preserves_every_live_creation_time_model_field() {
+        // Agent-surface coverage for `add.accepts_creation_time_model_fields`:
+        // this adapter must carry the typed contract instead of restoring its
+        // former defaults.
+        let dir = tempfile::Builder::new()
+            .tempdir_in(aplan_core::fixture::fixture_root())
+            .expect("tempdir");
+        plan(dir.path());
+        add(
+            dir.path(),
+            &AddArgs {
+                title: "release container".to_string(),
+                id: Some("M-s1".to_string()),
+                phase: Some(1),
+                status: Some(Status::Blocked),
+                blocked_by: vec!["M-s0".to_string()],
+                prefer_after: vec!["A-1".to_string()],
+                ratified_by: vec!["A-1".to_string()],
+                contains: vec!["M-s0".to_string()],
+                tags: vec!["milestone".to_string(), "s1".to_string()],
+                revisit_at: Some("2030-01-02T03:04:05Z".to_string()),
+                version_impact: Some(aplan_core::task::VersionImpact::Feature),
+                version_impact_reason: Some("new delivery surface".to_string()),
+                ..AddArgs::default()
+            },
+            &plain_policy(),
+        )
+        .expect("creates");
+
+        let loaded = aplan_core::load_plan(dir.path());
+        let task = loaded
+            .tasks
+            .iter()
+            .find(|loaded| loaded.task.id == "M-s1")
+            .map(|loaded| &loaded.task)
+            .expect("created task");
+        assert_eq!(task.status, Status::Blocked);
+        assert_eq!(task.blocked_by, ["M-s0"]);
+        assert_eq!(task.prefer_after, ["A-1"]);
+        assert_eq!(task.ratified_by, ["A-1"]);
+        assert_eq!(task.contains, ["M-s0"]);
+        assert_eq!(task.revisit_at.as_deref(), Some("2030-01-02T03:04:05Z"));
+        assert_eq!(
+            task.version_impact,
+            Some(aplan_core::task::VersionImpact::Feature)
+        );
+        assert_eq!(
+            task.version_impact_reason.as_deref(),
+            Some("new delivery surface")
+        );
+    }
+
+    #[test]
+    fn a_new_cut_move_returns_versioned_files_and_both_membership_directions() {
+        // Proves `add.creates_cut_around_existing_members` on the bounded agent
+        // surface, including its versioned review payload.
+        let dir = tempfile::Builder::new()
+            .tempdir_in(aplan_core::fixture::fixture_root())
+            .expect("tempdir");
+        plan(dir.path());
+        std::fs::write(
+            dir.path().join("tasks/A-0.md"),
+            "---\nid: A-0\ntitle: retained\nphase: 0\nstatus: todo\neffort_days: 1\n---\n",
+        )
+        .expect("retained member");
+        let source = dir.path().join("tasks/M-s0.md");
+        let text = std::fs::read_to_string(&source).expect("source cut");
+        std::fs::write(&source, text.replace("[A-1]", "[A-0, A-1]")).expect("two source members");
+
+        let payload = add(
+            dir.path(),
+            &AddArgs {
+                title: "second cut".to_string(),
+                id: Some("M-s1".to_string()),
+                phase: Some(1),
+                blocked_by: vec!["M-s0".to_string()],
+                members: vec!["A-1".to_string()],
+                tags: vec!["milestone".to_string(), "s1".to_string()],
+                ..AddArgs::default()
+            },
+            &plain_policy(),
+        )
+        .expect("new cut move");
+        assert_eq!(payload["schema_version"], "v1");
+        assert_eq!(payload["created"], "M-s1");
+        assert_eq!(payload["cut"], "M-s1");
+        assert_eq!(payload["files"].as_array().map(Vec::len), Some(2));
+        assert_eq!(payload["membership_added"][0]["cut"], "M-s1");
+        assert_eq!(payload["membership_added"][0]["tasks"][0], "A-1");
+        assert_eq!(payload["membership_removed"][0]["cut"], "M-s0");
+        assert_eq!(payload["membership_removed"][0]["tasks"][0], "A-1");
+        assert!(
+            payload["files"]
+                .as_array()
+                .expect("file list")
+                .iter()
+                .all(|file| file["path"].as_str().is_some()),
+            "{payload}"
+        );
+        assert!(
+            std::fs::read_to_string(source)
+                .expect("source after")
+                .contains("blocked_by: [A-0]")
+        );
+        assert!(dir.path().join("tasks/M-s1.md").exists());
     }
 
     /// The agent surface mints under the repository's strategy, not its own
@@ -3024,6 +3947,16 @@ mod adding {
 mod coordinating {
     use super::*;
 
+    fn git_init(root: &std::path::Path) {
+        let status = std::process::Command::new("git")
+            .arg("init")
+            .arg("--quiet")
+            .arg(root)
+            .status()
+            .expect("git init");
+        assert!(status.success());
+    }
+
     /// A plan with one free task, one held task and one closed task.
     fn plan(dir: &std::path::Path) {
         std::fs::create_dir_all(dir.join("tasks")).expect("mkdir");
@@ -3056,7 +3989,9 @@ mod coordinating {
         let dir = tempfile::Builder::new()
             .tempdir_in(aplan_core::fixture::fixture_root())
             .expect("tempdir");
+        git_init(dir.path());
         plan(dir.path());
+        claim(dir.path(), "T-held", Some("ada"), None, &policy()).expect("fixture claim");
         dir
     }
 
@@ -3066,12 +4001,14 @@ mod coordinating {
             options: aplan_core::validate::Options::default(),
             verdict: aplan_core::Verdict::default(),
             verify: aplan_evidence::VerifyOptions {
+                detect_drift: false,
                 version: None,
                 traces_root: None,
                 config_file: None,
                 execute: false,
                 test_runner: None,
                 max_unrelated_files: None,
+                observation_inputs: None,
                 url_check: None,
             },
             repo_root: std::path::PathBuf::from("."),
@@ -3084,6 +4021,14 @@ mod coordinating {
         text.lines()
             .find(|l| l.starts_with("owner:"))
             .map(|l| l.trim_start_matches("owner:").trim().to_string())
+    }
+
+    fn holder_of(root: &std::path::Path, id: &str) -> Option<String> {
+        let plan = load_plan(root);
+        aplan_app::claims::snapshot(root, &plan)
+            .expect("claim snapshot")
+            .claim(id)
+            .map(|record| record.holder.clone())
     }
 
     /// **Every refusal `claim` makes, on this surface** (`A1-359`).
@@ -3099,7 +4044,8 @@ mod coordinating {
 
         let out = claim(root, "T-free", Some("ada"), None, &policy()).expect("a free task");
         assert_eq!(out["held_by"], "ada");
-        assert_eq!(owner_of(root, "T-free").as_deref(), Some("ada"));
+        assert_eq!(holder_of(root, "T-free").as_deref(), Some("ada"));
+        assert_eq!(owner_of(root, "T-free"), None);
 
         // Held, and no `from`.
         let e = claim(root, "T-held", Some("grace"), None, &policy())
@@ -3110,7 +4056,11 @@ mod coordinating {
         let e = claim(root, "T-held", Some("grace"), Some("bob"), &policy())
             .expect_err("a wrong `from` must be refused");
         assert!(e.to_string().contains("not `bob`"), "{e}");
-        assert_eq!(owner_of(root, "T-held").as_deref(), Some("ada"), "it moved");
+        assert_eq!(
+            holder_of(root, "T-held").as_deref(),
+            Some("ada"),
+            "it moved"
+        );
 
         // `from` against a task nobody holds. `T-spare`, because `T-free` was
         // claimed above and is no longer free -- which is the whole point of
@@ -3122,7 +4072,9 @@ mod coordinating {
         // The named takeover works, and says what it displaced.
         let out = claim(root, "T-held", Some("grace"), Some("ada"), &policy()).expect("takeover");
         assert_eq!(out["taken_from"], "ada");
-        assert_eq!(owner_of(root, "T-held").as_deref(), Some("grace"));
+        assert_eq!(out["displaced"]["holder"], "ada");
+        assert_eq!(holder_of(root, "T-held").as_deref(), Some("grace"));
+        assert_eq!(owner_of(root, "T-held").as_deref(), Some("ada"));
 
         // An id that is not there.
         assert!(claim(root, "GHOST", Some("x"), None, &policy()).is_err());
@@ -3138,7 +4090,8 @@ mod coordinating {
         let out = release(root, "T-held", &policy()).expect("a held task");
         assert_eq!(out["was_held_by"], "ada");
         assert_eq!(out["changed"], true);
-        assert_eq!(owner_of(root, "T-held"), None, "the key was left behind");
+        assert_eq!(holder_of(root, "T-held"), None, "the key was left behind");
+        assert_eq!(owner_of(root, "T-held").as_deref(), Some("ada"));
 
         // Again: the outcome the caller asked for, reported rather than refused.
         let out = release(root, "T-held", &policy()).expect("already released");
@@ -3180,6 +4133,16 @@ mod coordinating {
         assert!(e.to_string().contains("terminal"), "{e}");
 
         assert!(working(root, "GHOST", true, &policy()).is_err());
+
+        // Local claim corruption is visible but independent of the durable
+        // status mutation on both agent and command surfaces (`A1-531`).
+        let state = root.join(".git/aplan/claims-v1.json");
+        std::fs::write(&state, "{ not JSON\n").expect("corrupt claim state");
+        let out = working(root, "T-held", true, &policy()).expect("start with unavailable claims");
+        assert_eq!(out["status"], "in_progress");
+        assert_eq!(out["coordination"]["available"], false);
+        let out = working(root, "T-held", false, &policy()).expect("stop with unavailable claims");
+        assert_eq!(out["status"], "todo");
     }
 
     /// **None of the four writes into a plan that does not load** (`A1-359`,
@@ -3190,7 +4153,7 @@ mod coordinating {
     /// this guard once, which is why it is asserted for each of the four rather
     /// than for one of them.
     #[test]
-    fn none_of_them_writes_into_a_plan_that_does_not_load() {
+    fn plan_mutations_refuse_a_broken_plan_but_release_can_recover() {
         let dir = fixture();
         let root = dir.path();
         std::fs::write(root.join("tasks/broken.md"), "---\nid: B\nnot: a task\n").expect("broken");
@@ -3198,7 +4161,6 @@ mod coordinating {
 
         for e in [
             claim(root, "T-free", Some("x"), None, &policy()).err(),
-            release(root, "T-held", &policy()).err(),
             working(root, "T-free", true, &policy()).err(),
             working(root, "T-held", false, &policy()).err(),
         ] {
@@ -3210,6 +4172,8 @@ mod coordinating {
             std::fs::read_to_string(root.join("tasks/T-free.md")).expect("read"),
             "a refusal wrote anyway"
         );
+        let released = release(root, "T-held", &policy()).expect("orphan recovery release");
+        assert_eq!(released["was_held_by"], "ada");
     }
 }
 
@@ -3217,24 +4181,24 @@ mod coordinating {
 mod coordination_gate {
     use super::*;
 
-    /// **A claim can move a task into a stricter evidence standard, and the
-    /// gate catches it** (`A1-359`).
-    ///
-    /// This is the reason `claim` runs the post-state rules at all, and the
-    /// reason is easy to disbelieve: `owner` looks inert. It is not. A `policy`
-    /// scope may select on `owners`, so naming a different holder can change
-    /// which `require_min_strength` a closed task is held to -- and a task that
-    /// closed cleanly on a note becomes `APLAN017` the moment it is claimed by
-    /// somebody the stricter scope covers.
-    ///
-    /// Written as a test rather than left as an assertion in a comment, because
-    /// a gate nobody has seen refuse is a gate nobody knows is wired up.
+    fn git_init(root: &std::path::Path) {
+        let status = std::process::Command::new("git")
+            .arg("init")
+            .arg("--quiet")
+            .arg(root)
+            .status()
+            .expect("git init");
+        assert!(status.success());
+    }
+
+    /// A terminal task keeps its durable record and cannot acquire a live claim.
     #[test]
-    fn claiming_into_a_stricter_policy_scope_is_refused() {
+    fn a_terminal_task_cannot_be_claimed() {
         let dir = tempfile::Builder::new()
             .tempdir_in(aplan_core::fixture::fixture_root())
             .expect("tempdir");
         let root = dir.path();
+        git_init(root);
         std::fs::create_dir_all(root.join("tasks")).expect("mkdir");
         // Closed on a note, which is fine under the whole-plan default.
         std::fs::write(
@@ -3245,30 +4209,19 @@ mod coordination_gate {
         )
         .expect("task");
 
-        // `ada`'s work must close on something a machine can check.
-        let mut options = aplan_core::validate::Options::default();
-        options
-            .evidence_scopes
-            .push(aplan_core::validate::EvidenceScope {
-                selector: aplan_core::select::Selector {
-                    owners: vec!["ada".to_string()],
-                    ..aplan_core::select::Selector::default()
-                },
-                named_dimensions: 1,
-                require_min_strength: Some(vec![aplan_core::EvidenceKind::Commit]),
-                exempt_tags: None,
-            });
         let policy = crate::Policy {
             id_strategy: aplan_core::IdStrategy::Sequential,
-            options,
+            options: aplan_core::validate::Options::default(),
             verdict: aplan_core::Verdict::default(),
             verify: aplan_evidence::VerifyOptions {
+                detect_drift: false,
                 version: None,
                 traces_root: None,
                 config_file: None,
                 execute: false,
                 test_runner: None,
                 max_unrelated_files: None,
+                observation_inputs: None,
                 url_check: None,
             },
             repo_root: std::path::PathBuf::from("."),
@@ -3276,35 +4229,26 @@ mod coordination_gate {
 
         let before = std::fs::read_to_string(root.join("tasks/T-1.md")).expect("read");
         let e = claim(root, "T-1", Some("ada"), None, &policy)
-            .expect_err("the claim introduces a finding, so it must be refused");
+            .expect_err("finished work cannot be claimed as active");
         assert!(
-            e.to_string().contains("APLAN017") || e.to_string().contains("finding"),
-            "the refusal does not say what it would have added: {e}"
+            e.to_string().contains("done") && e.to_string().contains("happening now"),
+            "the refusal does not name the lifecycle mismatch: {e}"
         );
         assert_eq!(
             before,
             std::fs::read_to_string(root.join("tasks/T-1.md")).expect("read"),
             "a refused claim wrote anyway"
         );
-
-        // And somebody the scope does not cover may still claim it, which is
-        // what keeps the gate a gate rather than a ban.
-        claim(root, "T-1", Some("grace"), None, &policy).expect("an uncovered holder is fine");
     }
 
-    /// **An `owner` the writer will not guess at is refused on this surface
-    /// too** (`A1-359`).
-    ///
-    /// The one reachable failure of `set_owner`: a block-form value, which
-    /// `rewrite_scalar_line` declines rather than mangle. The CLI reports it
-    /// and so must this, or an agent would see a different outcome from the
-    /// same plan.
+    /// Claim and release never rewrite even an unusual durable owner value.
     #[test]
-    fn a_block_form_owner_is_refused_rather_than_mangled() {
+    fn a_block_form_owner_is_preserved() {
         let dir = tempfile::Builder::new()
             .tempdir_in(aplan_core::fixture::fixture_root())
             .expect("tempdir");
         let root = dir.path();
+        git_init(root);
         std::fs::create_dir_all(root.join("tasks")).expect("mkdir");
         std::fs::write(
             root.join("tasks/T-1.md"),
@@ -3319,31 +4263,20 @@ mod coordination_gate {
             options: aplan_core::validate::Options::default(),
             verdict: aplan_core::Verdict::default(),
             verify: aplan_evidence::VerifyOptions {
+                detect_drift: false,
                 version: None,
                 traces_root: None,
                 config_file: None,
                 execute: false,
                 test_runner: None,
                 max_unrelated_files: None,
+                observation_inputs: None,
                 url_check: None,
             },
             repo_root: std::path::PathBuf::from("."),
         };
-        // `release` is the path that reaches the writer: it reads the holder
-        // only to report it, so nothing intervenes.
-        let e = release(root, "T-1", &policy).expect_err("a value this cannot swap is refused");
-        assert!(
-            e.to_string().contains("change it by hand"),
-            "the refusal does not say what to do: {e}"
-        );
-
-        // `claim` is refused earlier and for a different reason, which is worth
-        // pinning rather than glossing: a block scalar keeps its newline, so the
-        // holder reads as `ada\n` and `from: ada` genuinely does not name it.
-        // The holder comparison is doing its job; it simply gets there first.
-        let e = claim(root, "T-1", Some("grace"), Some("ada"), &policy)
-            .expect_err("the named holder does not match");
-        assert!(e.to_string().contains("not `ada`"), "{e}");
+        claim(root, "T-1", Some("grace"), None, &policy).expect("ephemeral claim");
+        release(root, "T-1", &policy).expect("release ephemeral claim");
         assert_eq!(
             before,
             std::fs::read_to_string(root.join("tasks/T-1.md")).expect("read"),

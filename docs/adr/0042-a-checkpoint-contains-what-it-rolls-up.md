@@ -2,8 +2,9 @@
 
 Date: 2026-09-23
 
-Status: accepted. Generalises ADR-0022's release; supersedes its decision 4 ("read one
-level through"). Does not disturb ADR-0014, for the reason in **What this is not** below.
+Status: Accepted. Generalises ADR-0022's release; supersedes its decision 4 ("read one level
+through"); superseded in part by ADR-0046, which keeps one task-membership level but recognises
+the built-in phase reporting coordinate.
 
 ## Context
 

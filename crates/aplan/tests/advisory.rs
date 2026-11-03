@@ -9,7 +9,7 @@
 
 use std::process::Command;
 
-mod common;
+use crate::common;
 use common::aplan;
 
 /// The unresolved-evidence note is on stderr, so a JSON consumer's stdout stays

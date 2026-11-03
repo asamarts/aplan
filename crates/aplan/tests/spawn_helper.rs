@@ -16,7 +16,7 @@
 use std::collections::BTreeSet;
 use std::path::{Path, PathBuf};
 
-mod common;
+use crate::common;
 
 /// The files a test author writes, which is what the gate below reads.
 fn test_sources() -> Vec<(String, String)> {
@@ -111,7 +111,8 @@ fn no_test_file_reaches_for_the_binary_itself() {
     assert!(
         offenders.is_empty(),
         "{} file(s) start the binary themselves instead of through `common`:\n  {}\n\
-         Use `common::run`, `common::output` or `common::command`. Every spawn goes \
+         Use `common::run`, `common::output`, `common::command` or \
+         `common::tui_terminal`. Every spawn goes \
          through one place so the suite can record what it invoked ({}).",
         offenders.len(),
         offenders.join("\n  "),
@@ -182,6 +183,36 @@ fn a_recorded_invocation_is_the_argument_vector_as_given() {
         second[1], "Ship it",
         "an argument holding a space survived as one argument"
     );
+}
+
+/// The merged integration harness runs this beside every other CLI test. A
+/// recording override must affect only its calling thread and must disappear at
+/// scope exit, or an unrelated test can corrupt the invocation corpus.
+#[test]
+fn a_recording_override_is_thread_local_and_scoped() {
+    let dir = tempfile::Builder::new()
+        .tempdir_in(aplan_core::fixture::fixture_root())
+        .expect("tempdir");
+    std::fs::create_dir_all(dir.path().join("aplan/tasks")).expect("mkdir");
+    std::fs::write(dir.path().join(".aplan.yml"), "root: aplan\n").expect("config");
+    let log = dir.path().join("invocations.jsonl");
+
+    {
+        let _recording = common::record_into(log.clone());
+        common::run(dir.path(), &["summary"]);
+        let other = dir.path().to_owned();
+        std::thread::spawn(move || common::run(&other, &["ready"]))
+            .join()
+            .expect("other test thread completed");
+    }
+    common::run(dir.path(), &["check"]);
+
+    let lines: Vec<Vec<String>> = std::fs::read_to_string(&log)
+        .expect("scoped invocation log")
+        .lines()
+        .map(|line| serde_json::from_str(line).expect("recording line is JSON"))
+        .collect();
+    assert_eq!(lines, [vec!["summary"]]);
 }
 
 /// **Silent unless asked.** With no variable set, a run writes nothing at all,

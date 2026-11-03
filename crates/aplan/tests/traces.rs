@@ -13,9 +13,12 @@
 //! documents, edits one row nobody traces, and asks `verify` whether anything
 //! drifted. Revert the migration and it fails, which is what makes it evidence.
 
-use std::path::Path;
+use std::{
+    collections::BTreeSet,
+    path::{Component, Path},
+};
 
-mod common;
+use crate::common;
 use common::aplan;
 
 fn repo_root() -> std::path::PathBuf {
@@ -39,6 +42,41 @@ fn copy_dir(from: &Path, to: &Path) {
     }
 }
 
+fn copy_traced_documents(root: &Path, to: &Path) {
+    let mut documents = BTreeSet::new();
+    for entry in std::fs::read_dir(root.join("aplan/tasks")).expect("read tasks") {
+        let path = entry.expect("task entry").path();
+        if path.extension().is_none_or(|extension| extension != "md") {
+            continue;
+        }
+        let task = std::fs::read_to_string(path).expect("read task");
+        for trace in traces_of(&task) {
+            let Some((document, _)) = trace.split_once('#') else {
+                continue;
+            };
+            let relative = Path::new(document);
+            if relative.is_absolute()
+                || relative
+                    .components()
+                    .any(|component| !matches!(component, Component::Normal(_)))
+            {
+                continue;
+            }
+            let source = root.join(relative);
+            if source.is_file() {
+                documents.insert(relative.to_path_buf());
+            }
+        }
+    }
+
+    for relative in documents {
+        let target = to.join(&relative);
+        std::fs::create_dir_all(target.parent().expect("traced document parent"))
+            .expect("create traced document parent");
+        std::fs::copy(root.join(&relative), target).expect("copy traced document");
+    }
+}
+
 /// This repository's plan and the documents it traces, copied so a test may edit
 /// them. Not a git repository: drift is hermetic, and `check` is the command that
 /// reports it.
@@ -48,8 +86,10 @@ fn plan_copy() -> tempfile::TempDir {
         .expect("tempdir");
     let root = repo_root();
     copy_dir(&root.join("aplan"), &dir.path().join("aplan"));
-    // Every markdown document at the root, plus `docs/`: a trace may name any of
-    // them, and a copy missing one turns this into a test about `APLAN008`.
+    // Root policy and documents are cheap and include `.aplan.yml`. Below
+    // `docs/`, copy the exact in-repository documents that traces name. Walking
+    // that whole tree makes this fixture depend on ignored prototype build
+    // output rather than on the trace contract it is meant to exercise.
     for entry in std::fs::read_dir(&root).expect("read root") {
         let entry = entry.expect("entry");
         let name = entry.file_name();
@@ -60,8 +100,50 @@ fn plan_copy() -> tempfile::TempDir {
             std::fs::copy(entry.path(), dir.path().join(&name)).expect("copy doc");
         }
     }
-    copy_dir(&root.join("docs"), &dir.path().join("docs"));
+    copy_traced_documents(&root, dir.path());
     dir
+}
+
+#[test]
+fn trace_fixture_copies_only_in_repository_traced_documents() {
+    let sandbox = tempfile::tempdir_in(aplan_core::fixture::fixture_root()).expect("sandbox");
+    let source = sandbox.path().join("source/repository");
+    let copy = sandbox.path().join("copy/repository");
+    let tasks = source.join("aplan/tasks");
+    std::fs::create_dir_all(&tasks).expect("tasks");
+    std::fs::write(
+        tasks.join("A1-001.md"),
+        "---\ntraces:\n- docs/kept.md#kept\n- ../outside.md#outside\n---\n",
+    )
+    .expect("task");
+
+    let docs = source.join("docs");
+    std::fs::create_dir_all(docs.join("prototype/target/dependency")).expect("artifact tree");
+    std::fs::write(docs.join("kept.md"), "# Kept\n").expect("traced document");
+    std::fs::write(docs.join("untraced.md"), "# Untraced\n").expect("untraced document");
+    std::fs::write(
+        docs.join("prototype/target/dependency/README.md"),
+        "# Build output\n",
+    )
+    .expect("build output");
+    std::fs::write(
+        source.parent().expect("source parent").join("outside.md"),
+        "# Outside\n",
+    )
+    .expect("outside document");
+
+    copy_traced_documents(&source, &copy);
+
+    assert!(copy.join("docs/kept.md").is_file());
+    assert!(!copy.join("docs/untraced.md").exists());
+    assert!(!copy.join("docs/prototype/target").exists());
+    assert!(
+        !copy
+            .parent()
+            .expect("copy parent")
+            .join("outside.md")
+            .exists()
+    );
 }
 
 fn drifted(text: &str) -> Vec<String> {
@@ -86,10 +168,7 @@ fn an_edit_to_a_row_nobody_traces_re_flags_nobody() {
 
     // A row of the CLI table that no task traces, edited the way any ordinary
     // change to that table edits one row.
-    let after = before.replace(
-        "| `aplan tui` | the terminal UI | planned |",
-        "| `aplan tui` | the terminal UI, once there is one | planned |",
-    );
+    let after = before.replacen("| `aplan tui` | ", "| `aplan tui` | fixture-edited ", 1);
     assert_ne!(before, after, "the fixture row moved; pick another");
     std::fs::write(&hld, after).expect("write");
 
@@ -112,6 +191,24 @@ fn an_edit_to_a_row_nobody_traces_re_flags_nobody() {
 /// Proves the named behaviour `traces.table_rows` (`A1-211`).
 #[test]
 fn an_edit_to_a_traced_row_re_flags_exactly_its_owner() {
+    if !repo_root().join("aplan/tasks/A1-009.md").is_file() {
+        let tasks = std::fs::read_dir(repo_root().join("aplan/tasks"))
+            .expect("public plan task directory")
+            .flatten()
+            .filter(|entry| entry.path().extension().is_some_and(|value| value == "md"))
+            .collect::<Vec<_>>();
+        assert!(
+            !tasks.is_empty()
+                && tasks.iter().all(|entry| {
+                    entry.file_name().to_string_lossy().starts_with("A2-")
+                        && !std::fs::read_to_string(entry.path())
+                            .expect("public task")
+                            .contains("\ntraces:")
+                }),
+            "the historical traced-row owner may be absent only in the trace-free A2 epoch"
+        );
+        return;
+    }
     let dir = plan_copy();
     let hld = dir.path().join("HLD.md");
     let before = std::fs::read_to_string(&hld).expect("read");

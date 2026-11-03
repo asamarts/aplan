@@ -22,39 +22,34 @@
 //! identifies the artifact, and it cannot go stale, because it is computed from
 //! the artifact.
 
-use std::process::Command;
+use std::path::Path;
+
+mod build_support;
 
 fn main() {
     println!("cargo:rerun-if-env-changed=APLAN_SOURCE_REV");
-    // Rebuild when the checkout moves, or the recorded rev goes stale the first
-    // time somebody commits without touching this crate.
-    // `packed-refs` too: after `git gc` a branch may have no file under
-    // `refs/heads`, and the commit would then go stale without it.
-    for path in [".git/HEAD", ".git/refs/heads", ".git/packed-refs"] {
-        println!("cargo:rerun-if-changed=../../{path}");
+    let manifest_dir = Path::new(env!("CARGO_MANIFEST_DIR"));
+    for path in build_support::script_watch_paths(manifest_dir) {
+        if let Some(path) = build_support::directive_path(&path) {
+            println!("cargo:rerun-if-changed={path}");
+        }
     }
 
-    let rev = std::env::var("APLAN_SOURCE_REV")
+    let override_rev = std::env::var("APLAN_SOURCE_REV")
         .ok()
-        .filter(|r| !r.trim().is_empty())
-        .or_else(git_describe)
+        .filter(|revision| !revision.trim().is_empty());
+    if override_rev.is_none() {
+        // Rebuild when this checkout's HEAD can have moved. Every selected path
+        // exists, and none is the shared refs directory (`A1-629`).
+        for path in build_support::git_watch_paths(manifest_dir) {
+            if let Some(path) = build_support::directive_path(&path) {
+                println!("cargo:rerun-if-changed={path}");
+            }
+        }
+    }
+
+    let rev = override_rev
+        .or_else(|| build_support::git_head(manifest_dir))
         .unwrap_or_default();
     println!("cargo:rustc-env=APLAN_SOURCE_REV={rev}");
-}
-
-/// The commit this source directory was at, as a full sha.
-///
-/// No `--dirty`: see the module comment. A marker that cannot be kept true is
-/// worse in a provenance record than no marker.
-fn git_describe() -> Option<String> {
-    let out = Command::new("git")
-        .args(["rev-parse", "HEAD"])
-        .current_dir(env!("CARGO_MANIFEST_DIR"))
-        .output()
-        .ok()?;
-    if !out.status.success() {
-        return None;
-    }
-    let rev = String::from_utf8(out.stdout).ok()?.trim().to_string();
-    (!rev.is_empty()).then_some(rev)
 }

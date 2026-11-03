@@ -2,17 +2,59 @@
 //! change to the engine (HLD §5, the `EvidenceResolver` extension point).
 
 use std::cell::RefCell;
+use std::collections::{BTreeMap, BTreeSet};
 use std::path::{Path, PathBuf};
 use std::process::Command;
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::{Mutex, OnceLock};
 
-use aplan_core::task::{Evidence, EvidenceKind, Status, Task, split_anchor, split_rev};
-use aplan_core::{Diagnostic, code};
+use aplan_core::task::{
+    Evidence, EvidenceDilutionMeasure, EvidenceKind, EvidencePathLocator, Status, Task,
+    is_vacuous_ref, split_anchor, split_rev,
+};
+use aplan_core::{Diagnostic, Repair, code};
 use globset::GlobSetBuilder;
 
 use aplan_config::{TestCoverage, TestRunner};
 
+use crate::batch::{
+    BatchWorkspace, ReportedOutcome, TestBatchOutcome, TestBatchResultEntry, validate_result_entry,
+};
+
+/// Whether `replace_evidence` can name both sides without ambiguity.
+///
+/// Keep this predicate aligned with that primitive's identity rule: `captured`
+/// is metadata, while kind plus reference names a citation. A duplicate source
+/// or an already-present target needs a person to decide which record survives,
+/// so neither is machine-applicable (`A1-199`).
+fn replacement_is_surgical(task: &Task, from: &Evidence, to: &Evidence) -> bool {
+    let same_name = |left: &Evidence, right: &Evidence| {
+        left.kind == right.kind && left.reference == right.reference
+    };
+    task.evidence
+        .iter()
+        .filter(|cited| same_name(cited, from))
+        .count()
+        == 1
+        && !task.evidence.iter().any(|cited| same_name(cited, to))
+}
+
 use crate::Error;
-use crate::repo::Repo;
+use crate::repo::{HeadReachability, Repo};
+
+/// The detector for a kind whose model names this concrete path locator.
+///
+/// Each resolver still owns how to obtain its path set, but the capability
+/// model decides whether that set is a locality claim and which rule reports a
+/// mismatch. The exhaustive evidence-kind audit makes a swapped locator fail.
+fn locality_detector(kind: EvidenceKind, locator: EvidencePathLocator) -> Option<&'static str> {
+    kind.capabilities().locality.detector_for_locator(locator)
+}
+
+/// The freshness detector for a kind whose referent is fingerprinted.
+fn freshness_detector(kind: EvidenceKind) -> Option<&'static str> {
+    kind.capabilities().freshness.detector()
+}
 
 /// Resolve one kind of evidence against the repository, emitting diagnostics.
 ///
@@ -32,6 +74,33 @@ pub trait EvidenceResolver {
         ev: &Evidence,
         out: &mut Vec<Diagnostic>,
     ) -> Result<(), Error>;
+
+    /// Describe what the just-completed call to [`Self::resolve`] established
+    /// about this exact citation.
+    ///
+    /// Diagnostics remain the gate's durable contract. This parallel value is
+    /// deliberately small and presentation-neutral: interactive clients need
+    /// to distinguish a failed citation from one a configured provider could
+    /// not ask, without reverse engineering diagnostic prose. Resolvers with
+    /// provider state override the default; repository-backed resolvers can use
+    /// the diagnostics emitted by their own call.
+    fn observation(&self, task: &Task, ev: &Evidence, direct: &[Diagnostic]) -> CitationResolution {
+        CitationResolution {
+            resolver: resolver_label(ev.kind),
+            strength: if direct.is_empty() {
+                repository_strength(ev.kind, task)
+            } else {
+                failed_strength(ev.kind, task, direct)
+            },
+            outcome: if direct.is_empty() {
+                CitationOutcome::Resolved
+            } else {
+                CitationOutcome::Failed
+            },
+            detail: diagnostic_codes(direct),
+            cost_subject: None,
+        }
+    }
 
     /// Judge the task's citations of this kind *together*, once every one has
     /// been resolved.
@@ -78,6 +147,131 @@ pub trait EvidenceResolver {
     }
 }
 
+/// The strongest rung this run actually reached for one citation.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum CitationStrength {
+    /// Inline provenance only; there is no machine resolver.
+    Recorded,
+    /// The reference was resolved to a fact.
+    Resolved,
+    /// The resolved fact was bound to the task's declared repository scope.
+    Relevant,
+    /// The configured test was executed and passed.
+    Executed,
+}
+
+impl CitationStrength {
+    /// The evidence-ladder name used by human and machine adapters.
+    #[must_use]
+    pub const fn label(self) -> &'static str {
+        match self {
+            Self::Recorded => "L0 recorded",
+            Self::Resolved => "L1 resolved",
+            Self::Relevant => "L2 relevant",
+            Self::Executed => "L3 executed",
+        }
+    }
+}
+
+/// The terminal result for one citation, separate from the whole-run verdict.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum CitationOutcome {
+    Resolved,
+    Failed,
+    Refused,
+    TimedOut,
+    Unavailable,
+    OutputLimited,
+}
+
+impl CitationOutcome {
+    #[must_use]
+    pub const fn label(self) -> &'static str {
+        match self {
+            Self::Resolved => "resolved",
+            Self::Failed => "failed",
+            Self::Refused => "refused",
+            Self::TimedOut => "timed out",
+            Self::Unavailable => "unavailable",
+            Self::OutputLimited => "output limited",
+        }
+    }
+}
+
+/// A resolver's typed answer about one citation.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct CitationResolution {
+    pub resolver: String,
+    pub strength: CitationStrength,
+    pub outcome: CitationOutcome,
+    pub detail: Option<String>,
+    /// The key of a provider-level [`Cost`] entry, when this resolver spawned
+    /// work. Cost is aggregated by provider rather than falsely allocated to a
+    /// citation whose command may have been memoised and shared.
+    pub cost_subject: Option<String>,
+}
+
+fn diagnostic_codes(diagnostics: &[Diagnostic]) -> Option<String> {
+    let mut codes = diagnostics
+        .iter()
+        .map(|diagnostic| diagnostic.code)
+        .collect::<Vec<_>>();
+    codes.sort_unstable();
+    codes.dedup();
+    (!codes.is_empty()).then(|| format!("finding(s): {}", codes.join(", ")))
+}
+
+fn resolver_label(kind: EvidenceKind) -> String {
+    match kind.capabilities().resolution {
+        aplan_core::task::EvidenceResolution::Git(
+            aplan_core::task::EvidenceGitResolver::Commit,
+        ) => "git commit object and changed paths".to_string(),
+        aplan_core::task::EvidenceResolution::Git(aplan_core::task::EvidenceGitResolver::File) => {
+            "git tree file and optional section".to_string()
+        }
+        aplan_core::task::EvidenceResolution::Configured(
+            aplan_core::task::EvidenceConfiguredResolver::Url,
+        ) => "configured url.check".to_string(),
+        aplan_core::task::EvidenceResolution::Configured(
+            aplan_core::task::EvidenceConfiguredResolver::Test,
+        ) => "configured test runner".to_string(),
+        aplan_core::task::EvidenceResolution::None => "no machine resolver".to_string(),
+    }
+}
+
+fn repository_strength(kind: EvidenceKind, task: &Task) -> CitationStrength {
+    match kind {
+        EvidenceKind::Commit | EvidenceKind::File if !task.paths.is_empty() => {
+            CitationStrength::Relevant
+        }
+        EvidenceKind::Commit | EvidenceKind::File | EvidenceKind::Test | EvidenceKind::Url => {
+            CitationStrength::Resolved
+        }
+        EvidenceKind::Note => CitationStrength::Recorded,
+    }
+}
+
+fn failed_strength(kind: EvidenceKind, task: &Task, direct: &[Diagnostic]) -> CitationStrength {
+    let reference_resolved = direct.iter().all(|diagnostic| {
+        !matches!(
+            diagnostic.code,
+            code::COMMIT_UNRESOLVED | code::FILE_UNRESOLVED
+        )
+    });
+    if !reference_resolved {
+        CitationStrength::Recorded
+    } else if direct.iter().any(|diagnostic| {
+        matches!(
+            diagnostic.code,
+            code::COMMIT_IRRELEVANT | code::FILE_IRRELEVANT
+        )
+    }) {
+        CitationStrength::Resolved
+    } else {
+        repository_strength(kind, task)
+    }
+}
+
 /// `commit` evidence: L1 (the SHA resolves, `APLAN011`) and L2 (its diff touches
 /// one of the task's `paths`, `APLAN012`).
 #[derive(Debug)]
@@ -87,10 +281,13 @@ pub struct CommitResolver {
     max_unrelated_files: usize,
     /// Citations left unresolved because the clone is shallow, counted so the
     /// run says it once instead of blaming each task (`A1-177`).
-    shallow_unresolved: std::cell::Cell<usize>,
+    shallow_unresolved: RefCell<std::collections::BTreeSet<(String, String)>>,
+    /// Citations whose objects are present but whose relationship to `HEAD`
+    /// cannot be established through the history a shallow clone has.
+    shallow_ancestry_unknown: RefCell<std::collections::BTreeSet<(String, String)>>,
     /// Citations that resolved but sit on the clone's boundary, so their diff
     /// cannot be computed and `APLAN012` must not be evaluated (`A1-177` audit).
-    shallow_unjudged: std::cell::Cell<usize>,
+    shallow_unjudged: RefCell<std::collections::BTreeSet<(String, String)>>,
 }
 
 impl CommitResolver {
@@ -98,8 +295,51 @@ impl CommitResolver {
     pub fn new(max_unrelated_files: Option<usize>) -> Self {
         Self {
             max_unrelated_files: max_unrelated_files.unwrap_or(DEFAULT_MAX_UNRELATED_FILES),
-            shallow_unresolved: std::cell::Cell::new(0),
-            shallow_unjudged: std::cell::Cell::new(0),
+            shallow_unresolved: RefCell::new(std::collections::BTreeSet::new()),
+            shallow_ancestry_unknown: RefCell::new(std::collections::BTreeSet::new()),
+            shallow_unjudged: RefCell::new(std::collections::BTreeSet::new()),
+        }
+    }
+
+    /// Stop a citation that cannot be established as part of the verified
+    /// tree. Returns `true` when the caller must not continue to L2.
+    fn reject_outside_head(
+        &self,
+        repo: &Repo,
+        task: &Task,
+        file: &Path,
+        ev: &Evidence,
+        commit: &git2::Commit<'_>,
+        out: &mut Vec<Diagnostic>,
+    ) -> bool {
+        match repo.head_reachability(commit) {
+            HeadReachability::Reachable => false,
+            HeadReachability::UnknownShallow => {
+                self.shallow_ancestry_unknown
+                    .borrow_mut()
+                    .insert((task.id.clone(), ev.reference.clone()));
+                true
+            }
+            HeadReachability::Unreachable => {
+                out.push(
+                    Diagnostic::error(
+                        code::COMMIT_UNRESOLVED,
+                        format!(
+                            "commit `{}` resolves locally but is not reachable from this \
+                             repository's `HEAD`",
+                            ev.reference
+                        ),
+                    )
+                    .with_task(&task.id)
+                    .with_file(file)
+                    .with_agent_instruction(
+                        "Cite the reachable merge, squash, or integration commit that contains \
+                         this work; local object presence does not make it part of the verified \
+                         tree.",
+                    ),
+                );
+                true
+            }
         }
     }
 }
@@ -124,6 +364,58 @@ impl EvidenceResolver for CommitResolver {
 
     fn finish_plan(&self, out: &mut Vec<Diagnostic>) {
         self.report_shallow(out);
+    }
+
+    fn observation(&self, task: &Task, ev: &Evidence, direct: &[Diagnostic]) -> CitationResolution {
+        let key = (task.id.clone(), ev.reference.clone());
+        if self.shallow_unresolved.borrow().contains(&key) {
+            return CitationResolution {
+                resolver: resolver_label(ev.kind),
+                strength: CitationStrength::Recorded,
+                outcome: CitationOutcome::Unavailable,
+                detail: Some("the shallow checkout cannot resolve this citation".into()),
+                cost_subject: None,
+            };
+        }
+        if self.shallow_ancestry_unknown.borrow().contains(&key) {
+            return CitationResolution {
+                resolver: resolver_label(ev.kind),
+                strength: CitationStrength::Recorded,
+                outcome: CitationOutcome::Unavailable,
+                detail: Some(
+                    "the shallow checkout cannot establish whether HEAD reaches this citation"
+                        .into(),
+                ),
+                cost_subject: None,
+            };
+        }
+        if self.shallow_unjudged.borrow().contains(&key) {
+            return CitationResolution {
+                resolver: resolver_label(ev.kind),
+                strength: CitationStrength::Resolved,
+                outcome: CitationOutcome::Unavailable,
+                detail: Some(
+                    "the shallow checkout resolves this citation but cannot judge its relevance"
+                        .into(),
+                ),
+                cost_subject: None,
+            };
+        }
+        CitationResolution {
+            resolver: resolver_label(ev.kind),
+            strength: if direct.is_empty() {
+                repository_strength(ev.kind, task)
+            } else {
+                failed_strength(ev.kind, task, direct)
+            },
+            outcome: if direct.is_empty() {
+                CitationOutcome::Resolved
+            } else {
+                CitationOutcome::Failed
+            },
+            detail: diagnostic_codes(direct),
+            cost_subject: None,
+        }
     }
 
     fn resolve(
@@ -168,7 +460,8 @@ impl EvidenceResolver for CommitResolver {
             // that could not be asked.
             if repo.is_shallow() {
                 self.shallow_unresolved
-                    .set(self.shallow_unresolved.get() + 1);
+                    .borrow_mut()
+                    .insert((task.id.clone(), ev.reference.clone()));
                 return Ok(());
             }
             out.push(
@@ -216,6 +509,10 @@ impl EvidenceResolver for CommitResolver {
             return Ok(());
         }
 
+        if self.reject_outside_head(repo, task, file, ev, &commit, out) {
+            return Ok(());
+        }
+
         // The clone stops here, so this commit's parent is absent and its diff
         // cannot be computed. `commit_paths` would diff it against the empty
         // tree -- the rule for a *root* commit -- which makes it touch every file
@@ -223,9 +520,17 @@ impl EvidenceResolver for CommitResolver {
         // Left unjudged and counted, with the same one-per-run report as an
         // unresolvable citation (`A1-177`, found by its audit).
         if repo.is_truncated_at(&commit) {
-            self.shallow_unjudged.set(self.shallow_unjudged.get() + 1);
+            self.shallow_unjudged
+                .borrow_mut()
+                .insert((task.id.clone(), ev.reference.clone()));
             return Ok(());
         }
+
+        let Some(locality_code) =
+            locality_detector(EvidenceKind::Commit, EvidencePathLocator::CommitChanges)
+        else {
+            return Ok(());
+        };
 
         // L2 needs `paths`; with none declared, relevance is unverifiable, that
         // is a gap in the task, not a violation of this rule (a future
@@ -242,7 +547,7 @@ impl EvidenceResolver for CommitResolver {
         if let Some(wild) = task.paths.iter().find(|p| is_match_everything(p)) {
             out.push(
                 Diagnostic::error(
-                    code::COMMIT_IRRELEVANT,
+                    locality_code,
                     format!(
                         "this task's `paths` include `{wild}`, which matches every file: a commit \
                          cannot be bound to the specific work this task owns"
@@ -257,7 +562,7 @@ impl EvidenceResolver for CommitResolver {
             return Ok(());
         }
 
-        report_unbound_commit(repo, task, file, &commit, &ev.reference, out)
+        report_unbound_commit(repo, task, file, &commit, &ev.reference, locality_code, out)
     }
 
     fn finish_task(
@@ -287,6 +592,7 @@ fn report_unbound_commit(
     file: &Path,
     commit: &git2::Commit<'_>,
     reference: &str,
+    locality_code: &'static str,
     out: &mut Vec<Diagnostic>,
 ) -> Result<(), Error> {
     let Some(set) = build_globset(&task.paths) else {
@@ -299,7 +605,7 @@ fn report_unbound_commit(
     let short = short_sha(reference);
     out.push(
         Diagnostic::error(
-            code::COMMIT_IRRELEVANT,
+            locality_code,
             format!(
                 "commit `{short}` touches none of this task's `paths` ({})",
                 task.paths.join(", ")
@@ -352,9 +658,9 @@ pub fn report_merge_evidence(repo: &Repo, task: &Task, file: &Path, out: &mut Ve
     for ev in task
         .evidence
         .iter()
-        .filter(|e| e.kind == EvidenceKind::Commit && !e.reference.trim().is_empty())
+        .filter(|e| e.kind == EvidenceKind::Commit && !is_vacuous_ref(&e.reference))
     {
-        let Some(commit) = repo.resolve_commit(&ev.reference) else {
+        let Some(commit) = reachable_cited_commit(repo, &ev.reference) else {
             // Unresolvable is `APLAN011`'s finding, not this rule's.
             continue;
         };
@@ -395,6 +701,13 @@ pub fn report_dilution(
     max_unrelated_files: usize,
     out: &mut Vec<Diagnostic>,
 ) -> Result<(), Error> {
+    let Some(detector) = EvidenceKind::Commit
+        .capabilities()
+        .dilution
+        .detector_for_measure(EvidenceDilutionMeasure::ChangedPathsOutsideTask)
+    else {
+        return Ok(());
+    };
     // Only a `done` task is claiming its evidence proves something finished; on
     // anything else a sprawling citation is work in progress, not an overclaim.
     if max_unrelated_files == 0 || task.status != Status::Done || task.paths.is_empty() {
@@ -415,7 +728,7 @@ pub fn report_dilution(
     if task
         .evidence
         .iter()
-        .any(|e| e.kind == EvidenceKind::Test && !e.reference.trim().is_empty())
+        .any(|e| e.kind == EvidenceKind::Test && !is_vacuous_ref(&e.reference))
     {
         return Ok(());
     }
@@ -432,7 +745,7 @@ pub fn report_dilution(
         if !is_sha_shaped(&e.reference) {
             continue;
         }
-        let Some(commit) = repo.resolve_commit(&e.reference) else {
+        let Some(commit) = reachable_cited_commit(repo, &e.reference) else {
             continue;
         };
         // A hex-shaped ref name is `APLAN011`'s finding, not proof to weigh.
@@ -487,7 +800,7 @@ pub fn report_dilution(
     };
     out.push(
         Diagnostic::warning(
-            code::DILUTED_EVIDENCE,
+            detector,
             format!(
                 "{lead}: it overlaps them, so `APLAN012` passes, but a commit that size would \
                  overlap almost any `paths`"
@@ -508,50 +821,91 @@ pub fn report_dilution(
 /// `None` when it resolves. Reuses `APLAN015`, and the message says which half
 /// failed, because "the document is not there" and "that section is not in it"
 /// send a reader to different places.
+struct AnchoredFile<'a> {
+    rev: Option<&'a str>,
+    path_for_git: &'a str,
+    written_path: &'a str,
+    anchor: &'a str,
+    evidence: &'a Evidence,
+}
+
+impl<'a> AnchoredFile<'a> {
+    fn new(
+        rev: Option<&'a str>,
+        path_for_git: &'a str,
+        written_path: &'a str,
+        anchor: &'a str,
+        evidence: &'a Evidence,
+    ) -> Self {
+        Self {
+            rev,
+            path_for_git,
+            written_path,
+            anchor,
+            evidence,
+        }
+    }
+}
+
 fn unresolved_anchor(
     repo: &Repo,
-    rev: Option<&str>,
-    // `path` is normalised and is what git is asked for; `written` is how the
-    // citation spells it and is what every message names. A reader has to find
-    // it in their own file, and naming a spelling they did not write is the
-    // defect `A1-254` set out to remove, one step along (`A1-254`, audit).
-    path: &str,
-    written: &str,
-    anchor: &str,
+    cited: &AnchoredFile<'_>,
     task: &Task,
     file: &Path,
 ) -> Result<Option<Diagnostic>, Error> {
+    let rev = cited.rev;
+    let path_for_git = cited.path_for_git;
+    let written_path = cited.written_path;
+    let anchor = cited.anchor;
+    let evidence = cited.evidence;
+    // `path_for_git` is normalised and is what git is asked for;
+    // `written_path` is how the citation spells it and is what every message
+    // names. A reader has to find it in their own file (`A1-254`).
+    let unanchored = rev.map_or_else(
+        || written_path.to_string(),
+        |rev| format!("{written_path}@{rev}"),
+    );
     let at = rev.map_or_else(|| "HEAD".to_string(), |r| format!("`{r}`"));
     if anchor.is_empty() {
         return Ok(Some(
             Diagnostic::error(
                 code::FILE_UNRESOLVED,
-                format!("file `{written}#` ends in an empty anchor"),
+                format!("file `{written_path}#` ends in an empty anchor"),
             )
             .with_task(&task.id)
             .with_file(file)
             .with_agent_instruction(format!(
-                "Name the section after the `#`, or cite `{written}` on its own to mean the whole \
+                "Name the section after the `#`, or cite `{written_path}` on its own to mean the whole \
                  document."
             )),
         ));
     }
-    let Some(text) = repo.text_at(rev, path)? else {
+    let Some(text) = repo.text_at(rev, path_for_git)? else {
         // Tracked (the caller checked) and unreadable as text: a binary, or one
         // this build cannot decode. Nothing to look for a heading in, and the
         // citation should not pass on the strength of an anchor nobody read.
-        return Ok(Some(
-            Diagnostic::error(
-                code::FILE_UNRESOLVED,
-                format!("file `{written}` at {at} is not text, so `#{anchor}` cannot be resolved"),
-            )
-            .with_task(&task.id)
-            .with_file(file)
-            .with_agent_instruction(format!(
-                "Cite `{written}` without an anchor, or point the citation at a text document whose \
+        let replacement = Evidence {
+            kind: EvidenceKind::File,
+            reference: unanchored.clone(),
+            captured: evidence.captured.clone(),
+        };
+        let mut diagnostic = Diagnostic::error(
+            code::FILE_UNRESOLVED,
+            format!("file `{written_path}` at {at} is not text, so `#{anchor}` cannot be resolved"),
+        )
+        .with_task(&task.id)
+        .with_file(file)
+        .with_agent_instruction(format!(
+            "Cite `{unanchored}` without an anchor, or point the citation at a text document whose \
                  sections can be named."
-            )),
         ));
+        if replacement_is_surgical(task, evidence, &replacement) {
+            diagnostic = diagnostic.with_repair(Repair::ReplaceEvidence {
+                from: evidence.clone(),
+                to: replacement,
+            });
+        }
+        return Ok(Some(diagnostic));
     };
     // The same reader `traces` uses, so a heading or a table row means here what
     // it means there, and a citation copied from a rendered URL resolves.
@@ -561,13 +915,15 @@ fn unresolved_anchor(
     Ok(Some(
         Diagnostic::error(
             code::FILE_UNRESOLVED,
-            format!("file `{written}` exists at {at}, and `#{anchor}` matches no heading or table row in it"),
+            format!(
+                "file `{written_path}` exists at {at}, and `#{anchor}` matches no heading or table row in it"
+            ),
         )
         .with_task(&task.id)
         .with_file(file)
         .with_agent_instruction(format!(
-            "Correct the anchor to a section `{written}` has, or cite `{written}` on its own to mean \
-             the whole document."
+            "Correct the anchor to a section `{written_path}` has, or cite `{written_path}` on its \
+             own to mean the whole document."
         )),
     ))
 }
@@ -622,21 +978,126 @@ fn outside_this_repository(path: &str, task: &Task, file: &std::path::Path) -> O
 /// `file` on the ladder: `require_min_strength` already counts `file` among the
 /// strong kinds, and naming a section only narrows what the citation claims.
 ///
-/// **Not fingerprinted**, unlike a `traces` anchor. A stamp would re-open a task
-/// whenever its proof was edited, which is a churn cost no pilot has asked for,
-/// and `traces` is where a document that must not drift already belongs.
 #[derive(Debug)]
-pub struct FileResolver;
+pub struct FileResolver {
+    detect_drift: bool,
+}
+
+impl FileResolver {
+    /// Build the resolver under the repository's explicit drift policy.
+    #[must_use]
+    pub const fn new(detect_drift: bool) -> Self {
+        Self { detect_drift }
+    }
+}
+
+/// Compare one still-resolving mutable citation with the baseline closure
+/// recorded. Kept separate from L1 resolution so the path, revision and anchor
+/// failures retain their own early-return precedence.
+fn report_file_drift(
+    detect_drift: bool,
+    repo: &Repo,
+    task: &Task,
+    file: &Path,
+    ev: &Evidence,
+    out: &mut Vec<Diagnostic>,
+) -> Result<(), Error> {
+    if !detect_drift || task.status != Status::Done || !crate::evidence_needs_fingerprint(repo, ev)
+    {
+        return Ok(());
+    }
+    let Some(detector) = freshness_detector(EvidenceKind::File) else {
+        return Ok(());
+    };
+    let key = crate::evidence_fingerprint_key(ev);
+    if !task.evidence_fingerprints.is_empty() && !task.evidence_fingerprints.contains_key(&key) {
+        out.push(
+            Diagnostic::warning(
+                detector,
+                format!(
+                    "file evidence `{}` has no recorded fingerprint while this task carries \
+                     freshness stamps for other evidence",
+                    ev.reference
+                ),
+            )
+            .with_task(&task.id)
+            .with_file(file)
+            .with_agent_instruction(format!(
+                "Review `{}` and run `aplan close {} --restamp` to record one complete evidence \
+                 baseline.",
+                ev.reference, task.id
+            )),
+        );
+    } else if let Some(stored) = task.evidence_fingerprints.get(&key)
+        && let Some(current) = file_fingerprint(repo, ev)?
+        && current != *stored
+    {
+        out.push(
+            Diagnostic::warning(
+                detector,
+                format!(
+                    "file evidence `{}` still resolves, but what it cites has changed since this \
+                     task recorded it",
+                    ev.reference
+                ),
+            )
+            .with_task(&task.id)
+            .with_file(file)
+            .with_agent_instruction(format!(
+                "Review the current `{}`. If it still proves this task, run `aplan close {} \
+                 --restamp`; otherwise replace the citation with `aplan amend {} \
+                 --replace-evidence file:{} <kind>:<ref>`.",
+                ev.reference, task.id, task.id, ev.reference
+            )),
+        );
+    }
+    Ok(())
+}
+
+/// The fingerprint of the mutable referent a `file` citation names.
+///
+/// An unversioned citation or one carrying a symbolic revision is mutable. Only
+/// an `@rev` that resolves as the object id it spells is pinned to an immutable
+/// tree and needs no stamp; syntax alone is insufficient because a ref may have
+/// an all-hex name. A whole file hashes its exact blob bytes, including binary
+/// artefacts; an anchored citation hashes only the section it claims, through
+/// the same normalisation trace drift uses.
+pub(crate) fn file_fingerprint(repo: &Repo, ev: &Evidence) -> Result<Option<String>, Error> {
+    if !crate::evidence_needs_fingerprint(repo, ev) {
+        return Ok(None);
+    }
+    let (reference, rev) = split_rev(&ev.reference);
+    let (path, anchor) = split_anchor(reference);
+    let normalised = aplan_core::anchor::normalise(std::path::Path::new(path));
+    if normalised.is_absolute() || normalised.starts_with("..") {
+        return Ok(None);
+    }
+    let path_for_git = normalised.to_string_lossy();
+    let Some(content) = repo.blob_at(rev, &path_for_git)? else {
+        return Ok(None);
+    };
+    let Some(anchor) = anchor else {
+        return Ok(Some(aplan_core::anchor::content_fingerprint(&content)));
+    };
+    if anchor.is_empty() {
+        return Ok(None);
+    }
+    let Ok(text) = String::from_utf8(content) else {
+        return Ok(None);
+    };
+    Ok(aplan_core::anchor::anchor_fingerprint(&text, anchor))
+}
 
 impl CommitResolver {
     /// The one finding a shallow clone earns, in place of one per citation.
     fn report_shallow(&self, out: &mut Vec<Diagnostic>) {
-        let unresolved = self.shallow_unresolved.get();
-        let unjudged = self.shallow_unjudged.get();
-        if unresolved + unjudged == 0 {
+        let unresolved = self.shallow_unresolved.borrow().len();
+        let ancestry_unknown = self.shallow_ancestry_unknown.borrow().len();
+        let unjudged = self.shallow_unjudged.borrow().len();
+        if unresolved + ancestry_unknown + unjudged == 0 {
             return;
         }
-        // Both halves in one sentence, because they are one cause and an adopter
+        // All limits in one sentence, because they are one cause and an adopter
         // fixes them with one flag.
         let boundary = |n: usize| {
             format!(
@@ -644,14 +1105,31 @@ impl CommitResolver {
                 if n == 1 { "sits" } else { "sit" }
             )
         };
-        let what = match (unresolved, unjudged) {
-            (n, 0) => format!("{n} `commit` {} could not be resolved", plural(n)),
-            (0, m) => format!("{m} `commit` {} {}", plural(m), boundary(m)),
-            (n, m) => format!(
-                "{n} `commit` {} could not be resolved, and {m} {}",
-                plural(n),
-                boundary(m)
-            ),
+        let mut limits = Vec::new();
+        if unresolved > 0 {
+            limits.push(format!(
+                "{unresolved} `commit` {} could not be resolved",
+                plural(unresolved)
+            ));
+        }
+        if ancestry_unknown > 0 {
+            limits.push(format!(
+                "whether `HEAD` reaches {ancestry_unknown} `commit` {} could not be established",
+                plural(ancestry_unknown)
+            ));
+        }
+        if unjudged > 0 {
+            limits.push(format!(
+                "{unjudged} `commit` {} {}",
+                plural(unjudged),
+                boundary(unjudged)
+            ));
+        }
+        let what = match limits.as_slice() {
+            [one] => one.clone(),
+            [first, second] => format!("{first}, and {second}"),
+            [first, second, third] => format!("{first}, {second}, and {third}"),
+            _ => unreachable!("the three shallow-history limits exhaust the cases"),
         };
         out.push(
             Diagnostic::error(
@@ -759,67 +1237,92 @@ impl EvidenceResolver for FileResolver {
         // grain, and a reader who sees `APLAN015` should not have to learn a
         // second number for it.
         if let Some(anchor) = anchor
-            && let Some(diagnostic) =
-                unresolved_anchor(repo, rev, path_for_git, path, anchor, task, file)?
+            && let Some(diagnostic) = unresolved_anchor(
+                repo,
+                &AnchoredFile::new(rev, path_for_git, path, anchor, ev),
+                task,
+                file,
+            )?
         {
             out.push(diagnostic);
             return Ok(());
         }
 
-        // L2, the half `APLAN012` had and this did not: a file that exists and
-        // lies outside the task's `paths` proves the repository has that file
-        // (`A1-045`).
-        //
-        // With no `paths` there is nothing to judge against, which is
-        // `APLAN023`'s finding and not this one's: reporting both would give one
-        // gap two codes.
-        if task.paths.is_empty() {
-            return Ok(());
-        }
-        // The same reading `APLAN012` takes of a catch-all: `paths` comes from an
-        // untrusted task file, so a claim to own every file must fail relevance
-        // rather than satisfy it trivially. Said once per task there, and once
-        // here, because a task may cite either kind.
-        if let Some(wild) = task.paths.iter().find(|p| is_match_everything(p)) {
-            out.push(
-                Diagnostic::error(
-                    code::FILE_IRRELEVANT,
-                    format!(
-                        "this task's `paths` include `{wild}`, which matches every file: a cited \
-                         file cannot be bound to the specific work this task owns"
-                    ),
-                )
-                .with_task(&task.id)
-                .with_file(file)
-                .with_agent_instruction(
-                    "Replace the catch-all glob with the specific files this task owns.",
-                ),
-            );
-            return Ok(());
-        }
+        // A still-resolving reference can name different proof over time. Only
+        // compare where closure recorded what was reviewed: historical tasks
+        // have no stamp and remain explicitly unverifiable rather than being
+        // flooded with retrospective findings. A symbolic revision such as
+        // `HEAD` or a branch can move and is fingerprinted; an object id cannot.
+        report_file_drift(self.detect_drift, repo, task, file, ev, out)?;
 
-        let Some(set) = build_globset(&task.paths) else {
-            return Ok(());
-        };
-        if !set.is_match(path_for_git) {
-            out.push(
-                Diagnostic::error(
-                    code::FILE_IRRELEVANT,
-                    format!(
-                        "file `{path}` is outside this task's `paths` ({}): it exists, which is \
-                         all the citation proves",
-                        task.paths.join(", ")
-                    ),
-                )
-                .with_task(&task.id)
-                .with_file(file)
-                .with_agent_instruction(
-                    "Cite a file this task owns, or correct the task's `paths` if they do not \
-                     name all of it. This cannot tell which of the two is wrong.",
-                ),
-            );
-        }
+        report_unbound_file(task, file, path, path_for_git, out);
         Ok(())
+    }
+}
+
+/// Report a file that resolves but is not bound to anything the task owns.
+fn report_unbound_file(
+    task: &Task,
+    file: &Path,
+    path: &str,
+    path_for_git: &str,
+    out: &mut Vec<Diagnostic>,
+) {
+    let Some(locality_code) = locality_detector(EvidenceKind::File, EvidencePathLocator::CitedFile)
+    else {
+        return;
+    };
+
+    // L2, the half `APLAN012` had and this did not: a file that exists and lies
+    // outside the task's `paths` proves the repository has that file
+    // (`A1-045`). With no `paths` there is nothing to judge against, which is
+    // `APLAN023`'s finding and not this one's: reporting both would give one gap
+    // two codes.
+    if task.paths.is_empty() {
+        return;
+    }
+    // The same reading `APLAN012` takes of a catch-all: `paths` comes from an
+    // untrusted task file, so a claim to own every file must fail relevance
+    // rather than satisfy it trivially. Said once per task there, and once here,
+    // because a task may cite either kind.
+    if let Some(wild) = task.paths.iter().find(|p| is_match_everything(p)) {
+        out.push(
+            Diagnostic::error(
+                locality_code,
+                format!(
+                    "this task's `paths` include `{wild}`, which matches every file: a cited \
+                     file cannot be bound to the specific work this task owns"
+                ),
+            )
+            .with_task(&task.id)
+            .with_file(file)
+            .with_agent_instruction(
+                "Replace the catch-all glob with the specific files this task owns.",
+            ),
+        );
+        return;
+    }
+
+    let Some(set) = build_globset(&task.paths) else {
+        return;
+    };
+    if !set.is_match(path_for_git) {
+        out.push(
+            Diagnostic::error(
+                locality_code,
+                format!(
+                    "file `{path}` is outside this task's `paths` ({}): it exists, which is \
+                     all the citation proves",
+                    task.paths.join(", ")
+                ),
+            )
+            .with_task(&task.id)
+            .with_file(file)
+            .with_agent_instruction(
+                "Cite a file this task owns, or correct the task's `paths` if they do not name \
+                 all of it. This cannot tell which of the two is wrong.",
+            ),
+        );
     }
 }
 
@@ -837,6 +1340,12 @@ const LIST_TIMEOUT_SECS: u64 = 600;
 /// runs of `verify` on one tree do the same thing.
 pub(crate) const MISS_SENTINEL: &str = "aplan-probe-a-name-no-test-can-have-8f3c1d";
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum TestObservationSource {
+    Direct,
+    Receipt,
+}
+
 /// How long `url.check` may take per citation (`A1-121`).
 ///
 /// Thirty seconds, because this is one network request. Two orders of magnitude
@@ -850,6 +1359,8 @@ const URL_TIMEOUT_SECS: u64 = 30;
 #[derive(Debug)]
 pub struct TestResolver {
     runners: Vec<TestRunner>,
+    schedule: aplan_config::TestSchedule,
+    schedule_is_explicit: bool,
     repo_root: PathBuf,
     execute: bool,
     /// What each runner listed, computed once.
@@ -861,19 +1372,15 @@ pub struct TestResolver {
     /// feature exists for. The corpus cannot change during a run, so asking
     /// twice was never buying anything.
     listings: RefCell<Vec<Option<Vec<String>>>>,
-    /// What went wrong with a runner, once per runner (`A1-066`).
-    ///
-    /// A runner that will not run used to abort the whole verification: a `dir`
-    /// that does not exist took every other task's findings with it and exited
-    /// `2`. The failure still has to be loud -- `A1-120` made it an abort
-    /// precisely so a broken runner could not quietly invalidate the citations
-    /// that depend on it -- so it is now an error *finding* reported once, and
-    /// the citations that would have used this runner are skipped rather than
-    /// reported as names it does not list.
-    faults: RefCell<Vec<Option<RunnerFault>>>,
+    /// Shared fault and cost state for each configured runner (`A1-185`).
+    checkers: ConfiguredCheckers,
     /// Which failing tests have already shown their output in this run
     /// (`A1-365`), keyed the way `executed` is: by runner and name.
     shown: RefCell<std::collections::BTreeSet<(usize, String)>>,
+    /// Which runner-level batch failures have already shown their shared
+    /// detail. Every citation still gets a finding, but 199 identities do not
+    /// print 199 copies of one adapter error.
+    batch_shown: RefCell<BTreeSet<usize>>,
     /// What a *miss* looks like for each runner, learned once from a sentinel
     /// and only when a citation has passed under `--execute` (`A1-167`).
     misses: RefCell<Vec<Option<MissProfile>>>,
@@ -892,9 +1399,6 @@ pub struct TestResolver {
     /// Keyed by runner and name, and never shared beyond this resolver, which
     /// lives for one `verify` invocation.
     executed: RefCell<std::collections::BTreeMap<(usize, String), Outcome>>,
-    /// Per runner: what its commands cost, merged across every one this run
-    /// spawned -- peaks kept, wall clock added (`A1-309`).
-    costs: RefCell<Vec<Cost>>,
     /// Per runner: the tests it says it will not run, asked once (`A1-300`).
     ///
     /// `None` where the runner declares no `skipped` command, which is every
@@ -902,6 +1406,76 @@ pub struct TestResolver {
     skips: RefCell<Vec<Option<Vec<String>>>>,
     /// Where `.aplan.yml` is, for the findings that are about it.
     config_file: Option<PathBuf>,
+    /// A fresh catalogue already carries the exact provider diagnostics,
+    /// including bounded output and exit status. Do not replace those with the
+    /// generic retained-catalogue fault emitted when no such detail exists.
+    catalogue_diagnostics_own_faults: bool,
+    catalogue_diagnostics: Vec<Diagnostic>,
+    /// Whether checker faults came from the closed receipt boundary. Receipt
+    /// findings must direct the caller to replace the observation or choose a
+    /// direct run, not claim that this invocation tried the runner command.
+    observation_source: TestObservationSource,
+}
+
+/// One configured runner's answer to a catalogue query.
+///
+/// This is deliberately the resolver's own value rather than a second parser
+/// over `test.list` output. Discovery, citation resolution and later
+/// interactive evidence selection must agree on the exact names a runner
+/// owns, including the distinction between an empty answer and a command that
+/// could not answer at all (`A1-478`).
+#[derive(
+    Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize, schemars::JsonSchema,
+)]
+#[serde(rename_all = "snake_case")]
+pub enum TestCatalogueRunnerState {
+    /// The runner answered with at least one normalized name.
+    Listed,
+    /// The runner answered successfully and named nothing.
+    Empty,
+    /// The runner did not produce a trustworthy listing.
+    Failed,
+}
+
+/// The normalized names reported by one configured runner.
+#[derive(
+    Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize, schemars::JsonSchema,
+)]
+pub struct TestCatalogueRunner {
+    /// One-based configuration position, retained even when labels collide.
+    pub index: usize,
+    /// The same label evidence diagnostics use.
+    pub label: String,
+    pub state: TestCatalogueRunnerState,
+    /// Sorted, deduplicated names. Empty for both `Empty` and `Failed`; `state`
+    /// is what prevents those answers being conflated.
+    pub names: Vec<String>,
+}
+
+/// A complete pass over the configured test-runner catalogue.
+#[derive(Debug, Clone)]
+pub struct TestCatalogue {
+    pub runners: Vec<TestCatalogueRunner>,
+    /// The exact resolver diagnostics for empty or failed runners.
+    pub diagnostics: Vec<Diagnostic>,
+    /// Configured-command cost incurred while producing the catalogue.
+    pub spend: Vec<(String, Cost)>,
+    /// Typed failure for each runner row when observed in this process.
+    /// Retained catalogues may omit these run-local outcomes; a failed retained
+    /// row then conservatively resolves as [`CitationOutcome::Unavailable`].
+    pub failure_outcomes: Vec<Option<CitationOutcome>>,
+}
+
+#[derive(Debug)]
+struct ListingFailure {
+    outcome: CitationOutcome,
+    error: Error,
+}
+
+impl std::fmt::Display for ListingFailure {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        self.error.fmt(f)
+    }
 }
 
 /// The names a listing command printed, one per line, with cargo's trailing
@@ -957,7 +1531,8 @@ struct MissProfile {
     masked: Vec<String>,
 }
 
-/// A runner that could not do its job, and which job (`A1-066`).
+/// A configured checker that could not do its job, and which job (`A1-066`,
+/// `A1-185`).
 ///
 /// The distinction earns its keep: a runner that could not be *asked what it
 /// lists* leaves every citation's L1 unknown, so no citation may be reported as
@@ -965,11 +1540,122 @@ struct MissProfile {
 /// `--execute` has told us everything L1 needs, and suppressing L1 findings for
 /// the rest of the plan on the strength of an L3 failure would hide real ones.
 #[derive(Debug, Clone)]
-struct RunnerFault {
-    /// Whether the fault means this runner's listing is unknown.
-    listing_unknown: bool,
-    /// The clause the finding reads, after "the `<runner>` test runner ".
+struct CheckerFault {
+    /// Whether the fault means this checker's resolution answer is unknown.
+    resolution_unknown: bool,
+    /// Typed reason an interactive client can report without parsing `what`.
+    outcome: CitationOutcome,
+    /// The checker-specific clause a finding wraps.
     what: String,
+}
+
+#[derive(Debug)]
+struct PreparedExecutionRunner {
+    skipped: Option<Vec<String>>,
+    fault: Option<CheckerFault>,
+    cost: Cost,
+    executed: BTreeMap<String, Outcome>,
+}
+
+/// Runtime state every configured checker needs.
+///
+/// There is one slot per configured checker (one url checker, or one per test
+/// runner). Keeping the first fault is the one-finding-per-checker convention:
+/// later citations may encounter the same broken command, but cannot multiply
+/// a configuration defect into one diagnostic per citation. The same state
+/// folds command costs, so a command that failed after it started is not lost
+/// from the run report.
+#[derive(Debug)]
+struct ConfiguredCheckers {
+    faults: RefCell<Vec<Option<CheckerFault>>>,
+    costs: RefCell<Vec<Cost>>,
+}
+
+impl ConfiguredCheckers {
+    fn new(count: usize) -> Self {
+        Self {
+            faults: RefCell::new(vec![None; count]),
+            costs: RefCell::new(vec![Cost::default(); count]),
+        }
+    }
+
+    /// Keep one cause per checker. A second failure is the same configuration
+    /// fault observed again, not a second finding.
+    fn fault(
+        &self,
+        index: usize,
+        resolution_unknown: bool,
+        outcome: CitationOutcome,
+        what: String,
+    ) {
+        let mut faults = self.faults.borrow_mut();
+        if faults[index].is_none() {
+            faults[index] = Some(CheckerFault {
+                resolution_unknown,
+                outcome,
+                what,
+            });
+        }
+    }
+
+    fn has_fault(&self, index: usize) -> bool {
+        self.faults.borrow()[index].is_some()
+    }
+
+    fn resolution_unknown(&self, index: usize) -> bool {
+        self.faults.borrow()[index]
+            .as_ref()
+            .is_some_and(|fault| fault.resolution_unknown)
+    }
+
+    fn outcome(&self, index: usize) -> Option<CitationOutcome> {
+        self.faults.borrow()[index]
+            .as_ref()
+            .map(|fault| fault.outcome)
+    }
+
+    fn resolution_unknown_count(&self) -> usize {
+        self.faults
+            .borrow()
+            .iter()
+            .filter(|fault| fault.as_ref().is_some_and(|fault| fault.resolution_unknown))
+            .count()
+    }
+
+    fn record_cost(&self, index: usize, cost: Cost) {
+        self.costs.borrow_mut()[index].fold(cost);
+    }
+
+    fn cost(&self, index: usize) -> Cost {
+        self.costs.borrow()[index]
+    }
+
+    fn spend(&self, mut label: impl FnMut(usize) -> String) -> Vec<(String, Cost)> {
+        self.costs
+            .borrow()
+            .iter()
+            .enumerate()
+            .map(|(index, cost)| (label(index), *cost))
+            .collect()
+    }
+
+    /// Emit exactly one diagnostic per checker with a fault, locating every
+    /// configuration fault on the selected config file when there is one.
+    fn finish_faults(
+        &self,
+        out: &mut Vec<Diagnostic>,
+        config_file: Option<&Path>,
+        mut diagnostic: impl FnMut(usize, &CheckerFault) -> Diagnostic,
+    ) {
+        for (index, fault) in self.faults.borrow().iter().enumerate() {
+            let Some(fault) = fault else { continue };
+            let mut finding = diagnostic(index, fault);
+            if let Some(path) = config_file {
+                finding = finding.with_file(path);
+            }
+            out.push(finding);
+        }
+    }
 }
 
 impl TestResolver {
@@ -980,28 +1666,815 @@ impl TestResolver {
         execute: bool,
         config_file: Option<PathBuf>,
     ) -> Self {
+        Self::new_scheduled(
+            runners,
+            aplan_config::TestSchedule::default(),
+            false,
+            repo_root,
+            execute,
+            config_file,
+        )
+    }
+
+    #[must_use]
+    pub(crate) fn new_scheduled(
+        runners: Vec<TestRunner>,
+        schedule: aplan_config::TestSchedule,
+        schedule_is_explicit: bool,
+        repo_root: PathBuf,
+        execute: bool,
+        config_file: Option<PathBuf>,
+    ) -> Self {
         let listings = RefCell::new(vec![None; runners.len()]);
-        let faults = RefCell::new(vec![None; runners.len()]);
+        let checkers = ConfiguredCheckers::new(runners.len());
         let misses = RefCell::new(vec![None; runners.len()]);
         let unproven = RefCell::new(vec![(0, None); runners.len()]);
         let executed = RefCell::new(std::collections::BTreeMap::new());
         let skips = RefCell::new(vec![None; runners.len()]);
-        let costs = RefCell::new(vec![Cost::default(); runners.len()]);
         let shown = RefCell::new(std::collections::BTreeSet::new());
+        let batch_shown = RefCell::new(BTreeSet::new());
         Self {
             runners,
+            schedule,
+            schedule_is_explicit,
             repo_root,
             execute,
             listings,
-            faults,
+            checkers,
             shown,
+            batch_shown,
             misses,
             unproven,
             executed,
-            costs,
             skips,
             config_file,
+            catalogue_diagnostics_own_faults: false,
+            catalogue_diagnostics: Vec::new(),
+            observation_source: TestObservationSource::Direct,
         }
+    }
+
+    /// Construct the ordinary resolver over a previously observed complete
+    /// catalogue, without starting a configured command.
+    ///
+    /// The caller owns freshness and configuration identity. This constructor
+    /// deliberately retains the current runner configuration so locality,
+    /// labels and ambiguity are recomputed against the current task rather than
+    /// copied from an old verdict.
+    #[must_use]
+    pub fn from_catalogue(
+        runners: Vec<TestRunner>,
+        schedule: aplan_config::TestSchedule,
+        schedule_is_explicit: bool,
+        repo_root: PathBuf,
+        execute: bool,
+        config_file: Option<PathBuf>,
+        catalogue: &TestCatalogue,
+    ) -> Self {
+        let structurally_valid = catalogue.runners.len() == runners.len()
+            && !catalogue
+                .runners
+                .iter()
+                .enumerate()
+                .any(|(index, observed)| observed.index != index + 1);
+        let mut resolver = Self::new_scheduled(
+            runners,
+            schedule,
+            schedule_is_explicit,
+            repo_root,
+            execute,
+            config_file,
+        );
+        resolver.catalogue_diagnostics_own_faults = !catalogue.diagnostics.is_empty();
+        resolver
+            .catalogue_diagnostics
+            .clone_from(&catalogue.diagnostics);
+        if !structurally_valid {
+            for index in 0..resolver.runners.len() {
+                resolver.fault(
+                    index,
+                    true,
+                    CitationOutcome::Unavailable,
+                    "could not be read from the retained catalogue because it does not contain exactly one ordered row per configured runner"
+                        .to_string(),
+                );
+            }
+            return resolver;
+        }
+        // A fresh bounded catalogue carries the commands' measured costs. Put
+        // them on the resolver that owns the corresponding rows so its normal
+        // spend projection emits exactly one measurement per runner. Retained
+        // catalogues intentionally omit run-local telemetry and therefore
+        // leave these values at zero.
+        if catalogue.spend.len() == resolver.runners.len() {
+            for (index, (_, cost)) in catalogue.spend.iter().enumerate() {
+                resolver.checkers.record_cost(index, *cost);
+            }
+        }
+        for (index, observed) in catalogue.runners.iter().enumerate() {
+            match observed.state {
+                TestCatalogueRunnerState::Listed | TestCatalogueRunnerState::Empty => {
+                    resolver.listings.borrow_mut()[index] = Some(observed.names.clone());
+                }
+                TestCatalogueRunnerState::Failed => resolver.fault(
+                    index,
+                    true,
+                    catalogue
+                        .failure_outcomes
+                        .get(index)
+                        .copied()
+                        .flatten()
+                        .unwrap_or(CitationOutcome::Unavailable),
+                    "could not be asked during the retained provider observation, so its test namespace is unknown"
+                        .to_string(),
+                ),
+            }
+        }
+        resolver
+    }
+
+    /// Construct an L1/L3 resolver from provider-ordered portable observations.
+    ///
+    /// This is a closed input boundary: every runner gets either a current row
+    /// or a retained rejection. All catalogue, skip and execution state is
+    /// populated here, so no later resolver path can need a configured command.
+    #[must_use]
+    pub fn from_observations(
+        runners: Vec<TestRunner>,
+        schedule: aplan_config::TestSchedule,
+        schedule_is_explicit: bool,
+        repo_root: PathBuf,
+        config_file: Option<PathBuf>,
+        observations: &crate::TestExecutionObservations,
+    ) -> Self {
+        let mut resolver = Self::new_scheduled(
+            runners,
+            schedule,
+            schedule_is_explicit,
+            repo_root,
+            true,
+            config_file,
+        );
+        resolver.observation_source = TestObservationSource::Receipt;
+        if observations.providers.len() != resolver.runners.len() {
+            for index in 0..resolver.runners.len() {
+                resolver.receipt_fault(
+                    index,
+                    crate::TestObservationRejectionKind::Absent,
+                    "the receipt set does not contain exactly one ordered row per configured provider",
+                );
+            }
+            return resolver;
+        }
+        for (index, provider) in observations.providers.iter().enumerate() {
+            match provider {
+                crate::TestProviderObservation::Current(observed) => {
+                    resolver.import_observation(index, observed);
+                }
+                crate::TestProviderObservation::Rejected {
+                    index: observed_index,
+                    label,
+                    kind,
+                    detail,
+                } => {
+                    if *observed_index != index + 1 || *label != resolver.label(index) {
+                        resolver.receipt_fault(
+                            index,
+                            crate::TestObservationRejectionKind::Incompatible,
+                            "the rejected receipt row does not identify this configured provider",
+                        );
+                    } else {
+                        resolver.receipt_fault(index, *kind, detail);
+                    }
+                }
+            }
+        }
+        resolver
+    }
+
+    fn receipt_fault(&self, index: usize, kind: crate::TestObservationRejectionKind, detail: &str) {
+        self.fault(
+            index,
+            true,
+            kind.citation_outcome(),
+            format!("has an {} receipt observation: {}", kind.label(), detail),
+        );
+    }
+
+    fn import_observation(&self, index: usize, observed: &crate::TestExecutionObservation) {
+        let names_are_sorted = observed
+            .runner
+            .names
+            .windows(2)
+            .all(|pair| pair[0] < pair[1]);
+        let requests_are_sorted = observed.requested.windows(2).all(|pair| pair[0] < pair[1]);
+        let expected_label = self.label(index);
+        let structurally_current = observed.complete
+            && observed.runner.index == index + 1
+            && observed.runner.label == expected_label
+            && observed.runner.state == TestCatalogueRunnerState::Listed
+            && !observed.runner.names.is_empty()
+            && names_are_sorted
+            && requests_are_sorted
+            && observed.requested == observed.runner.names
+            && observed.outcomes.len() == observed.requested.len()
+            && observed
+                .outcomes
+                .iter()
+                .zip(&observed.requested)
+                .all(|(outcome, requested)| {
+                    outcome.test == *requested && validate_result_entry(outcome).is_ok()
+                });
+        if !structurally_current {
+            self.receipt_fault(
+                index,
+                crate::TestObservationRejectionKind::Partial,
+                "its catalogue, complete request and typed outcomes are not one complete ordered set",
+            );
+            return;
+        }
+        self.listings.borrow_mut()[index] = Some(observed.runner.names.clone());
+        let mut executed = self.executed.borrow_mut();
+        for outcome in &observed.outcomes {
+            let resolved = match outcome.outcome {
+                TestBatchOutcome::Passed => Outcome::Passed {
+                    proves_nothing: false,
+                },
+                TestBatchOutcome::UnprovenSelection => Outcome::Passed {
+                    proves_nothing: true,
+                },
+                TestBatchOutcome::Failed => Outcome::Failed(outcome.diagnostic.clone()),
+                typed => Outcome::Reported {
+                    outcome: typed,
+                    attempts: outcome.attempts,
+                    diagnostic: outcome.diagnostic.clone(),
+                },
+            };
+            executed.insert((index, outcome.test.clone()), resolved);
+        }
+        drop(executed);
+        // A typed `skipped` execution already produces its per-citation
+        // APLAN014, exactly as a direct batch does. The separate skip list is a
+        // provider scheduling declaration; manufacturing it from outcomes
+        // would add a second task-level finding only on the receipt path.
+        self.skips.borrow_mut()[index] = Some(Vec::new());
+    }
+
+    /// Execute every unambiguous cited identity through each runner's optional
+    /// one-process batch adapter before citations are projected.
+    ///
+    /// Grouping happens only after every runner has answered, so batching can
+    /// never turn an ambiguous bare name into an order-dependent selection.
+    /// Legacy runners remain lazy and continue to execute one distinct name at
+    /// a time through [`Self::outcome_of`].
+    pub(crate) fn prepare_batches(&self, plan: &aplan_core::Plan) {
+        if !self.execute {
+            return;
+        }
+        let names = plan
+            .tasks
+            .iter()
+            .flat_map(|loaded| loaded.task.evidence.iter())
+            .filter(|evidence| {
+                evidence.kind == EvidenceKind::Test && !is_vacuous_ref(&evidence.reference)
+            })
+            .map(|evidence| evidence.reference.clone())
+            .collect::<BTreeSet<_>>();
+        let mut by_runner: BTreeMap<usize, BTreeSet<String>> = BTreeMap::new();
+        let mut skip_runners = BTreeSet::new();
+        for name in names {
+            let listing = self.runners_listing(&name);
+            if self.schedule_is_explicit {
+                skip_runners.extend(
+                    listing
+                        .iter()
+                        .copied()
+                        .filter(|runner| self.runners[*runner].skipped.is_some()),
+                );
+            }
+            let [runner] = listing.as_slice() else {
+                continue;
+            };
+            by_runner.entry(*runner).or_default().insert(name);
+        }
+        if !self.schedule_is_explicit {
+            for (runner, names) in by_runner {
+                if self.runners[runner].batch.is_some() {
+                    self.execute_batch(runner, &names);
+                }
+            }
+            return;
+        }
+        let scheduled = self
+            .runners
+            .iter()
+            .enumerate()
+            .filter(|(index, runner)| {
+                skip_runners.contains(index)
+                    || (runner.batch.is_some() && by_runner.contains_key(index))
+            })
+            .map(|(index, runner)| crate::scheduler::Job {
+                index,
+                weight: runner.weight(),
+                resources: runner.exclusive_resources(),
+            })
+            .collect();
+        let execution_runners = self.runners.clone();
+        let repo_root = self.repo_root.clone();
+        let config_file = self.config_file.clone();
+        let scheduled_names = by_runner.clone();
+        let outcomes = crate::scheduler::run(
+            scheduled,
+            self.schedule.capacity,
+            move |runner| {
+                let names = scheduled_names.get(&runner).cloned().unwrap_or_default();
+                Self::prepare_execution_runner(
+                    &execution_runners[runner],
+                    runner,
+                    &repo_root,
+                    config_file.as_deref(),
+                    &names,
+                )
+            },
+            configured_commands_terminating,
+            |_, _| {},
+        );
+        for (runner, outcome) in outcomes {
+            match outcome {
+                crate::scheduler::Outcome::Completed(prepared) => {
+                    self.checkers.record_cost(runner, prepared.cost);
+                    if let Some(fault) = prepared.fault {
+                        self.checkers.fault(
+                            runner,
+                            fault.resolution_unknown,
+                            fault.outcome,
+                            fault.what,
+                        );
+                    }
+                    if self.runners[runner].skipped.is_some() {
+                        self.skips.borrow_mut()[runner] = prepared.skipped;
+                    }
+                    let mut executed = self.executed.borrow_mut();
+                    for (name, result) in prepared.executed {
+                        executed.insert((runner, name), result);
+                    }
+                }
+                crate::scheduler::Outcome::Cancelled | crate::scheduler::Outcome::Panicked => {
+                    self.reject_unscheduled_runner(runner, by_runner.get(&runner));
+                }
+            }
+        }
+    }
+
+    fn prepare_execution_runner(
+        configured: &TestRunner,
+        runner: usize,
+        repo_root: &Path,
+        config_file: Option<&Path>,
+        names: &BTreeSet<String>,
+    ) -> PreparedExecutionRunner {
+        let isolated = Self::new(
+            vec![configured.clone()],
+            repo_root.to_path_buf(),
+            true,
+            config_file.map(Path::to_path_buf),
+        );
+        if isolated.runners[0].skipped.is_some() {
+            let _ = isolated.skipped_tests(0);
+        }
+        if isolated.runners[0].batch.is_some() {
+            isolated.execute_batch_as(0, runner + 1, names);
+        }
+        let skipped = isolated.skips.into_inner().into_iter().next().flatten();
+        let fault = isolated
+            .checkers
+            .faults
+            .into_inner()
+            .into_iter()
+            .next()
+            .flatten();
+        let cost = isolated
+            .checkers
+            .costs
+            .into_inner()
+            .into_iter()
+            .next()
+            .unwrap_or_default();
+        let executed = isolated
+            .executed
+            .into_inner()
+            .into_iter()
+            .map(|((_, name), outcome)| (name, outcome))
+            .collect();
+        PreparedExecutionRunner {
+            skipped,
+            fault,
+            cost,
+            executed,
+        }
+    }
+
+    fn reject_unscheduled_runner(&self, runner: usize, names: Option<&BTreeSet<String>>) {
+        let reason = if configured_commands_terminating() {
+            "provider scheduling was cancelled during process termination"
+        } else {
+            "a provider scheduler worker failed"
+        };
+        if self.runners[runner].skipped.is_some() {
+            self.fault(
+                runner,
+                false,
+                CitationOutcome::Unavailable,
+                format!("could not be asked which tests it will not run: {reason}"),
+            );
+        }
+        if self.runners[runner].batch.is_some()
+            && let Some(names) = names
+        {
+            self.reject_batch(runner, names, reason);
+        }
+    }
+
+    fn execute_batch(&self, runner: usize, names: &BTreeSet<String>) {
+        self.execute_batch_as(runner, runner + 1, names);
+    }
+
+    fn execute_batch_as(&self, runner: usize, provider_index: usize, names: &BTreeSet<String>) {
+        let configured = &self.runners[runner];
+        let batch = configured
+            .batch
+            .as_ref()
+            .expect("only a runner with a batch adapter is scheduled");
+        let workspace = match BatchWorkspace::create(provider_index, configured, names) {
+            Ok(workspace) => workspace,
+            Err(reason) => {
+                self.reject_batch(runner, names, &reason);
+                return;
+            }
+        };
+        let argv = match workspace.argv(batch) {
+            Ok(argv) => argv,
+            Err(reason) => {
+                self.reject_batch(runner, names, &reason);
+                return;
+            }
+        };
+        let spawned = run_configured_command(
+            &argv,
+            configured.command_policy(),
+            &self.dir_of(configured),
+            "test.batch.run",
+            0,
+        );
+        if let Ok((_, cost)) = &spawned
+            && self.record_batch_cost(runner, names, *cost)
+        {
+            return;
+        }
+        let output = match spawned.map(|(ran, _)| ran) {
+            Ok(Ran::Exited(output)) => output,
+            Ok(Ran::TimedOut(_)) => unreachable!("no batch timeout was set"),
+            Err(reason) => {
+                self.reject_batch(
+                    runner,
+                    names,
+                    &format!(
+                        "the batch adapter could not be started: {}",
+                        workspace.redact_paths(&reason.to_string())
+                    ),
+                );
+                return;
+            }
+        };
+        if !output.status.success() {
+            let excerpt = self
+                .command_excerpt(runner, &output, "test.max_output")
+                .map(|text| workspace.redact_paths(&text));
+            self.reject_batch_with_excerpt(
+                runner,
+                names,
+                "the batch adapter exited nonzero before producing an attributable complete result",
+                excerpt,
+            );
+            return;
+        }
+        let outcomes = match workspace.read_result() {
+            Ok(outcomes) => outcomes,
+            Err(reason) => {
+                let excerpt = self
+                    .command_excerpt(runner, &output, "test.max_output")
+                    .map(|text| workspace.redact_paths(&text));
+                self.reject_batch_with_excerpt(
+                    runner,
+                    names,
+                    &format!("the batch adapter result was refused: {reason}"),
+                    excerpt,
+                );
+                return;
+            }
+        };
+        let mut executed = self.executed.borrow_mut();
+        for (name, reported) in outcomes {
+            executed.insert(
+                (runner, name),
+                self.reported_batch_outcome(runner, &reported, &workspace),
+            );
+        }
+    }
+
+    /// Record one adapter process and fan a kernel-enforced stop out to every
+    /// requested identity. Returns whether the stop completed the batch.
+    fn record_batch_cost(&self, runner: usize, names: &BTreeSet<String>, cost: Cost) -> bool {
+        self.record_cost(runner, cost);
+        let Some(breach) = cost.breach else {
+            return false;
+        };
+        let mut executed = self.executed.borrow_mut();
+        for name in names {
+            executed.insert((runner, name.clone()), Outcome::Stopped(breach));
+        }
+        true
+    }
+
+    fn reported_batch_outcome(
+        &self,
+        runner: usize,
+        reported: &ReportedOutcome,
+        workspace: &BatchWorkspace,
+    ) -> Outcome {
+        let diagnostic = reported
+            .diagnostic
+            .as_deref()
+            .map(|text| workspace.redact_paths(text))
+            .as_deref()
+            .and_then(|text| self.adapter_diagnostic(runner, text));
+        match reported.outcome {
+            TestBatchOutcome::Passed => Outcome::Passed {
+                proves_nothing: false,
+            },
+            TestBatchOutcome::UnprovenSelection => Outcome::Passed {
+                proves_nothing: true,
+            },
+            TestBatchOutcome::Failed if reported.attempts.is_none() => Outcome::Failed(diagnostic),
+            outcome => Outcome::Reported {
+                outcome,
+                attempts: reported.attempts,
+                diagnostic,
+            },
+        }
+    }
+
+    fn reject_batch(&self, runner: usize, names: &BTreeSet<String>, reason: &str) {
+        self.reject_batch_with_excerpt(runner, names, reason, None);
+    }
+
+    fn reject_batch_with_excerpt(
+        &self,
+        runner: usize,
+        names: &BTreeSet<String>,
+        reason: &str,
+        excerpt: Option<String>,
+    ) {
+        let material = excerpt.map_or_else(
+            || reason.to_string(),
+            |excerpt| format!("{reason}\n{excerpt}"),
+        );
+        let detail = self.adapter_diagnostic(runner, &material);
+        let mut executed = self.executed.borrow_mut();
+        for name in names {
+            executed.insert(
+                (runner, name.clone()),
+                Outcome::BatchUnavailable(detail.clone()),
+            );
+        }
+    }
+
+    fn adapter_diagnostic(&self, runner: usize, text: &str) -> Option<String> {
+        crate::excerpt::of(
+            text.as_bytes(),
+            &[],
+            crate::excerpt::Bound {
+                lines: self.runners[runner]
+                    .output_lines
+                    .unwrap_or(crate::excerpt::DEFAULT_LINES),
+                ..crate::excerpt::Bound::default()
+            },
+        )
+    }
+
+    fn command_excerpt(
+        &self,
+        runner: usize,
+        output: &CapturedOutput,
+        output_key: &str,
+    ) -> Option<String> {
+        crate::excerpt::of_captured(
+            crate::excerpt::Captured {
+                head: output.stdout.head(),
+                tail: output.stdout.tail(),
+                omitted_bytes: output.stdout.omitted,
+            },
+            crate::excerpt::Captured {
+                head: output.stderr.head(),
+                tail: output.stderr.tail(),
+                omitted_bytes: output.stderr.omitted,
+            },
+            crate::excerpt::Bound {
+                lines: self.runners[runner]
+                    .output_lines
+                    .unwrap_or(crate::excerpt::DEFAULT_LINES),
+                ..crate::excerpt::Bound::default()
+            },
+            output_key,
+        )
+    }
+
+    /// Ask every configured runner once and return its exact evidence namespace.
+    ///
+    /// The ordinary resolver owns command policy, working directories,
+    /// timeouts, capture bounds and name normalization. Keeping the catalogue
+    /// on that type makes it impossible for the public discovery operation to
+    /// implement any of those a second way.
+    #[must_use]
+    pub fn catalogue(&self) -> TestCatalogue {
+        let mut runners = Vec::with_capacity(self.runners.len());
+        for index in 0..self.runners.len() {
+            let (state, mut names) = match self.list_tests(index) {
+                Some(names) if names.is_empty() => (TestCatalogueRunnerState::Empty, names),
+                Some(names) => (TestCatalogueRunnerState::Listed, names),
+                None => (TestCatalogueRunnerState::Failed, Vec::new()),
+            };
+            // Listing order is not evidence identity. Sorting and deduplicating
+            // keeps the discovery document deterministic while retaining every
+            // exact name the resolver would accept.
+            names.sort();
+            names.dedup();
+            runners.push(TestCatalogueRunner {
+                index: index + 1,
+                label: self.label(index),
+                state,
+                names,
+            });
+        }
+
+        let mut diagnostics = Vec::new();
+        self.finish_plan(&mut diagnostics);
+        diagnostics.sort_by(|left, right| {
+            left.code
+                .cmp(right.code)
+                .then(left.file.cmp(&right.file))
+                .then(left.message.cmp(&right.message))
+        });
+        TestCatalogue {
+            runners,
+            diagnostics,
+            spend: self.spend(),
+            failure_outcomes: (0..self.runners.len())
+                .map(|index| self.checkers.outcome(index))
+                .collect(),
+        }
+    }
+
+    /// Execute a selected subset while retaining the complete listed
+    /// catalogue. The caller must merge these outcomes with independently
+    /// validated reusable ones before constructing a complete receipt.
+    ///
+    /// The caller supplies the provider's original configuration position and
+    /// label because receipt generation isolates one runner for execution while
+    /// preserving its identity in the complete configuration.
+    pub(crate) fn observe_provider_selected(
+        &self,
+        original_index: usize,
+        label: String,
+        names: Vec<String>,
+        requested: Vec<String>,
+    ) -> crate::TestExecutionObservation {
+        let requested = requested.into_iter().collect::<BTreeSet<_>>();
+        let skipped = self.skipped_tests(0).unwrap_or_default();
+        let skipped = skipped.into_iter().collect::<BTreeSet<_>>();
+        let runnable = requested
+            .difference(&skipped)
+            .cloned()
+            .collect::<BTreeSet<_>>();
+        if self.runners[0].batch.is_some() && !runnable.is_empty() {
+            self.execute_batch_as(0, original_index, &runnable);
+        }
+
+        let mut complete = true;
+        let mut outcomes = Vec::with_capacity(requested.len());
+        for name in &requested {
+            if skipped.contains(name) {
+                outcomes.push(TestBatchResultEntry {
+                    test: name.clone(),
+                    outcome: TestBatchOutcome::Skipped,
+                    attempts: None,
+                    diagnostic: None,
+                });
+                continue;
+            }
+            let (outcome, settled) = if self.runners[0].batch.is_some() {
+                (
+                    self.executed.borrow().get(&(0, name.clone())).cloned(),
+                    true,
+                )
+            } else {
+                match self.execute_once(0, name) {
+                    Some((outcome, settled)) => (Some(outcome), settled),
+                    None => (None, false),
+                }
+            };
+            let (entry, attributable) = Self::receipt_entry(name, outcome, settled);
+            complete &= attributable;
+            outcomes.push(entry);
+        }
+        complete &= !self.checkers.faults.borrow().iter().any(Option::is_some);
+        crate::TestExecutionObservation {
+            runner: TestCatalogueRunner {
+                index: original_index,
+                label,
+                state: if names.is_empty() {
+                    TestCatalogueRunnerState::Empty
+                } else {
+                    TestCatalogueRunnerState::Listed
+                },
+                names,
+            },
+            requested: requested.into_iter().collect(),
+            outcomes,
+            complete,
+        }
+    }
+
+    fn receipt_entry(
+        name: &str,
+        outcome: Option<Outcome>,
+        settled: bool,
+    ) -> (TestBatchResultEntry, bool) {
+        if !settled {
+            return (
+                TestBatchResultEntry {
+                    test: name.into(),
+                    outcome: TestBatchOutcome::Incomplete,
+                    attempts: None,
+                    diagnostic: Some(
+                        "the provider result was not settled because exact selection could not be verified"
+                            .into(),
+                    ),
+                },
+                false,
+            );
+        }
+        let (outcome, attempts, diagnostic, attributable) = match outcome {
+            Some(Outcome::Passed {
+                proves_nothing: false,
+            }) => (TestBatchOutcome::Passed, None, None, true),
+            Some(Outcome::Passed {
+                proves_nothing: true,
+            }) => (
+                TestBatchOutcome::UnprovenSelection,
+                None,
+                Some("the runner exited successfully but could not prove that the exact requested identity executed".into()),
+                true,
+            ),
+            Some(Outcome::Failed(diagnostic)) => {
+                (TestBatchOutcome::Failed, None, diagnostic, true)
+            }
+            Some(Outcome::Reported {
+                outcome,
+                attempts,
+                diagnostic,
+            }) => (outcome, attempts, diagnostic, true),
+            Some(Outcome::Stopped(breach)) => (
+                TestBatchOutcome::ResourceBreach,
+                None,
+                Some(format!(
+                    "the provider crossed its configured {} boundary",
+                    match breach {
+                        Breach::Memory => "memory",
+                        Breach::Processes => "process",
+                    }
+                )),
+                true,
+            ),
+            Some(Outcome::BatchUnavailable(diagnostic)) => {
+                (TestBatchOutcome::FrameworkCrash, None, diagnostic, false)
+            }
+            None => (
+                TestBatchOutcome::Incomplete,
+                None,
+                Some("the provider produced no attributable terminal result".into()),
+                false,
+            ),
+        };
+        (
+            TestBatchResultEntry {
+                test: name.into(),
+                outcome,
+                attempts,
+                diagnostic,
+            },
+            attributable,
+        )
     }
 
     /// How a runner is named in a diagnostic: its `name`, else its `dir`, else
@@ -1025,10 +2498,7 @@ impl TestResolver {
         if let Some(cached) = self.listings.borrow()[index].as_ref() {
             return Some(cached.clone());
         }
-        if self.faults.borrow()[index]
-            .as_ref()
-            .is_some_and(|f| f.listing_unknown)
-        {
+        if self.checkers.resolution_unknown(index) {
             return None;
         }
         match self.list_tests_uncached(index) {
@@ -1040,6 +2510,7 @@ impl TestResolver {
                 self.fault(
                     index,
                     true,
+                    why.outcome,
                     format!(
                         "could not be asked what it lists, so no `test` citation it would have \
                          resolved could be checked: {why}"
@@ -1047,33 +2518,6 @@ impl TestResolver {
                 );
                 None
             }
-        }
-    }
-
-    /// What this runner declared, in the units a cgroup takes (`A1-310`).
-    ///
-    /// A size that will not parse cannot reach here: `TestRunner::validate`
-    /// refuses it when the file loads, which is where a value the adopter wrote
-    /// belongs.
-    fn caps_of(&self, index: usize) -> Caps {
-        let runner = &self.runners[index];
-        Caps {
-            memory_bytes: runner
-                .max_memory
-                .as_deref()
-                .and_then(|s| aplan_config::parse_size(s).ok()),
-            max_processes: runner.max_processes,
-        }
-    }
-
-    /// `wrap` prepended, if the runner declared one (`A1-310`).
-    ///
-    /// Outside the command and inside the cage, so a declared `systemd-run` or
-    /// `nice` is itself subject to whatever the dials set.
-    fn wrapped(&self, index: usize, argv: &[String]) -> Vec<String> {
-        match &self.runners[index].wrap {
-            Some(prefix) => prefix.iter().chain(argv).cloned().collect(),
-            None => argv.to_vec(),
         }
     }
 
@@ -1118,6 +2562,17 @@ impl TestResolver {
                 // excerpt is keyed by runner and name.
                 Executed::Failed(self.first_sighting(runner, &ev.reference, shown))
             }
+            Outcome::Reported {
+                outcome,
+                diagnostic,
+                ..
+            } => Executed::Reported(
+                outcome,
+                self.first_sighting(runner, &ev.reference, diagnostic),
+            ),
+            Outcome::BatchUnavailable(shown) => {
+                Executed::Unavailable(self.first_batch_sighting(runner, shown))
+            }
             Outcome::Passed { proves_nothing } => {
                 if proves_nothing {
                     self.note_unproven(runner, &ev.reference);
@@ -1154,15 +2609,17 @@ impl TestResolver {
     /// citation of the name. Everything is, except a pass judged while the
     /// miss-probe could not be run (`A1-243`, audit).
     fn execute_once(&self, runner: usize, name: &str) -> Option<(Outcome, bool)> {
-        let spawned = spawn_capped(
-            &self.wrapped(runner, &self.runners[runner].run_argv(name)),
-            &self.dir_of(&self.runners[runner]),
+        let configured = &self.runners[runner];
+        let argv = configured.run_argv(name);
+        let spawned = run_configured_command(
+            &argv,
+            configured.command_policy(),
+            &self.dir_of(configured),
             "test.run",
             // Unbounded on purpose: under `--execute` a long run is the
             // point rather than a symptom (`A1-121`, and the reasoning is
             // on `test.timeout_seconds` where an adopter reads it).
-            std::time::Duration::ZERO,
-            self.caps_of(runner),
+            0,
         );
         if let Ok((_, cost)) = &spawned {
             self.record_cost(runner, *cost);
@@ -1194,8 +2651,23 @@ impl TestResolver {
                         .unwrap_or(crate::excerpt::DEFAULT_LINES),
                     ..crate::excerpt::Bound::default()
                 };
+                let stdout = crate::excerpt::Captured {
+                    head: out.stdout.head(),
+                    tail: out.stdout.tail(),
+                    omitted_bytes: out.stdout.omitted,
+                };
+                let stderr = crate::excerpt::Captured {
+                    head: out.stderr.head(),
+                    tail: out.stderr.tail(),
+                    omitted_bytes: out.stderr.omitted,
+                };
                 Some((
-                    Outcome::Failed(crate::excerpt::of(&out.stdout, &out.stderr, bound)),
+                    Outcome::Failed(crate::excerpt::of_captured(
+                        stdout,
+                        stderr,
+                        bound,
+                        "test.max_output",
+                    )),
                     true,
                 ))
             }
@@ -1204,6 +2676,7 @@ impl TestResolver {
                 self.fault(
                     runner,
                     false,
+                    CitationOutcome::Unavailable,
                     format!(
                         "could not run the tests cited against it under `--execute`, so \
                              they are unverified rather than passing: {why}"
@@ -1231,6 +2704,18 @@ impl TestResolver {
             return Shown::Already;
         }
         self.shown.borrow_mut().insert(key);
+        match shown {
+            Some(text) => Shown::Excerpt(text),
+            None => Shown::Nothing,
+        }
+    }
+
+    /// Show one runner-level adapter fault once, while still attaching a
+    /// finding to every requested identity and every task that cites it.
+    fn first_batch_sighting(&self, runner: usize, shown: Option<String>) -> Shown {
+        if !self.batch_shown.borrow_mut().insert(runner) {
+            return Shown::Already;
+        }
         match shown {
             Some(text) => Shown::Excerpt(text),
             None => Shown::Nothing,
@@ -1287,6 +2772,69 @@ impl TestResolver {
             .with_detail(detail)
     }
 
+    fn batch_not_proved(
+        ev: &Evidence,
+        task: &Task,
+        file: &Path,
+        shown: Shown,
+        outcome: &str,
+        meaning: &str,
+    ) -> Diagnostic {
+        let mut detail = Vec::new();
+        let suffix = match shown {
+            Shown::Excerpt(text) => {
+                detail = text.lines().map(str::to_string).collect();
+                ", and reported:"
+            }
+            Shown::Already => "; another finding in this run carries the adapter detail",
+            Shown::Nothing => "",
+        };
+        Diagnostic::error(
+            code::TEST_FAILED,
+            format!(
+                "test `{}` was {outcome} by `test.batch` under `--execute`{suffix}",
+                ev.reference
+            ),
+        )
+        .with_task(&task.id)
+        .with_file(file)
+        .with_agent_instruction(format!(
+            "{meaning}. Fix the adapter or the test so the exact requested identity returns a complete `passed` outcome, or stop citing it as evidence."
+        ))
+        .with_detail(detail)
+    }
+
+    /// Turn one citation's execution state into its task-specific finding.
+    fn execution_finding(
+        executed: Executed,
+        ev: &Evidence,
+        task: &Task,
+        file: &Path,
+    ) -> Option<Diagnostic> {
+        match executed {
+            // A cap breach was already reported by `execute_citation`; the
+            // other two states make no negative claim about this citation.
+            Executed::Stopped | Executed::NotAsked | Executed::Passed => None,
+            Executed::Failed(shown) => Some(Self::failed(ev, task, file, shown)),
+            Executed::Reported(outcome, shown) => Some(Self::batch_not_proved(
+                ev,
+                task,
+                file,
+                shown,
+                outcome.label(),
+                outcome.meaning(),
+            )),
+            Executed::Unavailable(shown) => Some(Self::batch_not_proved(
+                ev,
+                task,
+                file,
+                shown,
+                TestBatchOutcome::Unavailable.label(),
+                TestBatchOutcome::Unavailable.meaning(),
+            )),
+        }
+    }
+
     /// The finding for a command the kernel stopped at its cap (`A1-310`).
     ///
     /// Extracted so `resolve` stays inside the length this workspace lints for,
@@ -1328,6 +2876,7 @@ impl TestResolver {
         self.fault(
             index,
             true,
+            CitationOutcome::Refused,
             format!(
                 "was stopped while listing its tests: it {}, so no `test` citation it would \
                  have resolved could be checked",
@@ -1364,59 +2913,64 @@ impl TestResolver {
     /// so would send an adopter to size a limit at twice what they need. Wall
     /// clock is added, because the run really did spend both.
     fn record_cost(&self, index: usize, c: Cost) {
-        self.costs.borrow_mut()[index].fold(c);
+        self.checkers.record_cost(index, c);
     }
 
     /// Record what went wrong with a runner, keeping the first reason: a second
     /// failure of the same runner is the same fault seen again.
-    fn fault(&self, index: usize, listing_unknown: bool, what: String) {
-        let mut faults = self.faults.borrow_mut();
-        if faults[index].is_none() {
-            faults[index] = Some(RunnerFault {
-                listing_unknown,
-                what,
-            });
-        }
+    fn fault(
+        &self,
+        index: usize,
+        resolution_unknown: bool,
+        outcome: CitationOutcome,
+        what: String,
+    ) {
+        self.checkers
+            .fault(index, resolution_unknown, outcome, what);
     }
 
     /// How many runners could not say what they list, which is the fault that
     /// makes "no runner lists this" an unproven claim.
     fn unlisted_count(&self) -> usize {
-        self.faults
-            .borrow()
-            .iter()
-            .filter(|f| f.as_ref().is_some_and(|f| f.listing_unknown))
-            .count()
+        self.checkers.resolution_unknown_count()
     }
 
     /// Ask one runner what it lists. A trailing `: test` / `: benchmark`
     /// (cargo's `--list` format) is stripped so a bare name matches.
-    fn list_tests_uncached(&self, index: usize) -> Result<Vec<String>, Error> {
+    fn list_tests_uncached(&self, index: usize) -> Result<Vec<String>, ListingFailure> {
         let runner = &self.runners[index];
-        let limit =
-            std::time::Duration::from_secs(runner.timeout_seconds.unwrap_or(LIST_TIMEOUT_SECS));
-        let (ran, cost) = spawn_capped(
-            &self.wrapped(index, &runner.list),
+        let (ran, cost) = run_configured_command(
+            &runner.list,
+            runner.command_policy(),
             &self.dir_of(runner),
             "test.list",
-            limit,
-            self.caps_of(index),
-        )?;
+            LIST_TIMEOUT_SECS,
+        )
+        .map_err(|error| ListingFailure {
+            outcome: CitationOutcome::Unavailable,
+            error,
+        })?;
         self.record_cost(index, cost);
         if let Some(breach) = cost.breach {
-            return Err(self.stopped_while_listing(index, breach));
+            return Err(ListingFailure {
+                outcome: CitationOutcome::Refused,
+                error: self.stopped_while_listing(index, breach),
+            });
         }
         let out = match ran {
             Ran::Exited(out) => out,
             // Nothing was learned, which is exactly what the listing failure
             // above means, so it takes the same route (`A1-121`).
             Ran::TimedOut(after) => {
-                return Err(Error::Exec(format!(
-                    "`test.list` for {}: `{}` had not returned after {}s and was killed",
-                    self.label(index),
-                    one_line(&runner.list.join(" ")),
-                    after.as_secs()
-                )));
+                return Err(ListingFailure {
+                    outcome: CitationOutcome::TimedOut,
+                    error: Error::Exec(format!(
+                        "`test.list` for {}: `{}` had not returned after {}s and was killed",
+                        self.label(index),
+                        one_line(&runner.list.join(" ")),
+                        after.as_secs()
+                    )),
+                });
             }
         };
         // A runner that could not answer must not read as a runner that listed
@@ -1430,18 +2984,25 @@ impl TestResolver {
         // rather than a reason to stop and say nothing about the plan
         // (`A1-066`).
         if !out.status.success() {
-            let stderr = String::from_utf8_lossy(&out.stderr);
+            let stderr = String::from_utf8_lossy(out.stderr.head());
             let detail = stderr.lines().next().unwrap_or("no output").trim();
-            return Err(Error::Exec(format!(
-                "`test.list` for {}: `{}` exited {} ({detail})",
-                self.label(index),
-                runner.list.join(" "),
-                out.status
-                    .code()
-                    .map_or_else(|| "by signal".into(), |c| c.to_string()),
-            )));
+            return Err(ListingFailure {
+                outcome: CitationOutcome::Unavailable,
+                error: Error::Exec(format!(
+                    "`test.list` for {}: `{}` exited {} ({detail})",
+                    self.label(index),
+                    runner.list.join(" "),
+                    out.status
+                        .code()
+                        .map_or_else(|| "by signal".into(), |c| c.to_string()),
+                )),
+            });
         }
-        Ok(listed_names(&out.stdout))
+        let stdout = out.stdout.complete().ok_or_else(|| ListingFailure {
+            outcome: CitationOutcome::OutputLimited,
+            error: output_truncated("test.list", "stdout", out.stdout.omitted),
+        })?;
+        Ok(listed_names(stdout))
     }
 
     /// Where a runner runs: its `dir` under the repository root, or the root.
@@ -1466,6 +3027,12 @@ impl TestResolver {
     /// `APLAN024`: the question is whether the citation identifies the right code
     /// at all, not how strong a completion claim is.
     fn report_foreign_tests(&self, task: &Task, file: &Path, out: &mut Vec<Diagnostic>) {
+        let Some(locality_code) = locality_detector(
+            EvidenceKind::Test,
+            EvidencePathLocator::ConfiguredTestCoverage,
+        ) else {
+            return;
+        };
         // Relevance needs `paths`; with none declared this is `APLAN023`'s
         // finding, and reporting it twice would not add anything.
         if task.paths.is_empty() {
@@ -1475,7 +3042,7 @@ impl TestResolver {
         for ev in task
             .evidence
             .iter()
-            .filter(|e| e.kind == EvidenceKind::Test && !e.reference.trim().is_empty())
+            .filter(|e| e.kind == EvidenceKind::Test && !is_vacuous_ref(&e.reference))
         {
             let listing = self.runners_listing(&ev.reference);
             let [only] = listing.as_slice() else {
@@ -1529,7 +3096,7 @@ impl TestResolver {
             )
         };
         out.push(
-            Diagnostic::warning(code::TEST_IRRELEVANT, message)
+            Diagnostic::warning(locality_code, message)
                 .with_task(&task.id)
                 .with_file(file)
                 // Symmetric, like `APLAN012`'s "or correct the task's `paths`".
@@ -1581,8 +3148,9 @@ impl TestResolver {
     /// mismatch rather than a typo, so edit distance alone would not have found
     /// it; both directions of `::` qualification are tried first, and a
     /// single-edit typo after that.
-    fn near_match(&self, name: &str) -> Option<String> {
+    fn near_matches(&self, name: &str) -> Vec<String> {
         let bare = name.rsplit("::").next().unwrap_or(name);
+        let mut hits = Vec::new();
         for i in 0..self.runners.len() {
             // A runner that could not be asked has no near match to offer, and
             // its silence is reported on its own. `continue`, not `?`: one
@@ -1592,26 +3160,38 @@ impl TestResolver {
                 continue;
             };
             // The citation is qualified and the runner lists it bare.
-            if let Some(hit) = listed.iter().find(|n| *n == bare)
-                && hit != name
-            {
-                return Some(hit.clone());
-            }
-            // The reverse: the runner qualifies and the citation does not.
-            if let Some(hit) = listed
-                .iter()
-                .find(|n| n.rsplit("::").next().unwrap_or(n) == name)
-            {
-                return Some(hit.clone());
-            }
-            if let Some(hit) = listed
-                .iter()
-                .find(|n| aplan_core::is_one_edit_apart(n, name))
-            {
-                return Some(hit.clone());
+            for hit in &listed {
+                let qualified_to_bare = hit == bare && hit != name;
+                // The reverse: the runner qualifies and the citation does not.
+                let bare_to_qualified = hit.rsplit("::").next().unwrap_or(hit) == name;
+                let one_edit = aplan_core::is_one_edit_apart(hit, name);
+                if (qualified_to_bare || bare_to_qualified || one_edit) && !hits.contains(hit) {
+                    hits.push(hit.clone());
+                }
             }
         }
-        None
+        hits
+    }
+
+    /// The first useful suggestion retains the diagnostic's historical
+    /// ordering. It is advice, not authority: [`Self::unambiguous_near_match`]
+    /// is the stricter answer a typed repair needs.
+    fn near_match(&self, name: &str) -> Option<String> {
+        self.near_matches(name).into_iter().next()
+    }
+
+    /// The only plausible listed name, when exactly one runner resolves it.
+    ///
+    /// Distinct spellings are not enough: two runners can list the same
+    /// candidate, and replacing the citation with it would still leave
+    /// `APLAN013`. A typed repair promises that the ordinary resolver accepts
+    /// its target (`A1-458`).
+    fn unambiguous_near_match(&self, name: &str) -> Option<String> {
+        let hits = self.near_matches(name);
+        match hits.as_slice() {
+            [only] if self.runners_listing(only).len() == 1 => Some(only.clone()),
+            _ => None,
+        }
     }
 
     /// The tests one runner says it will not run, asked once (`A1-300`).
@@ -1638,34 +3218,41 @@ impl TestResolver {
         // plan, for one fault that is already reported. A runner that has failed
         // at anything is not asked a further question; the run is failing loudly
         // either way.
-        if self.faults.borrow()[index].is_some() {
+        if self.checkers.has_fault(index) {
             return None;
         }
-        let limit =
-            std::time::Duration::from_secs(runner.timeout_seconds.unwrap_or(LIST_TIMEOUT_SECS));
         // A runner that could not be asked must not read as a runner that skips
         // nothing, which is what returning `None` quietly would mean: the key is
         // there to catch a citation nothing ran, and a broken command would
         // switch that off while the plan went green. Same channel as a `list`
         // that fails -- one finding about the configuration, on `.aplan.yml`.
-        let spawned = spawn_capped(
-            &self.wrapped(index, argv),
+        let spawned = run_configured_command(
+            argv,
+            runner.command_policy(),
             &self.dir_of(runner),
             "test.skipped",
-            limit,
-            self.caps_of(index),
+            LIST_TIMEOUT_SECS,
         );
         if let Ok((_, cost)) = &spawned {
             self.record_cost(index, *cost);
         }
         let what = match spawned.map(|(ran, _)| ran) {
             Ok(Ran::Exited(out)) if out.status.success() => {
-                let names = listed_names(&out.stdout);
+                let Some(stdout) = out.stdout.complete() else {
+                    self.fault(
+                        index,
+                        false,
+                        CitationOutcome::OutputLimited,
+                        output_truncated("test.skipped", "stdout", out.stdout.omitted).to_string(),
+                    );
+                    return None;
+                };
+                let names = listed_names(stdout);
                 self.skips.borrow_mut()[index] = Some(names.clone());
                 return Some(names);
             }
             Ok(Ran::Exited(out)) => {
-                let stderr = String::from_utf8_lossy(&out.stderr);
+                let stderr = String::from_utf8_lossy(out.stderr.head());
                 let detail = stderr.lines().next().unwrap_or("no output").trim();
                 format!(
                     "could not be asked which tests it will not run: `{}` exited {} ({detail})",
@@ -1683,7 +3270,7 @@ impl TestResolver {
             ),
             Err(why) => format!("could not be asked which tests it will not run: {why}"),
         };
-        self.fault(index, false, what);
+        self.fault(index, false, CitationOutcome::Unavailable, what);
         None
     }
 
@@ -1759,6 +3346,94 @@ impl EvidenceResolver for TestResolver {
         EvidenceKind::Test
     }
 
+    fn observation(
+        &self,
+        _task: &Task,
+        ev: &Evidence,
+        direct: &[Diagnostic],
+    ) -> CitationResolution {
+        let listing = self.runners_listing(&ev.reference);
+        let detail = diagnostic_codes(direct);
+        let (resolver, cost_subject, strength, outcome) = match listing.as_slice() {
+            [] => {
+                let outcome = self
+                    .checkers
+                    .faults
+                    .borrow()
+                    .iter()
+                    .flatten()
+                    .find(|fault| fault.resolution_unknown)
+                    .map_or(CitationOutcome::Failed, |fault| fault.outcome);
+                (
+                    "configured test runner".to_string(),
+                    None,
+                    CitationStrength::Recorded,
+                    outcome,
+                )
+            }
+            [runner] => {
+                let label = self.label(*runner);
+                let subject = format!("the `{label}` test runner");
+                if self.execute {
+                    let key = (*runner, ev.reference.clone());
+                    let executed = self.executed.borrow();
+                    let outcome = match executed.get(&key) {
+                        Some(Outcome::Passed {
+                            proves_nothing: false,
+                        }) => CitationOutcome::Resolved,
+                        Some(
+                            Outcome::Passed {
+                                proves_nothing: true,
+                            }
+                            | Outcome::Failed(_),
+                        ) => CitationOutcome::Failed,
+                        Some(Outcome::Reported { outcome, .. }) => outcome.citation_outcome(),
+                        Some(Outcome::Stopped(_)) => CitationOutcome::Refused,
+                        Some(Outcome::BatchUnavailable(_)) => CitationOutcome::Unavailable,
+                        None => self
+                            .checkers
+                            .outcome(*runner)
+                            .unwrap_or(CitationOutcome::Unavailable),
+                    };
+                    (
+                        format!("test runner `{label}`"),
+                        Some(subject),
+                        if outcome == CitationOutcome::Resolved {
+                            CitationStrength::Executed
+                        } else {
+                            CitationStrength::Resolved
+                        },
+                        outcome,
+                    )
+                } else {
+                    (
+                        format!("test runner `{label}`"),
+                        Some(subject),
+                        CitationStrength::Resolved,
+                        if direct.is_empty() {
+                            CitationOutcome::Resolved
+                        } else {
+                            CitationOutcome::Failed
+                        },
+                    )
+                }
+            }
+            _ => (
+                "multiple configured test runners".to_string(),
+                None,
+                CitationStrength::Recorded,
+                CitationOutcome::Refused,
+            ),
+        };
+        CitationResolution {
+            resolver,
+            strength,
+            outcome,
+            detail,
+            cost_subject,
+        }
+    }
+
     fn resolve(
         &self,
         _repo: &Repo,
@@ -1795,16 +3470,32 @@ impl EvidenceResolver for TestResolver {
                     None => format!("test `{}` is not one {which}", ev.reference),
                 };
                 let instruction = match &near {
-                    Some(hit) => format!("Cite `{hit}`, which is how `test.list` reports it."),
-                    None => "Name the test exactly as `test.list` reports it, or fix the evidence."
+                    Some(hit) => format!(
+                        "Cite `{hit}`, which is how the runner reports it. Run `aplan test list` \
+                         to inspect the exact configured names."
+                    ),
+                    None => "Run `aplan test list` with a search term, then cite an exact, \
+                             non-ambiguous returned name or fix the evidence."
                         .to_string(),
                 };
-                out.push(
-                    Diagnostic::error(code::TEST_UNRESOLVED, message)
-                        .with_task(&task.id)
-                        .with_file(file)
-                        .with_agent_instruction(instruction),
-                );
+                let mut diagnostic = Diagnostic::error(code::TEST_UNRESOLVED, message)
+                    .with_task(&task.id)
+                    .with_file(file)
+                    .with_agent_instruction(instruction);
+                if let Some(hit) = self.unambiguous_near_match(&ev.reference) {
+                    let replacement = Evidence {
+                        kind: EvidenceKind::Test,
+                        reference: hit,
+                        captured: ev.captured.clone(),
+                    };
+                    if replacement_is_surgical(task, ev, &replacement) {
+                        diagnostic = diagnostic.with_repair(Repair::ReplaceEvidence {
+                            from: ev.clone(),
+                            to: replacement,
+                        });
+                    }
+                }
+                out.push(diagnostic);
                 // A test that does not exist cannot be run.
                 return Ok(());
             }
@@ -1828,8 +3519,9 @@ impl EvidenceResolver for TestResolver {
                     .with_task(&task.id)
                     .with_file(file)
                     .with_agent_instruction(
-                        "Make the cited name unique, or narrow a runner's `list` so only one \
-                         reports it.",
+                        "Run `aplan test list` to inspect which runners report the name. Make \
+                         the cited name unique, or narrow a runner's `list` so only one reports \
+                         it.",
                     ),
                 );
                 return Ok(());
@@ -1851,13 +3543,14 @@ impl EvidenceResolver for TestResolver {
         // test, and reporting it as `APLAN014` would say the cited test failed
         // when nothing ran it. Recorded and reported once, like the listing
         // failure above, instead of ending the run (`A1-066`).
-        let shown = match self.execute_citation(runner, ev, task, file, out) {
-            // Stopped at its cap: the finding is already pushed, and a citation
-            // whose command never ran is neither proved nor disproved.
-            Executed::Stopped | Executed::NotAsked | Executed::Passed => return Ok(()),
-            Executed::Failed(shown) => shown,
-        };
-        out.push(Self::failed(ev, task, file, shown));
+        if let Some(finding) = Self::execution_finding(
+            self.execute_citation(runner, ev, task, file, out),
+            ev,
+            task,
+            file,
+        ) {
+            out.push(finding);
+        }
         Ok(())
     }
 
@@ -1898,12 +3591,8 @@ impl EvidenceResolver for TestResolver {
     /// One finding per runner that could not be asked, attached to no task
     /// because no task is at fault (`A1-066`).
     fn spend(&self) -> Vec<(String, Cost)> {
-        self.costs
-            .borrow()
-            .iter()
-            .enumerate()
-            .map(|(i, c)| (format!("the `{}` test runner", self.label(i)), *c))
-            .collect()
+        self.checkers
+            .spend(|index| format!("the `{}` test runner", self.label(index)))
     }
 
     fn finish_plan(&self, out: &mut Vec<Diagnostic>) {
@@ -1914,26 +3603,27 @@ impl EvidenceResolver for TestResolver {
         // `list` that failed here would record a fault the loop above had
         // already passed -- a runner failing silently, which is the exact shape
         // of the defect `APLAN036` exists to end. Free to order correctly now.
-        self.report_empty_listings(out);
         self.report_unproven_runs(out);
-        for (i, fault) in self.faults.borrow().iter().enumerate() {
-            let Some(fault) = fault else { continue };
-            let mut d = Diagnostic::error(
-                code::TEST_UNRESOLVED,
-                format!("the `{}` test runner {}", self.label(i), fault.what),
-            )
-            .with_agent_instruction(
-                "Fix the runner in `.aplan.yml`: check that its `dir` exists and that its \
-                 commands run there. Until they do, every citation that depends on it is \
-                 unverified rather than wrong.",
-            );
-            // The declaration's own file, so the finding has a location like
-            // every other one, on `APLAN029`'s reasoning: an annotation lands on
-            // `.aplan.yml` in the diff rather than being a locationless sentence.
-            if let Some(path) = &self.config_file {
-                d = d.with_file(path);
-            }
-            out.push(d);
+        out.extend(self.catalogue_diagnostics.clone());
+        if !self.catalogue_diagnostics_own_faults {
+            self.report_empty_listings(out);
+            self.checkers
+                .finish_faults(out, self.config_file.as_deref(), |index, fault| {
+                    let instruction = if self.observation_source == TestObservationSource::Receipt {
+                        "Supply a complete, current and authenticated receipt for this exact \
+                         configured provider, or deliberately run full direct verification with \
+                         `--execute`. Current-only receipt verification never starts the provider."
+                    } else {
+                        "Fix the runner in `.aplan.yml`: check that its `dir` exists and that its \
+                         commands run there. Until they do, every citation that depends on it is \
+                         unverified rather than wrong."
+                    };
+                    Diagnostic::error(
+                        code::TEST_UNRESOLVED,
+                        format!("the `{}` test runner {}", self.label(index), fault.what),
+                    )
+                    .with_agent_instruction(instruction)
+                });
         }
     }
 }
@@ -1949,7 +3639,7 @@ impl TestResolver {
     /// same as `Some(false)`: one says nothing was learned, the other claims the
     /// run proved something. They were one value before, and the caller now
     /// caches on the difference (`A1-243`, audit).
-    fn proves_nothing(&self, runner: usize, out: &std::process::Output) -> Option<bool> {
+    fn proves_nothing(&self, runner: usize, out: &CapturedOutput) -> Option<bool> {
         // The repository's own claim, taken at its word and costing nothing: no
         // sentinel is spawned for a runner that has declared it selects exactly.
         if self.runners[runner].run_selects == Some(true) {
@@ -2010,13 +3700,15 @@ impl TestResolver {
     /// Long and unmistakable on purpose: a runner may match its argument as a
     /// substring (`vitest run -t` does), so a short sentinel could select a real
     /// test and the probe would learn what a *hit* looks like.
-    fn run_sentinel(&self, runner: usize) -> Option<std::process::Output> {
-        let spawned = spawn_capped(
-            &self.wrapped(runner, &self.runners[runner].run_argv(MISS_SENTINEL)),
-            &self.dir_of(&self.runners[runner]),
+    fn run_sentinel(&self, runner: usize) -> Option<CapturedOutput> {
+        let configured = &self.runners[runner];
+        let argv = configured.run_argv(MISS_SENTINEL);
+        let spawned = run_configured_command(
+            &argv,
+            configured.command_policy(),
+            &self.dir_of(configured),
             "test.run",
-            std::time::Duration::ZERO,
-            self.caps_of(runner),
+            0,
         );
         if let Ok((_, cost)) = &spawned {
             self.record_cost(runner, *cost);
@@ -2191,6 +3883,18 @@ enum Outcome {
     /// record at all. `None` where the runner suppressed it with
     /// `output_lines: 0`, or where it printed nothing.
     Failed(Option<String>),
+    /// Any typed adapter result that is not an unconditional pass or ordinary
+    /// failure. The shared batch/receipt vocabulary keeps retry, flake, skip,
+    /// cancellation and framework failure distinguishable without letting one
+    /// of them silently satisfy L3.
+    Reported {
+        outcome: TestBatchOutcome,
+        attempts: Option<u32>,
+        diagnostic: Option<String>,
+    },
+    /// The adapter produced no complete attributable result for the whole
+    /// runner request. The detail is shared across every requested identity.
+    BatchUnavailable(Option<String>),
     /// The kernel stopped it at a declared cap (`A1-310`).
     Stopped(Breach),
 }
@@ -2218,25 +3922,63 @@ enum Executed {
     /// `Shown::Already` on the rest, so the output appears once however many
     /// tasks cite it.
     Failed(Shown),
+    /// A complete batch returned a typed non-passing result.
+    Reported(TestBatchOutcome, Shown),
+    /// The complete batch itself produced no attributable result.
+    Unavailable(Shown),
     /// It was stopped at a declared cap. The finding is already reported, and
     /// the citation is neither proved nor disproved.
     Stopped,
 }
 
-/// The caps one runner declares, in the units a cgroup takes (`A1-310`).
-#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+/// Output retained from each pipe when no value is configured (`A1-366`).
+///
+/// One MiB keeps ordinary compiler and test diagnostics whole while putting a
+/// small, platform-independent ceiling on memory held outside the child's
+/// cgroup. stdout and stderr each receive this budget so thread scheduling
+/// cannot decide which stream wins it.
+const DEFAULT_MAX_OUTPUT_BYTES: usize = 1024 * 1024;
+
+/// The caps one runner declares (`A1-310`, `A1-366`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 struct Caps {
     /// `memory.max` and `memory.swap.max`, in bytes.
     memory_bytes: Option<u64>,
     /// `pids.max`.
     max_processes: Option<u32>,
+    /// Bytes retained from each output stream in aplan's own process.
+    max_output_bytes: usize,
+}
+
+impl Default for Caps {
+    fn default() -> Self {
+        Self {
+            memory_bytes: None,
+            max_processes: None,
+            max_output_bytes: DEFAULT_MAX_OUTPUT_BYTES,
+        }
+    }
 }
 
 impl Caps {
     /// Whether anything was actually declared.
-    fn any(self) -> bool {
+    fn any_cgroup(self) -> bool {
         self.memory_bytes.is_some() || self.max_processes.is_some()
     }
+}
+
+/// A configured output size in the host's addressable units.
+///
+/// Configuration validation has already rejected an invalid or zero size. On
+/// a 32-bit host a larger valid `u64` is saturated to `usize::MAX`, which is
+/// still no greater than the adopter's declared ceiling and is the largest
+/// buffer that host could represent.
+fn output_bytes(value: Option<&str>) -> usize {
+    value
+        .and_then(|s| aplan_config::parse_size(s).ok())
+        .map_or(DEFAULT_MAX_OUTPUT_BYTES, |n| {
+            usize::try_from(n).unwrap_or(usize::MAX)
+        })
 }
 
 /// Why a declared cap is not in force (`A1-310`, ADR-0033).
@@ -2690,7 +4432,7 @@ fn sample_group(_pgid: u32, _stop: &std::sync::atomic::AtomicBool) -> Cost {
 /// Digits go because a clock and a duration are the two things a runner stamps
 /// its own output with, and neither says whether a test ran. Replacing them is
 /// deterministic, which measuring them across two runs was not.
-fn masked_lines(out: &std::process::Output) -> Vec<String> {
+fn masked_lines(out: &CapturedOutput) -> Vec<String> {
     let mask = |s: &str| {
         let mut out = String::with_capacity(s.len());
         let mut in_digits = false;
@@ -2707,11 +4449,21 @@ fn masked_lines(out: &std::process::Output) -> Vec<String> {
         }
         out
     };
-    let mut lines: Vec<String> = String::from_utf8_lossy(&out.stdout)
-        .lines()
-        .map(&mask)
-        .collect();
-    lines.extend(String::from_utf8_lossy(&out.stderr).lines().map(&mask));
+    let mut lines = Vec::new();
+    for (name, stream) in [("stdout", &out.stdout), ("stderr", &out.stderr)] {
+        lines.extend(String::from_utf8_lossy(stream.head()).lines().map(&mask));
+        if stream.truncated() {
+            // Part of the runner's observable profile, and deliberately names
+            // the stream: two runs whose opposite pipes overflowed are not the
+            // same run. The exact count is digit-masked below with every other
+            // volatile number.
+            lines.push(mask(&format!(
+                "<{name}: {} captured byte(s) omitted>",
+                stream.omitted
+            )));
+            lines.extend(String::from_utf8_lossy(stream.tail()).lines().map(&mask));
+        }
+    }
     lines
 }
 
@@ -2729,9 +4481,119 @@ fn one_line(s: &str) -> String {
         .replace('\t', "\\t")
 }
 
-/// What a pipe-reading thread read, or nothing if it panicked.
-fn join_or_empty(handle: std::thread::JoinHandle<Vec<u8>>) -> Vec<u8> {
-    handle.join().unwrap_or_default()
+/// Join one pipe reader without turning a broken reader into a partial answer.
+fn join_capture(
+    handle: Option<std::thread::JoinHandle<std::io::Result<CapturedStream>>>,
+    what: &str,
+    stream: &str,
+) -> Result<CapturedStream, Error> {
+    let Some(handle) = handle else {
+        return Ok(CapturedStream::default());
+    };
+    match handle.join() {
+        Ok(Ok(captured)) => Ok(captured),
+        Ok(Err(why)) => Err(Error::Exec(format!(
+            "`{what}`: could not drain {stream}: {why}"
+        ))),
+        Err(_) => Err(Error::Exec(format!(
+            "`{what}`: the {stream} pipe reader panicked"
+        ))),
+    }
+}
+
+/// Bytes retained from one command pipe (`A1-366`).
+///
+/// `bytes` is the complete stream when `omitted == 0`. Otherwise it is the
+/// first and last halves of the configured budget, in that order, and
+/// `head_len` is their boundary. Keeping both halves preserves the banner or
+/// first assertion an adopter asks for and the failure tail `A1-365` shows.
+#[derive(Debug, Default)]
+struct CapturedStream {
+    bytes: Vec<u8>,
+    head_len: usize,
+    omitted: u64,
+}
+
+impl CapturedStream {
+    fn truncated(&self) -> bool {
+        self.omitted > 0
+    }
+
+    fn complete(&self) -> Option<&[u8]> {
+        (!self.truncated()).then_some(&self.bytes)
+    }
+
+    fn head(&self) -> &[u8] {
+        if self.truncated() {
+            &self.bytes[..self.head_len]
+        } else {
+            &self.bytes
+        }
+    }
+
+    fn tail(&self) -> &[u8] {
+        if self.truncated() {
+            &self.bytes[self.head_len..]
+        } else {
+            &[]
+        }
+    }
+}
+
+/// Drain a pipe completely while retaining no more than `limit` bytes.
+///
+/// Dropping the reader after the prefix reaches its limit would send the child
+/// `SIGPIPE` or leave it blocked, changing the command being judged. This keeps
+/// reading into one fixed scratch buffer, preserving the first and last halves
+/// and counting everything between them without holding it.
+fn capture_pipe(mut pipe: impl std::io::Read, limit: usize) -> std::io::Result<CapturedStream> {
+    let head_limit = limit / 2 + limit % 2;
+    let tail_limit = limit / 2;
+    let mut head = Vec::new();
+    let mut tail: std::collections::VecDeque<u8> = std::collections::VecDeque::new();
+    let mut total = 0u64;
+    let mut chunk = [0u8; 8192];
+
+    loop {
+        let read = match pipe.read(&mut chunk) {
+            Ok(read) => read,
+            Err(e) if e.kind() == std::io::ErrorKind::Interrupted => continue,
+            Err(why) => return Err(why),
+        };
+        if read == 0 {
+            break;
+        }
+        total = total.saturating_add(read as u64);
+        let mut remaining = &chunk[..read];
+        if head.len() < head_limit {
+            let take = remaining.len().min(head_limit - head.len());
+            head.extend_from_slice(&remaining[..take]);
+            remaining = &remaining[take..];
+        }
+        if tail_limit == 0 || remaining.is_empty() {
+            continue;
+        }
+        if remaining.len() >= tail_limit {
+            tail.clear();
+            tail.extend(&remaining[remaining.len() - tail_limit..]);
+            continue;
+        }
+        let overflow = tail
+            .len()
+            .saturating_add(remaining.len())
+            .saturating_sub(tail_limit);
+        tail.drain(..overflow);
+        tail.extend(remaining);
+    }
+
+    let head_len = head.len();
+    head.extend(tail);
+    let omitted = total.saturating_sub(head.len() as u64);
+    Ok(CapturedStream {
+        head_len: if omitted == 0 { head.len() } else { head_len },
+        bytes: head,
+        omitted,
+    })
 }
 
 /// Kill a timed-out child and everything it started.
@@ -2740,6 +4602,14 @@ fn join_or_empty(handle: std::thread::JoinHandle<Vec<u8>>) -> Vec<u8> {
 /// Elsewhere, the child alone: this is the portable floor, and the platforms
 /// this tool ships for are unix.
 fn kill_group(child: &mut std::process::Child) {
+    kill_process_group(child.id());
+    // Whether or not the group signal landed, the direct child is killed: on
+    // non-unix this is the whole mechanism, and on unix it is the fallback for a
+    // system with no `kill` binary.
+    let _ = child.kill();
+}
+
+fn kill_process_group(pgid: u32) {
     #[cfg(unix)]
     {
         // Through a shell's `kill` *builtin*, not through FFI: this workspace
@@ -2754,28 +4624,54 @@ fn kill_group(child: &mut std::process::Child) {
         // negated pid names the group and nothing else. `SIGKILL` rather than
         // `SIGTERM`: this command has already ignored its deadline, and a second
         // grace period is another wait for the same answer.
-        let _ = Command::new("sh")
+        // `/bin/sh` is the POSIX system shell, not a program selected through
+        // the configured command's inherited `PATH`. Termination must keep
+        // working when that environment is empty or points at repository-owned
+        // wrappers; otherwise the parent can preserve its signal while the
+        // group it promised to stop survives.
+        let _ = Command::new("/bin/sh")
             .arg("-c")
-            .arg(format!("kill -KILL -{} 2>/dev/null", child.id()))
+            .arg(format!("kill -KILL -{pgid} 2>/dev/null"))
             .stdin(std::process::Stdio::null())
             .stdout(std::process::Stdio::null())
             .stderr(std::process::Stdio::null())
             .status();
     }
-    // Whether or not the group signal landed, the direct child is killed: on
-    // non-unix this is the whole mechanism, and on unix it is the fallback for a
-    // system with no `kill` binary.
-    let _ = child.kill();
+    #[cfg(not(unix))]
+    let _ = pgid;
 }
 
 /// What running a configured command produced (`A1-121`).
 #[derive(Debug)]
 enum Ran {
     /// It exited, with this status and output.
-    Exited(std::process::Output),
+    Exited(CapturedOutput),
     /// It was still running when its limit expired, and was killed. Nothing was
     /// learned: this is not "the command said no".
     TimedOut(std::time::Duration),
+}
+
+/// An exited command and the bounded bytes retained from its pipes (`A1-366`).
+#[derive(Debug)]
+struct CapturedOutput {
+    status: std::process::ExitStatus,
+    stdout: CapturedStream,
+    stderr: CapturedStream,
+}
+
+impl From<std::process::Output> for CapturedOutput {
+    fn from(out: std::process::Output) -> Self {
+        let stream = |bytes: Vec<u8>| CapturedStream {
+            head_len: bytes.len(),
+            bytes,
+            omitted: 0,
+        };
+        Self {
+            status: out.status,
+            stdout: stream(out.stdout),
+            stderr: stream(out.stderr),
+        }
+    }
 }
 
 /// Spawn `argv` with no shell. This is the trust boundary: the test name is one
@@ -2805,11 +4701,12 @@ enum Ran {
 /// in a process group of its own and the group is signalled, so a command that
 /// spawns its own children does not leave them behind.
 ///
-/// The cost, stated because it is a real one: a child in its own group no longer
-/// receives the terminal's `SIGINT`, so interrupting `aplan verify` by hand
-/// leaves the command it was running to finish on its own. That trade buys a
-/// bounded, silent-in-CI leak becoming none, and the timeout now ends the
-/// command in the case the interrupt was compensating for.
+/// A child in its own group no longer receives the terminal's catchable
+/// termination signals directly. The process-wide lifecycle owner therefore
+/// closes this spawn boundary and kills every registered group before it
+/// re-raises the signal. That pairing is deliberate: process groups make
+/// descendant cleanup exact, while the owner prevents them from becoming
+/// detached side effects when the parent is interrupted (`A1-592`).
 ///
 /// Every configured command goes through here, inside whatever caps the block
 /// that declared it asked for -- `test.list`, `test.run`, `test.skipped` and
@@ -2829,39 +4726,73 @@ fn spawn_capped(
     spawn_in_cage(argv, dir, what, limit, caps, &cgroup_root())
 }
 
+/// Run one command under the policy shared by every repository-declared
+/// command (`A1-185`).
+///
+/// The argv remains specific to the question: `test.list`, `test.run` and
+/// `url.check` deliberately have different shapes. The machinery around it is
+/// not specific: wrapper placement, timeout defaulting, cgroup limits and
+/// bounded capture all come through this one seam. Taking the typed borrowed
+/// view from `aplan-config` means a later shared key cannot be applied to one
+/// checker while being forgotten by the other.
+fn run_configured_command(
+    argv: &[String],
+    limits: aplan_config::CommandPolicy<'_>,
+    dir: &Path,
+    what: &str,
+    default_timeout_seconds: u64,
+) -> Result<(Ran, Cost), Error> {
+    let caps = configured_caps(limits);
+    let argv = configured_argv(argv, limits);
+    let limit = std::time::Duration::from_secs(limits.timeout_or(default_timeout_seconds));
+    spawn_capped(&argv, dir, what, limit, caps)
+}
+
+fn configured_caps(limits: aplan_config::CommandPolicy<'_>) -> Caps {
+    Caps {
+        memory_bytes: limits
+            .max_memory
+            .and_then(|s| aplan_config::parse_size(s).ok()),
+        max_processes: limits.max_processes,
+        max_output_bytes: output_bytes(limits.max_output),
+    }
+}
+
+fn configured_argv(argv: &[String], limits: aplan_config::CommandPolicy<'_>) -> Vec<String> {
+    match limits.wrap {
+        Some(prefix) => prefix.iter().chain(argv).cloned().collect(),
+        None => argv.to_vec(),
+    }
+}
+
 /// Run a command a config key declares, once, and return what it printed
 /// (`A1-313`).
 ///
-/// [`spawn_capped`] with the four keys every declaring block carries applied,
+/// [`spawn_capped`] with the five keys every declaring block carries applied,
 /// and every outcome that is not "it exited zero with output" turned into an
 /// [`Error::Exec`] that names the key. It is the seam a caller outside this
 /// module uses, because the cage, the timeout and the cost sampler are this
 /// module's and a fourth hand-written spawn would be the fourth chance to leave
 /// one of them out -- which is how `url.check` came to declare `max_memory` and
-/// never apply it (`A1-310`, audit).
+/// never apply it (`A1-310`, audit). It takes the typed block whole so the next
+/// key cannot be added to configuration without the compiler bringing it here.
 ///
 /// Not a resolver: this answers one question for the run rather than resolving a
 /// citation, so it has no [`EvidenceResolver`] to hang off and no cost to fold
 /// into a subject's total.
 pub(crate) fn run_declared(
-    argv: Vec<String>,
-    wrap: Option<&[String]>,
+    declared: &aplan_config::DeclaredCommand,
     dir: &Path,
     what: &str,
-    timeout_seconds: u64,
-    max_memory: Option<&str>,
-    max_processes: Option<u32>,
+    default_timeout_seconds: u64,
 ) -> Result<String, Error> {
-    let caps = Caps {
-        memory_bytes: max_memory.and_then(|s| aplan_config::parse_size(s).ok()),
-        max_processes,
-    };
-    let argv: Vec<String> = match wrap {
-        Some(prefix) => prefix.iter().chain(argv.iter()).cloned().collect(),
-        None => argv,
-    };
-    let limit = std::time::Duration::from_secs(timeout_seconds);
-    let (ran, cost) = spawn_capped(&argv, dir, what, limit, caps)?;
+    let (ran, cost) = run_configured_command(
+        &declared.command,
+        declared.command_policy(),
+        dir,
+        what,
+        default_timeout_seconds,
+    )?;
     declared_outcome(what, ran, cost)
 }
 
@@ -2878,24 +4809,18 @@ pub(crate) fn run_declared(
 /// one the kernel stopped, one that ran out of time -- is still an error, and
 /// no claim is called false on the strength of it.
 pub(crate) fn run_declared_ok(
-    argv: Vec<String>,
-    wrap: Option<&[String]>,
+    declared: &aplan_config::DeclaredCommand,
     dir: &Path,
     what: &str,
-    timeout_seconds: u64,
-    max_memory: Option<&str>,
-    max_processes: Option<u32>,
+    default_timeout_seconds: u64,
 ) -> Result<(bool, Cost), Error> {
-    let caps = Caps {
-        memory_bytes: max_memory.and_then(|s| aplan_config::parse_size(s).ok()),
-        max_processes,
-    };
-    let argv: Vec<String> = match wrap {
-        Some(prefix) => prefix.iter().chain(argv.iter()).cloned().collect(),
-        None => argv,
-    };
-    let limit = std::time::Duration::from_secs(timeout_seconds);
-    let (ran, cost) = spawn_capped(&argv, dir, what, limit, caps)?;
+    let (ran, cost) = run_configured_command(
+        &declared.command,
+        declared.command_policy(),
+        dir,
+        what,
+        default_timeout_seconds,
+    )?;
     // The cost is carried out whichever way the answer goes, because a command
     // that took eleven minutes and nine gigabytes is worth reporting even when
     // it said no -- and *especially* when it was stopped for saying it
@@ -2913,9 +4838,13 @@ pub(crate) fn run_declared_ok(
 fn declared_outcome(what: &str, ran: Ran, cost: Cost) -> Result<String, Error> {
     let out = declared_result(what, ran, cost)?;
     if out.status.success() {
-        return Ok(String::from_utf8_lossy(&out.stdout).into_owned());
+        let stdout = out
+            .stdout
+            .complete()
+            .ok_or_else(|| output_truncated(what, "stdout", out.stdout.omitted))?;
+        return Ok(String::from_utf8_lossy(stdout).into_owned());
     }
-    let detail = String::from_utf8_lossy(&out.stderr);
+    let detail = String::from_utf8_lossy(out.stderr.head());
     let detail = detail.lines().next().unwrap_or("no output").trim();
     Err(Error::Exec(format!(
         "`{what}`: the command exited {}: {detail}",
@@ -2934,7 +4863,7 @@ fn declared_outcome(what: &str, ran: Ran, cost: Cost) -> Result<String, Error> {
 /// caller and everything before it belongs here: a command that could not be
 /// launched, one the kernel stopped, one that ran out of time. None of those is
 /// an answer, and no claim may be called false on the strength of one.
-fn declared_result(what: &str, ran: Ran, cost: Cost) -> Result<std::process::Output, Error> {
+fn declared_result(what: &str, ran: Ran, cost: Cost) -> Result<CapturedOutput, Error> {
     // A command the kernel stopped answered nothing, and the adopter's own cap
     // must not be reported as the command's answer (ADR-0033).
     if let Some(breach) = cost.breach {
@@ -2965,6 +4894,108 @@ fn declared_result(what: &str, ran: Ran, cost: Cost) -> Result<std::process::Out
     }
 }
 
+/// A configured command printed more than the parent was allowed to retain.
+///
+/// Listing and value-producing commands need their complete stdout to answer;
+/// treating a retained prefix as complete would turn a resource safeguard into
+/// a false "test does not exist" or a partial version. Status-only commands do
+/// not call this: their answer is the exit status and their pipes are still
+/// drained under the same bound.
+fn output_truncated(what: &str, stream: &str, omitted: u64) -> Error {
+    let key = if what.starts_with("test.") {
+        "test.max_output".to_string()
+    } else if what == "url.check" {
+        "url.max_output".to_string()
+    } else {
+        format!("{what}.max_output")
+    };
+    Error::Exec(format!(
+        "`{what}`: {stream} exceeded `{key}` and {omitted} byte(s) were dropped while the pipe \
+         was drained; raise `{key}` so the command's complete answer can be checked"
+    ))
+}
+
+static CONFIGURED_COMMANDS_TERMINATING: AtomicBool = AtomicBool::new(false);
+static ACTIVE_CONFIGURED_COMMANDS: OnceLock<Mutex<BTreeMap<u32, Option<PathBuf>>>> =
+    OnceLock::new();
+
+fn active_configured_commands() -> &'static Mutex<BTreeMap<u32, Option<PathBuf>>> {
+    ACTIVE_CONFIGURED_COMMANDS.get_or_init(|| Mutex::new(BTreeMap::new()))
+}
+
+/// One configured command registered for process-wide termination cleanup.
+///
+/// Verification normally owns and reaps its children synchronously. Process
+/// termination is the exception: it must stop an uncooperative configured
+/// group before the parent preserves the signal outcome. This registry gives
+/// the CLI and TUI lifecycle owners a process-group handle while preserving
+/// ordinary ownership here.
+struct ActiveConfiguredCommand(u32);
+
+impl ActiveConfiguredCommand {
+    fn register(pgid: u32, cgroup: Option<PathBuf>) -> Self {
+        active_configured_commands()
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .insert(pgid, cgroup);
+        Self(pgid)
+    }
+}
+
+impl Drop for ActiveConfiguredCommand {
+    fn drop(&mut self) {
+        active_configured_commands()
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .remove(&self.0);
+    }
+}
+
+fn refuse_terminating_command(what: &str) -> Result<(), Error> {
+    if configured_commands_terminating() {
+        Err(Error::Exec(format!(
+            "`{what}`: process termination cancelled configured command startup"
+        )))
+    } else {
+        Ok(())
+    }
+}
+
+pub(crate) fn configured_commands_terminating() -> bool {
+    CONFIGURED_COMMANDS_TERMINATING.load(Ordering::Acquire)
+}
+
+fn register_configured_command(
+    child: &mut std::process::Child,
+    cgroup: Option<PathBuf>,
+    what: &str,
+) -> Result<ActiveConfiguredCommand, Error> {
+    let active = ActiveConfiguredCommand::register(child.id(), cgroup);
+    if let Err(error) = refuse_terminating_command(what) {
+        kill_group(child);
+        let _ = child.wait();
+        return Err(error);
+    }
+    Ok(active)
+}
+
+/// Refuse future configured-command spawns and kill every command currently
+/// registered by this process. Called by a process lifecycle owner immediately
+/// before the original signal is re-raised.
+pub(crate) fn terminate_active_configured_commands() {
+    CONFIGURED_COMMANDS_TERMINATING.store(true, Ordering::Release);
+    let active = active_configured_commands()
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+        .clone();
+    for (pgid, cgroup) in active {
+        if let Some(cgroup) = cgroup {
+            let _ = write_cgroup_knob(&cgroup.join("cgroup.kill"), "1");
+        }
+        kill_process_group(pgid);
+    }
+}
+
 /// [`spawn_capped`], against a cage root already found (`A1-310`).
 ///
 /// Both answers this takes are real states of a real machine -- a delegated
@@ -2980,8 +5011,6 @@ fn spawn_in_cage(
     caps: Caps,
     root: &Result<std::path::PathBuf, Unenforced>,
 ) -> Result<(Ran, Cost), Error> {
-    use std::io::Read as _;
-
     // Before the cage, not after. The joiner below makes *any* argv non-empty,
     // so checking after it would make this unreachable for a capped command --
     // and an empty `test.skipped` would then run `sh -c '... exec "$@"'` with no
@@ -2991,12 +5020,13 @@ fn spawn_in_cage(
     if argv.is_empty() {
         return Err(Error::Exec(format!("`{what}`: the command is empty")));
     }
+    refuse_terminating_command(what)?;
 
     // The cage, and the command that puts itself in it. A cap that cannot be
     // applied is carried out in `Cost` rather than failing the command: the
     // decision (ADR-0033) is that an unenforceable platform is told once and the
     // run proceeds, not that it is stopped.
-    let (caged, unenforced) = if caps.any() {
+    let (caged, unenforced) = if caps.any_cgroup() {
         let built = match root {
             Ok(root) => Cage::build_in(root, caps),
             Err(why) => Err(*why),
@@ -3041,6 +5071,11 @@ fn spawn_in_cage(
         command.process_group(0);
     }
     let mut child = command.spawn().map_err(fail)?;
+    let _active = register_configured_command(
+        &mut child,
+        caged.as_ref().map(|cage| cage.dir.clone()),
+        what,
+    )?;
 
     // Measured from outside the child, in its own thread, because the two paths
     // below differ: the bounded one polls and the unbounded one blocks in
@@ -3054,20 +5089,15 @@ fn spawn_in_cage(
         (ran, cost)
     };
 
-    let out_thread = child.stdout.take().map(|mut p| {
-        std::thread::spawn(move || {
-            let mut buf = Vec::new();
-            let _ = p.read_to_end(&mut buf);
-            buf
-        })
-    });
-    let err_thread = child.stderr.take().map(|mut p| {
-        std::thread::spawn(move || {
-            let mut buf = Vec::new();
-            let _ = p.read_to_end(&mut buf);
-            buf
-        })
-    });
+    let output_limit = caps.max_output_bytes;
+    let out_thread = child
+        .stdout
+        .take()
+        .map(|p| std::thread::spawn(move || capture_pipe(p, output_limit)));
+    let err_thread = child
+        .stderr
+        .take()
+        .map(|p| std::thread::spawn(move || capture_pipe(p, output_limit)));
 
     // No limit means no polling: `test.run` under `--execute` is deliberately
     // unbounded, and waking every few milliseconds for the length of a test suite
@@ -3075,10 +5105,14 @@ fn spawn_in_cage(
     // (`A1-121`, found by its audit).
     if limit.is_zero() {
         let status = child.wait().map_err(fail)?;
-        return Ok(finish(Ran::Exited(std::process::Output {
+        // Join both before propagating either result. If one reader failed, the
+        // other still owns a thread that has to be reaped rather than detached.
+        let stdout = join_capture(out_thread, what, "stdout");
+        let stderr = join_capture(err_thread, what, "stderr");
+        return Ok(finish(Ran::Exited(CapturedOutput {
             status,
-            stdout: out_thread.map(join_or_empty).unwrap_or_default(),
-            stderr: err_thread.map(join_or_empty).unwrap_or_default(),
+            stdout: stdout?,
+            stderr: stderr?,
         })));
     }
 
@@ -3105,19 +5139,44 @@ fn spawn_in_cage(
         // command is not delayed by it.
         std::thread::sleep(std::time::Duration::from_millis(5));
     };
-    let stdout = out_thread.map(join_or_empty).unwrap_or_default();
-    let stderr = err_thread.map(join_or_empty).unwrap_or_default();
-    Ok(finish(Ran::Exited(std::process::Output {
+    // Join both before propagating either result, as above.
+    let stdout = join_capture(out_thread, what, "stdout");
+    let stderr = join_capture(err_thread, what, "stderr");
+    Ok(finish(Ran::Exited(CapturedOutput {
         status,
-        stdout,
-        stderr,
+        stdout: stdout?,
+        stderr: stderr?,
     })))
 }
 
 /// Whether `s` is shaped like a git object id: 7 to 64 hex characters (an
 /// abbreviated SHA through a full sha256), and nothing else.
-fn is_sha_shaped(s: &str) -> bool {
+pub(crate) fn is_sha_shaped(s: &str) -> bool {
     (7..=64).contains(&s.len()) && s.bytes().all(|b| b.is_ascii_hexdigit())
+}
+
+/// Resolve one immutable citation only when it is usable as evidence about the
+/// verified tree. Secondary rules must not independently reopen an object that
+/// `APLAN011` has rejected, nor diff a shallow boundary that `APLAN012` cannot
+/// judge (`A1-572`).
+fn reachable_cited_commit<'repo>(
+    repo: &'repo Repo,
+    reference: &str,
+) -> Option<git2::Commit<'repo>> {
+    if !is_sha_shaped(reference) {
+        return None;
+    }
+    let commit = repo.resolve_commit(reference)?;
+    if !commit
+        .id()
+        .to_string()
+        .starts_with(&reference.to_lowercase())
+        || repo.head_reachability(&commit) != HeadReachability::Reachable
+        || repo.is_truncated_at(&commit)
+    {
+        return None;
+    }
+    Some(commit)
 }
 
 /// Whether `glob` matches every file, a catch-all with no literal path segment
@@ -3155,10 +5214,15 @@ fn normalize_dir(dir: &str) -> Option<String> {
 /// only: no subprocess, no repository, so the report stays hermetic.
 #[must_use]
 pub fn claims_locality(runners: &aplan_config::TestRunners, tests: &[String]) -> bool {
-    let all: Vec<&TestRunner> = match runners {
-        aplan_config::TestRunners::One(r) => vec![r],
-        aplan_config::TestRunners::Many(rs) => rs.iter().collect(),
-    };
+    if locality_detector(
+        EvidenceKind::Test,
+        EvidencePathLocator::ConfiguredTestCoverage,
+    )
+    .is_none()
+    {
+        return false;
+    }
+    let all = runners.all().iter().collect::<Vec<&TestRunner>>();
     all.iter()
         .any(|r| tests.iter().any(|t| !covered_prefixes(r, t).is_empty()))
 }
@@ -3277,37 +5341,31 @@ fn short_sha(reference: &str) -> &str {
 /// touches the network and `check` keeps its hermetic contract (`A1-041`).
 #[derive(Debug)]
 pub struct UrlResolver {
-    check: Vec<String>,
-    /// What this checker's command may spend, and what it runs under
-    /// (`A1-310`). ADR-0033 covers *every* spawned command, not the test
-    /// runner's alone: a checker is argv an adopter chose exactly as a runner
-    /// is, and the machine does not care which one ate it.
-    caps: Caps,
-    wrap: Option<Vec<String>>,
-    /// What the checker's commands cost, summed the way a runner's are
-    /// (`A1-309`). Measured before this and then discarded, so the one command
-    /// a plain `verify` can spawn reported nothing (`A1-310`, audit).
-    cost: RefCell<Cost>,
+    /// The whole typed declaration. Keeping it whole makes every shared limit
+    /// reach the same configured-command seam the test runners use (`A1-185`).
+    checker: aplan_config::UrlCheck,
+    /// Shared fault and cost state. A url block is one configured checker.
+    checkers: ConfiguredCheckers,
     repo_root: PathBuf,
-    /// One verdict per url, so a plan citing the same page from ten tasks makes
-    /// one request. The listing cache exists for the same reason (`A1-054`).
-    seen: RefCell<std::collections::BTreeMap<String, bool>>,
-    /// Why the checker itself could not be run, if it could not (`A1-066`).
-    ///
-    /// The third instance of the shape `A1-066` was filed about: a `url.check`
-    /// naming a program that is not installed aborted the whole run, so every
-    /// unrelated finding was lost to a key that is opt-in and advisory. It is a
-    /// finding now, and no `url` citation is reported as unanswered on the
-    /// strength of a checker that never ran.
-    fault: RefCell<Option<String>>,
+    /// One terminal outcome per url, so a plan citing the same page from ten
+    /// tasks makes one request even when that request times out (`A1-054`,
+    /// `A1-473`).
+    outcomes: RefCell<std::collections::BTreeMap<String, UrlOutcome>>,
     /// Where `.aplan.yml` is, for the finding that is about it.
     config_file: Option<PathBuf>,
-    /// How long one check may take, in seconds. Zero means no limit
-    /// (`A1-121`).
-    timeout_seconds: u64,
-    /// The urls whose check was abandoned, and after how long. A third outcome
-    /// beside answered and did not answer: nothing was learned.
-    timed_out: RefCell<std::collections::BTreeMap<String, u64>>,
+}
+
+/// What one URL check established.
+///
+/// `Unknown` is deliberately not cached per URL: it belongs to the checker's
+/// one global fault instead. The other outcomes are terminal for this run and
+/// are reused for every citation, including a timeout whose answer is "nothing
+/// was learned" (`A1-473`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum UrlOutcome {
+    Answered(bool),
+    TimedOut(u64),
+    Unknown,
 }
 
 impl UrlResolver {
@@ -3321,35 +5379,28 @@ impl UrlResolver {
         config_file: Option<PathBuf>,
     ) -> Self {
         Self {
-            check: url.check.clone(),
-            caps: Caps {
-                memory_bytes: url
-                    .max_memory
-                    .as_deref()
-                    .and_then(|s| aplan_config::parse_size(s).ok()),
-                max_processes: url.max_processes,
-            },
-            wrap: url.wrap.clone(),
-            cost: RefCell::new(Cost::default()),
+            checker: url.clone(),
+            checkers: ConfiguredCheckers::new(1),
             repo_root,
-            seen: RefCell::new(std::collections::BTreeMap::new()),
-            fault: RefCell::new(None),
+            outcomes: RefCell::new(std::collections::BTreeMap::new()),
             config_file,
-            timeout_seconds: url.timeout_seconds.unwrap_or(URL_TIMEOUT_SECS),
-            timed_out: RefCell::new(std::collections::BTreeMap::new()),
         }
     }
 
-    /// Whether the url answered: `None` when nothing asked it, because the
-    /// checker could not be run.
-    fn reachable(&self, url: &str) -> Option<bool> {
-        if self.fault.borrow().is_some() {
-            return None;
+    /// What checking this URL established.
+    fn outcome(&self, url: &str) -> UrlOutcome {
+        // Before the global fault: an answer already established for this URL
+        // remains true if a different invocation later exposes a broken checker.
+        // Looking at the fault first made diagnostics depend on task order and
+        // erased a real answer (`A1-473`).
+        if let Some(hit) = self.outcomes.borrow().get(url) {
+            return *hit;
         }
-        if let Some(hit) = self.seen.borrow().get(url) {
-            return Some(*hit);
+        if self.checkers.has_fault(0) {
+            return UrlOutcome::Unknown;
         }
         let argv: Vec<String> = self
+            .checker
             .check
             .iter()
             .map(|a| {
@@ -3364,49 +5415,72 @@ impl UrlResolver {
         // answer). A checker that cannot be *launched* has answered nothing, and
         // saying "did not answer" about it would report the adopter's missing
         // `curl` as a dead link (`A1-066`).
-        let limit = std::time::Duration::from_secs(self.timeout_seconds);
-        let argv = match &self.wrap {
-            Some(prefix) => prefix.iter().chain(argv.iter()).cloned().collect(),
-            None => argv,
-        };
-        let spawned = spawn_capped(&argv, &self.repo_root, "url.check", limit, self.caps);
+        let spawned = run_configured_command(
+            &argv,
+            self.checker.command_policy(),
+            &self.repo_root,
+            "url.check",
+            URL_TIMEOUT_SECS,
+        );
         if let Ok((_, cost)) = &spawned {
-            self.cost.borrow_mut().fold(*cost);
+            self.checkers.record_cost(0, *cost);
             // A checker the kernel stopped answered nothing, and saying "this
             // url did not answer" about it would report the adopter's own cap
             // as a dead link. The fault channel is where ADR-0033 puts a breach
             // in a command that is not `test.run`.
             if let Some(breach) = cost.breach {
-                *self.fault.borrow_mut() = Some(format!(
-                    "the configured `url.check` command was stopped: it exceeded `url.{}`, so \
+                self.checkers.fault(
+                    0,
+                    true,
+                    CitationOutcome::Refused,
+                    format!(
+                        "the configured `url.check` command was stopped: it exceeded `url.{}`, so \
                      it neither answered nor refused",
-                    breach.key()
-                ));
-                return None;
+                        breach.key()
+                    ),
+                );
+                return UrlOutcome::Unknown;
             }
         }
-        match spawned.map(|(ran, _)| ran) {
+        let outcome = match spawned.map(|(ran, _)| ran) {
+            Ok(Ran::Exited(out)) if out.status.code().is_some() => {
+                UrlOutcome::Answered(out.status.success())
+            }
+            // A death by signal is a checker crash, not the checker's ordinary
+            // non-zero answer. `version.check` makes the same distinction in
+            // `declared_result`; URL resolution must not call a link dead on the
+            // strength of a process that never returned a verdict (`A1-473`).
             Ok(Ran::Exited(out)) => {
-                let ok = out.status.success();
-                self.seen.borrow_mut().insert(url.to_string(), ok);
-                Some(ok)
+                self.checkers.fault(
+                    0,
+                    true,
+                    CitationOutcome::Unavailable,
+                    format!(
+                        "the configured `url.check` command was killed rather than exiting ({}), \
+                         so it neither answered nor refused",
+                        out.status
+                    ),
+                );
+                UrlOutcome::Unknown
             }
             // A limit that expired is a third outcome: not answered, not
             // refused, *not checked*. Reported per url, because it is this url's
             // check that was abandoned (`A1-121`).
-            Ok(Ran::TimedOut(after)) => {
-                self.timed_out
-                    .borrow_mut()
-                    .insert(url.to_string(), after.as_secs());
-                None
-            }
+            Ok(Ran::TimedOut(after)) => UrlOutcome::TimedOut(after.as_secs()),
             Err(why) => {
-                *self.fault.borrow_mut() = Some(format!(
-                    "the configured `url.check` command could not be run: {why}"
-                ));
-                None
+                self.checkers.fault(
+                    0,
+                    true,
+                    CitationOutcome::Unavailable,
+                    format!("the configured `url.check` command could not be run: {why}"),
+                );
+                UrlOutcome::Unknown
             }
+        };
+        if outcome != UrlOutcome::Unknown {
+            self.outcomes.borrow_mut().insert(url.to_string(), outcome);
         }
+        outcome
     }
 }
 
@@ -3415,12 +5489,49 @@ impl EvidenceResolver for UrlResolver {
         EvidenceKind::Url
     }
 
+    fn observation(
+        &self,
+        _task: &Task,
+        ev: &Evidence,
+        direct: &[Diagnostic],
+    ) -> CitationResolution {
+        let observed = self.outcomes.borrow().get(&ev.reference).copied();
+        let outcome = match observed {
+            Some(UrlOutcome::Answered(true)) => CitationOutcome::Resolved,
+            Some(UrlOutcome::Answered(false)) => CitationOutcome::Failed,
+            Some(UrlOutcome::TimedOut(_)) => CitationOutcome::TimedOut,
+            None if !ev
+                .reference
+                .get(..8)
+                .is_some_and(|prefix| prefix.eq_ignore_ascii_case("https://")) =>
+            {
+                CitationOutcome::Refused
+            }
+            Some(UrlOutcome::Unknown) | None => self
+                .checkers
+                .outcome(0)
+                .unwrap_or(CitationOutcome::Unavailable),
+        };
+        CitationResolution {
+            resolver: "configured url.check".to_string(),
+            strength: if outcome == CitationOutcome::Resolved {
+                CitationStrength::Resolved
+            } else {
+                CitationStrength::Recorded
+            },
+            outcome,
+            detail: diagnostic_codes(direct),
+            cost_subject: (self.checkers.cost(0) != Cost::default())
+                .then(|| "the `url.check` checker".to_string()),
+        }
+    }
+
     /// What the checker cost, when it ran at all.
     ///
     /// Nothing for a plan that cites no url: the checker is never spawned, and
     /// a zero would read as a measurement rather than as an absence.
     fn spend(&self) -> Vec<(String, Cost)> {
-        let cost = *self.cost.borrow();
+        let cost = self.checkers.cost(0);
         // Untouched means no url was ever checked: a plan citing none never
         // spawns the checker, and a zero would read as a measurement.
         if cost == Cost::default() {
@@ -3474,13 +5585,13 @@ impl EvidenceResolver for UrlResolver {
             );
             return Ok(());
         }
-        // `Some(false)` is the only case with something to say here:
-        // `Some(true)` answered, and `None` means nothing learned -- either the
-        // checker could not be run at all, which its own finding reports once
-        // (`A1-066`), or this url's check was abandoned at its limit, which is
-        // reported per citation just below (`A1-121`).
-        if self.reachable(&ev.reference) != Some(false) {
-            if let Some(after) = self.timed_out.borrow().get(&ev.reference) {
+        match self.outcome(&ev.reference) {
+            UrlOutcome::Answered(true) | UrlOutcome::Unknown => return Ok(()),
+            // A limit expiring is a third outcome: not answered, not refused,
+            // *not checked*. It is cached per URL but reported per citation, so
+            // repeated proof gets repeated context without repeated network work
+            // (`A1-121`, `A1-473`).
+            UrlOutcome::TimedOut(after) => {
                 out.push(
                     Diagnostic::warning(
                         code::URL_UNREACHABLE,
@@ -3501,8 +5612,9 @@ impl EvidenceResolver for UrlResolver {
                          the link.",
                     ),
                 );
+                return Ok(());
             }
-            return Ok(());
+            UrlOutcome::Answered(false) => {}
         }
         out.push(
             Diagnostic::warning(
@@ -3524,30 +5636,21 @@ impl EvidenceResolver for UrlResolver {
     /// The checker that could not be run, reported once and about the config
     /// rather than about any task (`A1-066`).
     fn finish_plan(&self, out: &mut Vec<Diagnostic>) {
-        let Some(why) = self.fault.borrow().clone() else {
-            return;
-        };
-        let mut d = Diagnostic::warning(
-            code::URL_UNREACHABLE,
-            // The lead-in belongs to whoever set the fault: a checker that was
-            // stopped at its cap *did* run, and saying it "could not be run"
-            // about it would be the one wording `A1-300` exists to prevent,
-            // one command over (`A1-310`, audit).
-            format!("no `url` citation was checked: {why}"),
-        )
-        .with_agent_instruction(
-            // Neutral about *why* it said nothing, because there are now two
-            // ways: it could not be launched, or it was stopped at a cap it
-            // was given. The distinction is in the message; the remedy is the
-            // same key either way (`A1-310`, audit).
-            "Fix `url.check` in `.aplan.yml`, or remove it. A checker that does not answer \
-             leaves every `url` citation unchecked, which is not the same as a url that \
-             did not answer.",
-        );
-        if let Some(path) = &self.config_file {
-            d = d.with_file(path);
-        }
-        out.push(d);
+        self.checkers
+            .finish_faults(out, self.config_file.as_deref(), |_index, fault| {
+                Diagnostic::warning(
+                    code::URL_UNREACHABLE,
+                    // The lead-in belongs to whoever set the fault: a checker
+                    // stopped at its cap did run, so it must not be described
+                    // as one that could not be run (`A1-310`, audit).
+                    format!("`url` citations were left unchecked: {}", fault.what),
+                )
+                .with_agent_instruction(
+                    "Fix `url.check` in `.aplan.yml`, or remove it. A checker that does not \
+                     answer leaves affected `url` citations unchecked, which is not the same as \
+                     a url that did not answer.",
+                )
+            });
     }
 }
 
@@ -3656,13 +5759,9 @@ pub fn report_unmatched_paths(
         let mut kinds: Vec<&str> = task
             .evidence
             .iter()
-            .filter(|e| !e.reference.trim().is_empty())
-            .filter_map(|e| match e.kind {
-                aplan_core::EvidenceKind::Commit => Some("commit"),
-                aplan_core::EvidenceKind::File => Some("file"),
-                aplan_core::EvidenceKind::Test => Some("test"),
-                _ => None,
-            })
+            .filter(|e| !is_vacuous_ref(&e.reference))
+            .filter(|e| e.kind.capabilities().locality.uses_task_paths())
+            .map(|e| e.kind.as_str())
             .collect();
         kinds.sort_unstable();
         kinds.dedup();
@@ -3804,7 +5903,7 @@ fn binds_through_paths(repo: &Repo, task: &Task, tracked: &[PathBuf]) -> Result<
     // Files first, whatever order the citations are written in: a file is a
     // lookup and a commit is a diff, and one bound citation is the whole answer.
     for ev in &task.evidence {
-        if ev.kind == EvidenceKind::File {
+        if ev.kind.capabilities().locality.locator() == Some(EvidencePathLocator::CitedFile) {
             // Membership of `tracked` is the existence check: a path the
             // repository tracks is a path that is there, so this asks git nothing
             // and works in a repository with no commits yet, which `close`
@@ -3816,10 +5915,10 @@ fn binds_through_paths(repo: &Repo, task: &Task, tracked: &[PathBuf]) -> Result<
         }
     }
     for ev in &task.evidence {
-        if ev.kind != EvidenceKind::Commit {
+        if ev.kind.capabilities().locality.locator() != Some(EvidencePathLocator::CommitChanges) {
             continue;
         }
-        let Some(commit) = repo.resolve_commit(&ev.reference) else {
+        let Some(commit) = reachable_cited_commit(repo, &ev.reference) else {
             continue;
         };
         if repo.commit_paths(&commit)?.iter().any(|p| binds(p)) {
@@ -3881,10 +5980,10 @@ fn unmatched_globs(
 fn historic_paths(repo: &Repo, task: &Task) -> Result<Vec<PathBuf>, Error> {
     let mut paths = Vec::new();
     for ev in &task.evidence {
-        if ev.kind != EvidenceKind::Commit {
+        if ev.kind.capabilities().locality.locator() != Some(EvidencePathLocator::CommitChanges) {
             continue;
         }
-        if let Some(commit) = repo.resolve_commit(&ev.reference) {
+        if let Some(commit) = reachable_cited_commit(repo, &ev.reference) {
             paths.extend(repo.tree_paths(&commit)?);
         }
     }
@@ -3913,13 +6012,89 @@ fn build_globset(paths: &[String]) -> Option<globset::GlobSet> {
 #[cfg(test)]
 mod tests {
     use super::{
-        Breach, Cage, Caps, Cost, EvidenceResolver as _, LIST_TIMEOUT_SECS, Ran, TestResolver,
-        URL_TIMEOUT_SECS, Unenforced, UrlResolver, listed_names, report_unmatched_paths,
-        report_unstarted_in_progress, root_under, spawn_in_cage, test_name_matches,
+        Breach, Cage, Caps, CitationOutcome, Cost, DEFAULT_MAX_OUTPUT_BYTES, Diagnostic,
+        EvidenceResolver as _, LIST_TIMEOUT_SECS, Outcome, Ran, TestCatalogueRunnerState,
+        TestResolver, URL_TIMEOUT_SECS, Unenforced, UrlResolver, listed_names,
+        report_unmatched_paths, report_unstarted_in_progress, root_under, spawn_in_cage,
+        test_name_matches,
     };
     use aplan_config::TestRunner;
     use aplan_core::code;
+    use std::collections::BTreeSet;
     use std::path::{Path, PathBuf};
+
+    #[test]
+    fn receipt_projection_preserves_every_internal_terminal_state() {
+        use crate::batch::TestBatchOutcome;
+
+        let cases = [
+            (
+                Some(Outcome::Passed {
+                    proves_nothing: false,
+                }),
+                true,
+                TestBatchOutcome::Passed,
+                true,
+            ),
+            (
+                Some(Outcome::Passed {
+                    proves_nothing: true,
+                }),
+                true,
+                TestBatchOutcome::UnprovenSelection,
+                true,
+            ),
+            (
+                Some(Outcome::Failed(Some("assertion".into()))),
+                true,
+                TestBatchOutcome::Failed,
+                true,
+            ),
+            (
+                Some(Outcome::Reported {
+                    outcome: TestBatchOutcome::RetriedPassed,
+                    attempts: Some(2),
+                    diagnostic: Some("first attempt failed".into()),
+                }),
+                true,
+                TestBatchOutcome::RetriedPassed,
+                true,
+            ),
+            (
+                Some(Outcome::Stopped(Breach::Memory)),
+                true,
+                TestBatchOutcome::ResourceBreach,
+                true,
+            ),
+            (
+                Some(Outcome::Stopped(Breach::Processes)),
+                true,
+                TestBatchOutcome::ResourceBreach,
+                true,
+            ),
+            (
+                Some(Outcome::BatchUnavailable(Some("adapter crashed".into()))),
+                true,
+                TestBatchOutcome::FrameworkCrash,
+                false,
+            ),
+            (None, true, TestBatchOutcome::Incomplete, false),
+            (
+                Some(Outcome::Passed {
+                    proves_nothing: false,
+                }),
+                false,
+                TestBatchOutcome::Incomplete,
+                false,
+            ),
+        ];
+        for (outcome, settled, expected, attributable) in cases {
+            let (entry, actual_attributable) =
+                TestResolver::receipt_entry("suite::case", outcome, settled);
+            assert_eq!(entry.outcome, expected);
+            assert_eq!(actual_attributable, attributable);
+        }
+    }
 
     /// **Each way a declared command can fail says which, and names the key**
     /// (`A1-313`).
@@ -3936,7 +6111,7 @@ mod tests {
             let out = std::process::Command::new(argv)
                 .output()
                 .expect("a program every unix has");
-            Ran::Exited(out)
+            Ran::Exited(out.into())
         };
         let breached = |b: Breach| Cost {
             breach: Some(b),
@@ -3986,6 +6161,37 @@ mod tests {
         );
     }
 
+    /// A command asked to *print an answer* needs complete stdout, while one
+    /// asked a yes-or-no question answers with its status (`A1-366`). The same
+    /// bounded capture serves both; truncation must not make their semantics the
+    /// same by accident.
+    #[test]
+    fn output_truncation_refuses_a_partial_value_but_preserves_a_status_answer() {
+        let argv = vec![
+            "sh".to_string(),
+            "-c".to_string(),
+            "awk 'BEGIN { for (i = 0; i < 200000; i++) printf \"x\" }'".to_string(),
+        ];
+        let declared = aplan_config::DeclaredCommand {
+            command: argv,
+            timeout_seconds: Some(30),
+            max_memory: None,
+            max_processes: None,
+            max_output: Some("1K".into()),
+            wrap: None,
+        };
+        let err = super::run_declared(&declared, Path::new("."), "version.current", 30)
+            .expect_err("a partial printed value is not an answer");
+        let said = err.to_string();
+        assert!(said.contains("version.current.max_output"), "{said}");
+        assert!(said.contains("dropped"), "{said}");
+
+        let (compatible, _) =
+            super::run_declared_ok(&declared, Path::new("."), "version.check", 30)
+                .expect("the exit status is complete even when its unused output is not");
+        assert!(compatible);
+    }
+
     /// [`spawn_capped`] with nothing declared, which is what most of these
     /// cases are about: the machinery around a command, not the cap on it.
     fn spawn_limited(
@@ -3997,6 +6203,220 @@ mod tests {
         super::spawn_capped(argv, dir, what, limit, Caps::default())
     }
 
+    /// Proof for `cli.configured_commands_follow_termination_signals`: every
+    /// registry race has one deterministic witness. Normal completion removes
+    /// its entry; simultaneous commands unregister independently; termination
+    /// reaches a command while its output pipes are draining and another in a
+    /// cgroup; a child spawned just before registration is killed and reaped;
+    /// and a later sequential runner is refused before it can start.
+    ///
+    /// The terminating flag is intentionally process-wide and irreversible,
+    /// so this scenario runs in an exact child test process. That keeps the
+    /// ordinary suite independent while still exercising the public entry
+    /// point and the real process-group cleanup path.
+    #[test]
+    #[cfg(unix)]
+    // Keep the ordered race witness in one function. Splitting its phases into
+    // helpers would hide that the same irreversible process flag and registry
+    // connect normal completion, concurrent ownership and post-signal refusal.
+    #[allow(clippy::too_many_lines)]
+    fn termination_cancels_active_and_future_configured_commands() {
+        const CHILD: &str = "APLAN_EVIDENCE_TERMINATION_TEST_CHILD";
+        if std::env::var_os(CHILD).is_some() {
+            use std::os::unix::process::CommandExt as _;
+
+            let commands = tempfile::Builder::new()
+                .tempdir_in(aplan_core::fixture::fixture_root())
+                .expect("configured-command fixture");
+            let blocking_fifo = |name: &str| {
+                let path = commands.path().join(name);
+                let status = std::process::Command::new("mkfifo")
+                    .arg(&path)
+                    .status()
+                    .expect("create blocking fifo");
+                assert!(status.success(), "mkfifo failed for {}", path.display());
+                path
+            };
+            let active_ids = || {
+                super::active_configured_commands()
+                    .lock()
+                    .unwrap_or_else(std::sync::PoisonError::into_inner)
+                    .keys()
+                    .copied()
+                    .collect::<Vec<_>>()
+            };
+            let normal = vec!["true".to_string()];
+            let (normal, _) = spawn_limited(
+                &normal,
+                Path::new("."),
+                "test.list",
+                std::time::Duration::from_secs(5),
+            )
+            .expect("normally completed configured command");
+            assert!(matches!(normal, Ran::Exited(ref out) if out.status.success()));
+            assert!(
+                active_ids().is_empty(),
+                "normal completion left a stale registry entry"
+            );
+
+            let first_fifo = blocking_fifo("first.fifo");
+            let mut first = std::process::Command::new("/bin/cat");
+            first
+                .arg(&first_fifo)
+                .process_group(0)
+                .stdin(std::process::Stdio::null())
+                .stdout(std::process::Stdio::null())
+                .stderr(std::process::Stdio::null());
+            let mut first = first.spawn().expect("first configured command");
+            let first_active = super::ActiveConfiguredCommand::register(first.id(), None);
+
+            let cgroup = tempfile::Builder::new()
+                .tempdir_in(aplan_core::fixture::fixture_root())
+                .expect("plain cgroup fixture");
+            std::fs::write(cgroup.path().join("cgroup.kill"), "0")
+                .expect("writable cgroup kill knob");
+            let second_fifo = blocking_fifo("second.fifo");
+            let mut second = std::process::Command::new("/bin/cat");
+            second
+                .arg(&second_fifo)
+                .process_group(0)
+                .stdin(std::process::Stdio::null())
+                .stdout(std::process::Stdio::null())
+                .stderr(std::process::Stdio::null());
+            let mut second = second.spawn().expect("second configured command");
+            let second_active = super::ActiveConfiguredCommand::register(
+                second.id(),
+                Some(cgroup.path().to_path_buf()),
+            );
+            let active = active_ids();
+            assert_eq!(active.len(), 2);
+            assert!(active.contains(&first.id()));
+            assert!(active.contains(&second.id()));
+
+            // One completed command cannot unregister its simultaneous peer.
+            super::kill_group(&mut first);
+            assert!(!first.wait().expect("reap first command").success());
+            drop(first_active);
+            assert_eq!(active_ids(), vec![second.id()]);
+
+            let drain_fifo = blocking_fifo("drain.fifo");
+            let started = commands.path().join("started");
+            let script = commands.path().join("drain.sh");
+            std::fs::write(
+                &script,
+                "#!/bin/sh\nprintf 'partial output\\n'\n: > \"$1\"\nexec /bin/cat \"$2\"\n",
+            )
+            .expect("output-drain script");
+            let mut permissions = std::fs::metadata(&script)
+                .expect("output-drain script metadata")
+                .permissions();
+            std::os::unix::fs::PermissionsExt::set_mode(&mut permissions, 0o755);
+            std::fs::set_permissions(&script, permissions).expect("executable output-drain script");
+            let drain_dir = commands.path().to_path_buf();
+            let drain_argv = vec![
+                script.to_string_lossy().into_owned(),
+                started.to_string_lossy().into_owned(),
+                drain_fifo.to_string_lossy().into_owned(),
+            ];
+            let drain = std::thread::spawn(move || {
+                spawn_limited(
+                    &drain_argv,
+                    &drain_dir,
+                    "test.list",
+                    std::time::Duration::from_secs(30),
+                )
+            });
+            let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
+            while !started.exists() {
+                assert!(
+                    std::time::Instant::now() < deadline,
+                    "output-drain command never reached its barrier"
+                );
+                std::thread::yield_now();
+            }
+
+            // This child exists in the spawn/register window. The first
+            // termination pass cannot see it; post-spawn registration must.
+            let racing_fifo = blocking_fifo("racing.fifo");
+            let mut racing = std::process::Command::new("/bin/cat");
+            racing
+                .arg(&racing_fifo)
+                .process_group(0)
+                .stdin(std::process::Stdio::null())
+                .stdout(std::process::Stdio::null())
+                .stderr(std::process::Stdio::null());
+            let mut racing = racing.spawn().expect("racing configured command");
+
+            crate::terminate_active_configured_commands();
+            assert_eq!(
+                std::fs::read_to_string(cgroup.path().join("cgroup.kill")).expect("kill knob"),
+                "1",
+                "the cgroup half of cleanup was requested"
+            );
+            assert!(
+                !second.wait().expect("reap second command").success(),
+                "an active configured command survived termination"
+            );
+            drop(second_active);
+
+            let Err(error) = super::register_configured_command(&mut racing, None, "test.list")
+            else {
+                panic!("termination must refuse a racing configured command");
+            };
+            assert!(
+                error.to_string().contains("termination cancelled"),
+                "{error}"
+            );
+
+            let (drained, _) = drain
+                .join()
+                .expect("output-drain thread")
+                .expect("registered command returns its signal outcome");
+            assert!(
+                matches!(drained, Ran::Exited(ref out) if out.status.code().is_none()),
+                "output-drain command was not killed"
+            );
+
+            // The prior command is gone and no entry remains, but termination
+            // is irreversible: the next sequential runner is refused before
+            // the program can create its marker.
+            let late_marker = commands.path().join("late-started");
+            let late = vec![
+                "touch".to_string(),
+                late_marker.to_string_lossy().into_owned(),
+            ];
+            let error = spawn_limited(
+                &late,
+                commands.path(),
+                "test.list",
+                std::time::Duration::from_secs(5),
+            )
+            .expect_err("future configured command must be refused");
+            assert!(
+                error.to_string().contains("termination cancelled"),
+                "{error}"
+            );
+            assert!(!late_marker.exists(), "a refused future command started");
+            assert!(active_ids().is_empty(), "every registry entry was removed");
+            // A later signal after the last child exits has no stale target and
+            // remains safe and idempotent.
+            crate::terminate_active_configured_commands();
+            assert!(active_ids().is_empty());
+            return;
+        }
+
+        let status = std::process::Command::new(std::env::current_exe().expect("test executable"))
+            .args([
+                "--exact",
+                "resolve::tests::termination_cancels_active_and_future_configured_commands",
+                "--nocapture",
+            ])
+            .env(CHILD, "1")
+            .status()
+            .expect("run isolated termination scenario");
+        assert!(status.success(), "isolated scenario failed: {status}");
+    }
+
     /// A `url` block with only a timeout to vary.
     fn url_check(timeout_seconds: Option<u64>) -> aplan_config::UrlCheck {
         aplan_config::UrlCheck {
@@ -4004,6 +6424,7 @@ mod tests {
             timeout_seconds,
             max_memory: None,
             max_processes: None,
+            max_output: None,
             wrap: None,
         }
     }
@@ -4016,13 +6437,73 @@ mod tests {
     fn the_documented_defaults_are_the_ones_a_run_uses() {
         assert_eq!(URL_TIMEOUT_SECS, 30, "the number `README.md` states");
         assert_eq!(LIST_TIMEOUT_SECS, 600, "the number `README.md` states");
+        assert_eq!(
+            DEFAULT_MAX_OUTPUT_BYTES,
+            1024 * 1024,
+            "the per-stream byte bound `README.md` states"
+        );
 
         // And they are what an unconfigured runner or checker actually gets,
         // which is the half a constant alone does not prove.
         let url = UrlResolver::new(&url_check(None), PathBuf::from("."), None);
-        assert_eq!(url.timeout_seconds, URL_TIMEOUT_SECS);
+        assert_eq!(
+            url.checker.command_policy().timeout_or(URL_TIMEOUT_SECS),
+            URL_TIMEOUT_SECS
+        );
         let configured = UrlResolver::new(&url_check(Some(7)), PathBuf::from("."), None);
-        assert_eq!(configured.timeout_seconds, 7, "the config wins");
+        assert_eq!(
+            configured
+                .checker
+                .command_policy()
+                .timeout_or(URL_TIMEOUT_SECS),
+            7,
+            "the config wins"
+        );
+    }
+
+    /// Test runners and the URL checker share this state rather than merely
+    /// following the same convention in two implementations (`A1-185`). The
+    /// first fault is the actionable cause; observing a broken checker again
+    /// cannot produce one finding per citation or replace that cause.
+    #[test]
+    fn configured_checkers_keep_one_first_fault_per_checker() {
+        let checkers = super::ConfiguredCheckers::new(2);
+        checkers.fault(0, true, CitationOutcome::TimedOut, "could not list".into());
+        checkers.fault(
+            0,
+            false,
+            CitationOutcome::Unavailable,
+            "later execution failure".into(),
+        );
+        checkers.fault(
+            1,
+            true,
+            CitationOutcome::Unavailable,
+            "could not check".into(),
+        );
+
+        assert_eq!(checkers.resolution_unknown_count(), 2);
+        let mut findings = Vec::new();
+        checkers.finish_faults(
+            &mut findings,
+            Some(Path::new("chosen.yml")),
+            |index, fault| {
+                Diagnostic::error(
+                    code::TEST_UNRESOLVED,
+                    format!("checker {index} {}", fault.what),
+                )
+            },
+        );
+
+        assert_eq!(findings.len(), 2, "one finding per checker, not per fault");
+        assert_eq!(findings[0].message, "checker 0 could not list");
+        assert_eq!(findings[1].message, "checker 1 could not check");
+        assert!(
+            findings
+                .iter()
+                .all(|finding| finding.file.as_deref() == Some(Path::new("chosen.yml"))),
+            "configuration faults point at the selected configuration"
+        );
     }
 
     /// A command that exits normally is not affected by the machinery around it:
@@ -4043,8 +6524,16 @@ mod tests {
             let Ran::Exited(out) = ran else {
                 panic!("a command that exits must not read as a timeout");
             };
-            assert_eq!(out.stdout, b"out", "limit {limit:?}");
-            assert_eq!(out.stderr, b"err", "limit {limit:?}");
+            assert_eq!(
+                out.stdout.complete(),
+                Some(b"out".as_slice()),
+                "limit {limit:?}"
+            );
+            assert_eq!(
+                out.stderr.complete(),
+                Some(b"err".as_slice()),
+                "limit {limit:?}"
+            );
             assert_eq!(out.status.code(), Some(3), "limit {limit:?}");
         }
     }
@@ -4068,19 +6557,357 @@ mod tests {
         )
         .expect("it ran");
         match ran {
-            Ran::Exited(out) => assert!(out.stdout.len() > 65_536, "{}", out.stdout.len()),
+            Ran::Exited(out) => assert!(
+                out.stdout.bytes.len() > 65_536,
+                "{}",
+                out.stdout.bytes.len()
+            ),
             Ran::TimedOut(_) => panic!("a command blocked on a full pipe read as a timeout"),
         }
+    }
+
+    /// **The reader drains a real pipe while retaining only the declared
+    /// bytes** (`A1-366`).
+    ///
+    /// The prefix and suffix are both assertions: retaining only a rolling tail
+    /// would lose the first diagnostics, while retaining only a prefix would
+    /// undo `A1-365`'s tail excerpt. The exact retained length is the guarantee
+    /// about aplan's memory; the much larger omitted count proves this is not an
+    /// assertion about what the child happened to print.
+    #[test]
+    fn a_chatty_command_retains_only_its_declared_prefix_and_suffix() {
+        let argv = vec![
+            "sh".to_string(),
+            "-c".to_string(),
+            "printf 'first retained line\\n'; \
+             awk 'BEGIN { for (i = 0; i < 200000; i++) printf \"x\" }'; \
+             printf '\\nlast retained line\\n'"
+                .to_string(),
+        ];
+        let (ran, _cost) = super::spawn_capped(
+            &argv,
+            Path::new("."),
+            "test.run",
+            std::time::Duration::ZERO,
+            Caps {
+                max_output_bytes: 1024,
+                ..Caps::default()
+            },
+        )
+        .expect("it ran");
+        let Ran::Exited(out) = ran else {
+            panic!("an unlimited-time command cannot time out");
+        };
+        assert_eq!(out.stdout.bytes.len(), 1024, "the parent byte bound");
+        assert!(
+            out.stdout.omitted > 190_000,
+            "the command really printed past it: {:?}",
+            out.stdout
+        );
+        assert!(
+            out.stdout.head().starts_with(b"first retained line\n"),
+            "the prefix was lost: {:?}",
+            out.stdout
+        );
+        assert!(
+            out.stdout.tail().ends_with(b"last retained line\n"),
+            "the failure tail was lost: {:?}",
+            out.stdout
+        );
+    }
+
+    /// The byte bound is exact at every neighbour, including an odd budget.
+    /// A broad "far past the limit" case runs the same branches without
+    /// detecting an off-by-one that makes a complete answer partial, retains
+    /// one byte too many, or moves the prefix/suffix boundary (`A1-405`).
+    #[test]
+    fn capture_boundaries_are_exact() {
+        struct Case<'a> {
+            printed: &'a [u8],
+            complete: Option<&'a [u8]>,
+            head: &'a [u8],
+            tail: &'a [u8],
+            omitted: u64,
+        }
+        let cases = [
+            Case {
+                printed: b"",
+                complete: Some(b""),
+                head: b"",
+                tail: b"",
+                omitted: 0,
+            },
+            Case {
+                printed: b"a",
+                complete: Some(b"a"),
+                head: b"a",
+                tail: b"",
+                omitted: 0,
+            },
+            Case {
+                printed: b"abcde",
+                complete: Some(b"abcde"),
+                head: b"abcde",
+                tail: b"",
+                omitted: 0,
+            },
+            Case {
+                printed: b"abcdef",
+                complete: None,
+                head: b"abc",
+                tail: b"ef",
+                omitted: 1,
+            },
+        ];
+
+        for case in cases {
+            let captured = super::capture_pipe(case.printed, 5).expect("a byte slice cannot fail");
+            assert_eq!(
+                captured.bytes.len(),
+                case.printed.len().min(5),
+                "{:?}",
+                case.printed
+            );
+            assert_eq!(captured.complete(), case.complete, "{:?}", case.printed);
+            assert_eq!(captured.head(), case.head, "{:?}", case.printed);
+            assert_eq!(captured.tail(), case.tail, "{:?}", case.printed);
+            assert_eq!(captured.omitted, case.omitted, "{:?}", case.printed);
+        }
+    }
+
+    #[test]
+    fn masked_profiles_preserve_truncation_side_and_join_failures_are_not_answers() {
+        let status = std::process::Command::new("true").status().expect("status");
+        let output = super::CapturedOutput {
+            status,
+            stdout: super::CapturedStream {
+                bytes: b"start 123\nend 456\n".to_vec(),
+                head_len: b"start 123\n".len(),
+                omitted: 789,
+            },
+            stderr: super::CapturedStream {
+                bytes: b"error 42\n".to_vec(),
+                head_len: b"error 42\n".len(),
+                omitted: 0,
+            },
+        };
+        assert_eq!(
+            super::masked_lines(&output),
+            [
+                "start #",
+                "<stdout: # captured byte(s) omitted>",
+                "end #",
+                "error #",
+            ]
+        );
+
+        assert!(
+            super::join_capture(None, "test.list", "stdout")
+                .expect("absent pipe has an empty capture")
+                .complete()
+                .is_some_and(<[u8]>::is_empty)
+        );
+        let read_error = std::thread::spawn(|| Err(std::io::Error::other("reader failed")));
+        let error =
+            super::join_capture(Some(read_error), "test.list", "stdout").expect_err("reader error");
+        assert!(
+            error.to_string().contains("could not drain stdout"),
+            "{error}"
+        );
+
+        let panicked = std::thread::spawn(|| -> std::io::Result<super::CapturedStream> {
+            panic!("reader panic")
+        });
+        let error =
+            super::join_capture(Some(panicked), "test.run", "stderr").expect_err("reader panic");
+        assert!(
+            error.to_string().contains("stderr pipe reader panicked"),
+            "{error}"
+        );
+    }
+
+    /// stdout and stderr have separate budgets. Sharing one would make what is
+    /// retained depend on which reader thread the scheduler happened to run
+    /// first, and would make the documented two-times-the-value ceiling false
+    /// (`A1-366`, `A1-405`).
+    #[test]
+    fn stdout_and_stderr_have_independent_capture_budgets() {
+        let argv = vec![
+            "sh".to_string(),
+            "-c".to_string(),
+            "awk 'BEGIN { for (i = 0; i < 200000; i++) printf \"o\" }'; \
+             awk 'BEGIN { for (i = 0; i < 200000; i++) printf \"e\" }' >&2"
+                .to_string(),
+        ];
+        let (ran, _cost) = super::spawn_capped(
+            &argv,
+            Path::new("."),
+            "test.run",
+            std::time::Duration::from_secs(30),
+            Caps {
+                max_output_bytes: 1025,
+                ..Caps::default()
+            },
+        )
+        .expect("both pipes were drained");
+        let Ran::Exited(out) = ran else {
+            panic!("draining both pipes must not become a timeout");
+        };
+
+        for (name, stream, byte) in [("stdout", &out.stdout, b'o'), ("stderr", &out.stderr, b'e')] {
+            assert_eq!(stream.bytes.len(), 1025, "{name} did not get its budget");
+            assert_eq!(stream.head().len(), 513, "{name} odd-budget prefix");
+            assert_eq!(stream.tail().len(), 512, "{name} odd-budget suffix");
+            assert!(stream.omitted > 190_000, "{name}: {stream:?}");
+            assert!(
+                stream.bytes.iter().all(|captured| *captured == byte),
+                "{name} contains bytes from the other stream"
+            );
+        }
+    }
+
+    /// A short read followed by an error is not a complete stream. In
+    /// particular, callers that parse stdout as a test catalogue or version
+    /// must never accept the prefix merely because some bytes arrived first
+    /// (`A1-366`, audit).
+    #[test]
+    fn a_pipe_read_error_cannot_turn_a_partial_stream_into_an_answer() {
+        struct FailsAfterPrefix(bool);
+
+        impl std::io::Read for FailsAfterPrefix {
+            fn read(&mut self, into: &mut [u8]) -> std::io::Result<usize> {
+                if self.0 {
+                    return Err(std::io::Error::other("the pipe broke"));
+                }
+                self.0 = true;
+                let prefix = b"plausible partial answer\n";
+                into[..prefix.len()].copy_from_slice(prefix);
+                Ok(prefix.len())
+            }
+        }
+
+        let err = super::capture_pipe(FailsAfterPrefix(false), 1024)
+            .expect_err("a partial stream is not a complete answer");
+        assert_eq!(err.kind(), std::io::ErrorKind::Other);
+        assert!(err.to_string().contains("pipe broke"), "{err}");
+    }
+
+    /// A partial test catalogue must not be treated as a complete one. Doing so
+    /// would turn the memory fix into a false `APLAN013` against any citation
+    /// whose name fell in the dropped middle (`A1-366`, audit).
+    #[test]
+    fn a_truncated_test_listing_is_a_runner_fault_not_a_partial_catalogue() {
+        let runner = aplan_config::TestRunner {
+            weight: None,
+            exclusive: None,
+            max_output: Some("1K".into()),
+            list: vec![
+                "sh".into(),
+                "-c".into(),
+                "printf 'first\\n'; awk 'BEGIN { for (i = 0; i < 200000; i++) print \"middle\" }'"
+                    .into(),
+            ],
+            ..skip_runner(&["true"], None)
+        };
+        let resolver = TestResolver::new(vec![runner], PathBuf::from("."), false, None);
+        let err = resolver
+            .list_tests_uncached(0)
+            .expect_err("a partial list is not an answer");
+        let said = err.to_string();
+        assert!(said.contains("dropped"), "{said}");
+        assert!(said.contains("test.max_output"), "{said}");
+    }
+
+    #[test]
+    fn the_catalogue_is_the_resolvers_normalized_cached_listing() {
+        let tmp = tempfile::Builder::new()
+            .tempdir_in(aplan_core::fixture::fixture_root())
+            .expect("tempdir");
+        let marker = tmp.path().join("listed");
+        let script = format!(
+            "printf x >> '{}'; printf '%s\\n' 'zeta: test' 'alpha: benchmark' 'zeta: test'",
+            marker.display()
+        );
+        let runner = TestRunner {
+            weight: None,
+            exclusive: None,
+            name: Some("unit".into()),
+            list: vec!["sh".into(), "-c".into(), script],
+            ..skip_runner(&["true"], None)
+        };
+        let resolver = TestResolver::new(
+            vec![runner],
+            tmp.path().to_path_buf(),
+            false,
+            Some(tmp.path().join(".aplan.yml")),
+        );
+
+        let first = resolver.catalogue();
+        let second = resolver.catalogue();
+        assert_eq!(first.runners, second.runners);
+        assert_eq!(first.runners[0].index, 1);
+        assert_eq!(first.runners[0].label, "unit");
+        assert_eq!(first.runners[0].state, TestCatalogueRunnerState::Listed);
+        assert_eq!(first.runners[0].names, ["alpha", "zeta"]);
+        assert!(first.diagnostics.is_empty(), "{:?}", first.diagnostics);
+        assert_eq!(
+            std::fs::read_to_string(marker).expect("listing marker"),
+            "x",
+            "catalogue discovery bypassed the resolver's one-listing cache"
+        );
+    }
+
+    #[test]
+    fn the_catalogue_keeps_empty_and_failed_runners_distinct() {
+        let tmp = tempfile::Builder::new()
+            .tempdir_in(aplan_core::fixture::fixture_root())
+            .expect("tempdir");
+        let empty = TestRunner {
+            weight: None,
+            exclusive: None,
+            name: Some("empty".into()),
+            list: vec!["true".into()],
+            ..skip_runner(&["true"], None)
+        };
+        let failed = TestRunner {
+            weight: None,
+            exclusive: None,
+            name: Some("failed".into()),
+            list: vec!["false".into()],
+            ..skip_runner(&["true"], None)
+        };
+        let resolver = TestResolver::new(
+            vec![empty, failed],
+            tmp.path().to_path_buf(),
+            false,
+            Some(tmp.path().join(".aplan.yml")),
+        );
+        let catalogue = resolver.catalogue();
+
+        assert_eq!(catalogue.runners[0].state, TestCatalogueRunnerState::Empty);
+        assert_eq!(catalogue.runners[1].state, TestCatalogueRunnerState::Failed);
+        let codes: Vec<_> = catalogue.diagnostics.iter().map(|d| d.code).collect();
+        assert_eq!(codes, [code::TEST_UNRESOLVED, code::RUNNER_LISTS_NOTHING]);
+        assert!(
+            catalogue
+                .diagnostics
+                .iter()
+                .all(|diagnostic| diagnostic.file.as_deref()
+                    == Some(tmp.path().join(".aplan.yml").as_path()))
+        );
     }
 
     /// The resolver's own defaulting, for the runner side.
     #[test]
     fn a_runner_with_no_timeout_configured_gets_the_default() {
         let runner = aplan_config::TestRunner {
+            weight: None,
+            exclusive: None,
             output_lines: None,
             skipped: None,
             max_memory: None,
             max_processes: None,
+            max_output: None,
             wrap: None,
             expect_tests: None,
             run_selects: None,
@@ -4088,8 +6915,10 @@ mod tests {
             dir: None,
             covers: None,
             covers_by_test: None,
+            inputs_by_test: None,
             list: vec!["true".into()],
             run: vec!["true".into(), aplan_config::PLACEHOLDER.into()],
+            batch: None,
             timeout_seconds: None,
         };
         let resolver = TestResolver::new(vec![runner], PathBuf::from("."), false, None);
@@ -4128,6 +6957,7 @@ mod tests {
             paths: paths.iter().map(|p| (*p).to_string()).collect(),
             traces: Vec::new(),
             trace_fingerprints: std::collections::BTreeMap::new(),
+            evidence_fingerprints: std::collections::BTreeMap::new(),
             tags: Vec::new(),
             revisit_at: None,
             version_impact: None,
@@ -4394,6 +7224,8 @@ mod tests {
     /// when there is more than one (`A1-138`).
     #[test]
     fn aplan019_names_what_is_unbound_and_says_it_as_english() {
+        // Proves `paths.unmatched_ignores_vacuous_evidence`: the subjects in
+        // the sentence come from the same substantive citations as the scope.
         let ev = |kind: aplan_core::EvidenceKind, r: &str| aplan_core::Evidence {
             kind,
             reference: r.to_string(),
@@ -4440,6 +7272,25 @@ mod tests {
         assert!(
             twice.contains("the commit this task cites binds"),
             "{twice}"
+        );
+
+        // The scope predicate and the subject formatter must agree about what
+        // counts as a citation. A zero-width reference looks non-empty to
+        // `trim`, but `APLAN005` and `Task::binds_paths` both reject it.
+        let beside_vacuous = say(vec![
+            ev(aplan_core::EvidenceKind::Commit, "abc123"),
+            ev(aplan_core::EvidenceKind::File, "   "),
+            ev(aplan_core::EvidenceKind::Test, "\u{200b}"),
+        ]);
+        assert!(
+            beside_vacuous.contains("so the commit this task cites binds to nothing"),
+            "{beside_vacuous}"
+        );
+        assert!(
+            !beside_vacuous.contains("commit and file")
+                && !beside_vacuous.contains("file and test")
+                && !beside_vacuous.contains("commit, file and test"),
+            "vacuous references were named as evidence: {beside_vacuous}"
         );
     }
 
@@ -4603,7 +7454,7 @@ mod tests {
         let runner = skip_runner(&["sleep", "30"], Some(1));
         let resolver = TestResolver::new(vec![runner], tmp.path().to_path_buf(), true, None);
         assert!(resolver.skipped_tests(0).is_none(), "nothing was learned");
-        let faults = resolver.faults.borrow();
+        let faults = resolver.checkers.faults.borrow();
         let what = &faults[0].as_ref().expect("a fault was recorded").what;
         assert!(what.contains("had not returned after 1s"), "{what}");
         assert!(
@@ -4621,7 +7472,7 @@ mod tests {
         let runner = skip_runner(&["no-such-program-anywhere"], None);
         let resolver = TestResolver::new(vec![runner], tmp.path().to_path_buf(), true, None);
         assert!(resolver.skipped_tests(0).is_none(), "nothing was learned");
-        let faults = resolver.faults.borrow();
+        let faults = resolver.checkers.faults.borrow();
         let what = &faults[0].as_ref().expect("a fault was recorded").what;
         assert!(what.contains("no-such-program-anywhere"), "{what}");
         assert!(
@@ -4630,13 +7481,115 @@ mod tests {
         );
     }
 
+    #[test]
+    fn a_scheduler_fault_rejects_every_answer_the_runner_was_due_to_supply() {
+        let mut runner = skip_runner(&["true"], None);
+        runner.batch = Some(aplan_config::TestBatch {
+            protocol: aplan_config::TEST_BATCH_PROTOCOL,
+            run: vec![
+                "true".into(),
+                aplan_config::BATCH_MANIFEST_PLACEHOLDER.into(),
+                aplan_config::BATCH_RESULT_PLACEHOLDER.into(),
+            ],
+        });
+        let resolver = TestResolver::new_scheduled(
+            vec![runner],
+            aplan_config::TestSchedule { capacity: 1 },
+            true,
+            PathBuf::from("."),
+            true,
+            None,
+        );
+        let names = ["suite::one".to_string(), "suite::two".to_string()]
+            .into_iter()
+            .collect::<BTreeSet<_>>();
+
+        resolver.reject_unscheduled_runner(0, Some(&names));
+
+        let faults = resolver.checkers.faults.borrow();
+        let fault = faults[0]
+            .as_ref()
+            .expect("the skipped query fault is retained");
+        assert!(!fault.resolution_unknown);
+        assert_eq!(fault.outcome, CitationOutcome::Unavailable);
+        assert!(fault.what.contains("scheduler worker failed"), "{fault:?}");
+        drop(faults);
+        assert!(resolver.skips.borrow()[0].is_none());
+        let executed = resolver.executed.borrow();
+        assert_eq!(executed.len(), 2);
+        assert!(executed.values().all(|outcome| {
+            matches!(outcome, Outcome::BatchUnavailable(Some(detail)) if detail.contains("scheduler worker failed"))
+        }));
+    }
+
+    #[test]
+    fn a_fresh_catalogue_restores_costs_and_the_exact_provider_failure() {
+        let measured = Cost {
+            peak_processes: 3,
+            measured: true,
+            ..Cost::default()
+        };
+        let catalogue = super::TestCatalogue {
+            runners: vec![
+                super::TestCatalogueRunner {
+                    index: 1,
+                    label: "listed".to_string(),
+                    state: TestCatalogueRunnerState::Listed,
+                    names: vec!["suite::one".to_string()],
+                },
+                super::TestCatalogueRunner {
+                    index: 2,
+                    label: "timed-out".to_string(),
+                    state: TestCatalogueRunnerState::Failed,
+                    names: Vec::new(),
+                },
+            ],
+            diagnostics: Vec::new(),
+            spend: vec![
+                ("listed".to_string(), measured),
+                ("timed-out".to_string(), measured),
+            ],
+            failure_outcomes: vec![None, Some(CitationOutcome::TimedOut)],
+        };
+        let resolver = TestResolver::from_catalogue(
+            vec![skip_runner(&["true"], None), skip_runner(&["true"], None)],
+            aplan_config::TestSchedule { capacity: 2 },
+            true,
+            PathBuf::from("."),
+            false,
+            None,
+            &catalogue,
+        );
+
+        assert_eq!(
+            resolver.listings.borrow()[0].as_deref(),
+            Some(["suite::one".to_string()].as_slice())
+        );
+        let faults = resolver.checkers.faults.borrow();
+        let fault = faults[1].as_ref().expect("the failed row remains a fault");
+        assert!(fault.resolution_unknown);
+        assert_eq!(fault.outcome, CitationOutcome::TimedOut);
+        assert!(fault.what.contains("retained provider observation"));
+        drop(faults);
+        assert_eq!(
+            resolver.spend(),
+            [
+                ("the `runner 1` test runner".to_string(), measured),
+                ("the `runner 2` test runner".to_string(), measured)
+            ]
+        );
+    }
+
     /// A runner that declares `skipped` and nothing else that matters here.
     fn skip_runner(skipped: &[&str], timeout_seconds: Option<u64>) -> aplan_config::TestRunner {
         aplan_config::TestRunner {
+            weight: None,
+            exclusive: None,
             output_lines: None,
             skipped: Some(skipped.iter().map(|a| (*a).to_string()).collect()),
             max_memory: None,
             max_processes: None,
+            max_output: None,
             wrap: None,
             expect_tests: None,
             run_selects: None,
@@ -4644,9 +7597,11 @@ mod tests {
             dir: None,
             covers: None,
             covers_by_test: None,
+            inputs_by_test: None,
             timeout_seconds,
             list: vec!["true".into()],
             run: vec!["true".into()],
+            batch: None,
         }
     }
 
@@ -4689,6 +7644,8 @@ mod tests {
     /// A runner that declares caps, for the reporting half of `A1-310`.
     fn capped_runner(max_memory: Option<&str>, max_processes: Option<u32>) -> TestRunner {
         TestRunner {
+            weight: None,
+            exclusive: None,
             max_memory: max_memory.map(ToString::to_string),
             max_processes,
             ..skip_runner(&["true"], None)
@@ -4711,6 +7668,7 @@ mod tests {
             paths: Vec::new(),
             traces: Vec::new(),
             trace_fingerprints: std::collections::BTreeMap::new(),
+            evidence_fingerprints: std::collections::BTreeMap::new(),
             tags: Vec::new(),
             revisit_at: None,
             version_impact: None,
@@ -4730,20 +7688,18 @@ mod tests {
     /// What a limit parses to, which is what the cgroup is actually set from.
     #[test]
     fn a_declared_cap_reaches_the_cage_in_the_units_it_takes() {
-        let r = TestResolver::new(
-            vec![capped_runner(Some("64M"), Some(4))],
-            PathBuf::from("."),
-            false,
-            None,
-        );
+        let mut runner = capped_runner(Some("64M"), Some(4));
+        runner.max_output = Some("2K".into());
+        let r = TestResolver::new(vec![runner], PathBuf::from("."), false, None);
         assert_eq!(
-            r.caps_of(0),
+            super::configured_caps(r.runners[0].command_policy()),
             Caps {
                 memory_bytes: Some(64 * 1024 * 1024),
                 max_processes: Some(4),
+                max_output_bytes: 2 * 1024,
             }
         );
-        assert!(r.caps_of(0).any());
+        assert!(super::configured_caps(r.runners[0].command_policy()).any_cgroup());
 
         let none = TestResolver::new(
             vec![capped_runner(None, None)],
@@ -4751,9 +7707,12 @@ mod tests {
             false,
             None,
         );
-        assert_eq!(none.caps_of(0), Caps::default());
+        assert_eq!(
+            super::configured_caps(none.runners[0].command_policy()),
+            Caps::default()
+        );
         assert!(
-            !none.caps_of(0).any(),
+            !super::configured_caps(none.runners[0].command_policy()).any_cgroup(),
             "a runner that declared nothing must not get a cgroup"
         );
     }
@@ -4827,10 +7786,10 @@ mod tests {
             "{err}"
         );
 
-        let faults = r.faults.borrow();
+        let faults = r.checkers.faults.borrow();
         let fault = faults[0].as_ref().expect("the runner carries the fault");
         assert!(
-            fault.listing_unknown,
+            fault.resolution_unknown,
             "a runner that could not list is a runner whose listing is unknown"
         );
         assert!(
@@ -4849,6 +7808,8 @@ mod tests {
     #[test]
     fn a_runner_runs_every_command_under_its_declared_wrap() {
         let runner = TestRunner {
+            weight: None,
+            exclusive: None,
             wrap: Some(vec!["env".into(), "APLAN_WRAPPED=yes".into()]),
             list: vec![
                 "sh".into(),
@@ -4859,7 +7820,7 @@ mod tests {
         };
         let r = TestResolver::new(vec![runner], PathBuf::from("."), false, None);
         assert_eq!(
-            r.wrapped(0, &["printf".to_string()]),
+            super::configured_argv(&["printf".to_string()], r.runners[0].command_policy()),
             vec!["env", "APLAN_WRAPPED=yes", "printf"],
             "the prefix goes outside the command"
         );
@@ -4882,6 +7843,7 @@ mod tests {
         let caps = Caps {
             memory_bytes: Some(64 * 1024 * 1024),
             max_processes: Some(64),
+            max_output_bytes: DEFAULT_MAX_OUTPUT_BYTES,
         };
         let tmp = tempfile::Builder::new()
             .tempdir_in(aplan_core::fixture::fixture_root())
@@ -4898,7 +7860,11 @@ mod tests {
         assert_eq!(cost.unenforced, None, "a root was available: {cost:?}");
         assert_eq!(cost.breach, None, "printf breaches nothing");
         match ran {
-            Ran::Exited(out) => assert_eq!(out.stdout, b"caged", "the command itself still ran"),
+            Ran::Exited(out) => assert_eq!(
+                out.stdout.complete(),
+                Some(b"caged".as_slice()),
+                "the command itself still ran"
+            ),
             Ran::TimedOut(_) => panic!("printf is not slow"),
         }
         let cage = std::fs::read_dir(tmp.path())
@@ -4926,7 +7892,11 @@ mod tests {
         .expect("it ran");
         assert_eq!(cost.unenforced, Some(Unenforced::NoCgroups));
         match ran {
-            Ran::Exited(out) => assert_eq!(out.stdout, b"bare", "unprotected, not unrun"),
+            Ran::Exited(out) => assert_eq!(
+                out.stdout.complete(),
+                Some(b"bare".as_slice()),
+                "unprotected, not unrun"
+            ),
             Ran::TimedOut(_) => panic!("printf is not slow"),
         }
 
@@ -4962,6 +7932,7 @@ mod tests {
                 Caps {
                     memory_bytes: Some(64 * 1024 * 1024),
                     max_processes: None,
+                    max_output_bytes: DEFAULT_MAX_OUTPUT_BYTES,
                 },
                 Ok(tmp.path().to_path_buf()),
             ),
@@ -5020,6 +7991,71 @@ mod tests {
         );
     }
 
+    #[test]
+    fn a_batch_cap_breach_stops_every_requested_identity() {
+        let resolver = TestResolver::new(
+            vec![capped_runner(Some("64M"), None)],
+            PathBuf::from("."),
+            true,
+            None,
+        );
+        let names = ["alpha".to_string(), "beta".to_string()]
+            .into_iter()
+            .collect::<BTreeSet<_>>();
+        assert!(resolver.record_batch_cost(
+            0,
+            &names,
+            Cost {
+                breach: Some(Breach::Memory),
+                measured: true,
+                ..Cost::default()
+            }
+        ));
+        let executed = resolver.executed.borrow();
+        assert!(names.iter().all(|name| {
+            matches!(
+                executed.get(&(0, name.clone())),
+                Some(Outcome::Stopped(Breach::Memory))
+            )
+        }));
+        drop(executed);
+        assert!(!resolver.record_batch_cost(
+            0,
+            &names,
+            Cost {
+                measured: true,
+                ..Cost::default()
+            }
+        ));
+        assert_eq!(resolver.spend()[0].1.breach, Some(Breach::Memory));
+    }
+
+    #[test]
+    fn an_oversized_batch_request_fails_every_identity_before_spawn() {
+        let mut runner = capped_runner(None, None);
+        runner.batch = Some(aplan_config::TestBatch {
+            protocol: aplan_config::TEST_BATCH_PROTOCOL,
+            run: vec![
+                "true".into(),
+                aplan_config::BATCH_MANIFEST_PLACEHOLDER.into(),
+                aplan_config::BATCH_RESULT_PLACEHOLDER.into(),
+            ],
+        });
+        let resolver = TestResolver::new(vec![runner], PathBuf::from("."), true, None);
+        let names = (0..=crate::batch::MAX_BATCH_IDENTITIES)
+            .map(|index| format!("test-{index}"))
+            .collect::<BTreeSet<_>>();
+        resolver.execute_batch(0, &names);
+        let executed = resolver.executed.borrow();
+        assert_eq!(executed.len(), names.len());
+        assert!(executed.values().all(|outcome| {
+            matches!(outcome, Outcome::BatchUnavailable(Some(detail)) if detail.contains("more than 100000 identities"))
+        }));
+        assert!(resolver.spend().iter().all(|(_, cost)| {
+            cost.elapsed.is_zero() && cost.peak_processes == 0 && cost.peak_rss_kb == 0
+        }));
+    }
+
     /// The cage can kill what the process group cannot reach.
     #[test]
     fn a_cage_can_kill_its_whole_group() {
@@ -5051,6 +8087,7 @@ mod tests {
             Caps {
                 memory_bytes: Some(64 * 1024 * 1024),
                 max_processes: Some(4),
+                max_output_bytes: DEFAULT_MAX_OUTPUT_BYTES,
             },
         )
         .expect("a plain directory takes plain writes");
@@ -5081,7 +8118,10 @@ mod tests {
     #[test]
     fn a_url_checker_carries_the_limits_its_block_declares() {
         let quiet = UrlResolver::new(&url_check(None), PathBuf::from("."), None);
-        assert_eq!(quiet.caps, Caps::default());
+        assert_eq!(
+            super::configured_caps(quiet.checker.command_policy()),
+            Caps::default()
+        );
         assert!(
             quiet.spend().is_empty(),
             "no url was checked, so there is nothing to report rather than a zero"
@@ -5091,6 +8131,7 @@ mod tests {
             &aplan_config::UrlCheck {
                 max_memory: Some("256M".into()),
                 max_processes: Some(16),
+                max_output: Some("2K".into()),
                 wrap: Some(vec!["nice".into()]),
                 ..url_check(None)
             },
@@ -5098,13 +8139,17 @@ mod tests {
             None,
         );
         assert_eq!(
-            capped.caps,
+            super::configured_caps(capped.checker.command_policy()),
             Caps {
                 memory_bytes: Some(256 * 1024 * 1024),
                 max_processes: Some(16),
+                max_output_bytes: 2 * 1024,
             }
         );
-        assert_eq!(capped.wrap.as_deref(), Some(&["nice".to_string()][..]));
+        assert_eq!(
+            capped.checker.command_policy().wrap,
+            Some(&["nice".to_string()][..])
+        );
     }
 
     /// A knob the platform will not take a write on is refused when the cage is

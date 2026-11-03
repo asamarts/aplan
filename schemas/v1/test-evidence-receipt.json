@@ -1,0 +1,404 @@
+{
+  "$defs": {
+    "ProducerIdentity": {
+      "additionalProperties": false,
+      "description": "Authenticated producer coordinates. In a statement these are self-reported;\na trust policy gives them meaning only after transport authentication.",
+      "properties": {
+        "event": {
+          "type": "string"
+        },
+        "privilege": {
+          "$ref": "#/$defs/ProducerPrivilege"
+        },
+        "repository": {
+          "type": "string"
+        },
+        "run_id": {
+          "type": "string"
+        },
+        "workflow": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "repository",
+        "workflow",
+        "run_id",
+        "event",
+        "privilege"
+      ],
+      "type": "object"
+    },
+    "ProducerPrivilege": {
+      "description": "Whether the workflow was allowed to publish privileged evidence.",
+      "enum": [
+        "trusted",
+        "untrusted"
+      ],
+      "type": "string"
+    },
+    "ReceiptCatalogue": {
+      "additionalProperties": false,
+      "description": "Complete namespace observed immediately before execution.",
+      "properties": {
+        "complete": {
+          "type": "boolean"
+        },
+        "names": {
+          "items": {
+            "type": "string"
+          },
+          "type": "array"
+        },
+        "sha256": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "complete",
+        "names",
+        "sha256"
+      ],
+      "type": "object"
+    },
+    "ReceiptProvider": {
+      "additionalProperties": false,
+      "description": "Exact configured-provider definition and its derived digest.",
+      "properties": {
+        "definition": true,
+        "index": {
+          "format": "uint",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "label": {
+          "type": "string"
+        },
+        "sha256": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "index",
+        "label",
+        "definition",
+        "sha256"
+      ],
+      "type": "object"
+    },
+    "RepositoryContext": {
+      "additionalProperties": false,
+      "description": "Repository state retained for audit, but not used as a substitute for the\nexact material identity.",
+      "properties": {
+        "commit": {
+          "type": "string"
+        },
+        "modified": {
+          "format": "uint",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "status_sha256": {
+          "type": "string"
+        },
+        "tree_sha256": {
+          "type": "string"
+        },
+        "untracked": {
+          "format": "uint",
+          "minimum": 0,
+          "type": "integer"
+        }
+      },
+      "required": [
+        "commit",
+        "tree_sha256",
+        "modified",
+        "untracked",
+        "status_sha256"
+      ],
+      "type": "object"
+    },
+    "ResourceDescriptor": {
+      "additionalProperties": false,
+      "description": "One in-toto subject descriptor.",
+      "properties": {
+        "digest": {
+          "additionalProperties": {
+            "type": "string"
+          },
+          "type": "object"
+        },
+        "name": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "name",
+        "digest"
+      ],
+      "type": "object"
+    },
+    "TestBatchOutcome": {
+      "description": "The adapter's typed answer for one requested identity.",
+      "oneOf": [
+        {
+          "const": "passed",
+          "description": "One execution passed and no retry was hidden.",
+          "type": "string"
+        },
+        {
+          "const": "failed",
+          "description": "The execution ran and failed.",
+          "type": "string"
+        },
+        {
+          "const": "skipped",
+          "description": "The framework selected the identity but did not run it.",
+          "type": "string"
+        },
+        {
+          "const": "expected_failure",
+          "description": "A failure the suite explicitly expected. It is not unconditional proof.",
+          "type": "string"
+        },
+        {
+          "const": "unexpected_pass",
+          "description": "A suite expected failure but the test passed. It is not unconditional proof.",
+          "type": "string"
+        },
+        {
+          "const": "retried_passed",
+          "description": "A later attempt passed after at least one earlier failure.",
+          "type": "string"
+        },
+        {
+          "const": "flaky",
+          "description": "Attempts disagreed and the framework classified the identity as flaky.",
+          "type": "string"
+        },
+        {
+          "const": "cancelled",
+          "description": "Execution was cancelled before a terminal test result.",
+          "type": "string"
+        },
+        {
+          "const": "timed_out",
+          "description": "Execution exceeded its framework-owned time limit.",
+          "type": "string"
+        },
+        {
+          "const": "resource_breach",
+          "description": "Execution crossed a declared memory or process boundary.",
+          "type": "string"
+        },
+        {
+          "const": "framework_crash",
+          "description": "The framework or adapter crashed before an attributable result.",
+          "type": "string"
+        },
+        {
+          "const": "incomplete",
+          "description": "The producer explicitly reports that output for this identity is partial.",
+          "type": "string"
+        },
+        {
+          "const": "unproven_selection",
+          "description": "The runner exited successfully, but its output was indistinguishable\nfrom the configured runner's exact-name miss sentinel.",
+          "type": "string"
+        },
+        {
+          "const": "stopped",
+          "description": "Backward-compatible v1 spelling for a selected identity that did not finish.",
+          "type": "string"
+        },
+        {
+          "const": "unavailable",
+          "description": "Backward-compatible v1 spelling for an identity with no attributable result.",
+          "type": "string"
+        }
+      ]
+    },
+    "TestBatchResultEntry": {
+      "additionalProperties": false,
+      "description": "One result row. Diagnostics are bounded and sanitized before display.",
+      "properties": {
+        "attempts": {
+          "description": "Number of attempts when the framework retried this identity.\n\nA plain `passed` outcome may not carry a value greater than one: doing\nso would erase the difference between an unconditional pass and a green\nproduced by retry policy.",
+          "format": "uint32",
+          "minimum": 0,
+          "type": [
+            "integer",
+            "null"
+          ]
+        },
+        "diagnostic": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "outcome": {
+          "$ref": "#/$defs/TestBatchOutcome"
+        },
+        "test": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "test",
+        "outcome"
+      ],
+      "type": "object"
+    },
+    "TestEvidencePredicate": {
+      "additionalProperties": false,
+      "description": "The provider-scoped statement body.",
+      "properties": {
+        "catalogue": {
+          "$ref": "#/$defs/ReceiptCatalogue"
+        },
+        "complete": {
+          "type": "boolean"
+        },
+        "completed_at_epoch_seconds": {
+          "format": "uint64",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "material": {
+          "$ref": "#/$defs/TestMaterialIdentity"
+        },
+        "outcomes": {
+          "items": {
+            "$ref": "#/$defs/TestBatchResultEntry"
+          },
+          "type": "array"
+        },
+        "producer": {
+          "$ref": "#/$defs/ProducerIdentity"
+        },
+        "provider": {
+          "$ref": "#/$defs/ReceiptProvider"
+        },
+        "repository": {
+          "$ref": "#/$defs/RepositoryContext"
+        },
+        "requested": {
+          "items": {
+            "type": "string"
+          },
+          "type": "array"
+        },
+        "schema": {
+          "type": "string"
+        },
+        "started_at_epoch_seconds": {
+          "format": "uint64",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "tool": {
+          "$ref": "#/$defs/ToolIdentity"
+        }
+      },
+      "required": [
+        "schema",
+        "repository",
+        "provider",
+        "catalogue",
+        "requested",
+        "outcomes",
+        "complete",
+        "material",
+        "tool",
+        "producer",
+        "started_at_epoch_seconds",
+        "completed_at_epoch_seconds"
+      ],
+      "type": "object"
+    },
+    "TestMaterialIdentity": {
+      "additionalProperties": false,
+      "description": "The portable material key carried by a test-evidence receipt.",
+      "properties": {
+        "environment_sha256": {
+          "description": "Every inherited environment key and value, without exposing either.",
+          "type": "string"
+        },
+        "inputs_sha256": {
+          "description": "Exact declared repository file tree, including executable permissions.",
+          "type": "string"
+        },
+        "sha256": {
+          "description": "Composition of the three stronger identities above.",
+          "type": "string"
+        },
+        "toolchain_sha256": {
+          "description": "Platform, configured executable bytes and applicable Rustup state.",
+          "type": "string"
+        }
+      },
+      "required": [
+        "inputs_sha256",
+        "environment_sha256",
+        "toolchain_sha256",
+        "sha256"
+      ],
+      "type": "object"
+    },
+    "ToolIdentity": {
+      "additionalProperties": false,
+      "description": "Who verified, in terms a reader can check rather than trust (`A1-154`).\n\nThe fifth pilot measured the gap: every development build from `main`\nreported `aplan 0.3.0-dev`, while their own pin review had already found\ndifferent capability sets behind that one string, so an auditor could not\nreconstruct what \"verified\" meant from the document alone\n(pre-public adoption evidence).\n\nFour fields, and what each is worth is different:\n\n- `version` is the package version, and on its own it is what was already\n  there.\n- `source` is the commit the build script saw, captured at build time. Empty\n  when there was no checkout to ask and no `APLAN_SOURCE_REV` given, which is\n  the honest answer for a build from a tarball. **Best effort**: a build\n  script runs when cargo thinks its inputs changed, so this names the commit\n  as of that moment rather than a fact anything checked. It is the weakest\n  of the four, and `binary_sha256` is the one that cannot go stale.\n- `facts_sha256` is the **capability contract**: the digest of this build's\n  own `facts` document, which enumerates its rules, commands, config keys,\n  behaviours, formats and evidence kinds. Two builds whose surfaces differ\n  cannot share it, and nothing about it is caller-supplied.\n- `binary_sha256` is this executable's digest, read from the running image.\n  **Self-reported**, which is worth stating plainly: it identifies rather\n  than authenticates, and its value is that an auditor can compare it with a\n  digest recorded independently when the binary was pinned -- which is\n  exactly how the pilot that asked for it works.",
+      "properties": {
+        "binary_sha256": {
+          "type": "string"
+        },
+        "facts_sha256": {
+          "type": "string"
+        },
+        "source": {
+          "type": "string"
+        },
+        "version": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "version",
+        "source",
+        "facts_sha256",
+        "binary_sha256"
+      ],
+      "type": "object"
+    }
+  },
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "additionalProperties": false,
+  "description": "An in-toto v1 Statement carrying aplan test evidence.",
+  "properties": {
+    "_type": {
+      "type": "string"
+    },
+    "predicate": {
+      "$ref": "#/$defs/TestEvidencePredicate"
+    },
+    "predicateType": {
+      "type": "string"
+    },
+    "subject": {
+      "items": {
+        "$ref": "#/$defs/ResourceDescriptor"
+      },
+      "type": "array"
+    }
+  },
+  "required": [
+    "_type",
+    "subject",
+    "predicateType",
+    "predicate"
+  ],
+  "title": "TestEvidenceStatement",
+  "type": "object"
+}

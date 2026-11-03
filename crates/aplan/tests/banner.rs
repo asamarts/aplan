@@ -13,7 +13,7 @@
 
 use std::path::Path;
 
-mod common;
+use crate::common;
 use common::aplan;
 
 /// One cut with one member, which is enough to render a roadmap.

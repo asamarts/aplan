@@ -13,7 +13,7 @@
 use std::path::Path;
 use std::process::Command;
 
-mod common;
+use crate::common;
 
 fn git(dir: &Path, args: &[&str]) {
     let out = Command::new("git")

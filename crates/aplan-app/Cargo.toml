@@ -1,0 +1,33 @@
+[package]
+name = "aplan-app"
+description = "Typed application operations shared by aplan delivery adapters."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+authors.workspace = true
+
+[lints]
+workspace = true
+
+[dependencies]
+aplan-attest.workspace = true
+aplan-config.workspace = true
+aplan-core.workspace = true
+aplan-evidence.workspace = true
+aplan-interop.workspace = true
+aplan-output.workspace = true
+blake3.workspace = true
+globset.workspace = true
+graphlay.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+sha2.workspace = true
+thiserror.workspace = true
+unicode-segmentation.workspace = true
+unicode-width.workspace = true
+
+[dev-dependencies]
+git2 = { version = "0.21", default-features = false }
+tempfile.workspace = true

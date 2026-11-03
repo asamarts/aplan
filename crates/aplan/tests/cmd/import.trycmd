@@ -72,7 +72,7 @@ nothing had happened.
 ```
 $ aplan import kep.yaml --dry-run --cut M-done
 ? 2
-aplan: `M-done` is `done`; adding an unfinished task to a settled cut would break it (APLAN007). Reopen it, or choose another cut.
+aplan: `M-done` is a settled cut with status `done` and cannot gain this member. A `done` cut accepts only proved `done` ledger entries; a `dropped` cut cannot be extended. Choose another cut or use the evidence-resolving ledger workflow.
 
 ```
 

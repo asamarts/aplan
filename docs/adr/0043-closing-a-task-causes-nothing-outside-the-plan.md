@@ -2,7 +2,7 @@
 
 Date: 2026-09-26
 
-Status: accepted
+Status: superseded in part by ADR-0061
 
 Answers `A1-316`. Extends HLD section 5.5 (the trust boundary) from *what may run* to
 *what may decide that something runs*, and holds ADR-0040 decision 5 ("nothing here

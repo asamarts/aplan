@@ -15,7 +15,7 @@
 use std::fmt::Write as _;
 use std::path::Path;
 
-mod common;
+use crate::common;
 use common::aplan;
 
 /// Four cuts, sequenced, fifteen tasks each, and one last-cut task that also has
@@ -296,6 +296,56 @@ fn an_undefined_blocker_survives_both_traversals() {
             "{args:?}:\n{out}"
         );
     }
+}
+
+/// Proof for `why.complete_retains_nested_undefined_blockers`: the human and
+/// JSON CLI adapters consume the same graph answer. A bounded walk hides the
+/// ghost with the cut; `--all` must not call itself complete while dropping the
+/// final unresolved edge.
+#[test]
+fn a_nested_undefined_blocker_respects_the_walk_boundary_on_every_why_surface() {
+    let dir = tempfile::Builder::new()
+        .tempdir_in(aplan_core::fixture::fixture_root())
+        .expect("tempdir");
+    std::fs::create_dir_all(dir.path().join("aplan/tasks")).expect("plan dir");
+    std::fs::write(dir.path().join(".aplan.yml"), "root: aplan\n").expect("config");
+    for (name, body) in [
+        (
+            "T-1.md",
+            "---\nid: T-1\ntitle: Leaf with unknown blocker\nphase: 1\nstatus: todo\n\
+             effort_days: 1\nblocked_by: [GHOST]\n---\n\n## Why\n\nSomething.\n",
+        ),
+        (
+            "M-s1.md",
+            "---\nid: M-s1\ntitle: A cut boundary\nphase: 1\nstatus: todo\n\
+             blocked_by: [T-1]\ntags: [milestone]\n---\n\n## Why\n\nA cut.\n",
+        ),
+        (
+            "T-9.md",
+            "---\nid: T-9\ntitle: Waits on the cut\nphase: 1\nstatus: todo\n\
+             effort_days: 1\nblocked_by: [M-s1]\n---\n\n## Why\n\nSomething.\n",
+        ),
+    ] {
+        std::fs::write(dir.path().join("aplan/tasks").join(name), body).expect("task");
+    }
+
+    let bounded = why(dir.path(), &["T-9"]);
+    assert!(bounded.contains("M-s1"), "{bounded}");
+    assert!(!bounded.contains("GHOST"), "{bounded}");
+
+    let complete = why(dir.path(), &["T-9", "--all"]);
+    assert!(complete.contains("T-1"), "{complete}");
+    assert!(complete.contains("GHOST"), "{complete}");
+    assert!(
+        complete.contains("referenced but not defined"),
+        "{complete}"
+    );
+
+    let json: serde_json::Value =
+        serde_json::from_str(&aplan(dir.path(), &["why", "T-9", "--all", "--format", "json"]).0)
+            .expect("json");
+    assert_eq!(json["traversal"], "complete");
+    assert_eq!(json["unknown"], serde_json::json!(["GHOST"]));
 }
 
 /// The JSON says the same thing, in the fields a consumer reads.

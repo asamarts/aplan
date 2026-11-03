@@ -78,6 +78,7 @@ impl ProposalSource for LineSource {
                 paths: Vec::new(),
                 traces: Vec::new(),
                 trace_fingerprints: std::collections::BTreeMap::new(),
+                evidence_fingerprints: std::collections::BTreeMap::new(),
                 tags: vec!["line:imported".to_string()],
                 revisit_at: None,
                 version_impact: None,

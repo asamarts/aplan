@@ -70,7 +70,7 @@ mod tests {
         assert_eq!(IdStrategy::Ulid.as_str(), "ulid");
         for s in [IdStrategy::Sequential, IdStrategy::Ulid] {
             let yaml = format!("{s}");
-            let parsed: IdStrategy = serde_yaml_ng::from_str(&yaml).expect("round trip");
+            let parsed: IdStrategy = yaml_compat::from_str(&yaml).expect("round trip");
             assert_eq!(parsed, s, "`{yaml}` did not parse back to what wrote it");
         }
     }
@@ -80,7 +80,7 @@ mod tests {
     /// `tag_families`).
     #[test]
     fn an_unknown_strategy_names_the_ones_that_exist() {
-        let err = serde_yaml_ng::from_str::<IdStrategy>("uild").expect_err("not a strategy");
+        let err = yaml_compat::from_str::<IdStrategy>("uild").expect_err("not a strategy");
         let text = err.to_string();
         assert!(
             text.contains("sequential") && text.contains("ulid"),

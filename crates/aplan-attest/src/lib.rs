@@ -64,11 +64,25 @@
 //! one: a file git has never seen is not in the tree a reader checks out, and
 //! the first version let one change the document while the commit stayed the
 //! same (`A1-040`, found by its audit).
+//!
+//! **One repository seam.** All Git reads and writes in production go through
+//! [`aplan_evidence::Repo`] (`A1-201`), the same concrete facade the verification
+//! ladder uses. This deliberately does not introduce a VCS trait: no measured
+//! adopter needs a non-Git store, while Git-backed `jj` repositories already fit
+//! the seam. In a shallow clone the facade reports the missing history to
+//! `verify`; if this recorder is called directly, an absent commit remains
+//! unresolved in the document rather than being guessed. The command always
+//! verifies first, so it never publishes that incomplete document.
 
 use std::collections::BTreeMap;
 use std::path::Path;
 
 use aplan_core::{Plan, Status};
+use aplan_evidence::Repo;
+use schemars::JsonSchema;
+use serde::{Deserialize, Serialize};
+
+pub mod receipt;
 
 /// Why an attestation could not be made.
 #[derive(Debug, thiserror::Error)]
@@ -161,7 +175,8 @@ pub struct AttestedEvidence {
 ///   than authenticates, and its value is that an auditor can compare it with a
 ///   digest recorded independently when the binary was pinned -- which is
 ///   exactly how the pilot that asked for it works.
-#[derive(Debug, Clone, PartialEq, Eq, Default)]
+#[derive(Debug, Clone, PartialEq, Eq, Default, Serialize, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
 pub struct ToolIdentity {
     pub version: String,
     pub source: String,
@@ -283,13 +298,14 @@ impl Attestation {
 /// [`AttestError::Repo`] when the repository cannot be read, and
 /// [`AttestError::Dirty`] when the work tree differs from the commit.
 pub fn refuse_dirty(repo_root: &Path) -> Result<(), AttestError> {
-    let repo = git2::Repository::discover(repo_root)
-        .map_err(|e| AttestError::Repo(format!("opening {}: {e}", repo_root.display())))?;
-    let (modified, untracked) = dirty_paths(&repo)?;
-    if modified > 0 || untracked > 0 {
+    let repo = open_repo(repo_root)?;
+    let changes = repo
+        .worktree_changes()
+        .map_err(|e| AttestError::Repo(format!("reading status: {e}")))?;
+    if !changes.is_clean() {
         return Err(AttestError::Dirty {
-            modified,
-            untracked,
+            modified: changes.modified,
+            untracked: changes.untracked,
         });
     }
     Ok(())
@@ -312,24 +328,23 @@ pub fn attest(
     tests_executed: bool,
     runners_that_proved_nothing: usize,
 ) -> Result<Attestation, AttestError> {
-    let repo = git2::Repository::discover(repo_root)
-        .map_err(|e| AttestError::Repo(format!("opening {}: {e}", repo_root.display())))?;
-    let head = repo
-        .head()
-        .and_then(|h| h.peel_to_commit())
-        .map_err(|e| AttestError::Repo(format!("reading HEAD: {e}")))?;
+    let repo = open_repo(repo_root)?;
 
-    let (modified, untracked) = dirty_paths(&repo)?;
-    if modified > 0 || untracked > 0 {
+    let changes = repo
+        .worktree_changes()
+        .map_err(|e| AttestError::Repo(format!("reading status: {e}")))?;
+    if !changes.is_clean() {
         return Err(AttestError::Dirty {
-            modified,
-            untracked,
+            modified: changes.modified,
+            untracked: changes.untracked,
         });
     }
 
     // Blob shas for the tree, looked up once: a plan of 150 tasks citing files
     // would otherwise walk the tree per citation.
-    let blobs = blob_shas(&head)?;
+    let head = repo
+        .head_tree()
+        .map_err(|e| AttestError::Repo(format!("reading HEAD and its tree: {e}")))?;
 
     let mut tasks: Vec<AttestedTask> = plan
         .tasks
@@ -345,7 +360,7 @@ pub fn attest(
                 .evidence
                 .iter()
                 .map(|e| {
-                    let (resolved, reachable) = resolve(&repo, head.id(), &blobs, e);
+                    let (resolved, reachable) = resolve(&repo, &head.commit, &head.blobs, e);
                     AttestedEvidence {
                         kind: e.kind.as_str().to_string(),
                         reference: e.reference.clone(),
@@ -360,7 +375,7 @@ pub fn attest(
     tasks.sort_by(|a, b| a.id.cmp(&b.id));
 
     Ok(Attestation {
-        commit: head.id().to_string(),
+        commit: head.commit,
         tool,
         tests_executed,
         runners_that_proved_nothing,
@@ -371,25 +386,17 @@ pub fn attest(
 /// What a reader can re-derive for this citation, and whether the attested
 /// commit can reach it.
 fn resolve(
-    repo: &git2::Repository,
-    head: git2::Oid,
+    repo: &Repo,
+    head: &str,
     blobs: &BTreeMap<String, String>,
     evidence: &aplan_core::task::Evidence,
 ) -> (Option<String>, Option<bool>) {
     match evidence.kind {
         aplan_core::task::EvidenceKind::Commit => {
-            let Some(oid) = repo
-                .revparse_single(&evidence.reference)
-                .ok()
-                .and_then(|obj| obj.peel_to_commit().ok())
-                .map(|c| c.id())
-            else {
+            let Some(commit) = repo.resolve_from(head, &evidence.reference) else {
                 return (None, None);
             };
-            // The commit itself is reachable from itself, which `git2` reports
-            // as `false` because it answers "is a *descendant* of".
-            let reachable = oid == head || repo.graph_descendant_of(head, oid).unwrap_or(false);
-            (Some(oid.to_string()), Some(reachable))
+            (Some(commit.sha), Some(commit.reachable))
         }
         aplan_core::task::EvidenceKind::File => (
             {
@@ -411,61 +418,7 @@ fn resolve(
     }
 }
 
-/// Every tracked path at this commit, with its blob sha.
-fn blob_shas(head: &git2::Commit<'_>) -> Result<BTreeMap<String, String>, AttestError> {
-    let tree = head
-        .tree()
-        .map_err(|e| AttestError::Repo(format!("reading the tree: {e}")))?;
-    let mut out = BTreeMap::new();
-    tree.walk(git2::TreeWalkMode::PreOrder, |dir, entry| {
-        // `Ok` rather than `Some` since git2 0.21: the name is now a `Result`
-        // whose `Err` is the case the old `None` meant, a path git holds as
-        // bytes that are not UTF-8. Skipping it is the behaviour this had
-        // before and is not this bump's to change.
-        if entry.kind() == Some(git2::ObjectType::Blob)
-            && let Ok(name) = entry.name()
-        {
-            out.insert(format!("{dir}{name}"), entry.id().to_string());
-        }
-        git2::TreeWalkResult::Ok
-    })
-    .map_err(|e| AttestError::Repo(format!("walking the tree: {e}")))?;
-    Ok(out)
-}
-
-/// How many paths differ between the work tree and the commit, split by kind.
-///
-/// Untracked paths are counted because an attestation is about a tree somebody
-/// else can check out: a file git has never seen is not in that tree, and a plan
-/// read partly from one is a plan nobody else has (`A1-040`, found by its audit,
-/// and the hazard `A1-144` already named for the generated rollup). Ignored
-/// paths are excluded, because ignoring one is the repository saying it is not
-/// part of the tree.
-fn dirty_paths(repo: &git2::Repository) -> Result<(usize, usize), AttestError> {
-    let mut opts = git2::StatusOptions::new();
-    opts.include_untracked(true)
-        .recurse_untracked_dirs(true)
-        .include_ignored(false);
-    let statuses = repo
-        .statuses(Some(&mut opts))
-        .map_err(|e| AttestError::Repo(format!("reading status: {e}")))?;
-    let mut modified = 0;
-    let mut untracked = 0;
-    for entry in statuses.iter() {
-        let status = entry.status();
-        if status.is_empty() {
-            continue;
-        }
-        if status.contains(git2::Status::WT_NEW) {
-            untracked += 1;
-        } else {
-            modified += 1;
-        }
-    }
-    Ok((modified, untracked))
-}
-
-/// Attach a document to `HEAD` as a git note, under `refs/notes/<r#ref>`.
+/// Attach a document to `target` as a git note, under `refs/notes/<r#ref>`.
 ///
 /// The seam the acceptance criteria call "pluggable": a note is *attachment*,
 /// not signature -- it is tamper-evident because git hashes it, not because
@@ -478,26 +431,25 @@ fn dirty_paths(repo: &git2::Repository) -> Result<(usize, usize), AttestError> {
 ///
 /// [`AttestError::Repo`] when the note cannot be written, including when one is
 /// already attached: overwriting somebody else's record is not this command's
-/// decision.
-pub fn attach_note(repo_root: &Path, notes: &str, body: &str) -> Result<String, AttestError> {
-    let repo = git2::Repository::discover(repo_root)
-        .map_err(|e| AttestError::Repo(format!("opening {}: {e}", repo_root.display())))?;
-    let head = repo
-        .head()
-        .and_then(|h| h.peel_to_commit())
-        .map_err(|e| AttestError::Repo(format!("reading HEAD: {e}")))?;
-    let sig = repo
-        .signature()
-        .map_err(|e| AttestError::Repo(format!("reading the git identity: {e}")))?;
+/// decision. The target and notes ref are named in the error.
+pub fn attach_note(
+    repo_root: &Path,
+    notes: &str,
+    target: &str,
+    body: &str,
+) -> Result<String, AttestError> {
+    let repo = open_repo(repo_root)?;
     let notes_ref = format!("refs/notes/{notes}");
-    repo.note(&sig, &sig, Some(&notes_ref), head.id(), body, false)
-        .map(|oid| oid.to_string())
-        .map_err(|e| {
-            AttestError::Repo(format!(
-                "attaching a note to {} on `{notes_ref}`: {e}",
-                head.id()
-            ))
-        })
+    repo.attach_note(notes, target, body).map_err(|e| {
+        AttestError::Repo(format!(
+            "attaching a note to `{target}` on `{notes_ref}`: {e}"
+        ))
+    })
+}
+
+fn open_repo(repo_root: &Path) -> Result<Repo, AttestError> {
+    Repo::discover(repo_root)
+        .map_err(|e| AttestError::Repo(format!("opening {}: {e}", repo_root.display())))
 }
 
 #[cfg(test)]
@@ -521,6 +473,7 @@ mod tests {
             paths: Vec::new(),
             traces: Vec::new(),
             trace_fingerprints: BTreeMap::new(),
+            evidence_fingerprints: std::collections::BTreeMap::new(),
             tags: Vec::new(),
             revisit_at: None,
             version_impact: None,
@@ -655,6 +608,164 @@ mod tests {
                 .expect("attests")
                 .tests_executed,
             "and the other way when `--execute` ran them"
+        );
+    }
+
+    /// The facade changes how repository facts arrive, not a byte of the
+    /// document they produce (`A1-201`). This pins the complete spelling rather
+    /// than comparing two runs that could both make the same new mistake.
+    #[test]
+    fn repository_facade_preserves_the_document_bytes() {
+        let dir = tempfile::Builder::new()
+            .tempdir_in(aplan_core::fixture::fixture_root())
+            .expect("tempdir");
+        let repo = git2::Repository::init(dir.path()).expect("init");
+        std::fs::write(dir.path().join("f.txt"), "x").expect("write");
+        let sha = commit_all(&repo, "first");
+        let reference = &sha[..8];
+        let plan = plan_of(vec![task(
+            "A-01",
+            Status::Done,
+            vec![evidence(EvidenceKind::Commit, reference)],
+        )]);
+
+        let actual = attest(&plan, dir.path(), identity("test"), false, 0)
+            .expect("attests")
+            .to_json();
+        let expected = format!(
+            r#"{{
+  "commit": "{sha}",
+  "schema": "aplan/attestation/v1",
+  "tasks": [
+    {{
+      "evidence": [
+        {{
+          "kind": "commit",
+          "reachable": true,
+          "reference": "{reference}",
+          "resolved": "{sha}"
+        }}
+      ],
+      "id": "A-01",
+      "status": "done"
+    }}
+  ],
+  "tests_executed": false,
+  "tool": {{
+    "binary_sha256": "{}",
+    "facts_sha256": "{}",
+    "source": "abc123",
+    "version": "test"
+  }}
+}}
+"#,
+            "b".repeat(64),
+            "f".repeat(64),
+        );
+        assert_eq!(actual, expected);
+    }
+
+    /// Shallow history is interpreted once, by the repository facade. The
+    /// command's preceding `verify` reports why an old citation is absent; a
+    /// direct recorder call carries the same unresolved fact and never invents
+    /// a different commit (`A1-201`, `A1-177`).
+    #[test]
+    fn a_shallow_clone_and_attestation_resolve_the_same_commits() {
+        let source = tempfile::Builder::new()
+            .tempdir_in(aplan_core::fixture::fixture_root())
+            .expect("source");
+        let repository = git2::Repository::init(source.path()).expect("init");
+        std::fs::write(source.path().join("f.txt"), "first").expect("write");
+        let old = commit_all(&repository, "first");
+        std::fs::write(source.path().join("f.txt"), "second").expect("write");
+        let head = commit_all(&repository, "second");
+
+        let parent = tempfile::Builder::new()
+            .tempdir_in(aplan_core::fixture::fixture_root())
+            .expect("clone parent");
+        let clone = parent.path().join("clone");
+        let output = std::process::Command::new("git")
+            .args(["clone", "--quiet", "--depth", "1"])
+            .arg(format!("file://{}", source.path().display()))
+            .arg(&clone)
+            .output()
+            .expect("clone");
+        assert!(output.status.success(), "clone: {output:?}");
+
+        let facade = Repo::discover(&clone).expect("repository facade");
+        assert!(
+            facade.is_shallow(),
+            "the fixture must exercise the boundary"
+        );
+        let direct_head = facade
+            .resolve_from(&head, &head)
+            .expect("HEAD is present in a depth-one clone");
+        assert!(direct_head.reachable);
+        assert_eq!(direct_head.sha, head);
+        assert_eq!(
+            facade.resolve_from(&head, &old),
+            None,
+            "the parent is outside the shallow object store"
+        );
+
+        let plan = plan_of(vec![task(
+            "A-01",
+            Status::Done,
+            vec![
+                evidence(EvidenceKind::Commit, &head),
+                evidence(EvidenceKind::Commit, &old),
+            ],
+        )]);
+        let document = attest(&plan, &clone, identity("test"), false, 0).expect("records facts");
+        assert_eq!(document.commit, head);
+        assert_eq!(
+            document.tasks[0].evidence[0].resolved.as_deref(),
+            Some(head.as_str())
+        );
+        assert_eq!(document.tasks[0].evidence[0].reachable, Some(true));
+        assert_eq!(document.tasks[0].evidence[1].resolved, None);
+        assert_eq!(document.tasks[0].evidence[1].reachable, None);
+    }
+
+    /// `attest.note_targets_attested_commit`: a note belongs to the exact tree
+    /// whose verdict its document records, even if another writer advances
+    /// `HEAD` between document creation and attachment (`A1-496`).
+    #[test]
+    fn a_note_targets_the_attested_commit_even_if_head_moves() {
+        let dir = tempfile::Builder::new()
+            .tempdir_in(aplan_core::fixture::fixture_root())
+            .expect("tempdir");
+        let repository = git2::Repository::init(dir.path()).expect("init");
+        let mut config = repository.config().expect("repository config");
+        config.set_str("user.name", "Test").expect("set user name");
+        config
+            .set_str("user.email", "test@example.invalid")
+            .expect("set user email");
+        std::fs::write(dir.path().join("f.txt"), "first").expect("write");
+        let attested_commit = commit_all(&repository, "attested tree");
+        let plan = plan_of(vec![task(
+            "A-01",
+            Status::Done,
+            vec![evidence(EvidenceKind::Commit, &attested_commit)],
+        )]);
+        let document = attest(&plan, dir.path(), identity("test"), false, 0)
+            .expect("attests")
+            .to_json();
+
+        std::fs::write(dir.path().join("f.txt"), "second").expect("write");
+        let later_commit = commit_all(&repository, "later tree");
+        attach_note(dir.path(), "audit", &attested_commit, &document).expect("attach note");
+
+        let notes_ref = Some("refs/notes/audit");
+        let attested_oid = git2::Oid::from_str(&attested_commit).expect("attested oid");
+        let note = repository
+            .find_note(notes_ref, attested_oid)
+            .expect("the attested commit receives the note");
+        assert_eq!(note.message().expect("utf-8 note"), document);
+        let later_oid = git2::Oid::from_str(&later_commit).expect("later oid");
+        assert!(
+            repository.find_note(notes_ref, later_oid).is_err(),
+            "a later HEAD must not receive a document about {attested_commit}"
         );
     }
 

@@ -2,7 +2,7 @@
 
 Generated from the scenario corpus in `crates/aplan-e2e/tests/coverage.rs`, committed,
 and compared on every test run. Do not edit by hand: change the rule, then regenerate
-with `APLAN_CATALOGUE=overwrite cargo test -p aplan-e2e --test coverage`.
+with `APLAN_CATALOGUE=overwrite cargo test -p aplan-e2e --test integration coverage::the_rule_catalogue_is_committed_and_current`.
 
 A rule's message and its `agent_instruction` are what an adopter and an agent act on.
 They are pinned here so that changing one is a reviewable diff rather than something
@@ -100,7 +100,7 @@ a note used as evidence carries a date
 
 ## APLAN011 (error)
 
-commit evidence resolves to a commit in this repository
+commit evidence resolves to an immutable commit reachable from HEAD
 
 - **says:** commit `<sha>` does not resolve to a commit in this repository
   - **fix:** Cite a commit SHA that exists in this repository, or remove the evidence.
@@ -117,9 +117,9 @@ commit evidence touches at least one of the task's paths
 test evidence names a test the runner can find
 
 - **says:** test `ghost` is not one the configured runner lists
-  - **fix:** Name the test exactly as `test.list` reports it, or fix the evidence.
+  - **fix:** Run `aplan test list` with a search term, then cite an exact, non-ambiguous returned name or fix the evidence.
 - **says:** test `guider::known` is not one the configured runner lists, but `known` is
-  - **fix:** Cite `known`, which is how `test.list` reports it.
+  - **fix:** Cite `known`, which is how the runner reports it. Run `aplan test list` to inspect the exact configured names.
 
 ## APLAN014 (error)
 
@@ -220,7 +220,7 @@ every task is a member of exactly one cut, or is tagged cross-cutting
 
 a done task's path-checkable evidence can actually be path-checked
 
-- **says:** `done` with commit evidence but no `paths`: the citation resolves, but nothing binds it to this task, so it proves only that the commit exists
+- **says:** `done` with commit evidence but no `paths`: even if the citation resolves, nothing binds it to this task; resolution alone is not evidence that the task's files changed
   - **fix:** Add `paths` naming the files this task is responsible for, so `verify` can check the cited commit actually touches them (APLAN012).
 
 ## APLAN024 (warning)
@@ -458,4 +458,32 @@ a task that is `in_progress` has something in the repository to show for it
   - **fix:** Either the work has not started, in which case `aplan stop <id>` says so, or it has and its files are not added yet, in which case `git add` them. If the task owns files that do not exist yet, its `paths` are a plan rather than a claim and the status is the thing to change.
 - **says:** this task is `in_progress`, and nothing the repository tracks matches its `paths`, so there is nothing to show the work has started
   - **fix:** `src` names a directory, and a glob without a wildcard names one file. Write `src/**` to own everything under it. The work may well have started; nothing can tell while the declaration matches nothing.
+
+## APLAN054 (warning)
+
+a closed task's mutable file evidence is covered by a current fingerprint
+
+- **says:** file evidence `docs/proof.md` still resolves, but what it cites has changed since this task recorded it
+  - **fix:** Review the current `docs/proof.md`. If it still proves this task, run `aplan close A --restamp`; otherwise replace the citation with `aplan amend A --replace-evidence file:docs/proof.md <kind>:<ref>`.
+
+## APLAN055 (error)
+
+captured dates are used only for authored note evidence
+
+- **says:** `file` evidence carries `captured: 2026-07-14`, but that date has no provenance semantics for this kind: the evidence fingerprint binds review to committed content; a separate author-entered date is not bound to that fingerprint and cannot date the approval it claims
+  - **fix:** Remove `captured` from this `file` evidence entry. `aplan` accepts the field only on authored `note` evidence; use this kind's resolver or freshness mechanism instead.
+
+## APLAN056 (warning)
+
+a task's owner belongs to the declared owner vocabulary
+
+- **says:** owner `kaminsdo` is not declared in `owners`: did you mean `kaminsod`?
+  - **fix:** Change this task's `owner` to `kaminsod` if that is who it means, or add `kaminsdo` to `owners` in `.aplan.yml` if it is a distinct identity.
+
+## APLAN057 (error)
+
+every inbox entry is one canonical, valid and cross-record-consistent V1 capture
+
+- **says:** invalid capture YAML: did not find expected ',' or ']' at line 3 column 1, while parsing a flow sequence at line 2 column 5
+  - **fix:** Repair the YAML so it is one `aplan/capture/v1` mapping.
 

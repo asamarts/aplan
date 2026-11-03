@@ -9,7 +9,7 @@
 
 use std::path::Path;
 
-mod common;
+use crate::common;
 
 /// A plan where the whole-plan chain and the chain to `M-a` are different
 /// numbers, so a command answering the wrong one is caught rather than agreeing

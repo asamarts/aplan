@@ -1,8 +1,356 @@
 {
   "behaviours": [
     {
+      "name": "capture.body_is_non_vacuous",
+      "what": "capture bodies from profiles, commands and loaded records are absent or contain visible content, never blank or invisible placeholders"
+    },
+    {
+      "name": "capture.writer_staging_is_not_a_record",
+      "what": "the strict capture loader ignores only the guarded writer's exact canonical staging-file pattern while continuing to reject every other non-record inbox member"
+    },
+    {
+      "name": "capture.inbox_lifecycle_commands",
+      "what": "the inbox command provides focused show, open-only amendment, discard and discarded-only restore over one guarded capture snapshot"
+    },
+    {
+      "name": "capture.promotion_is_atomic",
+      "what": "inbox promotion creates one ordinary validated task and freezes its capture link in one retry-safe guarded transaction whose late failure rolls back every write"
+    },
+    {
+      "name": "tui.capture_forms_are_record_bound",
+      "what": "every native TUI form populated from a retained capture carries that record's immutable fingerprint and refuses preview if the capture changes or the visible id is redirected before review"
+    },
+    {
+      "name": "claim.uses_worktree_shared_ephemeral_state",
+      "what": "`claim` records time, origin and identity-source attribution in private local state shared by every linked worktree, while durable task `owner` remains stable"
+    },
+    {
+      "name": "claim.concurrent_disjoint_updates_compose",
+      "what": "concurrent claims or releases for different tasks retry guarded whole-store contention so every nonconflicting update is retained"
+    },
+    {
+      "name": "coordination.is_not_a_plan_verdict_mutation",
+      "what": "`claim` and `release` mutate only local ephemeral coordination state, so they do not accept plan-verdict overrides or imply that the plan passed a gate"
+    },
+    {
+      "name": "release.recovers_orphaned_local_claims",
+      "what": "`release` can explicitly clear an ephemeral claim whose task is absent, while corrupt, unsafe or other orphaned claim state is never treated as free work"
+    },
+    {
+      "name": "owner.remains_stable_responsibility",
+      "what": "task `owner` is durable responsibility and claim or release never rewrites it"
+    },
+    {
+      "name": "owner.refuses_vacuous_values",
+      "what": "task creation and supersession refuse an owner made only of whitespace or invisible formatting characters rather than writing responsibility nobody can see"
+    },
+    {
+      "name": "selection.unclaimed_uses_ephemeral_claims",
+      "what": "`--unclaimed` selects the absence of an observed ephemeral claim, independently of durable `owner`, and refuses when local coordination is unavailable"
+    },
+    {
+      "name": "ready.exposes_ephemeral_claims",
+      "what": "`ready` and `aplan_ready` expose stable owner plus one local claim snapshot with holder, time, origin and explicit coordination scope"
+    },
+    {
+      "name": "show.exposes_ephemeral_claims",
+      "what": "`show` and `aplan_show` report stable owner and ephemeral claim as distinct facts, including claim age, origin and coordination scope"
+    },
+    {
+      "name": "stale.exposes_ephemeral_claims",
+      "what": "`stale` reports stable owner plus claim age and origin without a claim refreshing the task-file clock used to find neglected work"
+    },
+    {
+      "name": "tasks.exposes_ephemeral_claims",
+      "what": "`tasks --format json` carries the same explicit coordination scope and complete per-task claim records as the other read surfaces"
+    },
+    {
+      "name": "tui.distinguishes_owner_and_ephemeral_claim",
+      "what": "the TUI task list and inspector display the active local claim separately from durable task owner, including age, source, origin and unavailable coordination"
+    },
+    {
+      "name": "start.reports_ephemeral_holder",
+      "what": "`start` reports the ephemeral holder from local claim state rather than treating durable `owner` as the actor working now"
+    },
+    {
+      "name": "rekey.refuses_claimed_task",
+      "what": "`rekey` refuses an id carrying a local claim until it is explicitly released, so the old claim cannot become orphaned while the new id looks free"
+    },
+    {
+      "name": "claim.warns_on_placeholder_identity",
+      "what": "`claim` retains deterministic identity precedence but warns when the winning unauthenticated label looks like a machine or test placeholder"
+    },
+    {
+      "name": "claim.warns_on_cross_origin_identity_collision",
+      "what": "a holder label already observed from another local worktree origin produces an actionable warning that separate actors need distinct labels"
+    },
+    {
+      "name": "claim.origin_fallback_skips_invalid_host_values",
+      "what": "claim-origin attribution uses the first valid configured host label rather than letting a blank, overlong or control-bearing primary value suppress a valid fallback"
+    },
+    {
+      "name": "input_identity.uses_typed_canonical_bytes",
+      "what": "application input identities encode validation policy, verdict, configuration, paths, document state and explicit absence as deterministic typed bytes rather than Rust Debug output or map iteration order"
+    },
+    {
+      "name": "evidence.commit_requires_head_reachability",
+      "what": "APLAN011 accepts a commit citation only when its immutable SHA resolves to HEAD or one of HEAD's ancestors; APLAN012 and secondary commit rules never use an unreachable object, while incomplete shallow ancestry remains a checkout fault"
+    },
+    {
+      "name": "check_docs.identifier_boundaries_are_symmetric",
+      "what": "`check-docs` applies one Unicode-aware word-continuation predicate at both ends of ordinary, dotted, suffix-bearing and near-prefix task references"
+    },
+    {
+      "name": "check_docs.near_prefixes_prefer_longest_family",
+      "what": "`check-docs` matches overlapping one-digit-typo families longest-first, so the finding retains the complete referenced id and recommends the exact source family"
+    },
+    {
+      "name": "check_docs.complete_multi_hyphen_ids",
+      "what": "`check-docs` learns when a numeric id family carries hyphen-separated suffixes, resolves known complete ids and reports an unknown sibling without truncating it"
+    },
+    {
+      "name": "formats.refusal_names_every_rendered_surface",
+      "what": "a rejected known format describes every kind of output it can render and names the commands that accept it, rather than attributing its first surface to all of them"
+    },
+    {
+      "name": "tui.task_browser_preserves_selector_semantics",
+      "what": "the TUI task browser searches ids and titles, applies every shared selector dimension without changing plan semantics, exposes deterministic ready ranking, and preserves task identity across narrowing and refresh"
+    },
+    {
+      "name": "tui.task_browser_state_is_refresh_and_repeat_safe",
+      "what": "the TUI task browser applies enhanced-keyboard repeats to search editing without repeating modal activation, clamps a filter cursor after refresh, and anchors a hidden task identity at the visible viewport start"
+    },
+    {
+      "name": "show.carries_complete_task_projection",
+      "what": "the canonical typed `show` projection carries every persisted relationship, fingerprint and version claim, distinguishes missing from unloadable neighbours, and can include a body from the same identified input"
+    },
+    {
+      "name": "show.evidence_observations_are_nonblocking",
+      "what": "ordinary CLI and MCP task inspection never starts a configured provider and exposes typed per-citation and aggregate observation freshness; explicit bounded refresh recomputes the current plan against complete raw catalogues, reports exact runner progress, publishes only stable complete observations, and rejects stale late results"
+    },
+    {
+      "name": "evidence.scheduled_runner_identity_is_configured",
+      "what": "bounded provider discovery attributes catalogue rows, diagnostics and cost subjects to the same configured runner even when several runners have no name or directory label"
+    },
+    {
+      "name": "evidence.stale_premise_uses_configured_roots",
+      "what": "APLAN045 makes configured absolute plan paths repository-relative and resolves historical traced-document bytes through the configured trace root on `verify`, `show` and `aplan_show`"
+    },
+    {
+      "name": "tui.task_inspector_uses_show_projection",
+      "what": "the TUI task inspector searches task bodies, separates summary, body, relationships, paths, traces, evidence and findings from canonical `show`, wraps and scrolls inert text, preserves context through section and task links, and discards stale inspector coordinates when its snapshot refreshes"
+    },
+    {
+      "name": "tui.work_discovery_is_one_typed_flow",
+      "what": "the TUI joins ready rank factors and declared preferences, cut-bounded or complete why answers, and revisit due state at an explicit clock in one typed task inspector; due never claims an external condition is satisfied, and every loaded blocker or dependent is navigable with an identity-preserving back stack"
+    },
+    {
+      "name": "tui.work_discovery_state_is_semantically_exact",
+      "what": "the TUI canonicalizes a blank work clock so it follows refreshed snapshot time, keeps an explicit clock pinned, attributes an inactive preference to the exact unavailable side, and proves folded why and revisit controls against real data"
+    },
+    {
+      "name": "tui.overview_is_one_typed_projection",
+      "what": "the TUI Overview renders plan, build and refresh identity plus cut, effort, ready, due, finding and critical-path values from one typed projection, preserves honest empty and partial states, and drills each aggregate into the exact identities that produced it"
+    },
+    {
+      "name": "tui.overview_revisit_membership_is_exact",
+      "what": "the TUI Overview retains distinct timestamped identities for due and future revisits, and opening the composite row re-projects every task counted by both sides from the current snapshot"
+    },
+    {
+      "name": "tui.diagnostic_workbench_retains_complete_runs",
+      "what": "the TUI retains structural and configured-document diagnostics as distinct complete runs with independent verdicts, exact ordered findings and stable identities; filtering and grouping preserve canonical order and cannot turn a partial or denied run into a clean verdict, while detail carries subject, location, instruction, contribution and safe source context"
+    },
+    {
+      "name": "tui.narrowed_diagnostic_state_is_truthful",
+      "what": "an active diagnostic search or filter is always disclosed, an empty narrowed view names the retained whole-run verdict instead of claiming the run is clean, and narrowing and one-run relaxation remain visible before truncatable metadata"
+    },
+    {
+      "name": "tui.check_overrides_are_one_run",
+      "what": "the TUI advanced check sheet exposes effective effort, trace and warning policy, carries explicit overrides on one effect request, labels a relaxed result, and restores repository policy for the next ordinary refresh"
+    },
+    {
+      "name": "tui.verification_is_typed_and_non_blocking",
+      "what": "the TUI reviews identified repository, policy and provider inputs before running verification on its bounded worker; execute is explicit, complete findings and per-citation strength, outcome, detail and shared cost stay typed, exact repairs remain inspect-only, and queued, running, completed, refused, timed-out, output-limited, unavailable and stale states cannot impersonate one another"
+    },
+    {
+      "name": "tui.verification_execution_is_preview_bound",
+      "what": "interactive verification reloads and compares the reviewed input before any configured provider can run, reports a mismatch as typed stale work, and derives the evidence repository solely from the identified application context"
+    },
+    {
+      "name": "tui.evidence_mutation_previews_bind_identified_inputs",
+      "what": "interactive close, amend, restamp and verification repair work is staged as one typed guarded ChangeSet whose evidence ledger and policy are inspectable, and publication re-observes its identified plan, repository HEAD/status and selected configuration inputs"
+    },
+    {
+      "name": "tui.work_preview_responses_are_request_bound",
+      "what": "an interactive work preview derives its action and review projection from the immutable typed request and can replace a form only when its request token, selected task and identified plan input still match the unchanged form"
+    },
+    {
+      "name": "tui.mutation_layers_do_not_adopt_prior_effects",
+      "what": "after a running mutation layer is dismissed, another mutation cannot open until the prior effect finishes, and that late result is discarded without creating or populating a new layer"
+    },
+    {
+      "name": "tui.authoring_capture_refuses_non_regular_before_blocking",
+      "what": "interactive manifest and import capture accepts only a bounded regular file and refuses a stream or device before opening it can block the mutation worker, including a regular-file-to-FIFO replacement race on Unix"
+    },
+    {
+      "name": "tui.configured_test_selector_is_reachable",
+      "what": "the TUI command palette starts configured-test discovery on the bounded worker, retains partial and ambiguous resolver advice, searches the typed answer locally, and inserts only an unambiguous exact reference into the selected task's close or amend form"
+    },
+    {
+      "name": "tui.planning_forms_render_typed_choice_context",
+      "what": "interactive dependency and preference forms render the complete typed endpoint catalogue with status, cut membership and current-edge state while excluding self; tag forms render declared family scope, cardinality, members, selected values and observed arbitrary tags before preview"
+    },
+    {
+      "name": "tui.broad_mutations_are_recoverable",
+      "what": "broad interactive mutations enumerate every affected task and file, bind exact plan and selected-configuration bytes, require a deliberately re-focused confirmation, retain form input and per-path unchanged/complete/diverged observations after failure, and report success only after a fresh snapshot contains the reviewed after-state"
+    },
+    {
+      "name": "tui.mutation_surface_has_cross_adapter_parity",
+      "what": "the interactive mutation catalogue is a closed-world union of typed workflows; task/plan CLI modes are mapped or visibly bounded, representative coordination, planning, authoring and evidence writes cross a real PTY review boundary, and shared CLI, MCP and TUI requests retain exact post-state and refusal parity"
+    },
+    {
+      "name": "tui.graph_explorer_uses_semantic_scene",
+      "what": "the TUI graph explorer composes shared selectors with core reach, tree and critical-path scopes over the canonical typed GraphView, paints only visible ranges of the CLI's semantic scene, preserves exact omissions and identities, and supports non-colour selection, relationship following, hit testing, panning and recentering"
+    },
+    {
+      "name": "tui.graph_context_discloses_scope_and_grouping_omissions",
+      "what": "the TUI graph context names the relation class its active structural scope actually walked and reports exact omitted cut-membership-edge and grouping-only-task counts at every supported width"
+    },
+    {
+      "name": "tui.graph_windows_are_bounded_and_accounted",
+      "what": "the application projects selector/scope/membership results into deterministic anchor-preserving node, edge and lane budgets; exact omissions, cyclic/empty/failed states and paged incoming, outgoing and disconnected-component continuations stay typed, stable and reachable without changing complete CLI graph output"
+    },
+    {
+      "name": "tui.graph_explorer_projects_multiscale_semantics",
+      "what": "the application projects plan, phase, milestone and task levels from one admitted canonical task graph; phase remains grouping, milestone edges retain every underlying dependency and quotient feedback stays distinct from invalid task cycles, while raw selection, exact accounting, bounded task continuations and reversible transitions remain source-bound"
+    },
+    {
+      "name": "tui.graph_window_cursors_are_source_bound",
+      "what": "every graph continuation cursor carries the immutable input identity which emitted it, and a cursor presented to a refreshed or otherwise different projection is refused as invalid rather than reinterpreted by ordinal position"
+    },
+    {
+      "name": "tui.graph_explorer_windows_oversized_inputs",
+      "what": "the TUI opens an oversized graph as an explicitly labelled, fully accounted semantic window; keyboard and pointer controls traverse and reverse source-bound continuations, relationship navigation recentres omitted identities, neighbourhood depth composes with structural scope, and resizing changes only presentation"
+    },
+    {
+      "name": "tui.report_hub_preserves_cli_report_semantics",
+      "what": "the TUI report hub retains typed roadmap, summary, version, paths, vacuity, stale and deprecation values, states computation scope explicitly, and drills a row's frozen contributors without recomputing the report"
+    },
+    {
+      "name": "tui.report_discovery_is_literal_and_parameter_safe",
+      "what": "the TUI searches report names and typed result rows without changing report scope, edits the stale as-of date through a distinct contextual action, and displays configured version-source argv without erasing argument boundaries"
+    },
+    {
+      "name": "tui.external_refresh_is_identity_safe",
+      "what": "the TUI identifies plan, configuration, HEAD and exact Git status inputs, probes them off the input thread, atomically rejects a refresh raced by a newer identity, and preserves identity-based navigation while the previous complete snapshot remains visible"
+    },
+    {
+      "name": "tui.focus_epoch_invalidates_external_results",
+      "what": "a probe or refresh requested before terminal focus is lost cannot certify a later active focus epoch, and regaining focus obtains a current-epoch observation"
+    },
+    {
+      "name": "tui.suspension_invalidates_snapshot_freshness",
+      "what": "process suspension advances the external-observation epoch before stopping, resume paints retained bytes as unconfirmed and obtains a current-epoch observation as soon as worker capacity is available"
+    },
+    {
+      "name": "tui.continue_cancels_pending_suspend_handoff",
+      "what": "a continue observed after terminal teardown cancels a pending suspend decision before the default stop handler can strand the process, without changing quit or termination results"
+    },
+    {
+      "name": "tui.continue_establishes_freshness_boundary",
+      "what": "every continue that resumes interactive work establishes an external-observation boundary, including a standalone continue after an uncatchable stop and a continue that cancels the post-teardown suspend handoff"
+    },
+    {
+      "name": "tui.overdue_external_probe_is_fail_closed",
+      "what": "a periodic identity probe that cannot start because the bounded worker is occupied makes snapshot freshness unconfirmed and remains due until capacity starts it"
+    },
+    {
+      "name": "tui.quit_starts_no_new_work",
+      "what": "after input requests quit, termination and suspension retain precedence while continue is inert; the TUI exits before draining a completion that could start queued work, starting a probe, drawing another frame or polling for more input"
+    },
+    {
+      "name": "tui.production_external_probe_avoids_refresh_work",
+      "what": "periodic and focus-gain probes load the complete production input identity without constructing refresh-only verification or report projections, while refresh confirmation uses the same identity observation"
+    },
+    {
+      "name": "graph.merge_starts_at_destination_lane",
+      "what": "a fan-in merge begins at its destination lane, preserving unrelated routes to its left as vertical cells with only their own edge identities"
+    },
+    {
+      "name": "graph.text_focus_and_critical_overlay",
+      "what": "`graph --format text` retains the canonical semantic scene while adding exact statuses, a focus with visible direct dependency neighbours, the deterministic whole-plan critical route and exact edge cues through documented non-colour badges and stream-resolved terminal styling; presentation never changes scope or machine formats"
+    },
+    {
+      "name": "graph.critical_visibility_counts_step_identities",
+      "what": "the CLI text graph counts visible critical-route step identities rather than matching scene edge records, so repeated equal endpoints count once and omitted edges count zero"
+    },
+    {
+      "name": "summary.revision_selects_committed_inputs",
+      "what": "`summary --at` reads the plan and its discovered configuration from one resolved commit without a checkout, while an explicit configuration remains selected"
+    },
+    {
+      "name": "summary.revision_uses_historical_repository_boundary",
+      "what": "`summary --at` assigns an explicit in-repository root to the invocation's historical tree, unaffected by nested repositories created later, and refuses a plan-root gitlink or broken root link as incomplete input while accepting a root link to the top tree; an external repository, including one reached through an alias, requires the caller to select or decline current policy explicitly"
+    },
+    {
+      "name": "attest.note_targets_attested_commit",
+      "what": "an attached attestation is written to the exact commit recorded in its document, even if HEAD advances before the note write"
+    },
+    {
+      "name": "verify.url_checker_outcomes_are_stable",
+      "what": "each url's answered, refused or timed-out outcome is checked once and reused for every citation; a checker crash is one configuration fault and cannot erase an earlier answer"
+    },
+    {
+      "name": "selection.phase_coordinate",
+      "what": "the repeatable phase coordinate narrows every selecting command and may scope policy through the same selector without changing graph or readiness semantics"
+    },
+    {
+      "name": "export.checklist_names_single_phase_loss",
+      "what": "checklist export reports phase loss for every non-empty export and gives a single-phase plan the exact import flag that preserves its value"
+    },
+    {
+      "name": "config.grouping_error_names_its_view",
+      "what": "an undeclared family in `roadmap.group_by` or `summary.group_by` is refused as invalid grouping and names the exact view key, never the test runner"
+    },
+    {
+      "name": "config.tag_family_error_names_its_key",
+      "what": "a structurally invalid `tag_families` declaration is refused as that exact configuration block, never as an invalid test runner"
+    },
+    {
+      "name": "summary.grouped_human_is_unambiguous",
+      "what": "a grouped human summary names its family, renders every member distinctly from synthetic rows, and aligns values by terminal display width"
+    },
+    {
+      "name": "diagnostics.machine_applicable_repairs",
+      "what": "diagnostics carry exact evidence replacements as typed data, and `verify --fix` applies all valid ones as one guarded mutation before verifying the result"
+    },
+    {
+      "name": "diagnostics.repair_requires_unique_resolver",
+      "what": "a typed test-name repair is published only when exactly one configured runner resolves its replacement; a shared spelling remains prose advice"
+    },
+    {
+      "name": "evidence.test_unresolved_points_to_catalogue",
+      "what": "an unresolved or ambiguous test citation points at `aplan test list`, which exposes the resolver's exact configured names and runner identities"
+    },
+    {
+      "name": "verify_fix.post_runner_plan_is_gated",
+      "what": "`verify --fix` reloads the whole plan after configured runners finish, refuses their newly invalid sibling state before writing, and preserves valid sibling edits"
+    },
+    {
+      "name": "verify_fix.post_runner_config_is_gated",
+      "what": "`verify --fix` reloads the selected configuration after external resolvers finish and validates every replacement under the policy its post-verification will use"
+    },
+    {
+      "name": "verify_fix.one_post_runner_config_source",
+      "what": "`verify --fix` uses the post-run configuration discovered from its evidence repository for replacement resolution, mutation gating, and post-verification"
+    },
+    {
       "name": "rollup.cut_excludes_releases",
       "what": "a task's reported `cut` is the cut it is in, never a release that closes it"
+    },
+    {
+      "name": "verify_fix.revalidation_side_effects_are_gated",
+      "what": "`verify --fix` builds its candidate from the plan left by every replacement resolver and refuses a configuration that changes during that validation"
     },
     {
       "name": "traces.table_rows",
@@ -25,6 +373,34 @@
       "what": "`APLAN019` is silent about a dead `paths` glob when the task's cited commit or file binds through another one, so a stale declaration does not refuse a close"
     },
     {
+      "name": "paths.unmatched_ignores_vacuous_evidence",
+      "what": "`APLAN019` names only substantive commit, file and test references in its diagnostic, using the same invisible-reference predicate that scopes the rule"
+    },
+    {
+      "name": "evidence.vacuous_test_does_not_acquit_dilution",
+      "what": "`APLAN024` does not accept a whitespace-only or invisible test reference as independent proof that acquits diluted commit evidence"
+    },
+    {
+      "name": "evidence.batch_outcomes_preserve_terminal_semantics",
+      "what": "the existing test-batch result protocol keeps expected failure, retry, flake, cancellation, timeout, resource, framework and incomplete outcomes distinct, and a retry-created green cannot be encoded as an unconditional pass"
+    },
+    {
+      "name": "evidence.portable_provider_receipts",
+      "what": "`test receipt` exports one complete provider execution as a canonical, plan-independent statement whose current material and externally authenticated producer can be validated before it is used as evidence"
+    },
+    {
+      "name": "evidence.receipt_backed_whole_plan_resolution",
+      "what": "`verify --test-receipts` authenticates one complete current observation per configured provider, recomputes the exact current whole-plan L1/L2/L3 verdict, and never starts a test provider or silently falls back to direct execution"
+    },
+    {
+      "name": "evidence.verification_reports_provider_provenance",
+      "what": "human, JSON, MCP and TUI verification results identify observation scope, provider source, freshness and completeness without conflating receipt, direct and deferred work"
+    },
+    {
+      "name": "evidence.incremental_receipt_refresh",
+      "what": "`verify --refresh-test-receipts` derives invalidation from an explicit Git boundary, executes only identities covered by an exhaustive input-dependency declaration, widens every ambiguous case, atomically publishes a complete current receipt set, and re-derives the whole-plan verdict"
+    },
+    {
       "name": "ready.reports_a_closeable_cut",
       "what": "`ready` names a cut whose members are all done rather than answering with silence"
     },
@@ -33,12 +409,32 @@
       "what": "a command or tool that writes runs the rules against the plan it would produce, and refuses a mutation that introduces a finding"
     },
     {
+      "name": "dep.rebases_on_current_target",
+      "what": "a dependency edit derives its relationship list and mutation verdict from the current task bytes, preserving a valid edge added after its read snapshot"
+    },
+    {
+      "name": "dep.preserves_scalar_sequence_source_deltas",
+      "what": "dependency and preference edge edits retain the exact source of surviving scalar sequence members and surrounding trivia, and refuse a structure they cannot edit unambiguously instead of rebuilding it"
+    },
+    {
+      "name": "tag.preserves_scalar_sequence_source_deltas",
+      "what": "tag add, remove and plan-wide rename retain the exact source of surviving scalar sequence members and surrounding trivia, and refuse a structural sequence they cannot edit unambiguously without changing another field"
+    },
+    {
+      "name": "application.input_identity_matches_loaded_inputs",
+      "what": "an application result's input identity is derived from the exact candidate bytes parsed for that result, including Markdown candidates that are not yet tasks"
+    },
+    {
       "name": "verify.one_tasks_defect_does_not_stop_the_run",
       "what": "a defect in one task's input, or in one configured command, is a finding rather than a reason to abandon the run and report nothing about the rest"
     },
     {
       "name": "verify.configured_commands_are_bounded",
       "what": "a configured `test.list` or `url.check` that does not return is killed at its limit and reported, rather than waited for"
+    },
+    {
+      "name": "cli.configured_commands_follow_termination_signals",
+      "what": "on Unix, every non-interactive CLI path closes configured-command startup, stops all active process groups and preserves SIGINT, SIGTERM, SIGHUP or SIGQUIT as the caller-visible outcome"
     },
     {
       "name": "ready.honours_a_declared_preference",
@@ -57,6 +453,10 @@
       "what": "a successor inherits the predecessor's subject tags and is judged in the cut `--cut` names, so `supersede` itself can repair a plan that requires a tag family and a cut membership"
     },
     {
+      "name": "supersede.controls_inherited_successor_content",
+      "what": "`supersede` inherits paths, traces and its generated body only when their controls are omitted; explicit replacements, clears and a supplied body publish atomically"
+    },
+    {
       "name": "import.carries_the_plans_vocabulary",
       "what": "`import` gives every task it writes the tags the invocation names, and says which declared `tag_families` member the import would otherwise leave missing, so a plan with a mandatory vocabulary can be imported into"
     },
@@ -73,8 +473,76 @@
       "what": "`--config <file>` reads exactly that file and discovers none, `--no-config` reads none at all, and a named file that is missing is an error rather than a fallback"
     },
     {
+      "name": "traces.boundary_is_plan_repository",
+      "what": "`APLAN034` judges a trace against the plan's repository even when `--config` selects policy elsewhere; config-relative values and diagnostic locations stay with the selected file"
+    },
+    {
       "name": "close.evidence_resolves_before_write",
       "what": "`close` resolves a proposed citation before it writes, on both surfaces; only `--no-resolve` opts out, and it says what it skipped"
+    },
+    {
+      "name": "close.focused_l3_is_explicit_scoped_and_stale_safe",
+      "what": "`close --execute` explicitly runs only the proposed closure's distinct test identities, requires typed L3 passes, and publishes the reviewed task only while plan, repository, configuration and selected provider material remain current; ordinary close and agent tools remain L2-only"
+    },
+    {
+      "name": "close.focused_l3_terminal_outcomes_name_external_effects",
+      "what": "every focused L3 outcome after configured test code starts distinguishes aplan's guarded plan publication from command effects it cannot roll back, on CLI and interactive surfaces"
+    },
+    {
+      "name": "close.replaces_live_trace_fingerprints",
+      "what": "`close` replaces an accepted live task's existing trace fingerprint mapping in place with freshly resolved stamps instead of appending a duplicate key"
+    },
+    {
+      "name": "close.refuses_structural_fingerprint_mappings",
+      "what": "close, restamp and evidence repair replace ordinary block or one-line flow fingerprint maps, while structural mappings refuse actionably before any task bytes are written"
+    },
+    {
+      "name": "close.refuses_structural_evidence_sequences",
+      "what": "explicit and computed citation edits replace only an ordinary source-local block sequence of citation mappings; structural evidence refuses actionably before any task bytes or batch prefix are written"
+    },
+    {
+      "name": "amend.policy_reads_rewritten_evidence_candidate",
+      "what": "evidence amendment derives resolution, mutation-policy and freshness inputs by parsing the exact candidate produced by the core rewrite, so captured metadata cannot make a newly written citation look like an empty delta"
+    },
+    {
+      "name": "amend.preserves_evidence_sequence_source_deltas",
+      "what": "evidence add, remove and replace retain every unaddressed ordinary citation byte, including mapping indentation, key spacing, quote style, comments and newline convention, while structural sequences keep their exact no-write refusal"
+    },
+    {
+      "name": "close.preserves_fingerprint_mapping_boundary_trivia",
+      "what": "fingerprint replacement preserves an accepted ordinary mapping's literal key, colon spacing and boundary comment, retaining the comment standalone when the final derived baseline is cleared"
+    },
+    {
+      "name": "portfolio.preserves_rewrite_error_category",
+      "what": "park and unpark preserve typed rewrite failures through the CLI adapter, so plan input refusals exit as usage and a failed writer self-check exits as aplan's published internal error"
+    },
+    {
+      "name": "portfolio.refuses_alternate_optional_scalar_keys",
+      "what": "park and unpark edit ordinary revisit scalar lines exactly, while quoted or otherwise non-local optional-scalar keys refuse actionably before any target in the portfolio batch is written"
+    },
+    {
+      "name": "close.refuses_alternate_evidence_keys",
+      "what": "initial close treats every top-level key the YAML mapping resolves to `evidence` as an existing field, refusing a live task actionably and without constructing or writing a duplicate-key candidate"
+    },
+    {
+      "name": "close.refuses_empty_version_fields",
+      "what": "release close distinguishes an absent version field from every ordinary or alternate top-level key carrying a null value, refusing the present empty field actionably and without constructing or writing a duplicate-key candidate"
+    },
+    {
+      "name": "mutation.refuses_multiline_plain_scalar_rewrites",
+      "what": "line-local task scalar edits compare the complete parsed field with the inline source token, refusing multiline plain ids and optional values actionably before any task or batch bytes are written"
+    },
+    {
+      "name": "close.restamp_requires_drift_detection",
+      "what": "`close --restamp` refuses while `detect_drift` is disabled instead of claiming success while deleting trace and evidence baselines it did not refresh"
+    },
+    {
+      "name": "close.restamp_reports_baseline_changes",
+      "what": "`close --restamp` separately reports changed and already-current trace and committed file-evidence baselines, does not replace the task file when every baseline in its current task snapshot is current, and refuses a task changed since its plan load rather than misreporting a no-op"
+    },
+    {
+      "name": "mutation.block_replacements_cross_yaml_trivia",
+      "what": "surgical mapping and sequence replacements cross blank lines and comments without leaving an old entry behind or moving the trivia and following field"
     },
     {
       "name": "paths.no_sample_is_not_a_zero",
@@ -89,6 +557,62 @@
       "what": "`aplan add --from <file>` adds every task a file names as one change, each entry resolved against the ones before it"
     },
     {
+      "name": "add.accepts_creation_time_model_fields",
+      "what": "single and manifest task creation author live state, scheduling, version impact and every declared relationship in one validated write, including relationships to later manifest entries"
+    },
+    {
+      "name": "dep.atomic_batch_rewrites",
+      "what": "dependency additions and removals are judged as one final graph and guarded publication, while add-from and blueprint reverse blocks edges to existing or same-batch tasks publish with creation"
+    },
+    {
+      "name": "add_from.resolves_terminal_ledger_entries_atomically",
+      "what": "a manifest may add proved done history to a done cut only after every citation resolves and trace/evidence baselines are captured, with any failure leaving the complete batch and cut unchanged"
+    },
+    {
+      "name": "authoring.refuses_visually_empty_creation_values",
+      "what": "single and manifest authoring refuse visually empty ids, titles, metadata, relationships and bodies before any file is written"
+    },
+    {
+      "name": "blueprint.parameters_bind_totally_after_parsing",
+      "what": "blueprint parameters bind every parameterisable typed string slot after YAML parsing, refuse missing, undeclared or unused names, and treat supplied values as opaque non-recursive text"
+    },
+    {
+      "name": "blueprint.references_resolve_atomically",
+      "what": "blueprint relationships use explicit `local:` and `task:` namespaces, resolve every sibling key to an id minted for one current plan snapshot, and publish the complete graph into one existing cut only when its post-state passes"
+    },
+    {
+      "name": "agent_contract.guides_explicit_blueprint_application",
+      "what": "the generated agent contract says when a recurring plan shape warrants a blueprint, gives the explicit-file dry-run command, and requires review of its source identity and complete predicted graph before application"
+    },
+    {
+      "name": "add.refuses_milestone_work_fields",
+      "what": "`aplan add` and `add --from` refuse a milestone carrying `effort` or `paths`, and write nothing, regardless of the warning policy"
+    },
+    {
+      "name": "add.milestone_work_refusal_is_new_input_only",
+      "what": "the unconditional milestone-work-field refusal applies only to a milestone this add creates; improving an existing malformed cut remains under warning policy"
+    },
+    {
+      "name": "add.creates_cut_around_existing_members",
+      "what": "`add --member`, native application/TUI add and `aplan_add` create an explicitly identified milestone around existing live work, remove every old membership and publish all files as one validated guarded batch"
+    },
+    {
+      "name": "mcp.add_accepts_explicit_identity",
+      "what": "ordinary `aplan_add` accepts an explicit task id and reporting phase, uses both verbatim and mints or derives them only when the caller omits them"
+    },
+    {
+      "name": "mcp.add_refuses_milestone_work_fields",
+      "what": "`aplan_add` refuses a new milestone carrying `effort_days` or `paths` before writing, under every warning policy, like both CLI add forms"
+    },
+    {
+      "name": "mcp.explicit_root_resolves_one_repository_context",
+      "what": "an explicit MCP root denotes either a repository carrying `.aplan.yml` or its configured plan directory, resolves plan, policy, traces, evidence providers and Git together, exposes bounded provenance and refuses a partial or ambiguous root without falling back to the server's launch repository"
+    },
+    {
+      "name": "mcp.launch_context_honours_trace_selection",
+      "what": "an MCP server's launch context honours configured `traces_root` and `no_traces` before applying its repository fallback"
+    },
+    {
       "name": "evidence.file_path_is_normalised",
       "what": "a path is read the same way wherever a plan writes one: a `file` citation, a `paths` glob and a `traces` target all resolve however it is spelled (`./x`, `a/../x`)"
     },
@@ -101,6 +625,98 @@
       "what": "`aplan facts --identity` names this build -- its version, the commit it was built from, and the digests of its capability document and its own image -- without needing a plan, a repository or a clean tree"
     },
     {
+      "name": "facts.source_identity_tracks_active_checkout",
+      "what": "the build-time source identity ignores inherited `GIT_` context and follows the active checkout through loose refs, packed refs, disabled reflogs and linked worktrees without making ordinary unrelated branches build inputs"
+    },
+    {
+      "name": "facts.reports_build_capabilities",
+      "what": "`aplan facts` reports whether optional build capability `build.tui` is enabled, and `facts --require` accepts it only in a build that compiled the interface"
+    },
+    {
+      "name": "tui.cursor_restoration_is_singular",
+      "what": "`aplan tui` leaves cursor visibility to the Ratatui terminal, so a foundation frame and normal exit emit one hide and one restoring show rather than two competing pairs"
+    },
+    {
+      "name": "tui.event_loop_is_generation_safe",
+      "what": "`aplan tui` decodes terminal input into semantic actions, redraws only after state changes, and runs one identified effect with one bounded queued successor while stale or failed results cannot replace the last complete snapshot"
+    },
+    {
+      "name": "tui.caught_worker_panics_do_not_write_terminal",
+      "what": "a panic caught at the TUI effect-worker boundary becomes a typed failure without writing through the active terminal, while non-worker panics still reach the host's previous panic hook"
+    },
+    {
+      "name": "tui.worker_cleanup_is_unwind_safe",
+      "what": "dropping the TUI worker runtime, including during unwinding, cancels queued work and joins the sole running repository or process operation instead of detaching it"
+    },
+    {
+      "name": "tui.terminal_lifecycle_handles_signals",
+      "what": "every non-interactive command preserves its caller's terminal and emits only declared SGR controls; the TUI restores exact terminal state, stops active configured-command groups and re-raises catchable termination signals without waiting for the worker, while suspend restores before stopping and continue reacquires and repaints"
+    },
+    {
+      "name": "tui.terminal_portability_is_explicit",
+      "what": "a dedicated platform-neutral real-PTY module exercises mode ownership, focus, resize and minimum-size recovery plus ordinary and interrupt teardown, while the support matrix keeps unavailable platform observations distinct from passes"
+    },
+    {
+      "name": "tui.external_editor_handoff_is_safe_and_identity_bound",
+      "what": "the Add form launches VISUAL or EDITOR directly only after restoring terminal modes, accepts one private bounded Markdown draft through ordinary preview, and reacquires the interface only after requesting a current input observation"
+    },
+    {
+      "name": "tui.termination_preempts_worker_shutdown",
+      "what": "after restoring the terminal for a graceful quit, the TUI continues polling lifecycle signals while it waits for its worker, so catchable termination kills configured-command groups and preserves the signal exit instead of hanging"
+    },
+    {
+      "name": "tui.shell_is_responsive_and_contextual",
+      "what": "the TUI provides keyboard-complete routed wide, normal and narrow shells whose dispatch, footer, help and palette share one availability-aware command catalogue and whose text, cursor and hit targets use terminal-cell geometry"
+    },
+    {
+      "name": "tui.action_discovery_is_closed_and_contextual",
+      "what": "palette, full help and contextual footer consume one availability-aware action catalogue; every command published by facts maps to a driven native surface, guided route, inert exact CLI alternative or the TUI entry point, and every CLI leaf and semantic option has an executable disposition"
+    },
+    {
+      "name": "tui.modal_navigation_is_consistent",
+      "what": "arrow, j/k, Tab and Shift-Tab navigation all move and wrap the active modal selection instead of changing the obscured main view"
+    },
+    {
+      "name": "tui.selection_is_visible_and_pointer_safe",
+      "what": "the responsive TUI keeps selected task rows visible, derives painting and pointer targets from one bounded viewport, and preserves an escapable, size-bounded input surface across narrow and below-minimum layouts"
+    },
+    {
+      "name": "tui.shell_content_is_explicitly_bounded",
+      "what": "every responsive TUI surface fits hostile text to its real content rectangle with an explicit continuation marker, pointer targets stay inside painted cells, and wheel navigation stops at task-list boundaries"
+    },
+    {
+      "name": "tui.visual_language_is_semantic_and_deterministic",
+      "what": "the TUI resolves explicit dark, light, low-color and monochrome themes against NO_COLOR and reported color capacity without guessing a background; semantic roles, exact compact visualizations, ASCII equivalents and reduced-motion progress survive every responsive class"
+    },
+    {
+      "name": "tui.input_accessibility_is_safe_and_discoverable",
+      "what": "the TUI derives dispatch, quick help, complete help and palette key labels from one lifecycle-aware binding catalogue; keyboard-complete layers restore exact focus, and clamped pointer accelerators cannot click or wheel through an overlay or activate on drag, release or modifiers"
+    },
+    {
+      "name": "tui.overlay_pointer_activation_is_semantic_and_guarded",
+      "what": "visible modal rows, labelled overlay controls and mutation fields expose typed pointer targets derived from their painted geometry, while confirmation retains freshness, broad-change and pending-work guards"
+    },
+    {
+      "name": "tui.startup_feedback_precedes_plan_io",
+      "what": "an eligible interactive launch paints a responsive in-frame loading state before configuration or plan reads begin, consumes one generation-safe phase stream, and restores the terminal before reporting failure or joining cancelled work"
+    },
+    {
+      "name": "tui.inspectors_use_semantic_information_hierarchy",
+      "what": "task inspector sections carry typed identity, groups, labelled values, badges, metrics, callouts and links; wide panes align them and narrow panes stack the same exact values with non-colour meaning and stable selection"
+    },
+    {
+      "name": "tui.shell_adapts_by_route_and_available_rows",
+      "what": "the shell allocates chrome independently from pane width, retains route-specific useful work and explicit primary/detail orientation through short and narrow layouts, keeps hidden commands discoverable, and reflows without changing semantic or editable state"
+    },
+    {
+      "name": "tui.onboarding_and_capabilities_are_typed",
+      "what": "the TUI keeps missing, unreadable or invalid launch inputs in a read-only guided state, can retry into one complete snapshot, names root and configuration trust choices, and renders About from the same typed facts as `aplan facts`"
+    },
+    {
+      "name": "facts.omits_disabled_feature_behaviours",
+      "what": "`aplan facts` omits `tui.*` behaviour names when `build.tui` is disabled, so `--require` cannot accept a promise made only by code this build did not compile"
+    },
+    {
       "name": "output.plan_text_cannot_steer_a_terminal",
       "what": "a control character in any field a plan supplies is replaced by a visible marker before it reaches a human rendering, at every `--color` setting, while the machine formats keep the bytes the plan holds"
     },
@@ -111,6 +727,18 @@
     {
       "name": "color.explicitly_selectable",
       "what": "`--color=auto|always|never` overrides the terminal detection in both directions, reaching everything the tool prints -- its findings, its refusals, and `clap`'s own usage errors -- while the machine formats stay byte-identical at every setting"
+    },
+    {
+      "name": "progress.events_are_generation_safe",
+      "what": "plan loading and configured-provider work emit one ordered typed lifecycle whose operation generation, child identities and monotonic measures let a consumer reject late, duplicate, regressing or cross-operation events"
+    },
+    {
+      "name": "progress.stream_output_is_automation_safe",
+      "what": "operation progress is delayed and stderr-only; auto requires an attended human mode outside CI, always is explicit, never emits no progress bytes, machine stdout is unchanged and the TUI retains in-frame ownership"
+    },
+    {
+      "name": "progress.cli_renderer_is_identity_safe_and_terminal_safe",
+      "what": "one command-lifetime CLI renderer validates operation and child identities, aggregates bounded concurrent work, fits the terminal, serializes ordinary output and restores its transient row on success, failure, cancellation or catchable process interruption"
     },
     {
       "name": "traces.structured_documents",
@@ -129,15 +757,148 @@
       "what": "`aplan why` reports an unfinished cut as itself rather than walking into its members, and names the traversal that produced every answer; `--all` asks for the complete closure"
     },
     {
+      "name": "why.complete_retains_nested_undefined_blockers",
+      "what": "a complete why walk retains undefined blockers reached below loaded tasks on CLI, JSON and MCP, while a cut-bounded walk hides an undefined id behind its cut"
+    },
+    {
       "name": "identity.reads_a_per_user_file",
       "what": "a claimant's name may come from a per-user file outside the repository, read between the environment variable and git's `user.name`, and holding nothing a rule reads"
     },
     {
       "name": "ids.sequential_survives_concurrent_writers",
       "what": "a command that mints an id re-reads the plan and mints again when another writer takes it first, so concurrent writers do not serialise on the id"
+    },
+    {
+      "name": "ids.concurrent_snapshot_instability_is_retried",
+      "what": "an ID-creating mutation treats candidate-set instability during its pre-write plan snapshot as bounded contention, distinct from a file changed after it was read"
+    },
+    {
+      "name": "authoring.task_ids_preserve_cut_labels",
+      "what": "in-plan task creation and rekey refuse an id that would shadow a displayed cut label, before publishing any file"
+    },
+    {
+      "name": "rekey.surgical_yaml_scalars",
+      "what": "`rekey` treats a quoted task id or a block-list relationship member as one scalar and preserves the comments and bytes around it"
+    },
+    {
+      "name": "rekey.reports_moved_filename_links",
+      "what": "`rekey` includes repository text naming the old conventional `.md` filename in its possible-reference review list without rewriting it"
+    },
+    {
+      "name": "rekey.policy_cut_block_comments",
+      "what": "`rekey` preserves an inline comment on a `policy[].when.cut` block key while changing its exact milestone-id members"
+    },
+    {
+      "name": "rekey.relocation_late_failure_cleans_staging",
+      "what": "a late sibling-backup failure during `rekey` restores every original file and removes every unpublished staging file"
+    },
+    {
+      "name": "tui.layered_cell_scene_is_bounded_and_deterministic",
+      "what": "the multiscale semantic graph can be laid out as deterministic terminal-cell nodes, phase bands and exact routed edges under explicit work limits, with typed degradation, stable prior geometry and generation-safe fallback"
+    },
+    {
+      "name": "tui.layered_graph_is_a_semantic_ratatui_widget",
+      "what": "the TUI Graph destination paints the bounded layered scene as adaptive phase bands, semantic cards, ports and routed edges with cell-accurate hit targets, viewport accounting and an honest selectable fallback"
+    },
+    {
+      "name": "tui.selected_graph_card_is_one_continuous_surface",
+      "what": "a selected layered-graph task or aggregate card paints every visible interior cell with one coherent theme-selected style, including unused row suffixes and blank rows, without changing graph identity or hit geometry"
+    },
+    {
+      "name": "tui.layered_graph_navigation_is_semantic_and_reversible",
+      "what": "the layered Graph destination navigates actual dependency geometry and direct relations, drills and reverses plan/phase/milestone/task levels with exact session and contextual-return history, preserves explicit order, direction, density and scope policies, and keeps bounded off-view traversal typed"
+    },
+    {
+      "name": "graph.layered_scene_is_complete_or_fallback",
+      "what": "a layered scene is paintable only when every admitted edge, non-empty phase band and semantic identity has complete validated current geometry; any failure becomes an explained selectable fallback, and retained geometry is recovery input rather than current paint or hit state"
+    },
+    {
+      "name": "graph.layered_hardening_corpus_is_executable",
+      "what": "the shared layered graph runs one discoverable hostile corpus and every four-node DAG through deterministic cell geometry, proving exact edge provenance, phase containment, valid ports and routes, no overlap, typed feedback and total dependency accounting in both orientations"
+    },
+    {
+      "name": "graph.layered_routes_choose_low_bend_ports_within_crossing_budget",
+      "what": "layered routes may choose any valid node-boundary port when that reduces bends; on the matched crossing-heavy corpus both orientations retain exact monotone routes while producing no more unrelated-edge crossings than Lanes and at most 125 percent of its bends"
+    },
+    {
+      "name": "graph.layered_text_uses_the_shared_semantic_scene",
+      "what": "`graph --format text --layout layered` paints the same typed multiscale projection and validated terminal-cell scene as the TUI under explicit level, orientation, peer-order, detail, width and glyph policies; redirected bytes are deterministic and every omission is accounted while lanes remains an explicit compatibility layout"
+    },
+    {
+      "name": "graph.auto_text_orientation_prefers_a_scene_which_fits",
+      "what": "static layered text Auto orientation retains both validated direction candidates until the exact document width is known, chooses the best-quality complete scene which fits, and reports the smallest required width only when neither fits; explicitly forced directions and viewport-independent application/TUI Auto semantics are unchanged"
+    },
+    {
+      "name": "graph.text_defaults_to_layered_with_explicit_lane_compatibility",
+      "what": "`graph --format text` selects the shared Layered scene and therefore requires an exact width when redirected; `--layout lanes` retains the prior row-and-lane bytes, and JSON, Mermaid and DOT bytes and accepted controls do not change"
+    },
+    {
+      "name": "graph.attended_default_is_layered_and_redirected_default_is_mermaid",
+      "what": "an attended bare `graph` selects width-aware layered text, redirected bare `graph` retains deterministic Mermaid, and an explicit format remains authoritative in either environment"
+    },
+    {
+      "name": "graph.cell_routes_repair_terminal_border_collisions",
+      "what": "terminal-cell adaptation deterministically diverts an orthogonal route around unrelated painted card cells while preserving endpoints, monotone direction and complete edge identity; geometry which cannot be repaired still becomes an explained fallback"
+    },
+    {
+      "name": "graph.layered_phase_labels_are_horizontal_and_non_occluding",
+      "what": "layered phase labels in either orientation are horizontal top-border labels, so a top-to-bottom scene never overwrites a band edge or node card"
+    },
+    {
+      "name": "graph.aggregate_levels_are_bounded_and_continuable",
+      "what": "plan and phase aggregate levels apply a source-bound semantic node and edge window before cell layout, preserve exact raw-task and dependency accounting, and expose continuations which both the TUI and static text can traverse"
+    },
+    {
+      "name": "tui.external_observation_is_shutdown_cancellable",
+      "what": "periodic and focus-gain repository observations receive the worker cancellation token and yield at identified load boundaries, so graceful quit cannot wait for a newly in-flight observation after terminal restoration"
+    },
+    {
+      "name": "tui.simultaneous_resize_and_input_are_not_lost",
+      "what": "the Unix TUI polls terminal readiness level-triggered and consumes terminal input before a simultaneous resize notification, so an already queued key cannot be stranded after SIGWINCH"
+    },
+    {
+      "name": "tui.hidden_graph_resize_defers_reprojection",
+      "what": "terminal resize updates the future graph density without reprojecting or laying out a hidden Graph destination; the bounded scene is rebuilt from current size only when Graph becomes visible again"
+    },
+    {
+      "name": "tui.graph_fallback_paint_is_viewport_bounded",
+      "what": "the graph fallback caches complete-source extent when the projection changes and translates the visible row interval directly into a source-node slice, so steady-state paint work and allocation are bounded by the viewport rather than complete graph size"
+    },
+    {
+      "name": "tui.graph_selection_reuses_current_projection",
+      "what": "selecting a subject represented at a selection-independent plan or phase graph level updates selection and source-bound transition subjects in place, then refocuses retained cell geometry without repeating complete-source semantic projection; bounded detail levels still reproject around their new anchor"
+    },
+    {
+      "name": "tui.refresh_rebuilds_only_the_visible_projection",
+      "what": "refresh adopts the coherent shared snapshot and reconciles the visible destination plus shared work and inspector state; hidden Tasks, Graph and Reports projections defer source-sized work until route entry, where they rebuild from the adopted snapshot"
+    }
+  ],
+  "build_capabilities": [
+    {
+      "enabled": true,
+      "name": "build.tui"
     }
   ],
   "commands": [
+    {
+      "about": "Capture a thought quickly without creating a task or graph node",
+      "default_format": "human",
+      "formats": [
+        "human",
+        "json",
+        "agent"
+      ],
+      "name": "capture"
+    },
+    {
+      "about": "Review, amend, discard or restore versioned capture intake",
+      "default_format": "human",
+      "formats": [
+        "human",
+        "json"
+      ],
+      "name": "inbox"
+    },
     {
       "about": "Validate the plan. Fails on any error. Reads `.aplan.yml` if present; flags below override it",
       "default_format": "human",
@@ -161,6 +922,16 @@
         "sarif"
       ],
       "name": "verify"
+    },
+    {
+      "about": "Inspect the exact evidence names configured test runners report",
+      "default_format": "human",
+      "formats": [
+        "human",
+        "json",
+        "agent"
+      ],
+      "name": "test"
     },
     {
       "about": "List tasks whose blockers are all `done`, best first",
@@ -199,7 +970,7 @@
       "name": "version"
     },
     {
-      "about": "Print the dependency graph as Mermaid, whole or scoped",
+      "about": "Explore the dependency graph as layered terminal text, or export it",
       "default_format": "mermaid",
       "formats": [
         "json",
@@ -210,6 +981,12 @@
       "name": "graph"
     },
     {
+      "about": "Open the interactive terminal interface",
+      "default_format": null,
+      "formats": [],
+      "name": "tui"
+    },
+    {
       "about": "Show one task whole: its fields, what it waits on and releases, and the findings currently attached to it",
       "default_format": "human",
       "formats": [
@@ -217,6 +994,12 @@
         "json"
       ],
       "name": "show"
+    },
+    {
+      "about": "Explain one name from an explicit vocabulary",
+      "default_format": null,
+      "formats": [],
+      "name": "explain"
     },
     {
       "about": "Show one task's neighbourhood: what must precede it, and what it releases",
@@ -295,7 +1078,7 @@
       "name": "check-docs"
     },
     {
-      "about": "Roll the plan up by phase: tasks, effort, and how many are ready",
+      "about": "Roll the plan up by phase, or by `summary.group_by`: tasks, effort, and readiness",
       "default_format": "human",
       "formats": [
         "human",
@@ -310,19 +1093,31 @@
       "name": "drop"
     },
     {
-      "about": "Record who is working on a task, so two actors sharing a repository can see it. Refuses to take a task somebody else holds unless `--from` names them, and refuses to overwrite a claim made between reading and writing",
+      "about": "Park existing todo work as one validated change. Records the reason in every task body; elapsed revisit time never authorizes an automatic unpark",
+      "default_format": null,
+      "formats": [],
+      "name": "park"
+    },
+    {
+      "about": "Return parked work to `todo` as one validated change. Clears `revisit_at`, preserves body history and tags, and never bypasses graph blockers",
+      "default_format": null,
+      "formats": [],
+      "name": "unpark"
+    },
+    {
+      "about": "Record who is working on a task, so two actors sharing a repository can see it. Linked worktrees contend on one private record in Git's common directory. Refuses to take a task somebody else holds unless `--from` names them",
       "default_format": null,
       "formats": [],
       "name": "claim"
     },
     {
-      "about": "Drop a claim, naming whose it was. Anybody may run it, so a claim nobody released can always be cleared; the record of who held it is in the diff",
+      "about": "Drop a local claim, naming its holder, time and origin. Anybody may run it, including for an id absent from this worktree, so an orphaned claim always has an explicit recovery path",
       "default_format": null,
       "formats": [],
       "name": "release"
     },
     {
-      "about": "Record that work on a task has started. The claim is checked against the repository afterwards, so this is a statement `verify` can contradict rather than one it takes on trust",
+      "about": "Record that work on a task has started. The status is checked against the repository afterwards, so this is a statement `verify` can contradict rather than one it takes on trust",
       "default_format": null,
       "formats": [],
       "name": "start"
@@ -338,6 +1133,15 @@
       "default_format": null,
       "formats": [],
       "name": "mv"
+    },
+    {
+      "about": "Change a task's stable id and every structured reference to it as one guarded edit",
+      "default_format": "human",
+      "formats": [
+        "human",
+        "json"
+      ],
+      "name": "rekey"
     },
     {
       "about": "Emit the plan's tasks as data, so a rollup this tool does not have is a `jq` line rather than a feature request. Carries what a rollup needs resolved: the cut a task belongs to, and whether it is ready",
@@ -386,9 +1190,13 @@
       "name": "supersede"
     },
     {
-      "about": "Add or remove a dependency edge: `dep add A --after B` means A comes after B, and `dep rm` takes it back",
-      "default_format": null,
-      "formats": [],
+      "about": "Add or remove dependency edges: repeat `--after`, or use `dep apply` for mixed multi-target additions and removals against one final graph",
+      "default_format": "human",
+      "formats": [
+        "human",
+        "json",
+        "agent"
+      ],
       "name": "dep"
     },
     {
@@ -402,6 +1210,16 @@
       "default_format": null,
       "formats": [],
       "name": "import"
+    },
+    {
+      "about": "Preview or apply one explicit blueprint file as one guarded graph",
+      "default_format": "human",
+      "formats": [
+        "human",
+        "json",
+        "agent"
+      ],
+      "name": "blueprint"
     },
     {
       "about": "Scaffold a new task file: the next id in this plan's own convention, the fields `check` needs, and a body to fill in. It fills in nothing it cannot know, so a new task carries no estimate and no evidence unless you give them. `--from <file>` adds every task a file names instead, as one change",
@@ -436,6 +1254,9 @@
   ],
   "config_keys": [
     "advisory",
+    "capture",
+    "capture.kinds",
+    "capture.profiles",
     "deny_warnings",
     "detect_drift",
     "docs",
@@ -443,13 +1264,16 @@
     "docs.membership.declared_by",
     "docs.membership.doc",
     "docs.membership.marker",
+    "docs.paths",
     "effort_days_per_week",
     "evidence",
     "evidence.exempt_tags",
     "evidence.max_unrelated_files",
+    "evidence.observation_inputs",
     "evidence.require_min_strength",
     "id_strategy",
     "no_traces",
+    "owners",
     "policy",
     "policy.evidence",
     "policy.evidence.exempt_tags",
@@ -457,6 +1281,7 @@
     "policy.when",
     "policy.when.cut",
     "policy.when.owner",
+    "policy.when.phase",
     "policy.when.status",
     "policy.when.tag",
     "require_cut_membership",
@@ -465,29 +1290,69 @@
     "roadmap.group_by",
     "root",
     "stale_after_days",
+    "summary",
+    "summary.group_by",
     "tag_families",
     "test",
+    "test.batch",
+    "test.batch.protocol",
+    "test.batch.run",
     "test.covers",
     "test.covers_by_test",
     "test.covers_by_test.paths",
     "test.covers_by_test.tests",
     "test.dir",
+    "test.exclusive",
     "test.expect_tests",
+    "test.inputs_by_test",
+    "test.inputs_by_test.paths",
+    "test.inputs_by_test.tests",
     "test.list",
     "test.max_memory",
+    "test.max_output",
     "test.max_processes",
     "test.name",
     "test.output_lines",
     "test.run",
     "test.run_selects",
+    "test.runners",
+    "test.runners.batch",
+    "test.runners.batch.protocol",
+    "test.runners.batch.run",
+    "test.runners.covers",
+    "test.runners.covers_by_test",
+    "test.runners.covers_by_test.paths",
+    "test.runners.covers_by_test.tests",
+    "test.runners.dir",
+    "test.runners.exclusive",
+    "test.runners.expect_tests",
+    "test.runners.inputs_by_test",
+    "test.runners.inputs_by_test.paths",
+    "test.runners.inputs_by_test.tests",
+    "test.runners.list",
+    "test.runners.max_memory",
+    "test.runners.max_output",
+    "test.runners.max_processes",
+    "test.runners.name",
+    "test.runners.output_lines",
+    "test.runners.run",
+    "test.runners.run_selects",
+    "test.runners.skipped",
+    "test.runners.timeout_seconds",
+    "test.runners.weight",
+    "test.runners.wrap",
+    "test.schedule",
+    "test.schedule.capacity",
     "test.skipped",
     "test.timeout_seconds",
+    "test.weight",
     "test.wrap",
     "traces_external",
     "traces_root",
     "url",
     "url.check",
     "url.max_memory",
+    "url.max_output",
     "url.max_processes",
     "url.timeout_seconds",
     "url.wrap",
@@ -495,12 +1360,14 @@
     "version.check",
     "version.check.command",
     "version.check.max_memory",
+    "version.check.max_output",
     "version.check.max_processes",
     "version.check.timeout_seconds",
     "version.check.wrap",
     "version.current",
     "version.current.command",
     "version.current.max_memory",
+    "version.current.max_output",
     "version.current.max_processes",
     "version.current.timeout_seconds",
     "version.current.wrap",
@@ -512,13 +1379,14 @@
     "version.require_impact"
   ],
   "counts": {
-    "behaviours": 34,
-    "commands": 39,
-    "config_keys": 75,
+    "behaviours": 218,
+    "build_capabilities": 1,
+    "commands": 48,
+    "config_keys": 124,
     "evidence_kinds": 5,
     "formats": 9,
     "mcp_tools": 13,
-    "rules": 53
+    "rules": 57
   },
   "evidence_kinds": [
     "commit",
@@ -562,15 +1430,15 @@
       "name": "aplan_check"
     },
     {
-      "description": "Resolve the plan's evidence against the repository (L1/L2): a cited commit must exist and touch the task's `paths`, a cited file must exist. Opens git. Never runs tests.",
+      "description": "Resolve the plan's evidence against the repository (L1/L2): a cited commit must be reachable from HEAD and touch the task's `paths`, a cited file must exist. Opens git and may run configured discovery/check providers, but never executes a cited test.",
       "name": "aplan_verify"
     },
     {
-      "description": "Create a task: the next id in this plan's own convention (or its prefix and a ULID, where the repository set `id_strategy: ulid`), placed in a cut, whose `phase` it takes. Refuses before writing what `check` would reject after, by running the rules on the plan this would produce; what it would only warn about is named in `notes` instead.",
+      "description": "Create a task with an explicit id and phase, or mint the next id in this plan's own convention (including its configured ULID strategy) and derive the phase from its cut. It accepts live initial states, every creation-time relationship, revisit scheduling and version impact; terminal history uses the CLI's evidence-resolving manifest ledger. With `members`, both identity fields are required: create that milestone and move existing live work from its source cuts in one guarded batch. Refuses before writing what `check` would reject after, by running the rules on the plan this would produce; what it would only warn about is named in `notes` instead.",
       "name": "aplan_add"
     },
     {
-      "description": "One task whole: its `paths`, `traces` and `evidence`, which no other tool returns, plus what the graph resolves (its cut, whether it is ready, what it waits on and what it releases) and every finding attached to it. Reads the evidence ladder, so a closed task whose citation rotted looks different from a healthy one.",
+      "description": "One task whole: its `paths`, `traces` and `evidence`, which no other tool returns, plus what the graph resolves (its cut, whether it is ready, what it waits on and what it releases) and every finding attached to it. Reads repository-backed evidence and retained typed provider observations without starting configured processes; `aplan_verify` explicitly refreshes providers.",
       "name": "aplan_show"
     },
     {
@@ -578,15 +1446,15 @@
       "name": "aplan_dep"
     },
     {
-      "description": "Close a task with evidence, resolved before it is written: a cited commit must exist and touch the task's `paths`, a cited file must exist, and a cited test must be one a configured runner lists. Refuses exactly what the CLI refuses; evidence is a citation to be resolved, never a score the caller asserts. It never runs a test and never fetches a url, and whatever nothing here could check is named in `unchecked` rather than left looking like a pass. `aplan_verify` resolves the whole plan.",
+      "description": "Close a task with evidence, resolved at L2 before it is written: a cited commit must be reachable from HEAD and touch the task's `paths`, a cited file must exist, and a cited test must be one a configured runner lists. Refuses exactly what the CLI refuses; evidence is a citation to be resolved, never a score the caller asserts. This agent tool never runs a test; it never starts `test.run` or `test.batch`. Focused L3 closure is an explicit trusted CLI or interactive action. It never fetches a url, and whatever nothing here could check is named in `unchecked` rather than left looking like a pass. `aplan_verify` resolves the whole plan.",
       "name": "aplan_close"
     },
     {
-      "description": "Record that you are working on a task, so other agents sharing this repository can see it and `aplan_ready` can be filtered to what nobody holds. Two agents cannot both be told they hold one task: the write is a compare-and-swap, and the second is refused rather than overwriting the first. Taking a task somebody holds needs `from` naming them, which is checked. The name comes from `as`, else `APLAN_OWNER`, else the repository's git user, else the operating system's; it is never read from `.aplan.yml`, because several actors share one repository.",
+      "description": "Record that you are working on a task, so other agents sharing this Git repository and all of its linked worktrees can see the same local ephemeral claim. It never edits the task or its durable `owner`. Two agents cannot both be told they hold one task: the common-directory record is a compare-and-swap. Taking a held task needs `from` naming the displaced holder. Labels are attribution, not authentication; the response includes time, origin, source and coordination scope.",
       "name": "aplan_claim"
     },
     {
-      "description": "Drop a claim, reporting whose it was. Any caller may release, because a claim lasts until it is released or taken over and an abandoned one has to be clearable by somebody else; the record of who held it is in the diff. Releasing a task nobody holds changes nothing and says so.",
+      "description": "Drop a claim, reporting whose it was. Any caller may release, because a claim lasts until it is released or taken over and an abandoned one has to be clearable by somebody else. A missing task's orphaned local claim can still be released explicitly. Releasing a visible task nobody holds changes nothing and says so.",
       "name": "aplan_release"
     },
     {
@@ -652,7 +1520,7 @@
     {
       "code": "APLAN011",
       "severity": "error",
-      "title": "commit evidence resolves to a commit in this repository"
+      "title": "commit evidence resolves to an immutable commit reachable from HEAD"
     },
     {
       "code": "APLAN012",
@@ -863,8 +1731,28 @@
       "code": "APLAN053",
       "severity": "warning",
       "title": "a task that is `in_progress` has something in the repository to show for it"
+    },
+    {
+      "code": "APLAN054",
+      "severity": "warning",
+      "title": "a closed task's mutable file evidence is covered by a current fingerprint"
+    },
+    {
+      "code": "APLAN055",
+      "severity": "error",
+      "title": "captured dates are used only for authored note evidence"
+    },
+    {
+      "code": "APLAN056",
+      "severity": "warning",
+      "title": "a task's owner belongs to the declared owner vocabulary"
+    },
+    {
+      "code": "APLAN057",
+      "severity": "error",
+      "title": "every inbox entry is one canonical, valid and cross-record-consistent V1 capture"
     }
   ],
   "schema_version": "v1",
-  "version": "0.4.0"
+  "version": "0.5.0-dev"
 }

@@ -4,6 +4,23 @@
 use std::fmt;
 use std::path::PathBuf;
 
+use serde::{Deserialize, Serialize};
+
+use crate::task::Evidence;
+
+/// A diagnostic's machine-applicable repair.
+///
+/// This is deliberately narrower than [`Diagnostic::agent_instruction`]. An
+/// instruction may ask a person to choose between several valid outcomes; a
+/// repair exists only when the diagnostic already computed one exact edit that
+/// the ordinary mutation surface can validate before writing (`A1-199`).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "operation", rename_all = "snake_case")]
+pub enum Repair {
+    /// Replace one cited piece of evidence with one exact replacement.
+    ReplaceEvidence { from: Evidence, to: Evidence },
+}
+
 /// Severity of a diagnostic. `Error` fails `aplan check`; `Warning` does not.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
 pub enum Severity {
@@ -54,6 +71,8 @@ pub enum Binding {
     Traces,
     /// The stamps `APLAN018` compares a traced document against.
     TraceFingerprints,
+    /// The stamps `APLAN054` compares mutable evidence referents against.
+    EvidenceFingerprints,
     /// Evidence of one kind: a rule about commits says nothing about a task
     /// citing only tests.
     Evidence(crate::task::EvidenceKind),
@@ -70,6 +89,7 @@ impl Binding {
             Self::Paths => !task.paths.is_empty(),
             Self::Traces => !task.traces.is_empty(),
             Self::TraceFingerprints => !task.trace_fingerprints.is_empty(),
+            Self::EvidenceFingerprints => !task.evidence_fingerprints.is_empty(),
             Self::Evidence(kind) => task.evidence.iter().any(|e| e.kind == kind),
         }
     }
@@ -258,10 +278,11 @@ define_rules! {
     /// Evidence of kind `note` without a `captured` date.
     UndatedNote => UNDATED_NOTE = "APLAN010", Error, "a note used as evidence carries a date",
         points_at: Some("evidence");
-    /// `commit` evidence names a SHA that does not resolve to a commit in this
-    /// repository (L1 "Resolved"). Raised by `aplan verify`, never by `check`.
+    /// `commit` evidence names an immutable SHA that does not resolve to a
+    /// commit reachable from this repository's `HEAD` (L1 "Resolved"). Raised
+    /// by `aplan verify`, never by `check`.
     CommitUnresolved => COMMIT_UNRESOLVED = "APLAN011", Error,
-        "commit evidence resolves to a commit in this repository",
+        "commit evidence resolves to an immutable commit reachable from HEAD",
         points_at: Some("evidence");
     /// `commit` evidence resolves, but its diff touches nothing in the task's
     /// `paths` (L2 "Relevant"), the citation is real but not bound to the task.
@@ -426,8 +447,10 @@ define_rules! {
     /// A `done` task cites evidence whose relevance cannot be checked, because it
     /// declares no `paths`. `APLAN012` binds a cited `commit` to the task by
     /// requiring its diff to touch one of those globs; with none declared there is
-    /// nothing to compare against, so the citation resolves and proves only that
-    /// some commit exists. The first pilot found seventeen of thirty-three tasks
+    /// nothing to compare against, so even a citation that resolves proves only
+    /// that its referent exists (or, for a commit, belongs to `HEAD` history), not
+    /// that the task's files changed. The first pilot found seventeen of
+    /// thirty-three tasks
     /// in this state while `check` reported zero warnings and `verify` reported
     /// evidence resolved (pre-public adoption evidence item 6). A warning rather than
     /// an error: the citation may well be honest, and the repository is the judge
@@ -489,15 +512,15 @@ define_rules! {
         binds: &[Binding::Paths],
         points_at: Some("evidence");
 
-    /// A second grouping level always ends up in tags, because tags are what
-    /// exists. `ADR-0008` rejected them for cut membership precisely because a
-    /// typo is silent, and then a pilot put 22 epics there anyway, plus a
-    /// build/measure/review taxonomy beside them: one validated grouping level
-    /// and one unvalidated one in the same frontmatter, with no way to tell them
-    /// apart by looking (pre-public adoption evidence, items 4 and 5). Declaring the
-    /// vocabulary in `.aplan.yml` makes a claim the repository already believes
-    /// checkable, without making tags into a model, so it does not pre-empt the
-    /// nesting decision `A1-032` owns. A tag is judged to belong to a family
+    /// A second task-membership dimension ends up in tags, because tags are
+    /// what exists. `ADR-0008` rejected them for cut membership precisely
+    /// because a typo is silent, and then a pilot put 22 epics there anyway,
+    /// plus a build/measure/review taxonomy beside them: one validated
+    /// dimension and one unvalidated one in the same frontmatter, with no way
+    /// to tell them apart by looking (pre-public adoption evidence, items 4 and 5).
+    /// Declaring the vocabulary in `.aplan.yml` makes a claim the repository
+    /// already believes checkable without making tags into containment. A tag
+    /// is judged to belong to a family
     /// when it carries the family's `name-` prefix, or when it is one edit away
     /// from a declared member, which is what catches a transposition the prefix
     /// cannot see. A *warning*, not an error: an undeclared tag in a family's
@@ -1313,6 +1336,67 @@ define_rules! {
         "a task that is `in_progress` has something in the repository to show for it",
         applies: &[Binding::InProgress], binds: &[Binding::Paths],
         points_at: Some("status");
+    /// A mutable `file` evidence referent still has the contents that were
+    /// reviewed when the citation was recorded (`A1-196`).
+    ///
+    /// `APLAN015` owns reference rot: a path, revision or anchor no longer
+    /// resolves. This is the other failure mode, where the exact same reference
+    /// still resolves and now names different proof. Unversioned `file`
+    /// citations are stamped from committed blobs. An `@rev` that resolves as
+    /// the object id it spells is pinned to an immutable tree and needs no
+    /// stamp; a symbolic revision, including an all-hex branch or tag, can move
+    /// and is stamped.
+    ///
+    /// Advisory and opt-in through `detect_drift`, matching `APLAN018`. A change
+    /// does not prove the task is wrong; it proves the cited proof needs review.
+    /// A task closed before stamping existed carries no fingerprint and remains
+    /// unverifiable rather than being retrospectively declared invalid. Once a
+    /// task carries any evidence stamp, a mutable citation missing its own stamp
+    /// is reported: partial coverage is distinguishable from historical absence.
+    EvidenceDrift => EVIDENCE_DRIFT = "APLAN054", Warning,
+        "a closed task's mutable file evidence is covered by a current fingerprint",
+        applies: &[Binding::Done, Binding::Evidence(crate::task::EvidenceKind::File)],
+        binds: &[Binding::EvidenceFingerprints],
+        points_at: Some("evidence");
+    /// An author-entered `captured` date appears on machine-resolved evidence
+    /// (`A1-197`).
+    ///
+    /// Only a `note` is the author's inline assertion, so only a note gains
+    /// provenance from the date the author made it. A commit has immutable
+    /// identity, a file has a content stamp, URL and test resolvers report the
+    /// current run, and a future historical report needs its own subject and
+    /// producer identity. Accepting a date on those kinds would make ignored
+    /// metadata look like checked freshness.
+    InapplicableCapture => INAPPLICABLE_CAPTURE = "APLAN055", Error,
+        "captured dates are used only for authored note evidence",
+        points_at: Some("evidence");
+    /// `APLAN056`: a task's free-text owner belongs to the repository's
+    /// declared owner vocabulary (`A1-190`).
+    ///
+    /// Without `owners`, every spelling stays legal and the rule is silent, so
+    /// an existing repository does not acquire policy by upgrading. Once a
+    /// repository declares the vocabulary, however, every owner lives in that
+    /// one namespace: unlike tags, there is no second class of unrelated values
+    /// that must remain outside it. An undeclared owner is therefore reported
+    /// whether or not it is close enough to suggest a correction.
+    ///
+    /// A warning, matching `APLAN026`: an unfamiliar spelling may be a typo or
+    /// a real person missing from the declaration. `deny_warnings` lets the
+    /// repository make that judgement block its gate.
+    OwnerVocabulary => OWNER_VOCABULARY = "APLAN056", Warning,
+        "a task's owner belongs to the declared owner vocabulary",
+        points_at: Some("owner");
+    /// A capture file is one canonical, valid and cross-record-consistent V1
+    /// inbox record (`A1-514`, ADR-0063).
+    ///
+    /// One rule owns the record boundary because its remedy is indivisible:
+    /// repair the inbox before a read or mutation can select a trustworthy
+    /// snapshot. Syntax, canonical identity, timestamps, lifecycle fields and
+    /// source uniqueness are all properties of that same input. Captures do
+    /// not become tasks, so none of the task-only rules can report them.
+    CaptureInvalid => CAPTURE_INVALID = "APLAN057", Error,
+        "every inbox entry is one canonical, valid and cross-record-consistent V1 capture",
+        points_at: None;
 }
 
 /// A repository's verdict policy: what makes a report fail its build.
@@ -1324,7 +1408,7 @@ define_rules! {
 /// case `APLAN022` could not serve: the check most useful *during* a migration
 /// was the one a migration could not turn on until it was finished
 /// (pre-public adoption evidence, item 3).
-#[derive(Debug, Default, Clone)]
+#[derive(Debug, Default, Clone, Serialize)]
 pub struct Verdict {
     /// Whether a warning blocks.
     pub deny_warnings: bool,
@@ -1347,7 +1431,7 @@ impl Verdict {
 /// name it. Nothing renders an underline: all five consumers take a line and a
 /// column and nothing else -- GitHub's `line=`/`col=`, SARIF's `startLine`/
 /// `startColumn`, and the `path:line:` convention `check-docs` already prints.
-/// A span would also have to come from somewhere, and `serde_yaml_ng` hands
+/// A span would also have to come from somewhere, and `yaml_compat` hands
 /// back no marks for a parse that *succeeded*; getting them means a second YAML
 /// parser inside `aplan-core`, which is a large dependency to carry for a
 /// rendering nobody performs. This is the part of the span every renderer would
@@ -1375,6 +1459,11 @@ pub struct Diagnostic {
     pub message: String,
     /// A directive an autonomous agent can act on without further context.
     pub agent_instruction: Option<String>,
+    /// An exact edit the tool computed and can pass through its mutation gates.
+    ///
+    /// `None` means the remedy still requires judgement; it does not mean the
+    /// prose instruction is absent.
+    pub repair: Option<Repair>,
     /// Where in [`file`] the finding sits, when exactly one place answers.
     ///
     /// `None` is a real answer, not a missing one: a rule about the shape of
@@ -1418,6 +1507,7 @@ impl Diagnostic {
             file: None,
             message: message.into(),
             agent_instruction: None,
+            repair: None,
             location: None,
             detail: Vec::new(),
         }
@@ -1431,6 +1521,7 @@ impl Diagnostic {
             file: None,
             message: message.into(),
             agent_instruction: None,
+            repair: None,
             location: None,
             detail: Vec::new(),
         }
@@ -1458,6 +1549,13 @@ impl Diagnostic {
     #[must_use]
     pub fn with_agent_instruction(mut self, s: impl Into<String>) -> Self {
         self.agent_instruction = Some(s.into());
+        self
+    }
+
+    /// Attach one exact edit this diagnostic has already computed.
+    #[must_use]
+    pub fn with_repair(mut self, repair: Repair) -> Self {
+        self.repair = Some(repair);
         self
     }
 
@@ -1647,7 +1745,7 @@ mod tests {
         // Every rule's `code()` is one of the module constants and vice versa is
         // structurally guaranteed by the macro; this pins the count so dropping
         // a row is a visible change.
-        assert_eq!(Rule::ALL.len(), 53);
+        assert_eq!(Rule::ALL.len(), 57);
     }
 
     /// Severity is declared per rule in the macro. Pin the warnings so a
@@ -1666,7 +1764,7 @@ mod tests {
                 "APLAN009", "APLAN016", "APLAN018", "APLAN019", "APLAN021", "APLAN023", "APLAN024",
                 "APLAN025", "APLAN026", "APLAN027", "APLAN029", "APLAN035", "APLAN036", "APLAN037",
                 "APLAN038", "APLAN039", "APLAN040", "APLAN041", "APLAN042", "APLAN043", "APLAN044",
-                "APLAN045", "APLAN051", "APLAN052", "APLAN053"
+                "APLAN045", "APLAN051", "APLAN052", "APLAN053", "APLAN054", "APLAN056"
             ]
         );
     }
@@ -1748,6 +1846,9 @@ mod points_at_tests {
                 // the leftover prompt, which no frontmatter field names
                 // (`A1-299`)
                 "APLAN043",
+                // about a versioned inbox record rather than task frontmatter;
+                // the diagnostic still carries the capture file path
+                "APLAN057",
             ],
             "the set of rules with no location changed; if that is deliberate, say so here"
         );

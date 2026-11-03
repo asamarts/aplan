@@ -13,7 +13,7 @@
 
 use std::path::{Path, PathBuf};
 
-mod common;
+use crate::common;
 
 /// Every Rust source this workspace owns, test and production alike.
 fn workspace_sources() -> Vec<(String, String)> {
@@ -72,6 +72,11 @@ const MAY_NAME_THE_RAM_DISK: &[(&str, &str)] = &[
     (
         "crates/aplan/tests/fixture_root.rs",
         "this gate, which must name what it refuses",
+    ),
+    (
+        "crates/aplan-tui/src/lib.rs",
+        "the live external-editor handoff creates one bounded private user draft in the operating \
+         system's temporary directory; it is production data, not a test fixture",
     ),
 ];
 

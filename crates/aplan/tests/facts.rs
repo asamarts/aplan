@@ -4,10 +4,13 @@
 //! `facts.json` is generated from the code by `aplan::facts()`. This test pins the
 //! committed file to that output, so adding a rule, a format, a command, or an
 //! evidence kind without regenerating turns CI red. It runs in the normal
-//! `build + test` job, so no extra CI wiring is needed.
+//! default-feature `build + test` job, so no extra CI wiring is needed. The
+//! supported headless build deliberately emits a smaller capability document
+//! and therefore cannot be compared with the standard build's committed file.
 
-mod common;
+use crate::common;
 
+#[cfg(feature = "tui")]
 #[test]
 fn facts_json_is_up_to_date() {
     let generated = format!("{}\n", aplan::facts());

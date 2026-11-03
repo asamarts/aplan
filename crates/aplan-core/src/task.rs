@@ -30,6 +30,35 @@ crate::str_enum! {
     }
 }
 
+/// Whether a reference names nothing a reader or resolver can see.
+///
+/// `str::trim` strips Unicode `White_Space`, but not zero-width spaces,
+/// joiners, a BOM, soft hyphens or bidi marks. Treating those invisible values
+/// as citations would let `status: done` pass without visible proof and would
+/// let diagnostic subjects disagree about which evidence exists.
+#[must_use]
+pub fn is_vacuous_ref(reference: &str) -> bool {
+    reference
+        .chars()
+        .all(|c| c.is_whitespace() || c.is_control() || is_zero_width(c))
+}
+
+/// Invisible characters `char::is_whitespace` does not cover.
+fn is_zero_width(c: char) -> bool {
+    matches!(
+        c,
+        '\u{200B}'
+            | '\u{200C}'
+            | '\u{200D}'
+            | '\u{2060}'
+            | '\u{FEFF}'
+            | '\u{00AD}'
+            | '\u{200E}'
+            | '\u{200F}'
+            | '\u{061C}'
+    )
+}
+
 impl std::fmt::Display for Status {
     /// Renders as the serialised (`snake_case`) form. Diagnostics must show the
     /// value the user typed, not the Rust variant name.
@@ -87,6 +116,467 @@ crate::str_enum! {
     }
 }
 
+/// How a citation is turned back into a machine-checkable fact.
+///
+/// This is an intrinsic capability of the evidence kind, not a statement that
+/// a particular verification run has the required configuration. `Test` and
+/// `Url` are [`Configured`](Self::Configured), so their resolvers join a run
+/// only when the repository supplies the corresponding trusted command.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum EvidenceResolution {
+    /// Resolved from the repository through the named git-backed resolver.
+    Git(EvidenceGitResolver),
+    /// Resolved by the named command declared in trusted repository
+    /// configuration.
+    Configured(EvidenceConfiguredResolver),
+    /// Recorded for a reader, with no fact a machine can re-derive.
+    None,
+}
+
+/// The git-backed resolver that opens an evidence reference.
+///
+/// Naming the resolver prevents an under-specified generic "git" claim. The
+/// exhaustive audit still has to prove that each [`EvidenceKind`] names the
+/// right concrete resolver: a value-returning match can always return the
+/// wrong well-typed value.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum EvidenceGitResolver {
+    /// Resolve a commit object and inspect its changed paths.
+    Commit,
+    /// Resolve a committed file, revision and optional anchor.
+    File,
+}
+
+/// The configured resolver that opens an evidence reference.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum EvidenceConfiguredResolver {
+    /// Run the configured URL checker.
+    Url,
+    /// Query the configured test runners.
+    Test,
+}
+
+/// What detects that an evidence *reference* stopped resolving.
+///
+/// This deliberately says nothing yet about the referent changing while the
+/// reference remains valid. A file moving is reference rot; a file retaining
+/// its path while its proof is rewritten is the separate freshness question
+/// owned by `A1-196`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum EvidenceReferenceRot {
+    /// The stable rule code that reports the broken reference.
+    DetectedBy(&'static str),
+    /// No detector can exist because the kind references no machine-resolvable
+    /// fact. The reason is data so the exhaustive audit cannot turn absence
+    /// into an unexplained passing entry.
+    NotApplicable { reason: &'static str },
+}
+
+impl EvidenceReferenceRot {
+    /// The rule code that detects this kind's reference rot, if a machine can
+    /// re-resolve the reference at all.
+    #[must_use]
+    pub const fn detector(self) -> Option<&'static str> {
+        match self {
+            Self::DetectedBy(code) => Some(code),
+            Self::NotApplicable { .. } => None,
+        }
+    }
+}
+
+/// The operation that can replace a reference after it rots.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum EvidenceReferenceRepair {
+    /// `aplan amend <id> --replace-evidence <from> <to>` replaces the citation
+    /// through the mutation gate. It applies the same command policy as
+    /// `close`: git and configured test references are resolved, while a URL
+    /// is deliberately not fetched by a mutating command.
+    Amend,
+    /// There is no machine-resolvable reference to repair.
+    NotApplicable,
+}
+
+/// Whether a citation's referent can change while the reference still resolves.
+///
+/// Reference rot and referent freshness are deliberately separate. A file can
+/// keep the same path while its contents are rewritten; a URL can keep answering
+/// while the page says something else. [`EvidenceReferenceRot`] cannot describe
+/// either case without pretending that a valid reference stopped resolving.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum EvidenceFreshness {
+    /// The reference is content-addressed, so a changed referent necessarily has
+    /// a different reference.
+    Immutable { reason: &'static str },
+    /// The referent is mutable and a stored content fingerprint can detect a
+    /// later change.
+    Fingerprinted {
+        /// The stable rule code that reports a mismatch.
+        detector: &'static str,
+    },
+    /// The referent can change, but the resolver exposes no stable content that
+    /// can be compared without claiming more than it knows.
+    NotDetectable { reason: &'static str },
+    /// The citation has no independently mutable referent: its value is the
+    /// record itself.
+    NotApplicable { reason: &'static str },
+}
+
+impl EvidenceFreshness {
+    /// The rule that detects referent drift, when this kind has one.
+    #[must_use]
+    pub const fn detector(self) -> Option<&'static str> {
+        match self {
+            Self::Fingerprinted { detector } => Some(detector),
+            Self::Immutable { .. } | Self::NotDetectable { .. } | Self::NotApplicable { .. } => {
+                None
+            }
+        }
+    }
+}
+
+/// Whether the generic `captured` field has honest semantics for an evidence
+/// kind.
+///
+/// A date is provenance for an inline human note: it says when the author made
+/// the assertion. It is not freshness proof for a machine-resolved citation.
+/// Those kinds need immutable identity, a content fingerprint, a live resolver
+/// result, or a subject-bound report; an author-editable date supplies none of
+/// those. Keeping both answers in the kind model prevents a newly added kind
+/// from inheriting an ignored field by accident.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum EvidenceCapture {
+    /// The author or importer must record the date of the inline assertion.
+    AuthoredDate {
+        /// The rule that reports a missing or malformed date.
+        detector: &'static str,
+    },
+    /// The field would make no checked claim for this kind and is rejected.
+    NotApplicable {
+        /// The rule that reports a supplied but meaningless date.
+        detector: &'static str,
+        /// Why the kind's real freshness mechanism cannot be replaced by a
+        /// date entered in the task file.
+        reason: &'static str,
+    },
+}
+
+impl EvidenceCapture {
+    /// The rule that enforces this kind's capture semantics.
+    #[must_use]
+    pub const fn detector(self) -> &'static str {
+        match self {
+            Self::AuthoredDate { detector } | Self::NotApplicable { detector, .. } => detector,
+        }
+    }
+}
+
+/// How an evidence citation is related to the repository paths a task owns.
+///
+/// Locality is intrinsic to the *kind*: a commit always offers changed paths,
+/// a file always offers its cited path, and a test can offer the coverage its
+/// configured runner declares. Whether one particular citation resolves, or a
+/// runner is configured, remains an outcome of the verification run.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum EvidenceLocality {
+    /// Compare paths obtained from the citation with the task's `paths`.
+    TaskPaths {
+        /// Where the citation's side of that comparison comes from.
+        locator: EvidencePathLocator,
+        /// The rule that reports a resolved citation with no overlap.
+        detector: &'static str,
+    },
+    /// This kind has no honest repository-path locality check.
+    NotApplicable {
+        /// Why absence is the intended answer rather than a forgotten rule.
+        reason: &'static str,
+    },
+}
+
+impl EvidenceLocality {
+    /// The rule that detects a locality mismatch, if locality applies.
+    #[must_use]
+    pub const fn detector(self) -> Option<&'static str> {
+        match self {
+            Self::TaskPaths { detector, .. } => Some(detector),
+            Self::NotApplicable { .. } => None,
+        }
+    }
+
+    /// The declared detector when this locality uses `locator`.
+    ///
+    /// The locator selects the resolver-side path source; the detector comes
+    /// from this model rather than from a second locator-to-rule table.
+    #[must_use]
+    pub fn detector_for_locator(self, locator: EvidencePathLocator) -> Option<&'static str> {
+        match self {
+            Self::TaskPaths {
+                locator: declared,
+                detector,
+            } if declared == locator => Some(detector),
+            Self::TaskPaths { .. } | Self::NotApplicable { .. } => None,
+        }
+    }
+
+    /// The citation-side locator used by a path-local kind.
+    #[must_use]
+    pub const fn locator(self) -> Option<EvidencePathLocator> {
+        match self {
+            Self::TaskPaths { locator, .. } => Some(locator),
+            Self::NotApplicable { .. } => None,
+        }
+    }
+
+    /// Whether this kind can bind a citation to a task's `paths`.
+    #[must_use]
+    pub const fn uses_task_paths(self) -> bool {
+        matches!(self, Self::TaskPaths { .. })
+    }
+
+    /// Whether locality can be attempted without repository configuration.
+    ///
+    /// `check` uses this distinction for `APLAN023`: a commit or file with no
+    /// task paths has already lost a check that always exists, while test
+    /// locality exists only where a runner declares coverage.
+    #[must_use]
+    pub const fn is_configuration_independent(self) -> bool {
+        matches!(
+            self,
+            Self::TaskPaths {
+                locator: EvidencePathLocator::CommitChanges | EvidencePathLocator::CitedFile,
+                ..
+            }
+        )
+    }
+}
+
+/// The citation-side path set used for a locality comparison.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum EvidencePathLocator {
+    /// Paths changed by the cited commit.
+    CommitChanges,
+    /// The one repository-relative path named by the file citation.
+    CitedFile,
+    /// Coverage prefixes declared by the runner that lists the cited test.
+    ConfiguredTestCoverage,
+}
+
+/// Whether and how evidentiary breadth is measured after locality succeeds.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum EvidenceDilution {
+    /// A rule measures the named footprint and reports an over-broad citation.
+    Measured {
+        /// The breadth measurement the rule performs.
+        measure: EvidenceDilutionMeasure,
+        /// The rule that reports the excessive breadth.
+        detector: &'static str,
+    },
+    /// No sound breadth measurement exists for this kind.
+    NotApplicable {
+        /// Why absence is a decision rather than an unimplemented check.
+        reason: &'static str,
+    },
+}
+
+impl EvidenceDilution {
+    /// The rule that detects dilution, if dilution is measurable for this kind.
+    #[must_use]
+    pub const fn detector(self) -> Option<&'static str> {
+        match self {
+            Self::Measured { detector, .. } => Some(detector),
+            Self::NotApplicable { .. } => None,
+        }
+    }
+
+    /// The declared detector when this dilution uses `measure`.
+    ///
+    /// This keeps both halves of the capability together: selecting a measure
+    /// does not authorize a resolver to reconstruct its own rule-code mapping.
+    #[must_use]
+    pub fn detector_for_measure(self, measure: EvidenceDilutionMeasure) -> Option<&'static str> {
+        match self {
+            Self::Measured {
+                measure: declared,
+                detector,
+            } if declared == measure => Some(detector),
+            Self::Measured { .. } | Self::NotApplicable { .. } => None,
+        }
+    }
+}
+
+/// A machine-observable footprint that can be compared with task ownership.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum EvidenceDilutionMeasure {
+    /// Count changed paths outside the task's `paths`.
+    ChangedPathsOutsideTask,
+}
+
+/// Capabilities intrinsic to one [`EvidenceKind`].
+///
+/// One exhaustive match owns these facts. The verification engine reads
+/// [`resolution`](Self::resolution), and the evidence-kind audit checks the
+/// detector, repair, freshness, capture semantics, locality and dilution
+/// against the rule and command surfaces.
+///
+/// `evidence.require_min_strength` is deliberately absent. It is a
+/// repository's set of accepted kinds, not an intrinsic ordering or strength
+/// assigned by aplan; putting it here would turn policy into a property of the
+/// kind and contradict plans that choose a different accepted set.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct EvidenceCapabilities {
+    /// How this kind can be resolved.
+    pub resolution: EvidenceResolution,
+    /// What reports a reference that no longer resolves.
+    pub reference_rot: EvidenceReferenceRot,
+    /// How a broken reference can be replaced.
+    pub reference_repair: EvidenceReferenceRepair,
+    /// Whether the referent can change under a still-valid reference, and how
+    /// that change is detected when it can be.
+    pub freshness: EvidenceFreshness,
+    /// Whether `captured` records real provenance for this kind.
+    pub capture: EvidenceCapture,
+    /// How a resolved citation can be bound to this task's repository paths.
+    pub locality: EvidenceLocality,
+    /// Whether excessive breadth can be measured after that binding succeeds.
+    pub dilution: EvidenceDilution,
+}
+
+impl EvidenceKind {
+    /// The capabilities of this evidence kind.
+    ///
+    /// The match is exhaustive, so adding a kind is a compile error until its
+    /// resolution, reference-rot detector, repair, freshness, capture,
+    /// locality and dilution have answers.
+    #[must_use]
+    // Keep the five complete records together. Splitting a column into a second
+    // per-kind function would make the capability audit compare two tables and
+    // recreate the drift this model was introduced to remove.
+    #[allow(clippy::too_many_lines)]
+    pub const fn capabilities(self) -> EvidenceCapabilities {
+        match self {
+            EvidenceKind::Commit => EvidenceCapabilities {
+                resolution: EvidenceResolution::Git(EvidenceGitResolver::Commit),
+                reference_rot: EvidenceReferenceRot::DetectedBy("APLAN011"),
+                reference_repair: EvidenceReferenceRepair::Amend,
+                freshness: EvidenceFreshness::Immutable {
+                    reason: "a commit citation is content-addressed: changing the tree produces a \
+                             different commit SHA rather than changing the object under the same \
+                             reference",
+                },
+                capture: EvidenceCapture::NotApplicable {
+                    detector: "APLAN055",
+                    reason: "the commit id is the immutable provenance; an author-entered date is \
+                             neither the commit time nor proof of when somebody reviewed it",
+                },
+                locality: EvidenceLocality::TaskPaths {
+                    locator: EvidencePathLocator::CommitChanges,
+                    detector: "APLAN012",
+                },
+                dilution: EvidenceDilution::Measured {
+                    measure: EvidenceDilutionMeasure::ChangedPathsOutsideTask,
+                    detector: "APLAN024",
+                },
+            },
+            EvidenceKind::Url => EvidenceCapabilities {
+                resolution: EvidenceResolution::Configured(EvidenceConfiguredResolver::Url),
+                reference_rot: EvidenceReferenceRot::DetectedBy("APLAN016"),
+                reference_repair: EvidenceReferenceRepair::Amend,
+                freshness: EvidenceFreshness::NotDetectable {
+                    reason: "the configured URL checker observes reachability, not whether a page \
+                             still contains the proposition that made it evidence; hashing arbitrary \
+                             remote representations would make redirects, negotiation and dynamic \
+                             content part of an unstated contract",
+                },
+                capture: EvidenceCapture::NotApplicable {
+                    detector: "APLAN055",
+                    reason: "a URL checker observes the remote endpoint during this run; a date \
+                             written by the task author is not a persisted resolver result and \
+                             cannot say what representation answered then",
+                },
+                locality: EvidenceLocality::NotApplicable {
+                    reason: "an external URL exposes no repository path owned by the task, and \
+                             inferring one from arbitrary URL text or content would not be a \
+                             deterministic ownership check",
+                },
+                dilution: EvidenceDilution::NotApplicable {
+                    reason: "without a repository-path locality frame, a URL has no comparable \
+                             inside and outside footprint whose breadth can be measured",
+                },
+            },
+            EvidenceKind::File => EvidenceCapabilities {
+                resolution: EvidenceResolution::Git(EvidenceGitResolver::File),
+                reference_rot: EvidenceReferenceRot::DetectedBy("APLAN015"),
+                reference_repair: EvidenceReferenceRepair::Amend,
+                freshness: EvidenceFreshness::Fingerprinted {
+                    detector: "APLAN054",
+                },
+                capture: EvidenceCapture::NotApplicable {
+                    detector: "APLAN055",
+                    reason: "the evidence fingerprint binds review to committed content; a separate \
+                             author-entered date is not bound to that fingerprint and cannot date \
+                             the approval it claims",
+                },
+                locality: EvidenceLocality::TaskPaths {
+                    locator: EvidencePathLocator::CitedFile,
+                    detector: "APLAN031",
+                },
+                dilution: EvidenceDilution::NotApplicable {
+                    reason: "a file citation names one atomic repository path, so locality is a \
+                             binary overlap check with no broader path set to score",
+                },
+            },
+            EvidenceKind::Test => EvidenceCapabilities {
+                resolution: EvidenceResolution::Configured(EvidenceConfiguredResolver::Test),
+                reference_rot: EvidenceReferenceRot::DetectedBy("APLAN013"),
+                reference_repair: EvidenceReferenceRepair::Amend,
+                freshness: EvidenceFreshness::NotDetectable {
+                    reason: "a configured runner exposes an opaque test name and result, not a \
+                             stable mapping to the test body or the claim it proves; a renamed test \
+                             is reference rot, while a gutted test cannot be detected from that \
+                             interface",
+                },
+                capture: EvidenceCapture::NotApplicable {
+                    detector: "APLAN055",
+                    reason: "the configured runner resolves the named test in the current run; a \
+                             historical result needs a subject-bound report with producer and \
+                             execution identity, not a date written beside the test name",
+                },
+                locality: EvidenceLocality::TaskPaths {
+                    locator: EvidencePathLocator::ConfiguredTestCoverage,
+                    detector: "APLAN025",
+                },
+                dilution: EvidenceDilution::NotApplicable {
+                    reason: "runner coverage is a declared logical scope rather than an observed \
+                             execution footprint, and broad integration coverage can strengthen \
+                             rather than dilute a test citation",
+                },
+            },
+            EvidenceKind::Note => EvidenceCapabilities {
+                resolution: EvidenceResolution::None,
+                reference_rot: EvidenceReferenceRot::NotApplicable {
+                    reason: "a dated human note references nothing a machine can re-resolve, so \
+                             there is no reference whose rot a rule could detect",
+                },
+                reference_repair: EvidenceReferenceRepair::NotApplicable,
+                freshness: EvidenceFreshness::NotApplicable {
+                    reason: "a note's text is stored inline as the evidence record itself, so there \
+                             is no independently mutable referent behind a still-valid reference",
+                },
+                capture: EvidenceCapture::AuthoredDate {
+                    detector: "APLAN010",
+                },
+                locality: EvidenceLocality::NotApplicable {
+                    reason: "a human note has no machine-readable repository locator to compare \
+                             with the paths a task owns",
+                },
+                dilution: EvidenceDilution::NotApplicable {
+                    reason: "a human note exposes no machine-observable path footprint whose \
+                             breadth could be measured",
+                },
+            },
+        }
+    }
+}
+
 /// Split a `file` reference into `(path, rev)`. `path@rev` yields a rev; a bare
 /// path (or one whose `@` leaves either side empty) resolves at `HEAD`.
 ///
@@ -130,8 +620,9 @@ pub struct Evidence {
     /// the note text itself.
     #[serde(rename = "ref")]
     pub reference: String,
-    /// ISO-8601 date the evidence was captured. Required for `note`, because an
-    /// undated note is a rumour.
+    /// ISO-8601 date the inline assertion was made. Required for `note`, because
+    /// an undated note is a rumour, and rejected on every machine-resolved kind:
+    /// an author-entered date is not freshness proof (`APLAN055`).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub captured: Option<String>,
 }
@@ -150,7 +641,9 @@ pub struct Task {
     /// and there is no reading of an empty title that was intended.
     #[schemars(length(min = 1))]
     pub title: String,
-    /// Phase number. Used for rollups and ordering, not for gating.
+    /// Required ordered reporting coordinate. The default summary groups by it,
+    /// and new-id minting uses it as a convention hint. It creates no
+    /// membership, dependency, readiness gate, or execution order.
     pub phase: u32,
     /// Lifecycle status.
     pub status: Status,
@@ -213,9 +706,10 @@ pub struct Task {
     /// of edge. A release is now the special case of this rather than the
     /// mechanism for it.
     ///
-    /// **This is not a second grouping level** (ADR-0014): a task still belongs
-    /// to exactly one cut, the one that lists it. A container *borrows* the work
-    /// beneath it, which is the word ADR-0022 already used for a release.
+    /// **This is not a second task-membership level** (ADR-0014): a task still
+    /// belongs to exactly one cut, the one that lists it. A container *borrows*
+    /// the work beneath it, which is the word ADR-0022 already used for a
+    /// release.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub contains: Vec<String>,
     /// Proof of completion. Must be non-empty when `status: done`.
@@ -240,6 +734,15 @@ pub struct Task {
     /// stamp. Absent means unverifiable, not a violation (zero false positives).
     #[serde(default, skip_serializing_if = "std::collections::BTreeMap::is_empty")]
     pub trace_fingerprints: std::collections::BTreeMap<String, String>,
+    /// Content fingerprints of mutable evidence referents, captured by `close`
+    /// and `amend` when drift detection is enabled. Keys are full citations
+    /// (`file:path`), so kinds cannot collide. `APLAN054` compares a stored
+    /// fingerprint with the committed referent. Bare paths resolve at `HEAD`;
+    /// symbolic revisions are mutable too, while revisions that resolve as the
+    /// object id they spell need no stamp. Absent means unverifiable, not a
+    /// violation, so adoption is incremental.
+    #[serde(default, skip_serializing_if = "std::collections::BTreeMap::is_empty")]
+    pub evidence_fingerprints: std::collections::BTreeMap<String, String>,
     /// Free-form labels.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub tags: Vec<String>,
@@ -309,7 +812,9 @@ pub struct Task {
     pub version: Option<String>,
 }
 
-/// What a change did to the thing that ships (`A1-312`, ADR-0034).
+// The version semantics were established by A1-312 and ADR-0034. Keep that
+// repository-local provenance out of this public type's derived JSON Schema.
+/// What a change did to the thing that ships.
 ///
 /// Ordered, and the order is the whole type: aggregation takes the strongest of
 /// what a level floors and what its members claim, so `None < Fix < Feature <
@@ -340,7 +845,7 @@ pub enum VersionImpact {
 /// Resolved rather than configured, because this crate must not know what
 /// `.aplan.yml` looks like: `aplan_config` turns the adopter's map into this,
 /// defaults and all, and the rule below reads only the answer.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
 pub struct VersionFloors {
     /// A unit of work.
     pub task: VersionImpact,
@@ -423,10 +928,10 @@ impl Task {
     /// Whether anything this task cites is judged against its `paths`.
     ///
     /// `APLAN012` binds a `commit` by asking whether its diff touched them,
-    /// `APLAN024` measures how much of that commit falls outside them, `APLAN015`
-    /// and `APLAN023` bind a `file` to them, and `APLAN025` asks whether a cited
-    /// `test` covers them. A `note` or a `url` is judged against nothing, and a
-    /// task citing neither has nothing bound to its paths at all.
+    /// `APLAN024` measures how much of that commit falls outside them, `APLAN031`
+    /// binds a `file` to them, and `APLAN025` asks whether a cited `test` covers
+    /// them. A `note` or a `url` is judged against nothing, and a task citing
+    /// neither has nothing bound to its paths at all.
     ///
     /// This is `APLAN019`'s scope (`A1-138`). That rule reports a glob matching
     /// no tracked file, and explains itself with "so every rule that judges
@@ -442,13 +947,8 @@ impl Task {
     pub fn binds_paths(&self) -> bool {
         self.evidence
             .iter()
-            .filter(|e| !crate::validate::is_vacuous_ref(&e.reference))
-            .any(|e| {
-                matches!(
-                    e.kind,
-                    EvidenceKind::Commit | EvidenceKind::File | EvidenceKind::Test
-                )
-            })
+            .filter(|e| !is_vacuous_ref(&e.reference))
+            .any(|e| e.kind.capabilities().locality.uses_task_paths())
     }
 
     /// Whether this task is a *milestone*: a checkpoint over other tasks rather
@@ -482,6 +982,69 @@ impl Task {
 mod tests {
     use super::*;
 
+    #[test]
+    fn capability_selections_return_the_detector_the_model_declares() {
+        let locality = EvidenceLocality::TaskPaths {
+            locator: EvidencePathLocator::CitedFile,
+            detector: "LOCALITY-FROM-THE-MODEL",
+        };
+        assert_eq!(
+            locality.detector_for_locator(EvidencePathLocator::CitedFile),
+            Some("LOCALITY-FROM-THE-MODEL")
+        );
+        assert_eq!(
+            locality.detector_for_locator(EvidencePathLocator::CommitChanges),
+            None,
+            "a different resolver-side locator must not borrow this detector"
+        );
+        assert_eq!(locality.detector(), Some("LOCALITY-FROM-THE-MODEL"));
+        assert_eq!(
+            EvidenceLocality::NotApplicable {
+                reason: "locality does not apply"
+            }
+            .detector(),
+            None
+        );
+
+        let dilution = EvidenceDilution::Measured {
+            measure: EvidenceDilutionMeasure::ChangedPathsOutsideTask,
+            detector: "DILUTION-FROM-THE-MODEL",
+        };
+        assert_eq!(
+            dilution.detector_for_measure(EvidenceDilutionMeasure::ChangedPathsOutsideTask),
+            Some("DILUTION-FROM-THE-MODEL")
+        );
+        assert_eq!(dilution.detector(), Some("DILUTION-FROM-THE-MODEL"));
+        assert_eq!(
+            EvidenceDilution::NotApplicable {
+                reason: "dilution does not apply"
+            }
+            .detector(),
+            None
+        );
+    }
+
+    #[test]
+    fn reference_rot_exposes_a_detector_only_where_one_can_exist() {
+        for kind in [
+            EvidenceKind::Commit,
+            EvidenceKind::Url,
+            EvidenceKind::File,
+            EvidenceKind::Test,
+        ] {
+            assert!(
+                kind.capabilities().reference_rot.detector().is_some(),
+                "{} is machine-resolvable and must name its detector",
+                kind.as_str()
+            );
+        }
+        assert_eq!(
+            EvidenceKind::Note.capabilities().reference_rot.detector(),
+            None,
+            "a human note has no reference a detector could re-resolve"
+        );
+    }
+
     /// A blank work task, for the level cases below.
     fn work_task() -> Task {
         Task {
@@ -499,6 +1062,7 @@ mod tests {
             paths: Vec::new(),
             traces: Vec::new(),
             trace_fingerprints: std::collections::BTreeMap::new(),
+            evidence_fingerprints: std::collections::BTreeMap::new(),
             tags: Vec::new(),
             revisit_at: None,
             version_impact: None,
@@ -578,6 +1142,7 @@ mod tests {
             paths: Vec::new(),
             traces: Vec::new(),
             trace_fingerprints: std::collections::BTreeMap::new(),
+            evidence_fingerprints: std::collections::BTreeMap::new(),
             tags: vec![RELEASE_TAG.to_string()],
             revisit_at: None,
             version_impact: None,
@@ -615,6 +1180,7 @@ mod tests {
             paths: Vec::new(),
             traces: Vec::new(),
             trace_fingerprints: std::collections::BTreeMap::new(),
+            evidence_fingerprints: std::collections::BTreeMap::new(),
             tags: Vec::new(),
             revisit_at: None,
             version_impact: None,
@@ -662,6 +1228,7 @@ mod tests {
                 paths: vec!["src/**".into()],
                 traces: Vec::new(),
                 trace_fingerprints: std::collections::BTreeMap::new(),
+                evidence_fingerprints: std::collections::BTreeMap::new(),
                 tags: Vec::new(),
                 revisit_at: None,
                 version_impact: None,
@@ -671,6 +1238,15 @@ mod tests {
             t.evidence = evidence;
             t.binds_paths()
         };
+
+        for kind in EvidenceKind::ALL {
+            assert_eq!(
+                with(vec![ev(*kind, "citation")]),
+                kind.capabilities().locality.uses_task_paths(),
+                "{} path binding must be derived from its capability",
+                kind.as_str()
+            );
+        }
 
         assert!(with(vec![ev(EvidenceKind::Commit, "abc")]));
         assert!(with(vec![ev(EvidenceKind::File, "src/a.rs")]));
@@ -710,6 +1286,7 @@ mod tests {
             paths: Vec::new(),
             traces: Vec::new(),
             trace_fingerprints: std::collections::BTreeMap::new(),
+            evidence_fingerprints: std::collections::BTreeMap::new(),
             tags: Vec::new(),
             revisit_at: None,
             version_impact: None,

@@ -4,6 +4,8 @@ set -euo pipefail
 REPO_ROOT="$(cd "$(dirname "$0")/../.." && pwd)"
 cd "$REPO_ROOT"
 
+export CARGO_BUILD_WARNINGS=deny
+
 # Per-crate line-coverage floors (A1-046). The floors live in `coverage.json`,
 # committed, so lowering one is a diff a reviewer sees rather than a silent decay;
 # the gate also fails when a crate has outgrown its floor by more than the ratchet
@@ -18,23 +20,21 @@ cd "$REPO_ROOT"
 # Its own job because the instrumented rebuild does not share artifacts with the
 # ordinary `cargo test` build: putting it in the test job would double that job's
 # time for every push.
-# **The instrumented objects must not outlive the commit that built them**
-# (A1-352). `cargo llvm-cov` keeps them in `llvm-cov-target`, and this runner
-# mounts one `CARGO_TARGET_DIR` across every job, so builds of the same crate
-# from several commits accumulate there. Each carries its own coverage mapping
-# for the same source file, llvm-cov merges them into one entry per filename and
-# adds the counts, and the percentage is then wrong rather than missing:
-# `aplan-evidence` read 64.5% against 98.1% with every test passing, because
-# `src/lib.rs` was credited with 6,761 coverable lines in a 5,594-line file.
-#
-# `cargo llvm-cov clean` cannot do this: it refuses a target directory outside
-# the project, which is exactly the arrangement here. `xtask` refuses the
-# impossible count regardless, so a run that skips this is reported rather than
-# quietly believed.
+# **The instrumented objects must not be shared between builds** (A1-457).
+# `xtask` resolves Cargo's target and build directories through `cargo metadata`,
+# including an external `CARGO_TARGET_DIR`, then atomically allocates private
+# `llvm-cov-target` children for this run. Overlapping local measurements cannot
+# delete or contribute mappings to one another, and identification, allocation,
+# or cleanup failure stops the gate. Keeping this inside `xtask` makes the local
+# command and CI the same operation; a shell default here previously cleaned CI
+# while leaving local measurements vulnerable to merged mappings.
 #
 # It costs an instrumented rebuild every run. That is the price of a number that
 # means the same thing on two commits, which is the only thing a floor is for.
-rm -rf "${CARGO_TARGET_DIR:-target}/llvm-cov-target"
+# The xtask also pins libtest to four threads. Instrumentation makes each test
+# and child materially more expensive; host-sized fan-out starved both provider
+# readiness and an already-idle real-terminal session. The ordinary test gate is
+# deliberately unaffected (`A1-603`).
 
 echo "==> cargo xtask coverage --check"
 cargo run -q -p xtask -- coverage --check

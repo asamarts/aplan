@@ -11,22 +11,21 @@
 //! -- a script that treats it as "findings" reports a clean plan as dirty, and
 //! one that treats it as usage retries forever.
 //!
-//! **`3` is only reachable through a defect**, by construction: its single
-//! producer is `CloseError::Produced`, which means `close` built frontmatter it
-//! could not read back, and that is a bug in `aplan` rather than anything a
-//! plan can ask for. Which is why the mapping was all anyone had tested. The
-//! probe below therefore rides on a real one (`A1-213`): a task whose
-//! `blocked_by` carries a YAML anchor that another field aliases loads
-//! perfectly well, and rewriting that list orphans the alias, so what the
-//! writer produced no longer parses. When that is fixed the probe stops
-//! producing `3`
-//! and this file fails -- which is the point. The gate enumerates the codes
-//! from `facts`, so the repair is to find the next route to `3`, not to delete
-//! the probe: dropping it fails the same assertion from the other side.
+//! **`3` is only reachable through a defect**, by construction: `exit_code_for`
+//! assigns it only to an error carrying the internal `Bug` marker. For years
+//! this gate therefore rode one known writer failure after another: fixing an
+//! accepted YAML source form meant finding the next defect which still reached
+//! the marker. That is an incentive in exactly the wrong direction. `A1-726`
+//! replaces the poisoned-plan fixture with one exact private environment fault
+//! gated again by the integration harness's existing invocation ledger. It
+//! enters the real binary before dispatch and crosses the ordinary renderer and
+//! classifier, while an absent ledger or absent, empty and near-miss values do
+//! nothing. No CLI argument exposes it, and no accepted plan input has to remain
+//! broken merely so this gate can exercise the code a defect would take.
 
 use std::path::Path;
 
-mod common;
+use crate::common;
 
 /// One invocation that must produce one code.
 struct Probe {
@@ -68,6 +67,29 @@ fn plan(dir: &Path, frontmatter: &str) {
     .expect("task");
 }
 
+const INTERNAL_FAULT_ENV: &str = "APLAN_TEST_ONLY_FAULT";
+const INTERNAL_FAULT_VALUE: &str = "internal-exit-census-v1";
+const HARNESS_RECORD_ENV: &str = "APLAN_TEST_INVOCATIONS";
+
+fn harness_record(dir: &Path) -> std::path::PathBuf {
+    let path = dir.join("internal-exit-census.invocations");
+    std::fs::write(&path, []).expect("create the private harness marker");
+    path
+}
+
+fn internal_fault(dir: &Path) -> common::Run {
+    let out = common::command(dir, &["facts"])
+        .env(INTERNAL_FAULT_ENV, INTERNAL_FAULT_VALUE)
+        .env(HARNESS_RECORD_ENV, harness_record(dir))
+        .output()
+        .expect("run the binary with its private internal fault");
+    common::Run {
+        stdout: String::from_utf8_lossy(&out.stdout).into_owned(),
+        stderr: String::from_utf8_lossy(&out.stderr).into_owned(),
+        code: out.status.code().unwrap_or(-1),
+    }
+}
+
 const PROBES: &[Probe] = &[
     Probe {
         code: "clean",
@@ -98,31 +120,80 @@ const PROBES: &[Probe] = &[
     },
     Probe {
         code: "internal",
-        says: "bug in aplan",
-        // The previous route here was an argument a plain scalar could not carry
-        // (`A1-250`), which stopped producing `3` once list entries were
-        // serialised rather than pasted: an id the plan does not know is now
-        // `APLAN003`, which is the plan's problem and not aplan's (`A1-213`,
-        // audit). An anchor is the honest remainder -- valid YAML that this tool
-        // accepts and cannot rewrite.
-        what: "`dep add --after` on a task whose `blocked_by` carries a YAML anchor \
-               another field aliases, which `aplan` loads and cannot rewrite (`A1-213`)",
-        invoke: |dir| {
-            plan(dir, "blocked_by: &d\n  - T-2\ntags: *d\n");
-            for id in ["T-2", "T-3"] {
-                std::fs::write(
-                    dir.join(format!("aplan/{id}.md")),
-                    format!(
-                        "---\nid: {id}\ntitle: a task\nphase: 1\nstatus: todo\n\
-                         effort_days: 1\n---\n\n## Why\n\nBecause.\n"
-                    ),
-                )
-                .expect("task");
-            }
-            common::run(dir, &["dep", "add", "T-1", "--after", "T-3"])
-        },
+        says: "deliberate internal-exit test fault",
+        what: "the real binary's exact private internal-exit fault (`A1-726`)",
+        invoke: internal_fault,
     },
 ];
+
+#[test]
+fn only_the_exact_private_environment_value_injects_the_internal_fault() {
+    let dir = scratch();
+    let harness = harness_record(dir.path());
+    let absent = common::command(dir.path(), &["facts"])
+        .env_remove(INTERNAL_FAULT_ENV)
+        .env(HARNESS_RECORD_ENV, &harness)
+        .output()
+        .expect("facts without the private fault");
+    assert_eq!(absent.status.code(), Some(0));
+    for value in [
+        "",
+        "internal",
+        "internal-exit-census",
+        "internal-exit-census-v0",
+        "internal-exit-census-v1-near-miss",
+    ] {
+        let out = common::command(dir.path(), &["facts"])
+            .env(INTERNAL_FAULT_ENV, value)
+            .env(HARNESS_RECORD_ENV, &harness)
+            .output()
+            .expect("near-miss facts run");
+        assert_eq!(
+            out.status.code(),
+            Some(0),
+            "near-miss fault value {value:?} changed an ordinary command: {}{}",
+            String::from_utf8_lossy(&out.stdout),
+            String::from_utf8_lossy(&out.stderr)
+        );
+    }
+
+    let argument = common::run(dir.path(), &["facts", "--require", INTERNAL_FAULT_VALUE]);
+    assert_ne!(
+        argument.code, 3,
+        "the private token became a CLI route to internal exit: {argument:?}"
+    );
+    assert!(
+        !argument
+            .text()
+            .contains("deliberate internal-exit test fault")
+    );
+
+    let no_harness = common::command(dir.path(), &["facts"])
+        .env(INTERNAL_FAULT_ENV, INTERNAL_FAULT_VALUE)
+        .env_remove(HARNESS_RECORD_ENV)
+        .output()
+        .expect("fault token outside the test harness");
+    assert_eq!(
+        no_harness.status.code(),
+        Some(0),
+        "the private fault escaped its test-harness boundary: {}{}",
+        String::from_utf8_lossy(&no_harness.stdout),
+        String::from_utf8_lossy(&no_harness.stderr)
+    );
+
+    let stale_harness = common::command(dir.path(), &["facts"])
+        .env(INTERNAL_FAULT_ENV, INTERNAL_FAULT_VALUE)
+        .env(HARNESS_RECORD_ENV, dir.path().join("not-created"))
+        .output()
+        .expect("fault token with a stale harness path");
+    assert_eq!(
+        stale_harness.status.code(),
+        Some(0),
+        "a stale harness marker enabled the private fault: {}{}",
+        String::from_utf8_lossy(&stale_harness.stdout),
+        String::from_utf8_lossy(&stale_harness.stderr)
+    );
+}
 
 /// The `exit_codes` map the running build publishes.
 fn published() -> serde_json::Map<String, serde_json::Value> {

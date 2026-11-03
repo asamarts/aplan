@@ -10,11 +10,12 @@
 //! **Ids come from the plan, never from a pattern.** This tool deliberately does
 //! not own id format (`A1-029`, and `A1-047`'s `id_strategy` config key): the
 //! plans this has been measured against write `A1-042`, `AL1-07`, `WH2-06`,
-//! `RD1-01`, `K0-3`, `M-v0.8`, `M-phase-2` and `M-s1`, and a regex describing
-//! all of those would also describe half the version strings in a changelog. So
-//! the *prefixes* are learned from the plan's own ids -- everything before the
-//! final run of digits -- and only a word carrying one of those prefixes is read
-//! as a reference.
+//! `RD1-01`, `K0-3`, `M-v0.8`, `M-phase-2`, `M-p0-design` and `M-s1`, and a
+//! regex describing all of those would also describe half the version strings
+//! in a changelog. So the *families* are learned from the plan's own ids: a word
+//! must carry a taught prefix followed by the family's numeric core, including
+//! dot-separated digits or hyphen-separated suffixes only where the plan uses
+//! them.
 //!
 //! What that costs, measured before it shipped: over this repository's 43
 //! documents and four pilots' prose, 1,211 references were found and **two
@@ -57,10 +58,11 @@ pub struct Reference {
 
 /// What the plan teaches about how its ids are written (`A1-148`).
 ///
-/// A prefix, and whether ids under it carry dots. Both are learned from the
-/// plan's own ids and neither is a pattern this crate owns: `A1-042` teaches
-/// `A1-` without dots, `M-v0.8` teaches `M-v` with them, `M-phase-2` teaches
-/// `M-phase-`.
+/// A prefix, whether ids under it carry dots, and whether their numeric core may
+/// be followed by hyphen-separated words. All are learned from the plan's own
+/// ids and none is a pattern this crate owns: `A1-042` teaches `A1-` without
+/// dots or a suffix, `M-v0.8` teaches `M-v` with dots, `M-phase-2` teaches
+/// `M-phase-`, and `M-p0-design` teaches a suffix-bearing `M-p` family.
 ///
 /// The dot is why this is a type rather than a set of strings. `M-v0.N` is how
 /// prose writes "a milestone" and must not read as `M-v0`; `aplan/tasks/T-999.md`
@@ -69,51 +71,119 @@ pub struct Reference {
 /// shape -- digits, a dot, letters -- and only the plan can say which is which.
 #[derive(Debug, Clone, Default)]
 pub struct Vocabulary {
-    /// `(prefix, ids under it may contain dots)`, longest prefix first so
-    /// `M-v` wins over `M-` where a plan teaches both.
-    entries: Vec<(String, bool)>,
+    /// Longest prefix first so `M-v` wins over `M-` where a plan teaches both.
+    entries: Vec<Family>,
+}
+
+#[derive(Debug, Clone)]
+struct Family {
+    prefix: String,
+    dotted: bool,
+    hyphenated_suffix: bool,
+}
+
+fn sort_families(entries: &mut [Family]) {
+    entries.sort_by(|a, b| {
+        b.prefix
+            .chars()
+            .count()
+            .cmp(&a.prefix.chars().count())
+            .then(a.prefix.cmp(&b.prefix))
+    });
+}
+
+/// The characters that make a candidate part of a surrounding word rather
+/// than a standalone identifier. Keep this single predicate on both sides of
+/// the scanner: accepting `A1-042_suffix` as the known `A1-042` while rejecting
+/// `prefix_A1-042` would make the documented word-boundary contract depend on
+/// which side the punctuation sits.
+fn continues_word(c: char) -> bool {
+    c.is_alphanumeric() || c == '_'
+}
+
+/// Whether `chars` is one or more non-empty, hyphen-separated alphanumeric
+/// words and contains a letter. The caller hands this the separator itself.
+/// Requiring a letter keeps a numeric tail such as `M-phase-2` in the ordinary
+/// final-number family; [`crate::ids::contains_a_ulid`] separately keeps a
+/// minted ULID's numeric beginning from teaching a spurious prefix.
+fn hyphenated_suffix(chars: &[char]) -> bool {
+    if chars.first() != Some(&'-') {
+        return false;
+    }
+    let mut segment_len = 0;
+    let mut saw_letter = false;
+    for c in &chars[1..] {
+        if *c == '-' {
+            if segment_len == 0 {
+                return false;
+            }
+            segment_len = 0;
+        } else if c.is_alphanumeric() {
+            segment_len += 1;
+            saw_letter |= c.is_alphabetic();
+        } else {
+            return false;
+        }
+    }
+    segment_len > 0 && saw_letter
 }
 
 impl Vocabulary {
     /// Learn it from the plan's ids.
     #[must_use]
     pub fn of(ids: &BTreeSet<String>) -> Self {
-        let mut by_prefix: std::collections::BTreeMap<String, bool> =
+        let mut by_prefix: std::collections::BTreeMap<String, (bool, bool)> =
             std::collections::BTreeMap::new();
         for id in ids {
+            if crate::ids::contains_a_ulid(id) {
+                continue;
+            }
             // By characters, never by bytes: an id is whatever the plan wrote,
             // and slicing a multi-byte character in half would panic on someone
             // else's plan rather than decline to learn from it.
             let chars: Vec<char> = id.chars().collect();
-            let digits = chars.len()
-                - chars
+            let suffix = chars
+                .windows(2)
+                .enumerate()
+                .filter_map(|(i, pair)| {
+                    (pair[0].is_ascii_digit()
+                        && pair[1] == '-'
+                        && hyphenated_suffix(&chars[i + 1..]))
+                    .then_some(i + 1)
+                })
+                .next_back();
+            let numeric_end = suffix.unwrap_or(chars.len());
+            let digits = numeric_end
+                - chars[..numeric_end]
                     .iter()
                     .rev()
-                    .take_while(|c| c.is_ascii_digit())
+                    .take_while(|c| c.is_ascii_digit() || **c == '.')
                     .count();
             // A prefix of nothing would match every number in the document.
-            if digits == 0 || digits >= chars.len() {
+            if digits == 0 || digits >= numeric_end {
                 continue;
             }
-            let tail: String = chars[..digits].iter().collect();
-            let head = tail.trim_end_matches(|c: char| c.is_ascii_digit() || c == '.');
+            let head: String = chars[..digits].iter().collect();
             // A prefix has to be a *word*, not punctuation. An id like `-42`
             // would otherwise teach `-`, and every negative number in the
             // document would read as a reference to a task.
             if !head.chars().any(char::is_alphanumeric) {
                 continue;
             }
-            let dotted = tail.len() > head.len() && tail[head.len()..].contains('.');
-            let entry = by_prefix.entry(head.to_string()).or_insert(false);
-            *entry = *entry || dotted;
+            let dotted = chars[digits..numeric_end].contains(&'.');
+            let entry = by_prefix.entry(head).or_insert((false, false));
+            entry.0 |= dotted;
+            entry.1 |= suffix.is_some();
         }
-        let mut entries: Vec<(String, bool)> = by_prefix.into_iter().collect();
-        entries.sort_by(|a, b| {
-            b.0.chars()
-                .count()
-                .cmp(&a.0.chars().count())
-                .then(a.0.cmp(&b.0))
-        });
+        let mut entries: Vec<Family> = by_prefix
+            .into_iter()
+            .map(|(prefix, (dotted, hyphenated_suffix))| Family {
+                prefix,
+                dotted,
+                hyphenated_suffix,
+            })
+            .collect();
+        sort_families(&mut entries);
         Self { entries }
     }
 
@@ -128,14 +198,29 @@ impl Vocabulary {
     /// what was learned.
     #[must_use]
     pub fn prefixes(&self) -> Vec<&str> {
-        self.entries.iter().map(|(p, _)| p.as_str()).collect()
-    }
-
-    fn matching(&self, chars: &[char], at: usize) -> Option<(usize, bool)> {
         self.entries
             .iter()
-            .find(|(p, _)| starts_with(chars, at, p))
-            .map(|(p, dotted)| (p.chars().count(), *dotted))
+            .map(|family| family.prefix.as_str())
+            .collect()
+    }
+
+    fn matching(&self, chars: &[char], at: usize) -> Option<(usize, bool, bool)> {
+        self.entries
+            .iter()
+            .find(|family| {
+                let prefix_len = family.prefix.chars().count();
+                starts_with(chars, at, &family.prefix)
+                    && chars
+                        .get(at + prefix_len)
+                        .is_some_and(|c| c.is_ascii_digit() || (family.dotted && *c == '.'))
+            })
+            .map(|family| {
+                (
+                    family.prefix.chars().count(),
+                    family.dotted,
+                    family.hyphenated_suffix,
+                )
+            })
     }
 
     /// Prefixes a digit's typo away from a taught one, each with the prefix it
@@ -151,11 +236,15 @@ impl Vocabulary {
     /// is a near miss, and `AI-2027` in prose is not, though it differs in one
     /// position too. A letter is where another project's ids live.
     #[must_use]
-    pub fn near_prefixes(&self) -> std::collections::BTreeMap<String, (bool, Vec<String>)> {
-        let taught: BTreeSet<&str> = self.entries.iter().map(|(p, _)| p.as_str()).collect();
+    pub fn near_prefixes(&self) -> std::collections::BTreeMap<String, (bool, bool, Vec<String>)> {
+        let taught: BTreeSet<&str> = self
+            .entries
+            .iter()
+            .map(|family| family.prefix.as_str())
+            .collect();
         let mut out = std::collections::BTreeMap::new();
-        for (prefix, dotted) in &self.entries {
-            let chars: Vec<char> = prefix.chars().collect();
+        for family in &self.entries {
+            let chars: Vec<char> = family.prefix.chars().collect();
             for (i, c) in chars.iter().enumerate() {
                 if !c.is_ascii_digit() {
                     continue;
@@ -170,10 +259,13 @@ impl Vocabulary {
                     if taught.contains(variant.as_str()) {
                         continue;
                     }
-                    let entry = out.entry(variant).or_insert_with(|| (*dotted, Vec::new()));
-                    entry.0 = entry.0 || *dotted;
-                    if !entry.1.contains(prefix) {
-                        entry.1.push(prefix.clone());
+                    let entry = out
+                        .entry(variant)
+                        .or_insert_with(|| (family.dotted, family.hyphenated_suffix, Vec::new()));
+                    entry.0 |= family.dotted;
+                    entry.1 |= family.hyphenated_suffix;
+                    if !entry.2.contains(&family.prefix) {
+                        entry.2.push(family.prefix.clone());
                     }
                 }
             }
@@ -184,17 +276,20 @@ impl Vocabulary {
 
 /// Every reference in `text` to something shaped like one of the plan's ids.
 ///
-/// Both ends are word boundaries, and both are letters-and-digits only. The
-/// start rule keeps `xT-042` from reading as a reference; the end rule is what
-/// the first measurement added, without which `M-v0.N` reports a missing `M-v0`
-/// and every ULID in a document reports a missing task built from its leading
-/// digits.
+/// Both ends are word boundaries. The start rule keeps `xT-042` from reading as
+/// a reference; the end rule is what the first measurement added, without which
+/// `M-v0.N` reports a missing `M-v0` and every ULID in a document reports a
+/// missing task built from its leading digits. Between them, a family always
+/// has a numeric core and carries dots or single-hyphen suffix segments only
+/// where the plan taught that shape.
 ///
-/// A hyphen is *not* a boundary character, which the audit of this task had to
-/// fix: this project writes `--` where another would write an em dash, so
-/// `the clause--T-042` is ordinary prose, and treating the dash as part of the
-/// word made the reference invisible. A dangling id hiding behind punctuation is
-/// the one failure a gate like this cannot have.
+/// A hyphen at the front is *not* a boundary character, which the audit of this
+/// task had to fix: this project writes `--` where another would write an em
+/// dash, so `the clause--T-042` is ordinary prose, and treating the dash as part
+/// of the preceding word made the reference invisible. Within a suffix, only a
+/// hyphen followed by a non-empty alphanumeric segment continues the id, so the
+/// same doubled dash still separates two references. A dangling id hiding
+/// behind punctuation is the one failure a gate like this cannot have.
 #[must_use]
 pub fn references(text: &str, vocabulary: &Vocabulary) -> Vec<Reference> {
     let mut out = Vec::new();
@@ -207,10 +302,10 @@ pub fn references(text: &str, vocabulary: &Vocabulary) -> Vec<Reference> {
             line_start = i + 1;
             continue;
         }
-        if i > 0 && (chars[i - 1].is_alphanumeric() || chars[i - 1] == '_') {
+        if i > 0 && continues_word(chars[i - 1]) {
             continue;
         }
-        let Some((prefix_len, dotted)) = vocabulary.matching(&chars, i) else {
+        let Some((prefix_len, dotted, hyphenated)) = vocabulary.matching(&chars, i) else {
             continue;
         };
         let start = i + prefix_len;
@@ -225,9 +320,21 @@ pub fn references(text: &str, vocabulary: &Vocabulary) -> Vec<Reference> {
         if end == start {
             continue; // The prefix with no number after it is just a word.
         }
+        if hyphenated {
+            while chars.get(end) == Some(&'-') {
+                let mut next = end + 1;
+                while chars.get(next).is_some_and(|c| c.is_alphanumeric()) {
+                    next += 1;
+                }
+                if next == end + 1 {
+                    break;
+                }
+                end = next;
+            }
+        }
         // The end boundary. A ULID continues into letters, so it is not a
         // reference to the id its leading digits spell.
-        if chars.get(end).is_some_and(|c| c.is_alphanumeric()) {
+        if chars.get(end).is_some_and(|c| continues_word(*c)) {
             continue;
         }
         // A dot only matters where the plan's own ids use dots. There, a dot
@@ -273,9 +380,16 @@ pub fn dangling(text: &str, ids: &BTreeSet<String>) -> Vec<Reference> {
     // sentence -- are the ones above rather than a second reading of them.
     let near = vocabulary.near_prefixes();
     if !near.is_empty() {
-        let variants = Vocabulary {
-            entries: near.iter().map(|(v, (d, _))| (v.clone(), *d)).collect(),
-        };
+        let mut entries: Vec<Family> = near
+            .iter()
+            .map(|(variant, (dotted, hyphenated_suffix, _))| Family {
+                prefix: variant.clone(),
+                dotted: *dotted,
+                hyphenated_suffix: *hyphenated_suffix,
+            })
+            .collect();
+        sort_families(&mut entries);
+        let variants = Vocabulary { entries };
         for mut r in references(text, &variants) {
             if ids.contains(&r.id) || !seen.insert((r.id.clone(), r.line)) {
                 continue;
@@ -283,7 +397,7 @@ pub fn dangling(text: &str, ids: &BTreeSet<String>) -> Vec<Reference> {
             r.mistyped_prefix = near
                 .iter()
                 .find(|(v, _)| r.id.starts_with(v.as_str()))
-                .map(|(_, (_, taught))| taught.clone())
+                .map(|(_, (_, _, taught))| taught.clone())
                 .unwrap_or_default();
             out.push(r);
         }
@@ -497,9 +611,9 @@ pub fn membership(
 /// under it, and wrong for a document that nests one cut's heading inside
 /// another's. The audit found the cost: the outer cut read the inner one's
 /// declaration as its own and reported the inner cut's tasks as work it had never
-/// heard of. ADR-0014 says a plan has one grouping level, so this is a document
-/// this tool did not expect rather than one it should refuse; taking the narrower
-/// body reads it the way its author plainly meant.
+/// heard of. ADR-0014 says a plan has one task-membership level, so this is a
+/// document this tool did not expect rather than one it should refuse; taking
+/// the narrower body reads it the way its author plainly meant.
 fn cut_body(
     lines: &[&str],
     section: &aplan_core::anchor::Section,
@@ -628,6 +742,38 @@ mod tests {
         assert!(dangling("xA1-999 is not a reference", &known).is_empty());
     }
 
+    /// Proof for `check_docs.identifier_boundaries_are_symmetric`: a token
+    /// which continues with a word character is not the shorter known or
+    /// unknown id on either side. This exercises every scanner mode, including
+    /// the near-prefix pass, because they deliberately share one boundary.
+    #[test]
+    fn identifier_word_boundaries_are_symmetric_across_every_family() {
+        let known = ids(&["A1-557", "M-v0.8", "M-p0-design"]);
+        let joined = "prefix_A1-999 A1-999_suffix A1-557_suffix \
+                      M-v0.8_suffix M-p0-design_suffix A2-999_suffix";
+
+        assert!(
+            references(joined, &Vocabulary::of(&known)).is_empty(),
+            "no joined token is a standalone reference"
+        );
+        assert!(
+            dangling(joined, &known).is_empty(),
+            "near-prefix pass agrees"
+        );
+
+        assert_eq!(
+            dangling(
+                "Punctuation: A1-999.md, M-v0.9; M-p0-review--A1-557.",
+                &known
+            )
+            .into_iter()
+            .map(|reference| reference.id)
+            .collect::<Vec<_>>(),
+            vec!["A1-999", "M-v0.9", "M-p0-review"],
+            "punctuation, filenames and doubled hyphens remain boundaries"
+        );
+    }
+
     /// This project's own em dash is two hyphens, so a reference can arrive with
     /// one glued to its front. Found by the audit: the id was silently skipped,
     /// which is a dangling reference hiding behind punctuation.
@@ -638,6 +784,111 @@ mod tests {
         assert_eq!(dangling("a range A1-999--A1-042", &known).len(), 1);
         // The boundary that still holds: a reference does not continue a word.
         assert!(dangling("xA1-999", &known).is_empty());
+    }
+
+    /// Proof for `check_docs.complete_multi_hyphen_ids`: once the plan teaches
+    /// a numeric family with hyphenated suffixes, the complete token is the
+    /// reference. Known ids resolve and an unknown sibling is reported under
+    /// the spelling the document actually used, rather than as its numeric
+    /// prefix (`A1-557`, P00024 pilot item 6).
+    #[test]
+    fn complete_multi_hyphen_ids_are_resolved_and_reported_without_truncation() {
+        let known = ids(&["M-p0-design", "M-p0-build", "M-p1-read", "A1-557", "M-v0.1"]);
+        let text = "`M-p0-design`, M-p0-build; M-p1-read. Unknown: `M-p0-review`. \
+                    Ordinary: `A1-557` and `M-v0.1`.";
+
+        assert_eq!(
+            references(text, &Vocabulary::of(&known))
+                .into_iter()
+                .map(|reference| reference.id)
+                .collect::<Vec<_>>(),
+            vec![
+                "M-p0-design",
+                "M-p0-build",
+                "M-p1-read",
+                "M-p0-review",
+                "A1-557",
+                "M-v0.1"
+            ]
+        );
+        assert_eq!(
+            dangling(text, &known)
+                .into_iter()
+                .map(|reference| reference.id)
+                .collect::<Vec<_>>(),
+            vec!["M-p0-review"],
+            "the finding names the complete unknown token"
+        );
+    }
+
+    /// The suffix boundary is the hyphen after the numeric core, not an earlier
+    /// digit that happens to be part of the prefix. Picking the first eligible
+    /// hyphen in `A1-042-patch` teaches `A`, causing ordinary prose beginning
+    /// with that letter to become reference candidates.
+    #[test]
+    fn a_hyphenated_suffix_keeps_digits_that_belong_to_the_prefix() {
+        let known = ids(&["A1-042-patch", "A1-057-2fa"]);
+        let vocabulary = Vocabulary::of(&known);
+        assert_eq!(vocabulary.prefixes(), vec!["A1-"]);
+        assert_eq!(
+            references(
+                "`A1-042-patch`--`A1-057-2fa`; `A1-999-missing`.",
+                &vocabulary
+            )
+            .into_iter()
+            .map(|reference| reference.id)
+            .collect::<Vec<_>>(),
+            vec!["A1-042-patch", "A1-057-2fa", "A1-999-missing"]
+        );
+    }
+
+    /// Longest-prefix selection applies only among families that can consume
+    /// the numeric core at this position. A numeric subfamily and a named cut
+    /// family may legitimately overlap; the former must not mask the latter.
+    #[test]
+    fn an_overlapping_numeric_family_does_not_mask_a_hyphenated_suffix() {
+        let known = ids(&["M-p0-design", "M-p0-001"]);
+        assert_eq!(
+            references(
+                "Known: M-p0-design and M-p0-001; missing: M-p0-review.",
+                &Vocabulary::of(&known)
+            )
+            .into_iter()
+            .map(|reference| reference.id)
+            .collect::<Vec<_>>(),
+            vec!["M-p0-design", "M-p0-001", "M-p0-review"]
+        );
+    }
+
+    /// Selecting only a family that can consume the next character must not
+    /// narrow the older dotted-family behavior. A plan may teach `.8` as its
+    /// numeric core just as it may teach `0.8`; both were accepted before
+    /// suffix-bearing families existed.
+    #[test]
+    fn an_overlap_guard_preserves_a_dotted_core_that_begins_with_a_dot() {
+        let known = ids(&["M-v.8", "M-v0-design"]);
+        assert!(dangling("Known: M-v.8 and M-v0-design.", &known).is_empty());
+        assert_eq!(
+            dangling("Missing: M-v.9 and M-v0-review.", &known)
+                .into_iter()
+                .map(|reference| reference.id)
+                .collect::<Vec<_>>(),
+            vec!["M-v.9", "M-v0-review"]
+        );
+    }
+
+    /// Proof for `check_docs.near_prefixes_prefer_longest_family`: the typo
+    /// vocabulary is derived after the primary one, but it still has the same
+    /// longest-prefix contract. Here `A1-` and `A11-` are both near variants;
+    /// taking lexical order would report `A1-1` for `A11-999` and recommend the
+    /// wrong family.
+    #[test]
+    fn overlapping_near_prefixes_are_matched_longest_first() {
+        let known = ids(&["A2-001", "A01-001"]);
+        let dangling = dangling("Mistyped: A11-999.", &known);
+        assert_eq!(dangling.len(), 1);
+        assert_eq!(dangling[0].id, "A11-999");
+        assert_eq!(dangling[0].mistyped_prefix, vec!["A01-"]);
     }
 
     /// A plan can teach a prefix that is not a word, and then every number in

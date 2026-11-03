@@ -15,7 +15,7 @@
 
 use std::path::Path;
 
-mod common;
+use crate::common;
 
 /// A plan with a blocked task, a preference among ready work, and a cut whose
 /// members are all done, so every field in both payloads has a value.
@@ -80,6 +80,23 @@ fn payload(mut doc: serde_json::Value) -> serde_json::Value {
     doc
 }
 
+/// Remove the deliberately per-observation clock after proving it is present.
+///
+/// Separate CLI/MCP invocations can cross a one-second boundary. Comparing the
+/// sampled clock for equality would make a parity audit depend on scheduling,
+/// while omitting it without checking would let the field disappear unnoticed
+/// (`A1-531`).
+fn stable_ready(mut doc: serde_json::Value) -> serde_json::Value {
+    let observed = doc
+        .as_object_mut()
+        .expect("a ready object")
+        .remove("claim_observed_at_epoch_seconds")
+        .and_then(|value| value.as_i64())
+        .expect("ready carries an integer claim observation clock");
+    assert!(observed >= 0, "claim observation precedes the Unix epoch");
+    doc
+}
+
 #[test]
 fn ready_answers_the_cli_and_mcp_with_one_value() {
     let dir = tempfile::Builder::new()
@@ -91,7 +108,11 @@ fn ready_answers_the_cli_and_mcp_with_one_value() {
     let mcp = serde_json::to_value(aplan_mcp::tools::ready(dir.path()).expect("mcp ready"))
         .expect("serialisable");
 
-    assert_eq!(cli, mcp, "the CLI and MCP answers for `ready` differ");
+    assert_eq!(
+        stable_ready(cli.clone()),
+        stable_ready(mcp),
+        "the CLI and MCP answers for `ready` differ"
+    );
 
     // And the answer is worth having: the fixture is built so each field has a
     // value, or this would be comparing two empty lists.
@@ -220,8 +241,11 @@ fn the_json_shape_does_not_depend_on_explain() {
         .expect("tempdir");
     fixture(dir.path());
 
-    let plain = cli_json(dir.path(), &["ready", "--format", "json"]);
-    let explained = cli_json(dir.path(), &["ready", "--explain", "--format", "json"]);
+    let plain = stable_ready(cli_json(dir.path(), &["ready", "--format", "json"]));
+    let explained = stable_ready(cli_json(
+        dir.path(),
+        &["ready", "--explain", "--format", "json"],
+    ));
     assert_eq!(plain, explained, "`--explain` changed the machine shape");
 }
 

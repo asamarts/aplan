@@ -1,0 +1,207 @@
+# aplan's own policy, enforced by its own check on every push.
+evidence:
+  # A code task closes on a *test*, not on a commit (`A1-123`). `APLAN012` binds a
+  # cited commit to the task by path overlap only, which is the weakest of the
+  # three kinds, and this repository was accepting it while the tests it wrote in
+  # the same session went uncited: measured at 53 of 108 closed tasks, 20 of them
+  # owning code. The tests existed; the plan did not point at them.
+  #
+  # Requiring `test` alone is only honest because `A1-120` configured runners, so a
+  # `test` citation resolves against something. Before that it would have swapped a
+  # weak claim for an unchecked one.
+  require_min_strength: [test]
+  # The exemption, and what claiming it means: **there is no test that would fail
+  # if this task's work were reverted**. Prose, an ADR, a pilot log, a
+  # configuration change, a plan edit. It is not "a test would be hard to write":
+  # a task that could be proved and is not must cite the proof. Every task
+  # carrying it says which case it is, in its body, because a tag is a claim and
+  # this repository does not take claims on trust (`A1-123`).
+  # `milestone` is here for a different reason: a cut's `done` is proved by its
+  # members being done (ADR-0008), it owns no files and no test can bind to it, so
+  # asking a checkpoint for a test citation is a category error rather than a
+  # missing proof.
+  exempt_tags: [untestable, milestone]
+  # Provider observations are reusable only while this exhaustive material
+  # input set, the configured commands, their executables, Rustup installation
+  # manifests and inherited environment are identical (`A1-590`, ADR-0053). These are the sources and
+  # compile-time fixtures that can change a Cargo test catalogue; `target/` is
+  # deliberately absent because it is output, and a provider changing its own
+  # declared input cannot publish a current observation.
+  observation_inputs:
+    - Cargo.toml
+    - Cargo.lock
+    - rust-toolchain.toml
+    - .cargo/**
+    - crates/**
+    - xtask/**
+    - ci/**
+# What a week of this project absorbs, in effort days (`A1-147`, ADR-0023). It is
+# measured, not assumed: 151.0 effort days closed over the 5.6 calendar weeks from
+# the first commit (2026-07-09) to 2026-08-17, which is 27.0. Declared at 27 rather
+# than rounded up, and re-measurable by the same division at any time.
+#
+# What it says is that the estimates are calibrated to a human week and this
+# repository is not one: the sixth pilot assumed a 1.5x AI multiplier over five
+# days, and this is 5.4x its own estimate scale (`docs/pilots/p00013.md` item 2).
+# It is a capacity, not a promise, and the window is short enough that it is worth
+# re-deriving rather than trusting.
+effort_days_per_week: 27
+# Prose whose task references this repository promises to keep resolvable
+# (`A1-203`). These globs grow when an authored document is added; the old
+# hardcoded CI and Rust lists did not. Task files and test fixtures are inputs,
+# not narrative documentation. `ROADMAP.md` also appears through
+# `membership.doc` below; overlapping declarations resolve to one document.
+#
+# The membership declaration (`A1-165`) also says that the `**Tasks:**` line
+# under each `### v0.N` heading and the cut's milestone are two copies of one
+# fact. `M-v0.1` has no cut section here and is silent, which is the behaviour
+# a milestone that shipped before the document grew sections needs.
+docs:
+  paths:
+    - aplan/README.md
+deny_warnings: true
+# Stamp traced sections at close, warn when a closed task's section drifts (APLAN018).
+detect_drift: true
+# Every non-milestone task must be a member of exactly one cut, or tagged `cross-cutting`
+# (APLAN022): a milestone's `done` then proves the cut is exhaustively complete (ADR-0008).
+require_cut_membership: true
+# Canonical task assignees (`A1-190`, APLAN056). The short `t` is this host's
+# configured actor and already owns plan history; spelling remains exact so a
+# mistyped identity cannot split owner-filtered reports into two people.
+owners: [asamarts]
+# One runner per crate (`A1-054`). Not one `--workspace` runner: a name shared by two
+# crates must resolve as ambiguous, not against whichever package Cargo happened to run.
+# Consolidated integration tests carry their source-module prefix, but unit-test modules
+# and future crates can still collide. Split runners make any such shared name visible to
+# `APLAN013` rather than guessed (`A1-120`, `A1-630`).
+test:
+  # No `covers`, deliberately: this crate's tests drive the *binary*, so they
+  # assert what every crate does. `cli_corpus` pins the bytes `aplan-output`
+  # renders and `close_gate` proves what `aplan-evidence` resolves. A runner
+  # declaring no `covers` makes no locality claim and `APLAN025` stays silent for
+  # it, which is the honest form: a `covers_by_test: ['*']` would say the same
+  # thing while also claiming it of the unit tests inside `crates/aplan/src`
+  # (`A1-123`).
+  - name: aplan
+    list: [cargo, test, -q, -p, aplan, '--', --list]
+    run: [cargo, test, -q, -p, aplan, '--', --exact, '{test}']
+    skipped: [cargo, test, -q, -p, aplan, '--', --list, --ignored]
+  # Added with the runtime crate (`A1-420`): the typed application boundary is
+  # independently consumable by CLI, MCP and TUI, so its own tests are evidence
+  # about its own paths rather than being borrowed from an adapter.
+  - name: aplan-app
+    covers: [crates/aplan-app/**]
+    list: [cargo, test, -q, -p, aplan-app, '--', --list]
+    run: [cargo, test, -q, -p, aplan-app, '--', --exact, '{test}']
+    skipped: [cargo, test, -q, -p, aplan-app, '--', --list, --ignored]
+  # The terminal guard and renderer are a separately testable delivery adapter;
+  # its evidence must not be borrowed from the composing CLI (`A1-421`).
+  - name: aplan-tui
+    covers: [crates/aplan-tui/**]
+    list: [cargo, test, -q, -p, aplan-tui, '--', --list]
+    run: [cargo, test, -q, -p, aplan-tui, '--', --exact, '{test}']
+    skipped: [cargo, test, -q, -p, aplan-tui, '--', --list, --ignored]
+  - name: aplan-core
+    covers: [crates/aplan-core/**]
+    list: [cargo, test, -q, -p, aplan-core, '--', --list]
+    run: [cargo, test, -q, -p, aplan-core, '--', --exact, '{test}']
+    skipped: [cargo, test, -q, -p, aplan-core, '--', --list, --ignored]
+  - name: aplan-config
+    covers: [crates/aplan-config/**]
+    list: [cargo, test, -q, -p, aplan-config, '--', --list]
+    run: [cargo, test, -q, -p, aplan-config, '--', --exact, '{test}']
+    skipped: [cargo, test, -q, -p, aplan-config, '--', --list, --ignored]
+  # Added with the crate (`A1-040`): without a runner, no task can cite a test in
+  # it, and `amend` refused the citation for this task's own audit -- which is the
+  # gate working, one crate later than it should have.
+  - name: aplan-attest
+    covers: [crates/aplan-attest/**]
+    list: [cargo, test, -q, -p, aplan-attest, '--', --list]
+    run: [cargo, test, -q, -p, aplan-attest, '--', --exact, '{test}']
+    skipped: [cargo, test, -q, -p, aplan-attest, '--', --list, --ignored]
+  - name: aplan-evidence
+    covers: [crates/aplan-evidence/**]
+    list: [cargo, test, -q, -p, aplan-evidence, '--', --list]
+    run: [cargo, test, -q, -p, aplan-evidence, '--', --exact, '{test}']
+    skipped: [cargo, test, -q, -p, aplan-evidence, '--', --list, --ignored]
+  - name: aplan-output
+    covers: [crates/aplan-output/**]
+    list: [cargo, test, -q, -p, aplan-output, '--', --list]
+    run: [cargo, test, -q, -p, aplan-output, '--', --exact, '{test}']
+    skipped: [cargo, test, -q, -p, aplan-output, '--', --list, --ignored]
+  - name: aplan-interop
+    covers: [crates/aplan-interop/**]
+    list: [cargo, test, -q, -p, aplan-interop, '--', --list]
+    run: [cargo, test, -q, -p, aplan-interop, '--', --exact, '{test}']
+    skipped: [cargo, test, -q, -p, aplan-interop, '--', --list, --ignored]
+  - name: aplan-mcp
+    covers: [crates/aplan-mcp/**]
+    list: [cargo, test, -q, -p, aplan-mcp, '--', --list]
+    run: [cargo, test, -q, -p, aplan-mcp, '--', --exact, '{test}']
+    skipped: [cargo, test, -q, -p, aplan-mcp, '--', --list, --ignored]
+  - name: xtask
+    covers: [xtask/**]
+    list: [cargo, test, -q, -p, xtask, '--', --list]
+    run: [cargo, test, -q, -p, xtask, '--', --exact, '{test}']
+    skipped: [cargo, test, -q, -p, xtask, '--', --list, --ignored]
+  # `aplan-e2e` was missing until `A1-123` tried to cite one of its tests. It holds
+  # the scenario corpus and the coverage audits, which are exactly the proof for a
+  # task whose work is "every rule says something true", so a task that had a test
+  # was unable to say so and the citation was refused as unlistable.
+  # No `covers`, for the same reason: the scenario corpus and the coverage audits
+  # are repository-wide invariants by construction. "Every rule has a fires and a
+  # silent scenario" is a fact about `aplan-core`, asserted from the crate that
+  # can read the whole tree.
+  - name: aplan-e2e
+    list: [cargo, test, -q, -p, aplan-e2e, '--', --list]
+    run: [cargo, test, -q, -p, aplan-e2e, '--', --exact, '{test}']
+    skipped: [cargo, test, -q, -p, aplan-e2e, '--', --list, --ignored]
+# How this repository's own version is read, for `aplan version` and `APLAN048`
+# (`A1-313`, ADR-0040). A command rather than a parse, which is the point: this
+# tool does not know what a `Cargo.toml` means, and the one thing the arithmetic
+# must never do is invent the number it counts from.
+#
+# The same one-line script `ci/scripts/release.sh` reads the version through, so
+# the number the release gate refuses a tag against and the number the plan does
+# arithmetic on cannot come apart.
+#
+# `require_impact` stays off: every task here would have to declare one, and the
+# floors already answer for the ordinary ones (ADR-0034). What is declared is
+# what a floor cannot supply.
+version:
+  current:
+    command: [ci/scripts/current-version.sh]
+  # The L3 rung of a version claim (`A1-314`, APLAN049), written out and left off.
+  #
+  # `cargo semver-checks check-release` is the worked example for this workspace
+  # and it is one command away -- but it is not installed on the machine this
+  # repository is developed and gated on, and a declared checker that cannot be
+  # launched makes every `verify` report a configuration fault. That is the rule
+  # working, and it is not a useful default for a gate that runs on every push.
+  #
+  # Turn it on by installing `cargo-semver-checks` wherever `verify` runs and
+  # uncommenting these three lines. Nine hundred seconds rather than the default
+  # six hundred because this workspace is nine crates and the checker builds rustdoc
+  # for each.
+  # check:
+  #   command: [cargo, semver-checks, check-release]
+  #   timeout_seconds: 900
+  # On, so the gate that judges adopters judges this plan first (`A1-315`). It
+  # costs this plan nothing: `APLAN044` fires only on a *closed* task that
+  # claims **less** than its level implies and says nowhere why, so a task that
+  # declares nothing takes its floor in silence. Thirteen tasks here declare
+  # `breaking`, which no floor can supply; nothing else needed an edit.
+  require_impact: true
+  levels:
+    # A cut here is a planning bucket, not a delivery, so it owes nothing of its
+    # own. Measured rather than assumed, and ADR-0034 predicted it: eight done
+    # cuts against three tags. Leaving the shipped `feature` default on would
+    # make every closed cut raise the release by itself, which would be version
+    # by ceremony -- the thing that default exists to avoid for projects where a
+    # cut *is* a delivery.
+    #
+    # What it costs: below 1.0 nothing, because `feature` and `fix` both move
+    # the patch. The `feature` rung is therefore unobservable in this repository
+    # today, which is why its 160 feature tasks are left to the task floor
+    # rather than backfilled. `A1-315` has the measurement.
+    cut: none

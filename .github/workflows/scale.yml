@@ -1,8 +1,8 @@
 name: scale
 
-# Not on push. This generates 24,000 task files and runs for about twenty
-# seconds (a 29s job on the runner, 2026-09-09), which is not a per-commit cost
-# (`A1-229`); the per-commit gates are in `ci.yml`.
+# Not on push. This generates 24,000 task files and runs the release-profile,
+# real-PTY TUI budgets (`A1-229`, `A1-447`), which is not a per-commit cost; the
+# per-commit gates are in `ci.yml`.
 # Nightly catches a regression within a day, and `workflow_dispatch` is there for
 # the change that is *expected* to move the number.
 on:
@@ -16,17 +16,20 @@ concurrency:
 
 env:
   CARGO_TERM_COLOR: always
-  RUSTFLAGS: -D warnings
+  CARGO_BUILD_WARNINGS: deny
 
 permissions:
   contents: read
 
 jobs:
   scale:
-    name: scale shape
-    runs-on: [self-hosted, linux, aplan]
+    name: scale and TUI performance
+    runs-on: ${{ (github.event.repository.private && fromJSON('["self-hosted","linux","aplan"]')) || fromJSON('["ubuntu-latest"]') }}
     timeout-minutes: 30  # bound a hang: one runner, so a stuck job blocks all CI
     steps:
-      - uses: actions/checkout@v7
-      - name: scale
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - name: prepare a GitHub-hosted runner
+        if: runner.environment == 'github-hosted'
+        run: ci/scripts/prepare-hosted.sh base
+      - name: scale and TUI performance
         run: ci/scripts/scale.sh

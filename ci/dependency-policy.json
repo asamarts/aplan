@@ -1,0 +1,176 @@
+{
+  "schema": "aplan/dependency-policy/v1",
+  "target": "x86_64-unknown-linux-gnu",
+  "budgets": {
+    "lock": 288,
+    "default": 200,
+    "headless": 169,
+    "tui_increment": 32
+  },
+  "binary_budget": {
+    "owner": "A2-002",
+    "foundation_default_bytes": 12850648,
+    "foundation_headless_bytes": 12444008,
+    "measured_default_bytes": 20106544,
+    "measured_headless_bytes": 17817912,
+    "maximum_increment_bytes": 2500000,
+    "maximum_increment_basis_points": 1500,
+    "measurement": "stripped native x86_64 release binaries built from the same source and Rust 1.99.1 toolchain"
+  },
+  "terminal_stack": {
+    "crossterm": "0.29.0",
+    "ratatui": "0.30.2",
+    "ratatui-crossterm": "0.1.2"
+  },
+  "forbidden_progress_packages": [
+    "console",
+    "indicatif",
+    "unit-prefix"
+  ],
+  "admissions": [
+    {
+      "owner": "aplan-tui",
+      "kind": "normal",
+      "dependency": "aplan-app",
+      "target": "all",
+      "behavior": "typed read, verification, progress and mutation operations shared with non-terminal adapters",
+      "task": "A2-002"
+    },
+    {
+      "owner": "aplan-tui",
+      "kind": "normal",
+      "dependency": "aplan-core",
+      "target": "all",
+      "behavior": "task, finding, evidence and graph domain types rendered by the interface",
+      "task": "A2-002"
+    },
+    {
+      "owner": "aplan-tui",
+      "kind": "normal",
+      "dependency": "aplan-evidence",
+      "target": "all",
+      "behavior": "typed evidence options and verification trust state",
+      "task": "A2-002"
+    },
+    {
+      "owner": "aplan-tui",
+      "kind": "normal",
+      "dependency": "aplan-output",
+      "target": "all",
+      "behavior": "shared terminal-safe text and display-width primitives",
+      "task": "A2-002"
+    },
+    {
+      "owner": "aplan-tui",
+      "kind": "normal",
+      "dependency": "ratatui",
+      "target": "all",
+      "behavior": "terminal buffers, layout, widgets and the selected Crossterm backend",
+      "task": "A2-002"
+    },
+    {
+      "owner": "aplan-tui",
+      "kind": "normal",
+      "dependency": "shell-words",
+      "target": "all",
+      "behavior": "portable parsing of the configured external editor command",
+      "task": "A2-002"
+    },
+    {
+      "owner": "aplan-tui",
+      "kind": "normal",
+      "dependency": "thiserror",
+      "target": "all",
+      "behavior": "typed terminal, worker and application error boundaries",
+      "task": "A2-002"
+    },
+    {
+      "owner": "aplan-tui",
+      "kind": "normal",
+      "dependency": "unicode-segmentation",
+      "target": "all",
+      "behavior": "grapheme-safe clipping, editing and cursor movement",
+      "task": "A2-002"
+    },
+    {
+      "owner": "aplan-tui",
+      "kind": "normal",
+      "dependency": "unicode-width",
+      "target": "all",
+      "behavior": "terminal-cell measurement for responsive layout and hit geometry",
+      "task": "A2-002"
+    },
+    {
+      "owner": "aplan-tui",
+      "kind": "normal",
+      "dependency": "crossterm",
+      "target": "cfg(unix)",
+      "behavior": "level-triggered /dev/tty event polling through use-dev-tty",
+      "task": "A2-002"
+    },
+    {
+      "owner": "aplan-tui",
+      "kind": "normal",
+      "dependency": "libc",
+      "target": "cfg(unix)",
+      "behavior": "terminal process-group and editor handoff primitives absent from the portable facade",
+      "task": "A2-002"
+    },
+    {
+      "owner": "aplan-tui",
+      "kind": "normal",
+      "dependency": "signal-hook",
+      "target": "cfg(unix)",
+      "behavior": "catchable termination and suspend/resume lifecycle integration",
+      "task": "A2-002"
+    },
+    {
+      "owner": "aplan-tui",
+      "kind": "dev",
+      "dependency": "aplan-config",
+      "target": "all",
+      "behavior": "identity-safe refresh and configuration fixtures",
+      "task": "A2-002"
+    },
+    {
+      "owner": "aplan-tui",
+      "kind": "dev",
+      "dependency": "tempfile",
+      "target": "all",
+      "behavior": "isolated plan, repository and terminal lifecycle fixtures",
+      "task": "A2-002"
+    },
+    {
+      "owner": "aplan-app",
+      "kind": "normal",
+      "dependency": "graphlay",
+      "target": "all",
+      "behavior": "deterministic layered graph coordinates behind the private terminal-cell adapter",
+      "task": "A2-002"
+    },
+    {
+      "owner": "aplan",
+      "kind": "normal",
+      "dependency": "shell-words",
+      "target": "all",
+      "behavior": "portable direct parsing of VISUAL and EDITOR commands for capture body editing without a shell",
+      "task": "A2-002"
+    },
+    {
+      "owner": "aplan",
+      "kind": "normal",
+      "dependency": "tempfile",
+      "target": "all",
+      "behavior": "private temporary-file handoff for capture body editing with cleanup on every return path",
+      "task": "A2-002"
+    },
+    {
+      "owner": "aplan",
+      "kind": "dev",
+      "dependency": "termlens",
+      "target": "all",
+      "behavior": "deadline-bounded real-PTY terminal lifecycle and interaction journeys",
+      "task": "A2-002"
+    }
+  ]
+}

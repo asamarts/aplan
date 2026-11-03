@@ -1,0 +1,16 @@
+ aplan x ERROR  2 tasks  1 error  2 warnings  repo/very-lon>
+[1 O] [2 T] [3 D] [4 G] [5 R] [6 I]
++> Esc metrics | Overview > Snapshot identity <------------+
+|plan: repo/very-long-root sha:plan-identit                |
+|config: none selected sha:config-ident                    |
+|repository: repo/very-long-root                           |
+|repository state: not observed: synthetic snapshot        |
+|build: 0.test src:test-source                             |
+|facts:facts binary:binary                                 |
+|input: identity working_tree Hermetic                     |
+|snapshot: current; memory dirty: no                       |
+|load: complete                                            |
+|work: active work; effort: complete                       |
++----------------------------------------------------------+
+Esc metrics | C-p commands | ? help | i about | Tab focus
+Idle

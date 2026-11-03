@@ -544,6 +544,16 @@ fn body_for(source_name: &str, kind: &str, title: &str, blurb: Option<&str>) -> 
     body
 }
 
+fn require_work(doc: &Document, source_name: &str) -> Result<(), ImportError> {
+    if doc.phases.is_empty() && doc.workstreams.iter().all(|w| w.milestones.is_empty()) {
+        return Err(ImportError::Empty {
+            source_name: source_name.to_string(),
+            detail: None,
+        });
+    }
+    Ok(())
+}
+
 impl ProposalSource for RoadmapJson {
     fn flavor(&self) -> &'static str {
         "roadmap-json"
@@ -565,19 +575,13 @@ impl ProposalSource for RoadmapJson {
             source_name: source_name.to_string(),
             message: e.to_string(),
         })?;
-        if doc.phases.is_empty() && doc.workstreams.iter().all(|w| w.milestones.is_empty()) {
-            return Err(ImportError::Empty {
-                source_name: source_name.to_string(),
-                detail: None,
-            });
-        }
+        require_work(&doc, source_name)?;
 
         let mut report = Report::new();
         let mut tasks: Vec<Task> = Vec::new();
         let mut bodies: Vec<String> = Vec::new();
 
-        // The mapping is printed, not implied: a reader of the import has to be
-        // able to audit what happened to each of the source's words.
+        // Print the mapping so a reader can audit what happened to each source word.
         report.push(Notice::new(
             source_name,
             NoticeKind::Provenance,
@@ -591,7 +595,6 @@ impl ProposalSource for RoadmapJson {
             ),
         ));
         report_losses(&doc, source_name, &mut report);
-
         // A phase may depend on another phase or on a workstream, both of which
         // this importer renames (`0` -> `PHASE-00`, `W` -> `W-CUT`), or on a
         // milestone, whose id it keeps. Resolved against the source's own lists
@@ -645,6 +648,7 @@ impl ProposalSource for RoadmapJson {
                 paths: Vec::new(),
                 traces: Vec::new(),
                 trace_fingerprints: BTreeMap::new(),
+                evidence_fingerprints: std::collections::BTreeMap::new(),
                 tags,
                 revisit_at: None,
                 version_impact: None,
@@ -736,6 +740,7 @@ fn read_workstream(
                     paths: Vec::new(),
                     traces: m.evidence.clone(),
                     trace_fingerprints: BTreeMap::new(),
+                    evidence_fingerprints: std::collections::BTreeMap::new(),
                     tags,
                     revisit_at: None,
                     version_impact: None,
@@ -784,6 +789,7 @@ fn read_workstream(
                     paths: Vec::new(),
                     traces,
                     trace_fingerprints: BTreeMap::new(),
+                    evidence_fingerprints: std::collections::BTreeMap::new(),
                     tags: vec!["milestone".to_string()],
                     revisit_at: None,
                     version_impact: None,

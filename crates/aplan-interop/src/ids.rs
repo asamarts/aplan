@@ -252,7 +252,7 @@ fn ulid_id(plan: &Plan, phase: u32) -> Result<String, IdError> {
     // convention to infer raises there and mints a bare ULID here, which is the
     // one place the two strategies are allowed to differ.
     let stem = convention_for(plan, phase).map_or_else(|_| String::new(), |c| c.stem);
-    Ok(format!("{stem}{}", ulid()?))
+    Ok(format!("{stem}{}", mint_ulid()?))
 }
 
 /// How long to wait before trying a minted id again, when another writer took it.
@@ -348,7 +348,7 @@ const CROCKFORD: &[u8; 32] = b"0123456789ABCDEFGHJKMNPQRSTVWXYZ";
 /// Every window rather than the tail alone, because a hand-written `--id` may
 /// put characters after the ULID as easily as before it, and either way what
 /// follows is not a sequence.
-fn contains_a_ulid(id: &str) -> bool {
+pub(crate) fn contains_a_ulid(id: &str) -> bool {
     if !id.is_ascii() || id.len() < ULID_LEN {
         return false;
     }
@@ -395,7 +395,16 @@ const ULID_LEN: usize = 26;
 /// # Errors
 ///
 /// [`IdError::Entropy`] when the platform will not supply randomness.
-fn ulid() -> Result<String, IdError> {
+/// Mint one canonical 26-character ULID from the system clock and operating-
+/// system entropy.
+///
+/// Capture identity uses the same measured primitive as task `ulid` identity,
+/// but supplies its own fixed `I-` namespace rather than a task-family stem.
+///
+/// # Errors
+///
+/// [`IdError::Entropy`] when the platform cannot supply randomness.
+pub fn mint_ulid() -> Result<String, IdError> {
     let ms = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
         .map_or(0, |d| d.as_millis());
@@ -550,6 +559,7 @@ mod tests {
                 paths: Vec::new(),
                 traces: Vec::new(),
                 trace_fingerprints: std::collections::BTreeMap::new(),
+                evidence_fingerprints: std::collections::BTreeMap::new(),
                 tags: if milestone {
                     vec!["milestone".into()]
                 } else {

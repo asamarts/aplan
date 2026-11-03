@@ -62,6 +62,8 @@ struct Scenario {
     require_impact: bool,
     /// Declare a tag vocabulary (enables `APLAN026`).
     tag_families: Option<aplan_core::TagFamily>,
+    /// Declare canonical owners (enables `APLAN056`).
+    owners: &'static [&'static str],
     /// The generated block `export-agents-md` would write now, compared against
     /// the scenario's own `AGENTS.md` (enables `APLAN041`). `None` is a caller
     /// that cannot render one, which switches the rule off.
@@ -110,6 +112,11 @@ impl Scenario {
         self
     }
 
+    fn owners(mut self, owners: &'static [&'static str]) -> Self {
+        self.owners = owners;
+        self
+    }
+
     /// What the contract would say now, for `APLAN041` (`A1-273`). The file it
     /// is compared against is an ordinary scenario file at `AGENTS.md`.
     fn agents_block(mut self, current: &'static str) -> Self {
@@ -131,6 +138,7 @@ fn scen(name: &'static str, rule: Rule, expect: Expect, files: Vec<(String, Stri
         detect_drift: false,
         require_cut_membership: false,
         tag_families: None,
+        owners: &[],
         agents_block: None,
     }
 }
@@ -143,6 +151,11 @@ fn taskfile(body: &str) -> String {
 /// A task file at `tasks/<name>.md`.
 fn tf(name: &str, body: &str) -> (String, String) {
     (format!("tasks/{name}.md"), taskfile(body))
+}
+
+/// One canonical inbox record, for `APLAN057`.
+fn cf(id: &str, body: &str) -> (String, String) {
+    (format!(".inbox/{id}.yml"), body.to_string())
 }
 
 /// An `AGENTS.md` carrying a generated block, for `APLAN041` (`A1-273`).
@@ -456,6 +469,7 @@ fn corpus() -> Vec<Scenario> {
     all.extend(milestone_rules());
     all.extend(cancelled_cut_rules());
     all.extend(tag_family_rules());
+    all.extend(owner_vocabulary_rules());
     all.extend(drift_rules());
     all.extend(interpolated_reason_branches());
     all.extend(partial_stamp_rules());
@@ -739,6 +753,26 @@ fn loader_and_identity_rules() -> Vec<Scenario> {
             Rule::Schema,
             Silent,
             vec![tf("ok", "id: A-1\ntitle: A-1\nphase: 0\nstatus: todo")],
+        ),
+        // APLAN057, captures have a separate strict V1 loader and never rely on
+        // the task-frontmatter rule for visibility.
+        scen(
+            "capture-invalid-fires",
+            Rule::CaptureInvalid,
+            Fires,
+            vec![cf(
+                "I-01K8Z3A4H00000000000000000",
+                "schema: aplan/capture/v1\nid: [unterminated\n",
+            )],
+        ),
+        scen(
+            "capture-invalid-silent",
+            Rule::CaptureInvalid,
+            Silent,
+            vec![cf(
+                "I-01K8Z3A4H00000000000000000",
+                "schema: aplan/capture/v1\nid: I-01K8Z3A4H00000000000000000\ntitle: valid intake\nkind: task\nstate: open\ncaptured_at: '2026-01-01T00:00:00Z'\norigin: cli\n",
+            )],
         ),
         // APLAN002, task ids are unique.
         scen(
@@ -1483,6 +1517,30 @@ fn effort_note_and_deadlock_rules() -> Vec<Scenario> {
                 "id: A-1\ntitle: A-1\nphase: 0\nstatus: done\nevidence:\n  - kind: note\n    ref: spoke to the division\n    captured: 2026-07-14",
             )],
         ),
+        // APLAN055, an authored capture date is not accepted as ersatz
+        // freshness metadata on a machine-resolved citation.
+        scen(
+            "inapplicable-capture-fires",
+            Rule::InapplicableCapture,
+            Fires,
+            vec![tf(
+                "a",
+                "id: A-1\ntitle: A-1\nphase: 0\nstatus: todo\neffort_days: 1\n\
+                 evidence:\n  - kind: file\n    ref: docs/proof.md\n    captured: 2026-07-14",
+            )],
+        ),
+        // The one kind for which the field is provenance keeps its established
+        // shape and still belongs to APLAN010 alone.
+        scen(
+            "inapplicable-capture-silent",
+            Rule::InapplicableCapture,
+            Silent,
+            vec![tf(
+                "a",
+                "id: A-1\ntitle: A-1\nphase: 0\nstatus: todo\neffort_days: 1\n\
+                 evidence:\n  - kind: note\n    ref: spoke to the division\n    captured: 2026-07-14",
+            )],
+        ),
         // APLAN020, a live task is not blocked by a dropped one.
         scen(
             "dropped-blocker-fires",
@@ -1653,6 +1711,31 @@ fn tag_family_rules() -> Vec<Scenario> {
     ]
 }
 
+fn owner_vocabulary_rules() -> Vec<Scenario> {
+    vec![
+        scen(
+            "owner-vocabulary-fires",
+            Rule::OwnerVocabulary,
+            Fires,
+            vec![tf(
+                "a",
+                "id: A-1\ntitle: A-1\nphase: 0\nstatus: todo\nowner: kaminsdo",
+            )],
+        )
+        .owners(&["kaminsod"]),
+        scen(
+            "owner-vocabulary-silent",
+            Rule::OwnerVocabulary,
+            Silent,
+            vec![tf(
+                "a",
+                "id: A-1\ntitle: A-1\nphase: 0\nstatus: todo\nowner: kaminsod",
+            )],
+        )
+        .owners(&["kaminsod"]),
+    ]
+}
+
 /// `APLAN027`, split out because `milestone_rules` outgrew the line limit when
 /// this arrived: the gate noticing a function had become a list.
 fn cancelled_cut_rules() -> Vec<Scenario> {
@@ -1755,6 +1838,7 @@ fn options_for(s: &Scenario, dir: &std::path::Path) -> Options {
         } else {
             std::collections::BTreeMap::new()
         },
+        owners: s.owners.iter().map(|owner| (*owner).to_string()).collect(),
         agents_block: s.agents_block.map(|current| aplan_core::AgentsBlock {
             path: dir.join("AGENTS.md"),
             current: current.to_string(),
@@ -1785,7 +1869,15 @@ fn scenario_run(s: &Scenario) -> (Vec<aplan_core::Diagnostic>, std::path::PathBu
         std::fs::write(&path, contents).expect("write fixture");
     }
     let opts = options_for(s, dir.path());
-    let diagnostics = validate(&load_plan(dir.path()), &opts).diagnostics;
+    let mut diagnostics = validate(&load_plan(dir.path()), &opts).diagnostics;
+    diagnostics.extend(
+        aplan_core::capture::load_inbox(
+            dir.path(),
+            &aplan_core::capture::CapturePolicy::default(),
+            &aplan_core::capture::FixedClock(2_000_000_000),
+        )
+        .diagnostics,
+    );
     (diagnostics, dir.path().to_path_buf())
 }
 
@@ -1830,21 +1922,9 @@ fn no_diagnostic_cites_this_projects_adrs() {
 /// Materialise a scenario to a temp directory and return the `(code, severity)`
 /// of every diagnostic the validator reports over it.
 fn diagnostics_for(s: &Scenario) -> Vec<(&'static str, Severity)> {
-    let dir = tempfile::Builder::new()
-        .tempdir_in(aplan_core::fixture::fixture_root())
-        .expect("tempdir");
-    for (rel, contents) in &s.files {
-        let path = dir.path().join(rel);
-        if let Some(parent) = path.parent() {
-            std::fs::create_dir_all(parent).expect("create parent");
-        }
-        std::fs::write(&path, contents).expect("write fixture");
-    }
-    let opts = options_for(s, dir.path());
-    let report = validate(&load_plan(dir.path()), &opts);
-    report
-        .diagnostics
-        .iter()
+    scenario_run(s)
+        .0
+        .into_iter()
         .map(|d| (d.code, d.severity))
         .collect()
 }
@@ -1926,6 +2006,8 @@ struct VerifyCase {
     runner: Option<TestRunner>,
     /// Run `test` evidence (rung L3). Only meaningful with a runner.
     execute: bool,
+    /// Whether referent fingerprints are compared. False is the shipped default.
+    detect_drift: bool,
     /// The configured `url` checker, for `APLAN016`. `None` leaves `url`
     /// evidence at L0, which is every other case.
     url_check: Option<aplan_config::UrlCheck>,
@@ -1948,6 +2030,7 @@ fn git_case(
         build,
         runner: None,
         execute: false,
+        detect_drift: false,
         url_check: None,
         version: None,
     }
@@ -1968,6 +2051,7 @@ fn compat_case(name: &'static str, expect: Expect, declares: &str, compatible: b
             timeout_seconds: None,
             max_memory: None,
             max_processes: None,
+            max_output: None,
             wrap: None,
         });
     }
@@ -1994,6 +2078,7 @@ fn version_case(
         build,
         runner: None,
         execute: false,
+        detect_drift: false,
         url_check: None,
         version: Some(aplan_config::VersionPolicy {
             require_impact: None,
@@ -2005,6 +2090,7 @@ fn version_case(
                 timeout_seconds: None,
                 max_memory: None,
                 max_processes: None,
+                max_output: None,
                 wrap: None,
             }),
         }),
@@ -2027,6 +2113,7 @@ fn test_case(
         build,
         runner: Some(runner),
         execute,
+        detect_drift: false,
         url_check: None,
         version: None,
     }
@@ -2034,7 +2121,7 @@ fn test_case(
 
 fn verify_corpus() -> Vec<VerifyCase> {
     vec![
-        // APLAN011, the commit SHA resolves.
+        // APLAN011, the commit SHA resolves in `HEAD` history.
         git_case(
             "commit-unresolved-fires",
             Rule::CommitUnresolved,
@@ -2214,6 +2301,28 @@ fn verify_corpus() -> Vec<VerifyCase> {
             Silent,
             v015_anchor_silent,
         ),
+        VerifyCase {
+            name: "evidence-drift-fires",
+            rule: Rule::EvidenceDrift,
+            expect: Fires,
+            build: v054_fires,
+            runner: None,
+            execute: false,
+            detect_drift: true,
+            url_check: None,
+            version: None,
+        },
+        VerifyCase {
+            name: "evidence-drift-silent",
+            rule: Rule::EvidenceDrift,
+            expect: Silent,
+            build: v054_silent,
+            runner: None,
+            execute: false,
+            detect_drift: true,
+            url_check: None,
+            version: None,
+        },
         // APLAN031, a cited file lies inside the task's `paths`. `APLAN012`'s
         // question, asked of the other kind that names an artefact (`A1-045`).
         git_case(
@@ -2263,6 +2372,7 @@ fn verify_corpus() -> Vec<VerifyCase> {
             build: v016_fires,
             runner: None,
             execute: false,
+            detect_drift: false,
             url_check: Some(url_check(false)),
             version: None,
         },
@@ -2273,6 +2383,7 @@ fn verify_corpus() -> Vec<VerifyCase> {
             build: v016_fires,
             runner: None,
             execute: false,
+            detect_drift: false,
             url_check: Some(url_check(true)),
             version: None,
         },
@@ -2285,6 +2396,7 @@ fn verify_corpus() -> Vec<VerifyCase> {
             build: v016_fires,
             runner: None,
             execute: false,
+            detect_drift: false,
             url_check: None,
             version: None,
         },
@@ -2297,6 +2409,7 @@ fn verify_corpus() -> Vec<VerifyCase> {
             build: v016_not_https,
             runner: None,
             execute: false,
+            detect_drift: false,
             url_check: Some(url_check(true)),
             version: None,
         },
@@ -2504,6 +2617,8 @@ fn verify_corpus() -> Vec<VerifyCase> {
 /// that the runner is *asked*, not anything about cargo (`A1-300`).
 fn skipping_runner(lists: &str, skips: &str) -> TestRunner {
     TestRunner {
+        weight: None,
+        exclusive: None,
         skipped: Some(vec!["printf".into(), format!("{skips}\n")]),
         ..list_runner(lists, true)
     }
@@ -2523,9 +2638,12 @@ fn filter_runner(lists: &str, declares_selective: Option<bool>) -> TestRunner {
                   [ $hit = 1 ] && echo ''Tests  1 passed (2)'' || echo ''Tests  2 skipped (2)''"
         .replace("''", "\"");
     TestRunner {
+        weight: None,
+        exclusive: None,
         output_lines: None,
         max_memory: None,
         max_processes: None,
+        max_output: None,
         wrap: None,
         expect_tests: None,
         skipped: None,
@@ -2533,6 +2651,7 @@ fn filter_runner(lists: &str, declares_selective: Option<bool>) -> TestRunner {
         timeout_seconds: None,
         covers: None,
         covers_by_test: None,
+        inputs_by_test: None,
         name: Some("vitest-shaped".into()),
         dir: None,
         list: vec!["printf".into(), format!("{lists}\n")],
@@ -2543,6 +2662,7 @@ fn filter_runner(lists: &str, declares_selective: Option<bool>) -> TestRunner {
             "sh".into(),
             PLACEHOLDER.into(),
         ],
+        batch: None,
     }
 }
 
@@ -2553,9 +2673,12 @@ fn filter_runner(lists: &str, declares_selective: Option<bool>) -> TestRunner {
 /// different fixes and used to be indistinguishable.
 fn silent_runner(expect_tests: Option<bool>) -> TestRunner {
     TestRunner {
+        weight: None,
+        exclusive: None,
         output_lines: None,
         max_memory: None,
         max_processes: None,
+        max_output: None,
         wrap: None,
         skipped: None,
         expect_tests,
@@ -2563,10 +2686,12 @@ fn silent_runner(expect_tests: Option<bool>) -> TestRunner {
         timeout_seconds: None,
         covers: None,
         covers_by_test: None,
+        inputs_by_test: None,
         name: Some("blind".into()),
         dir: None,
         list: vec!["printf".into(), String::new()],
         run: vec!["true".into(), PLACEHOLDER.into()],
+        batch: None,
     }
 }
 
@@ -2575,9 +2700,12 @@ fn silent_runner(expect_tests: Option<bool>) -> TestRunner {
 fn list_runner(name: &str, passes: bool) -> TestRunner {
     let run_program = if passes { "true" } else { "false" };
     TestRunner {
+        weight: None,
+        exclusive: None,
         output_lines: None,
         max_memory: None,
         max_processes: None,
+        max_output: None,
         wrap: None,
         expect_tests: None,
         skipped: None,
@@ -2585,10 +2713,12 @@ fn list_runner(name: &str, passes: bool) -> TestRunner {
         timeout_seconds: None,
         covers: None,
         covers_by_test: None,
+        inputs_by_test: None,
         name: None,
         dir: None,
         list: vec!["printf".into(), format!("{name}\n")],
         run: vec![run_program.into(), PLACEHOLDER.into()],
+        batch: None,
     }
 }
 
@@ -2650,6 +2780,7 @@ fn url_check(reachable: bool) -> aplan_config::UrlCheck {
     aplan_config::UrlCheck {
         max_memory: None,
         max_processes: None,
+        max_output: None,
         wrap: None,
         timeout_seconds: None,
         check: vec![
@@ -2802,6 +2933,35 @@ fn v015_silent(repo: &Repository) -> Vec<Task> {
     git_commit(repo, &[("src/a.rs", "x")], "init");
     vec![done("A", vec![file_ev("src/a.rs")], Vec::new())]
 }
+
+fn stamped_file_task(content: &str) -> Task {
+    let mut task = done("A", vec![file_ev("docs/proof.md")], Vec::new());
+    task.evidence_fingerprints.insert(
+        "file:docs/proof.md".to_string(),
+        aplan_core::anchor::content_fingerprint(content.as_bytes()),
+    );
+    task
+}
+
+/// `APLAN054`: the file still exists at the same reference, but its committed
+/// contents are not what closure reviewed.
+fn v054_fires(repo: &Repository) -> Vec<Task> {
+    let reviewed = "reviewed proof\n";
+    git_commit(repo, &[("docs/proof.md", reviewed)], "review proof");
+    git_commit(
+        repo,
+        &[("docs/proof.md", "different proof\n")],
+        "rewrite proof",
+    );
+    vec![stamped_file_task(reviewed)]
+}
+
+/// The same mutable reference and a stamp of exactly what `HEAD` contains.
+fn v054_silent(repo: &Repository) -> Vec<Task> {
+    let reviewed = "reviewed proof\n";
+    git_commit(repo, &[("docs/proof.md", reviewed)], "review proof");
+    vec![stamped_file_task(reviewed)]
+}
 /// A citation naming a section the document does not have. The shape a project
 /// whose proof is a reviewed document brings (`A1-159`, from the `p0000019`
 /// pilot).
@@ -2878,9 +3038,12 @@ fn v031_catch_all(repo: &Repository) -> Vec<Task> {
 /// about which code it covers.
 fn rooted_runner(name: &str, dir: &str) -> TestRunner {
     TestRunner {
+        weight: None,
+        exclusive: None,
         output_lines: None,
         max_memory: None,
         max_processes: None,
+        max_output: None,
         wrap: None,
         expect_tests: None,
         skipped: None,
@@ -2888,10 +3051,12 @@ fn rooted_runner(name: &str, dir: &str) -> TestRunner {
         timeout_seconds: None,
         covers: None,
         covers_by_test: None,
+        inputs_by_test: None,
         name: Some(dir.to_string()),
         dir: Some(dir.to_string()),
         list: vec!["printf".into(), format!("{name}\n")],
         run: vec!["true".into(), PLACEHOLDER.into()],
+        batch: None,
     }
 }
 /// A runner that declares what it covers while running at the repository root,
@@ -2906,9 +3071,12 @@ fn runner_name(covers: &str) -> String {
 
 fn covering_runner(name: &str, covers: &str) -> TestRunner {
     TestRunner {
+        weight: None,
+        exclusive: None,
         output_lines: None,
         max_memory: None,
         max_processes: None,
+        max_output: None,
         wrap: None,
         expect_tests: None,
         skipped: None,
@@ -2916,6 +3084,7 @@ fn covering_runner(name: &str, covers: &str) -> TestRunner {
         timeout_seconds: None,
         covers: Some(vec![covers.to_string()]),
         covers_by_test: None,
+        inputs_by_test: None,
         // A runner name, not the glob it covers. Setting it to `covers` made the
         // rule catalogue read "a runner that is called `component/**` and covers
         // `component/**`", which is not a shape any adopter would write and is
@@ -2924,6 +3093,7 @@ fn covering_runner(name: &str, covers: &str) -> TestRunner {
         dir: None,
         list: vec!["printf".into(), format!("{name}\n")],
         run: vec!["true".into(), PLACEHOLDER.into()],
+        batch: None,
     }
 }
 /// A runner covering the whole tree, whose named subset covers one component:
@@ -2931,9 +3101,12 @@ fn covering_runner(name: &str, covers: &str) -> TestRunner {
 /// name the subset it matched rather than the runner's own claim.
 fn subset_runner(name: &str, covers: &str) -> TestRunner {
     TestRunner {
+        weight: None,
+        exclusive: None,
         output_lines: None,
         max_memory: None,
         max_processes: None,
+        max_output: None,
         wrap: None,
         expect_tests: None,
         skipped: None,
@@ -2944,10 +3117,12 @@ fn subset_runner(name: &str, covers: &str) -> TestRunner {
             tests: vec![format!("{name}*")],
             paths: vec![covers.to_string()],
         }]),
+        inputs_by_test: None,
         name: Some(runner_name(covers)),
         dir: None,
         list: vec!["printf".into(), format!("{name}\n")],
         run: vec!["true".into(), PLACEHOLDER.into()],
+        batch: None,
     }
 }
 
@@ -2955,9 +3130,12 @@ fn subset_runner(name: &str, covers: &str) -> TestRunner {
 /// covers only its own component.
 fn invariant_runner(name: &str, covers: &str) -> TestRunner {
     TestRunner {
+        weight: None,
+        exclusive: None,
         output_lines: None,
         max_memory: None,
         max_processes: None,
+        max_output: None,
         wrap: None,
         expect_tests: None,
         skipped: None,
@@ -2968,10 +3146,12 @@ fn invariant_runner(name: &str, covers: &str) -> TestRunner {
             tests: vec![format!("{name}*")],
             paths: vec!["**".to_string()],
         }]),
+        inputs_by_test: None,
         name: Some(runner_name(covers)),
         dir: None,
         list: vec!["printf".into(), format!("{name}\n")],
         run: vec!["true".into(), PLACEHOLDER.into()],
+        batch: None,
     }
 }
 /// The runner's directory has to exist for it to be spawned there.
@@ -3099,6 +3279,7 @@ fn done(id: &str, evidence: Vec<Evidence>, paths: Vec<String>) -> Task {
         paths,
         traces: Vec::new(),
         trace_fingerprints: std::collections::BTreeMap::new(),
+        evidence_fingerprints: std::collections::BTreeMap::new(),
         tags: Vec::new(),
         revisit_at: None,
         version_impact: None,
@@ -3286,12 +3467,14 @@ fn verify_run_with_plan(
         unloadable: std::collections::BTreeMap::new(),
     };
     let opts = aplan_evidence::VerifyOptions {
+        detect_drift: case.detect_drift,
         version: case.version.clone(),
         traces_root: None,
         config_file: None,
         execute: case.execute,
         test_runner: case.runner.clone().map(TestRunners::One),
         max_unrelated_files: None,
+        observation_inputs: None,
         url_check: case.url_check.clone(),
     };
     let report = aplan_evidence::verify(&plan, dir.path(), &opts).expect("verify runs");
@@ -3581,7 +3764,8 @@ fn render_catalogue() -> String {
     out.push_str(
         "Generated from the scenario corpus in `crates/aplan-e2e/tests/coverage.rs`, committed,\n\
          and compared on every test run. Do not edit by hand: change the rule, then regenerate\n\
-         with `APLAN_CATALOGUE=overwrite cargo test -p aplan-e2e --test coverage`.\n\n\
+         with `APLAN_CATALOGUE=overwrite cargo test -p aplan-e2e --test integration \
+         coverage::the_rule_catalogue_is_committed_and_current`.\n\n\
          A rule's message and its `agent_instruction` are what an adopter and an agent act on.\n\
          They are pinned here so that changing one is a reviewable diff rather than something\n\
          discovered in a consumer's CI log (`A1-088`).\n\n\
@@ -3637,7 +3821,8 @@ fn the_rule_catalogue_is_committed_and_current() {
     assert_eq!(
         committed, rendered,
         "{CATALOGUE} and the rules disagree. If the new wording is what you meant, run\n  \
-         {OVERWRITE}=overwrite cargo test -p aplan-e2e --test coverage\nand commit the result, \
+         {OVERWRITE}=overwrite cargo test -p aplan-e2e --test integration \
+         coverage::the_rule_catalogue_is_committed_and_current\nand commit the result, \
          reading the diff: it is what every adopter will read."
     );
 }

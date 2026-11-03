@@ -1,8 +1,12 @@
-//! **A mutation causes nothing outside the plan** (`A1-354`, ADR-0043).
+//! **A mutation causes nothing outside the plan unless the user explicitly
+//! requests the focused L3 close boundary** (`A1-354`, ADR-0043 as superseded
+//! in part by ADR-0061).
 //!
 //! ADR-0043 decided that closing a task causes nothing outside the plan: a
 //! mutation writes plan files, and spawns only the observing commands trusted
-//! configuration names. That was true when it was decided, and **nothing would
+//! configuration names. ADR-0061 admits one narrow exception: `close
+//! --execute` runs only the proposed closure's cited tests before the guarded
+//! write. That is explicit, off by default and measured below. **Nothing would
 //! have noticed it stopping**. A key such as `on_close.command`, or a spawn
 //! written into `close`'s resolution path by hand, would have left every test in
 //! this workspace green, which is the same shape of hole `policy.rs` describes
@@ -14,7 +18,9 @@
 //! [`every_process_production_starts_is_named_with_its_reason`] reads every
 //! crate's production sources and names every place one of them starts a
 //! process. It catches a spawn written in by hand, which no configuration would
-//! mention and no fixture would trigger. It cannot say what is *reachable from*
+//! mention and no fixture would trigger. Each site must be an observation,
+//! cleanup of a process aplan owns, build-time input, or an explicit user action
+//! that precedes the mutation gate. The scan cannot say what is *reachable from*
 //! a mutation, and a scan claiming to would be guessing at a call graph.
 //!
 //! [`which_configured_commands_a_command_reaches_is_measured_not_declared`]
@@ -33,15 +39,16 @@
 //! say no is still an observation; the gate does not have to guess that, because
 //! the allowance is written next to the command with that reason.
 //!
-//! **`verify --execute` is in scope and is the control.** It runs the
-//! repository's tests, which do anything at all, and it is off by default for
-//! exactly that reason. Listing it as an exemption and leaving it there would
-//! make this file's central claim unfalsifiable, so it is the one command
-//! required to reach `test.run`: it proves the recording channel is live, which
-//! is what stops every "reached nothing" above from being a measurement of a
-//! broken fixture.
+//! **`verify --execute` and `close --execute` are in scope and are controls.**
+//! Both run the repository's tests, which can do anything at all, and both are
+//! off by default for exactly that reason. Listing either only as an exemption
+//! would make this file's central claim unfalsifiable. The controls below
+//! require focused close to reach `test.batch.run`, and require verify, after
+//! removing the optional batch adapter, to reach legacy `test.run`. That proves
+//! both recording channels are live, so "reached nothing" cannot be a
+//! measurement of a broken fixture.
 
-mod common;
+use crate::common;
 
 use std::collections::BTreeSet;
 use std::os::unix::fs::PermissionsExt as _;
@@ -50,13 +57,15 @@ use std::path::{Path, PathBuf};
 // ---------------------------------------------------------------- the scan
 
 /// Every place production code starts a process, and why each is an observation
-/// rather than an effect.
+/// or a bounded explicit effect rather than a hidden mutation side effect.
 ///
-/// Three, and the list is the argument. Two are the configured-command path
-/// itself and one is not, which is the entry worth reading: a mutation does
-/// reach a `git` subprocess, and ADR-0043's words ("spawns only the observing
-/// commands trusted config names") do not cover it, because nothing configured
-/// names it.
+/// Seven, and the list is the argument. Two execute or clean up the
+/// configured-command path, two run only while a binary is built, one observes
+/// repository identity before a mutation, and two are direct user-requested
+/// editor effects. The identity observer is the runtime exception worth reading:
+/// a mutation does reach a `git` subprocess, and ADR-0043's words ("spawns only
+/// the observing commands trusted config names") do not cover it, because
+/// nothing configured names it.
 const SPAWNS: &[(&str, &str, &str)] = &[
     (
         "crates/aplan-evidence/src/resolve.rs",
@@ -68,20 +77,29 @@ const SPAWNS: &[(&str, &str, &str)] = &[
     ),
     (
         "crates/aplan-evidence/src/resolve.rs",
-        "kill_group",
+        "kill_process_group",
         "stopping what `spawn_in_cage` started, when a command outlives its timeout (`A1-310`). \
          It spawns `sh` to signal a process group, which is an effect on a process this tool \
          created and on nothing else: the alternative is leaving an adopter's test runner behind \
          after the run that started it has gone",
     ),
     (
-        "crates/aplan-attest/build.rs",
-        "git_describe",
-        "asking `git` for the commit this binary was built from, at build time (`A1-154`). It is \
-         not reached by any command, because it has already run before there is a binary to run \
-         one with: an adopter compiles it, and what it learns is embedded. It is in this list \
-         because a walk of `*/src` is not a walk of what ships, and leaving it out would have \
-         made that omission invisible rather than argued",
+        "crates/aplan-attest/build_support.rs",
+        "git",
+        "asking `git` for this checkout's identity inputs and commit at build time (`A1-154`, \
+         `A1-629`). It is not reached by any command, because it has already run before there is \
+         a binary to run one with: an adopter compiles it, and what it learns is embedded. It is \
+         in this list because a walk of `*/src` is not a walk of what ships, and leaving it out \
+         would have made that omission invisible rather than argued",
+    ),
+    (
+        "crates/aplan/build.rs",
+        "main",
+        "asking `rustc -Vv` which compiler produced this binary, at build time (`A1-589`). The \
+         exact answer is folded into the private cache-writer identity so a generation parsed by \
+         another implementation is a miss. It cannot be reached by an aplan command because it \
+         runs before that command's binary exists, and the compiler query only observes version \
+         and host information",
     ),
     (
         "crates/aplan-interop/src/identity.rs",
@@ -92,6 +110,22 @@ const SPAWNS: &[(&str, &str, &str)] = &[
          observation in the strict sense: it reads a value, and the only thing it can change is the text this tool \
          writes into the plan. It is also the one spawn nothing configured names, so the \
          measurement below cannot see it and this list is the only place it is accounted for",
+    ),
+    (
+        "crates/aplan-tui/src/lib.rs",
+        "run_external_editor",
+        "the user explicitly invokes Ctrl-E before any plan mutation is previewed or published. \
+         The TUI first releases every terminal mode, starts parsed VISUAL/EDITOR arguments \
+         directly without a shell, waits for that one bounded private draft handoff, and routes \
+         accepted bytes back through the ordinary preview and confirmation gate (`A1-448`)",
+    ),
+    (
+        "crates/aplan/src/lib.rs",
+        "edit_capture_body",
+        "the user explicitly requests `capture --edit` or `inbox amend --edit`. The CLI parses \
+         VISUAL/EDITOR arguments, starts the executable directly without a shell, waits for that \
+         one private temporary-file handoff, and validates the returned bytes before constructing \
+         or publishing any capture change (`A1-515`)",
     ),
 ];
 
@@ -210,8 +244,8 @@ fn every_process_production_starts_is_named_with_its_reason() {
     assert!(
         unnamed.is_empty(),
         "{} place(s) where production code starts a process without saying why it is an \
-         observation rather than an effect (ADR-0043, `A1-354`). Add it to `SPAWNS` with the \
-         argument, or do not spawn:\n  - {}",
+         observation or bounded explicit effect rather than a hidden mutation side effect \
+         (ADR-0043, `A1-354`). Add it to `SPAWNS` with the argument, or do not spawn:\n  - {}",
         unnamed.len(),
         unnamed.join("\n  - ")
     );
@@ -247,6 +281,12 @@ fn every_process_production_starts_is_named_with_its_reason() {
 /// do would be a list somebody typed, while "nothing, except these two, for
 /// these reasons" is a sentence that can be argued with.
 const ALLOWED_TO_REACH: &[(&str, &[&str], &str)] = &[
+    (
+        "test",
+        &["test.list", "test.wrap"],
+        "its answer is exactly the configured test catalogue, so it must ask the trusted \
+         runner through the same wrapper as evidence resolution; it never executes a test",
+    ),
     (
         "verify",
         &[
@@ -311,6 +351,7 @@ const CANNOT_BE_MEASURED: &[(&str, &str)] = &[(
 struct Wiring {
     log: PathBuf,
     config: String,
+    legacy_config: String,
 }
 
 /// Name a recording script in every place configuration can name a command.
@@ -335,6 +376,12 @@ fn wire(support: &Path) -> Wiring {
     // to run what it was handed or the spawn it wraps never happens.
     let list = script("test.list", "echo the_only_test");
     let run = script("test.run", "exit 0");
+    let batch = script(
+        "test.batch.run",
+        "nonce=$(sed -n 's/.*\"nonce\":\"\\([^\"]*\\)\".*/\\1/p' \"$1\")\n\
+         provider=$(sed -n 's/.*\"provider\":\"\\([^\"]*\\)\".*/\\1/p' \"$1\")\n\
+         printf '{\"schema\":\"aplan/test-batch-result/v1\",\"nonce\":\"%s\",\"provider\":\"%s\",\"complete\":true,\"tests\":[{\"test\":\"the_only_test\",\"outcome\":\"passed\"}]}\\n' \"$nonce\" \"$provider\" > \"$2\"",
+    );
     let skipped = script("test.skipped", "exit 0");
     let wrap = script("test.wrap", "exec \"$@\"");
     let url = script("url.check", "exit 0");
@@ -343,7 +390,7 @@ fn wire(support: &Path) -> Wiring {
     let current_wrap = script("version.current.wrap", "exec \"$@\"");
     let check = script("version.check", "exit 0");
     let check_wrap = script("version.check.wrap", "exec \"$@\"");
-    let config = format!(
+    let legacy_config = format!(
         "root: aplan\n\
          test:\n  \
            list: [sh, {list}]\n  \
@@ -361,7 +408,37 @@ fn wire(support: &Path) -> Wiring {
              command: [sh, {check}]\n    \
              wrap: [sh, {check_wrap}]\n"
     );
-    Wiring { log, config }
+    let batched = legacy_config.replace(
+        "  skipped:",
+        &format!(
+            "  batch:\n    protocol: 1\n    run: [sh, {batch}, '{{manifest}}', '{{result}}']\n  skipped:"
+        ),
+    );
+    let (test, rest) = batched
+        .strip_prefix("root: aplan\ntest:\n")
+        .expect("the fixture starts with its test block")
+        .split_once("url:\n")
+        .expect("the url block follows the test block");
+    let runner = test
+        .lines()
+        .enumerate()
+        .map(|(index, line)| {
+            if index == 0 {
+                format!("    - {}", line.trim_start())
+            } else {
+                format!("    {line}")
+            }
+        })
+        .collect::<Vec<_>>()
+        .join("\n");
+    let config = format!(
+        "root: aplan\ntest:\n  schedule: {{capacity: 1}}\n  runners:\n{runner}\nurl:\n{rest}"
+    );
+    Wiring {
+        log,
+        config,
+        legacy_config,
+    }
 }
 
 /// Commit the fixture, so evidence has something to resolve against.
@@ -554,6 +631,31 @@ fn the_one_observation_close_makes_is_the_one_it_is_for() {
     );
 }
 
+#[test]
+fn focused_close_reaches_the_named_execution_boundary_only_when_requested() {
+    let (dir, _support, wiring) = a_wired_plan();
+    let out = common::run(
+        dir.path(),
+        &[
+            "close",
+            "W-1",
+            "--evidence",
+            "test:the_only_test",
+            "--execute",
+        ],
+    );
+    assert_eq!(out.code, 0, "focused close failed: {}", out.text());
+    let saw = reached(&wiring.log);
+    assert!(
+        saw.contains("test.list")
+            && saw.contains("test.wrap")
+            && saw.contains("test.batch.run")
+            && !saw.contains("test.run"),
+        "focused close did not stay on the configured list/wrap/batch boundary: {saw:?}\n{}",
+        out.text()
+    );
+}
+
 /// **Every wired runner is reached by something** (`A1-354`, audit).
 ///
 /// The exhaustiveness check above proves the fixture *names* a script in every
@@ -591,6 +693,9 @@ fn every_wired_runner_is_reached_by_something() {
     ] {
         common::run(dir.path(), argv);
     }
+    std::fs::write(dir.path().join(".aplan.yml"), &wiring.legacy_config)
+        .expect("remove the optional batch adapter");
+    common::run(dir.path(), &["verify", "--execute"]);
 
     let saw = reached(&wiring.log);
     let wired: BTreeSet<String> = WIRED.iter().map(|(_, s)| (*s).to_string()).collect();
@@ -615,12 +720,23 @@ fn verify_execute_is_the_control_that_proves_the_recording_works() {
     let out = common::run(dir.path(), &["verify", "--execute"]);
     let saw = reached(&wiring.log);
     assert!(
-        saw.contains("test.run"),
-        "`verify --execute` did not run the configured runner, so every \"reached nothing\" in \
+        saw.contains("test.batch.run") && !saw.contains("test.run"),
+        "`verify --execute` did not prefer the configured batch runner, so every \"reached nothing\" in \
          this file is a measurement of a fixture that does not work. It saw {saw:?} (before: \
          {fresh:?}), exit {}:\n{}",
         out.code,
         out.text()
+    );
+    std::fs::write(dir.path().join(".aplan.yml"), &wiring.legacy_config)
+        .expect("remove the optional batch adapter");
+    let legacy = common::run(dir.path(), &["verify", "--execute"]);
+    let saw = reached(&wiring.log);
+    assert!(
+        saw.contains("test.run"),
+        "`verify --execute` did not use the legacy fallback after batch removal. It saw {saw:?}, \
+         exit {}:\n{}",
+        legacy.code,
+        legacy.text()
     );
 }
 
@@ -636,9 +752,15 @@ fn verify_execute_is_the_control_that_proves_the_recording_works() {
 /// commit that adds it rather than when somebody remembers.
 const WIRED: &[(&str, &str)] = &[
     (".test.list", "test.list"),
+    (".test.batch.run", "test.batch.run"),
     (".test.run", "test.run"),
     (".test.skipped", "test.skipped"),
     (".test.wrap", "test.wrap"),
+    (".test.runners.list", "test.list"),
+    (".test.runners.batch.run", "test.batch.run"),
+    (".test.runners.run", "test.run"),
+    (".test.runners.skipped", "test.skipped"),
+    (".test.runners.wrap", "test.wrap"),
     (".url.check", "url.check"),
     (".url.wrap", "url.wrap"),
     (".version.check.command", "version.check"),
@@ -675,7 +797,7 @@ fn every_place_configuration_can_name_a_command_is_wired_into_the_fixture() {
     // above is what covers the gap, because a key nothing spawns is harmless and
     // a spawn is in the sources whatever its key is called.
     assert!(
-        found.len() >= 10,
+        found.len() >= 11,
         "the schema walk found only {} command-valued path(s), so it cannot have seen the \
          configuration surface",
         found.len()
@@ -778,9 +900,9 @@ fn names_a_command(property: &serde_json::Value) -> bool {
 /// `claim` is the only command in the workspace that resolves an identity, so it
 /// is the only one that can reach `git config user.name`. The others are here to
 /// make that a measured claim rather than an observation about today's call
-/// graph: `release` and `working` read the owner the plan already holds, and a
-/// change that had them ask the machine instead would be a mutation consulting
-/// the world, which is the thing ADR-0043 is about.
+/// graph: `release` reads only the local claim record and `start`/`stop` need no
+/// actor identity. A change that had them ask the machine instead would be a
+/// mutation consulting the world, which is the thing ADR-0043 is about.
 const UNDER_THE_SHIM: &[(&[&str], bool)] = &[
     (&["claim", "W-1"], true),
     (&["release", "W-4"], false),
@@ -872,11 +994,11 @@ fn the_one_subprocess_no_configuration_names_is_the_one_that_asks_who_you_are() 
                  {asked:?}",
                 argv.join(" ")
             );
-            let owner = std::fs::read_to_string(dir.path().join("aplan/tasks/W-1.md"))
-                .expect("the claimed task");
+            let claims = std::fs::read_to_string(dir.path().join(".git/aplan/claims-v1.json"))
+                .expect("the local claim store");
             assert!(
-                owner.contains("measured-by-git"),
-                "the shim recorded the question but its answer never reached the plan, so this \
+                claims.contains("measured-by-git"),
+                "the shim recorded the question but its answer never reached the claim, so this \
                  test is measuring something other than the chain it names:\n{}",
                 String::from_utf8_lossy(&out.stdout)
             );

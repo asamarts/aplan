@@ -48,36 +48,36 @@ const KNOWN_STATUSES: &[&str] = &[
 struct KepYaml {
     title: Option<String>,
     #[serde(rename = "kep-number")]
-    kep_number: Option<serde_yaml_ng::Value>,
+    kep_number: Option<yaml_compat::Value>,
     authors: Option<Vec<String>>,
     #[serde(rename = "owning-sig")]
     owning_sig: Option<String>,
     status: Option<String>,
     stage: Option<String>,
     #[serde(flatten)]
-    extra: BTreeMap<String, serde_yaml_ng::Value>,
+    extra: BTreeMap<String, yaml_compat::Value>,
 }
 
 /// Whether a YAML value carries nothing worth reporting as lost.
 ///
 /// A key present but empty (`see-also:` with no entries) lost nothing, so
 /// reporting it would be noise that trains the reader to skim the report.
-fn is_absent(v: &serde_yaml_ng::Value) -> bool {
+fn is_absent(v: &yaml_compat::Value) -> bool {
     match v {
-        serde_yaml_ng::Value::Null => true,
-        serde_yaml_ng::Value::String(s) => s.trim().is_empty(),
-        serde_yaml_ng::Value::Sequence(s) => s.is_empty(),
-        serde_yaml_ng::Value::Mapping(m) => m.is_empty(),
+        yaml_compat::Value::Null => true,
+        yaml_compat::Value::String(s) => s.trim().is_empty(),
+        yaml_compat::Value::Sequence(s) => s.is_empty(),
+        yaml_compat::Value::Mapping(m) => m.is_empty(),
         _ => false,
     }
 }
 
 /// Render `kep-number` as it appears in an id, accepting the number the
 /// template uses and the string some repositories quote it as.
-fn kep_number(v: &serde_yaml_ng::Value) -> Option<String> {
+fn kep_number(v: &yaml_compat::Value) -> Option<String> {
     match v {
-        serde_yaml_ng::Value::Number(n) => Some(n.to_string()),
-        serde_yaml_ng::Value::String(s) if !s.trim().is_empty() => Some(s.trim().to_string()),
+        yaml_compat::Value::Number(n) => Some(n.to_string()),
+        yaml_compat::Value::String(s) if !s.trim().is_empty() => Some(s.trim().to_string()),
         _ => None,
     }
 }
@@ -227,11 +227,10 @@ impl ProposalSource for Kep {
             });
         }
 
-        let doc: KepYaml =
-            serde_yaml_ng::from_str(contents).map_err(|e| ImportError::Malformed {
-                source_name: source_name.to_string(),
-                message: e.to_string(),
-            })?;
+        let doc: KepYaml = yaml_compat::from_str(contents).map_err(|e| ImportError::Malformed {
+            source_name: source_name.to_string(),
+            message: e.to_string(),
+        })?;
 
         let malformed = |message: &str| ImportError::Malformed {
             source_name: source_name.to_string(),
@@ -278,6 +277,7 @@ impl ProposalSource for Kep {
             paths: Vec::new(),
             traces: Vec::new(),
             trace_fingerprints: BTreeMap::new(),
+            evidence_fingerprints: std::collections::BTreeMap::new(),
             tags,
             // An importer never invents one: a revisit is a decision about work
             // somebody parked, and no source format carries it.

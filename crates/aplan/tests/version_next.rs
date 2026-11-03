@@ -12,7 +12,7 @@
 
 use std::path::Path;
 
-mod common;
+use crate::common;
 
 /// A repository that released `v0.3.0` and has since closed `W-1`, declaring
 /// `declares` as the version it ships today.

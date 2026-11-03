@@ -10,3 +10,13 @@ $ aplan verify --format bogus
 aplan: `aplan verify` renders a set of findings, so it takes --format `human`, `json`, `agent`, `github` or `sarif`, not `bogus`
 
 ```
+
+Applying repairs writes task files, so a machine report cannot be mixed with
+mutation narration:
+
+```
+$ aplan verify --fix --format json
+? 2
+aplan: `aplan verify --fix` writes task files and supports only `--format human`; run `aplan verify --format json` to review the typed repairs without applying them
+
+```

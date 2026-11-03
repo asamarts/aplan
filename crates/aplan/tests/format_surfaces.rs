@@ -15,9 +15,9 @@ use std::collections::BTreeSet;
 use std::path::Path;
 
 use aplan::{COMMAND_SURFACES, NOT_AN_OUTPUT_FORMAT, surface_of};
-use aplan_output::Format;
+use aplan_output::{Format, Surface};
 
-mod common;
+use crate::common;
 
 /// A plan small enough to load and rich enough that every command has something
 /// to print.
@@ -31,19 +31,79 @@ fn fixture(dir: &Path) {
          ---\n\n## Why\n\nx\n",
     )
     .expect("task");
+    std::fs::write(
+        dir.join("aplan/tasks/T-002.md"),
+        "---\nid: T-002\ntitle: another task\nphase: 0\nstatus: todo\nowner: t\neffort_days: 1\n---\n\n## Why\n\nx\n",
+    )
+    .expect("task");
+    std::fs::write(
+        dir.join("aplan/tasks/M-a.md"),
+        "---\nid: M-a\ntitle: a cut\nphase: 0\nstatus: todo\ntags: [milestone]\n\
+         ---\n\n## Why\n\nA cut.\n",
+    )
+    .expect("cut");
+    std::fs::write(
+        dir.join("feature.blueprint.yml"),
+        concat!(
+            "schema: aplan/blueprint/v1\n",
+            "name: format\n",
+            "title: Format blueprint\n",
+            "description: Exercise every action rendering.\n",
+            "tasks:\n",
+            "  - key: work\n",
+            "    title: Render blueprint output\n",
+            "    effort: 1\n",
+        ),
+    )
+    .expect("blueprint");
+    std::fs::write(dir.join("edges.yml"), "- id: T-001\n  add: [T-002]\n")
+        .expect("dependency batch");
 }
 
 /// The arguments each command needs before `--format` is even reached.
-fn extra_args(command: &str) -> Vec<&'static str> {
+fn extra_args(dir: &Path, command: &str) -> Vec<&'static str> {
     match command {
         // A command needing an argument must get one before `--format` is
         // reached at all: without it clap refuses first, every format looks
         // accepted, and this file silently stops testing the gate for that
         // command. `why` did exactly that when it gained the flag.
         "show" | "why" | "version" => vec!["T-001"],
+        "test" => vec!["list"],
         "check-docs" => vec!["DOC.md"],
+        "capture" => vec!["A format census capture", "--dry-run"],
+        "blueprint" => vec![
+            "apply",
+            "--file",
+            "feature.blueprint.yml",
+            "--cut",
+            "M-a",
+            "--dry-run",
+        ],
+        "dep" => vec!["apply", "--from", "edges.yml", "--dry-run"],
+        // The rendering tests invoke every accepted format against one fixture.
+        // Rekey is necessarily mutating, so alternate the direction instead of
+        // letting the second rendering become a missing-source refusal.
+        "rekey" if dir.join("aplan/tasks/T-001.md").exists() => {
+            vec!["T-001", "T-900"]
+        }
+        "rekey" => vec!["T-900", "T-001"],
         _ => Vec::new(),
     }
+}
+
+/// A renderable invocation for one declared command/format pair.
+///
+/// Redirected layered graph text deliberately requires an exact width. Keep
+/// that presentation control on the text pair alone: machine/export formats
+/// must continue to reject terminal-only controls.
+fn format_args<'a>(dir: &Path, command: &'a str, value: &'a str) -> Vec<&'a str> {
+    let mut args = vec![command];
+    args.extend(extra_args(dir, command));
+    args.extend(["--format", value]);
+    if command == "graph" && value == "text" {
+        args.extend(["--width", "240"]);
+    }
+    args
 }
 
 /// Whether the binary accepted `--format value` for `command`.
@@ -51,10 +111,7 @@ fn extra_args(command: &str) -> Vec<&'static str> {
 /// Acceptance is "it was not refused for the format", not "it exited zero": a
 /// command may still report findings, and that is not this question.
 fn accepts(dir: &Path, command: &str, value: &str) -> bool {
-    let mut args: Vec<&str> = vec![command];
-    args.extend(extra_args(command));
-    args.extend(["--format", value]);
-
+    let args = format_args(dir, command, value);
     let out = common::output(dir, &args);
     let text = format!(
         "{}{}",
@@ -300,11 +357,59 @@ fn no_hand_written_list_of_format_names_remains() {
 
 /// Commands whose `--format` help deliberately names formats it does *not*
 /// take, and why that is right rather than drift.
-const HELP_NAMES_MORE_THAN_IT_TAKES: &[(&str, &str)] = &[(
-    "show",
-    "its help explains which report formats it refuses and why, which is the \
-     documentation `A1-118` asked for rather than a list of what it accepts",
-)];
+const HELP_NAMES_MORE_THAN_IT_TAKES: &[(&str, &str)] = &[
+    (
+        "show",
+        "its help explains which report formats it refuses and why, which is the \
+         documentation `A1-118` asked for rather than a list of what it accepts",
+    ),
+    (
+        "inbox",
+        "the parent is a report, while its nested `promote` operation returns an action and \
+         therefore additionally accepts the agent action format; the executable matrix below \
+         audits that deliberate split",
+    ),
+];
+
+/// `inbox` normally renders a report, but promotion is an action result. Keep
+/// that one nested widening executable rather than hiding it in conditional
+/// adapter code or widening every inbox read to an agent action document.
+#[test]
+fn nested_inbox_promotion_accepts_exactly_the_action_formats() {
+    let dir = tempfile::Builder::new()
+        .tempdir_in(aplan_core::fixture::fixture_root())
+        .expect("tempdir");
+    fixture(dir.path());
+
+    let mut checked = 0_usize;
+    for format in Format::ALL {
+        let out = common::output(
+            dir.path(),
+            &[
+                "inbox",
+                "promote",
+                "I-01K8Z3A4H00000000000000000",
+                "--dry-run",
+                "--format",
+                format.as_str(),
+            ],
+        );
+        let text = format!(
+            "{}{}",
+            String::from_utf8_lossy(&out.stdout),
+            String::from_utf8_lossy(&out.stderr)
+        );
+        let accepted = !text.contains("takes --format") && !text.contains("unknown format");
+        assert_eq!(
+            accepted,
+            format.renders(Surface::Action),
+            "`inbox promote` and the action surface disagree for `{}`: {text}",
+            format.as_str()
+        );
+        checked += 1;
+    }
+    assert_eq!(checked, Format::ALL.len());
+}
 
 /// The help text names exactly the formats the command takes.
 ///
@@ -426,9 +531,7 @@ fn rendered(dir: &Path, command: &str, value: &str) -> String {
 
 /// The exit code and stdout of `command --format value`.
 fn ran(dir: &Path, command: &str, value: &str) -> (i32, String) {
-    let mut args: Vec<&str> = vec![command];
-    args.extend(extra_args(command));
-    args.extend(["--format", value]);
+    let args = format_args(dir, command, value);
     let out = common::output(dir, &args);
     (
         out.status.code().unwrap_or(-1),

@@ -15,8 +15,30 @@
 
 use std::path::Path;
 
-mod common;
+use crate::common;
 use common::{on_a_terminal_raw, run};
+
+const FOCUSED_GRAPH: &[&str] = &[
+    "graph",
+    "--format",
+    "text",
+    "--layout",
+    "lanes",
+    "--focus",
+    "T-003",
+    "--critical",
+];
+const LAYERED_GRAPH: &[&str] = &[
+    "graph",
+    "--format",
+    "text",
+    "--width",
+    "160",
+    "--ascii",
+    "--focus",
+    "T-003",
+    "--critical",
+];
 
 /// The shared spawn boundary, rather than a contributor's shell profile,
 /// decides the fixture's starting point (`A1-346`).
@@ -56,8 +78,29 @@ fn the_shared_launcher_has_a_known_colour_baseline() {
 /// compared nothing against nothing passed while checking neither. The
 /// non-emptiness guard in the census is what found that, one commit after this
 /// file was written with a clean fixture.
+fn capture_fixtures(dir: &Path) {
+    std::fs::create_dir_all(dir.join("aplan/.inbox")).expect("inbox");
+    std::fs::write(
+        dir.join("aplan/.inbox/I-01K8Z3A4H00000000000000000.yml"),
+        "schema: aplan/capture/v1\nid: I-01K8Z3A4H00000000000000000\n\
+         title: An open capture\nkind: task\nstate: open\n\
+         captured_at: '2026-01-01T00:00:00Z'\norigin: cli\n\
+         source:\n  namespace: colour\n  key: census\n",
+    )
+    .expect("open capture");
+    std::fs::write(
+        dir.join("aplan/.inbox/I-01K8Z3A4H00000000000000001.yml"),
+        "schema: aplan/capture/v1\nid: I-01K8Z3A4H00000000000000001\n\
+         title: A discarded capture\nkind: task\nstate: discarded\n\
+         captured_at: '2026-01-01T00:00:00Z'\norigin: cli\n\
+         disposed_at: '2026-01-02T00:00:00Z'\nreason: reviewed\n",
+    )
+    .expect("discarded capture");
+}
+
 fn fixture(dir: &Path) {
     std::fs::create_dir_all(dir.join("aplan/tasks")).expect("mkdir");
+    capture_fixtures(dir);
     std::fs::write(dir.join(".aplan.yml"), "root: aplan\n").expect("config");
     std::fs::write(dir.join("DOC.md"), "# Doc\n\n## intro\n\nbody\n").expect("doc");
     std::fs::write(
@@ -99,7 +142,22 @@ fn fixture(dir: &Path) {
          tags: [milestone]\nblocked_by: [T-001, T-002, T-003, T-004]\n---\n\n## Why\n\nx\n",
     )
     .expect("a cut");
-
+    std::fs::write(
+        dir.join("feature.blueprint.yml"),
+        concat!(
+            "schema: aplan/blueprint/v1\n",
+            "name: colour\n",
+            "title: Colour blueprint\n",
+            "description: Exercise blueprint rendering.\n",
+            "tasks:\n",
+            "  - key: work\n",
+            "    title: Render a blueprint\n",
+            "    effort: 1\n",
+        ),
+    )
+    .expect("blueprint");
+    std::fs::write(dir.join("edges.yml"), "- id: T-003\n  add: [T-001]\n")
+        .expect("dependency batch");
     // A repository, because `verify` opens one and prints nothing without it --
     // the second pair the non-emptiness guard caught being checked against
     // nothing. Nothing here has evidence to resolve; what matters is that the
@@ -135,6 +193,7 @@ fn fixture(dir: &Path) {
 /// with blockers; and `paths` needs a task that declares some.
 fn census_fixture(dir: &Path) {
     std::fs::create_dir_all(dir.join("aplan/tasks")).expect("mkdir");
+    capture_fixtures(dir);
     std::fs::write(dir.join(".aplan.yml"), "root: aplan\n").expect("config");
     std::fs::write(dir.join("DOC.md"), "# Doc\n\n## intro\n\nbody\n").expect("doc");
     std::fs::write(
@@ -162,7 +221,22 @@ fn census_fixture(dir: &Path) {
          tags: [milestone]\nblocked_by: [T-001, T-002, T-003]\n---\n\n## Why\n\nx\n",
     )
     .expect("cut");
-
+    std::fs::write(
+        dir.join("feature.blueprint.yml"),
+        concat!(
+            "schema: aplan/blueprint/v1\n",
+            "name: colour\n",
+            "title: Colour blueprint\n",
+            "description: Exercise blueprint rendering.\n",
+            "tasks:\n",
+            "  - key: work\n",
+            "    title: Render a blueprint\n",
+            "    effort: 1\n",
+        ),
+    )
+    .expect("blueprint");
+    std::fs::write(dir.join("edges.yml"), "- id: T-003\n  add: [T-001]\n")
+        .expect("dependency batch");
     let git = |args: &[&str], date: Option<&str>| {
         let mut c = std::process::Command::new("git");
         c.args(args).current_dir(dir);
@@ -187,14 +261,29 @@ fn census_fixture(dir: &Path) {
     git(&later, None);
 }
 
-/// Every ANSI escape sequence in `text`.
+fn blueprint_render_args() -> Vec<&'static str> {
+    vec![
+        "apply",
+        "--file",
+        "feature.blueprint.yml",
+        "--cut",
+        "M-c1",
+        "--dry-run",
+    ]
+}
+
+fn dependency_render_args() -> Vec<&'static str> {
+    vec!["apply", "--from", "edges.yml", "--dry-run"]
+}
+
+/// Every CSI escape sequence in `text`.
 ///
 /// The final byte is searched for *after* the `[`, not from the escape: `[` is
 /// itself in the `@`..`~` range a sequence ends on, so scanning from the start
 /// returns `ESC [` and leaves `1m` in the text. That bug passed every
 /// presence assertion in this file, because `ESC [` is still an escape, and was
 /// caught only by the one test that compares the stripped bytes.
-fn sgr(text: &str) -> Vec<String> {
+fn csi(text: &str) -> Vec<String> {
     let mut out = Vec::new();
     let mut rest = text;
     while let Some(i) = rest.find('\u{1b}') {
@@ -215,6 +304,13 @@ fn sgr(text: &str) -> Vec<String> {
     out
 }
 
+fn sgr(text: &str) -> Vec<String> {
+    csi(text)
+        .into_iter()
+        .filter(|sequence| sequence.ends_with('m'))
+        .collect()
+}
+
 fn has_colour(text: &str) -> bool {
     !sgr(text).is_empty()
 }
@@ -226,6 +322,86 @@ fn plain(text: &str) -> String {
         out = out.replace(&seq, "");
     }
     out
+}
+
+/// Remove deliberately per-invocation values before comparing whether colour
+/// changed a JSON document. Their presence and type remain part of the
+/// assertion: only equality of two independently sampled clocks is not.
+fn stable_machine_json(command: &str, output: &str) -> serde_json::Value {
+    let mut value: serde_json::Value = serde_json::from_str(output).expect("machine JSON");
+    if matches!(command, "ready" | "stale" | "tasks") {
+        let observed = value
+            .as_object_mut()
+            .expect("machine JSON object")
+            .remove("claim_observed_at_epoch_seconds")
+            .and_then(|clock| clock.as_i64())
+            .expect("claim-aware output carries an integer observation clock");
+        assert!(observed >= 0, "claim observation precedes the Unix epoch");
+    }
+    if command == "verify" {
+        let observed = value
+            .get_mut("evidence_observation")
+            .and_then(serde_json::Value::as_object_mut)
+            .expect("verify machine output carries an evidence observation")
+            .remove("observed_at_epoch_seconds")
+            .and_then(|clock| clock.as_i64())
+            .expect("evidence observation carries an integer observation clock");
+        assert!(
+            observed >= 0,
+            "evidence observation precedes the Unix epoch"
+        );
+    }
+    if command == "inbox" {
+        let observed = value
+            .as_object_mut()
+            .expect("inbox machine JSON object")
+            .remove("evaluated_at")
+            .and_then(|clock| clock.as_str().map(str::to_string))
+            .expect("inbox output carries an evaluation clock");
+        assert!(
+            observed.ends_with('Z'),
+            "inbox evaluation clock is not UTC: {observed}"
+        );
+    }
+    value
+}
+
+fn stable_human_text(command: &str, output: &str) -> String {
+    if command != "inbox" {
+        return output.to_string();
+    }
+    let mut normalized = output
+        .lines()
+        .map(|line| {
+            if line.starts_with("evaluated at: ") {
+                "evaluated at: <clock>"
+            } else {
+                line
+            }
+        })
+        .collect::<Vec<_>>()
+        .join("\n");
+    if output.ends_with('\n') {
+        normalized.push('\n');
+    }
+    normalized
+}
+
+#[test]
+fn volatile_observation_clocks_do_not_impersonate_colour_differences() {
+    let first = r#"{
+        "evidence_observation": {"state": "current", "observed_at_epoch_seconds": 1},
+        "warnings": []
+    }"#;
+    let later = r#"{
+        "evidence_observation": {"state": "current", "observed_at_epoch_seconds": 2},
+        "warnings": []
+    }"#;
+
+    assert_eq!(
+        stable_machine_json("verify", first),
+        stable_machine_json("verify", later)
+    );
 }
 
 const COLS: usize = 100;
@@ -306,6 +482,99 @@ fn the_environment_contract_still_holds() {
         has_colour(&String::from_utf8_lossy(&forced.stdout)),
         "CLICOLOR_FORCE did not force colour into a pipe"
     );
+}
+
+/// Proof for `graph.text_focus_and_critical_overlay`: graph `text` is a human
+/// terminal shape even though it is not named `human`, and it obeys the same
+/// automatic, environment and explicit colour contract as every report.
+#[test]
+fn graph_text_obeys_every_colour_mode_without_changing_its_plain_bytes() {
+    let dir = tempfile::Builder::new()
+        .tempdir_in(aplan_core::fixture::fixture_root())
+        .expect("tempdir");
+    fixture(dir.path());
+    let graph = FOCUSED_GRAPH;
+
+    let piped = run(dir.path(), graph);
+    assert!(!has_colour(&piped.stdout), "auto coloured a pipe");
+    let mut always = vec!["--color=always"];
+    always.extend(graph.iter().copied());
+    let forced = run(dir.path(), &always);
+    assert!(
+        has_colour(&forced.stdout),
+        "always did not colour graph text"
+    );
+    assert_eq!(plain(&forced.stdout), piped.stdout);
+
+    let Some(terminal) = on_a_terminal_raw(dir.path(), COLS, &[], graph) else {
+        return;
+    };
+    assert!(
+        has_colour(&terminal),
+        "auto did not colour graph text at a terminal"
+    );
+    for (environment, args, reason) in [
+        (
+            vec![("NO_COLOR", "1")],
+            graph.to_vec(),
+            "NO_COLOR did not disable graph colour",
+        ),
+        (
+            vec![("CLICOLOR", "0")],
+            graph.to_vec(),
+            "CLICOLOR=0 did not disable graph colour",
+        ),
+        (
+            vec![("CLICOLOR_FORCE", "1")],
+            {
+                let mut args = vec!["--color=never"];
+                args.extend(graph);
+                args
+            },
+            "--color=never did not override CLICOLOR_FORCE",
+        ),
+    ] {
+        let text = on_a_terminal_raw(dir.path(), COLS, &environment, &args).expect("pty");
+        assert!(!has_colour(&text), "{reason}: {text:?}");
+    }
+
+    let forced_by_environment = common::command(dir.path(), graph)
+        .env("CLICOLOR_FORCE", "1")
+        .output()
+        .expect("run graph");
+    assert!(
+        has_colour(&String::from_utf8_lossy(&forced_by_environment.stdout)),
+        "CLICOLOR_FORCE did not colour graph text in a pipe"
+    );
+}
+
+/// Proof for `graph.layered_text_uses_the_shared_semantic_scene`: the static
+/// cell painter uses the process-wide human-output palette while redirected
+/// Auto and Never remain plain and all three choices have identical content.
+#[test]
+fn layered_graph_text_obeys_colour_without_changing_plain_bytes() {
+    let dir = tempfile::Builder::new()
+        .tempdir_in(aplan_core::fixture::fixture_root())
+        .expect("tempdir");
+    fixture(dir.path());
+
+    let automatic = run(dir.path(), LAYERED_GRAPH);
+    assert!(!has_colour(&automatic.stdout), "auto coloured a pipe");
+
+    let mut always = vec!["--color=always"];
+    always.extend(LAYERED_GRAPH.iter().copied());
+    let forced = run(dir.path(), &always);
+    assert!(
+        has_colour(&forced.stdout),
+        "always did not colour layered text"
+    );
+    assert_eq!(plain(&forced.stdout), automatic.stdout);
+
+    let mut never = vec!["--color=never"];
+    never.extend(LAYERED_GRAPH.iter().copied());
+    let disabled = run(dir.path(), &never);
+    assert!(!has_colour(&disabled.stdout));
+    assert_eq!(disabled.stdout, automatic.stdout);
 }
 
 /// **The flag wins over the environment**, in both directions.
@@ -463,12 +732,18 @@ fn every_surface_that_was_coloured_is_still_coloured() {
         role(aplan_output::style::HEADING),
         role(aplan_output::style::DIM),
     );
-    let (attention, error) = (
+    let (attention, warning, error) = (
         role(aplan_output::style::ATTENTION),
+        role(aplan_output::style::WARNING),
         role(aplan_output::style::ERROR),
     );
     let (id, done, heading) = (id.as_str(), done.as_str(), heading.as_str());
-    let (dim, attention, error) = (dim.as_str(), attention.as_str(), error.as_str());
+    let (dim, attention, warning, error) = (
+        dim.as_str(),
+        attention.as_str(),
+        warning.as_str(),
+        error.as_str(),
+    );
 
     let dir = tempfile::Builder::new()
         .tempdir_in(aplan_core::fixture::fixture_root())
@@ -509,6 +784,14 @@ fn every_surface_that_was_coloured_is_still_coloured() {
         (
             &["critical-path"],
             &[(id, "the id"), (heading, "the headline")],
+        ),
+        (
+            FOCUSED_GRAPH,
+            &[
+                (heading, "the focused role"),
+                (warning, "the direct-blocker role"),
+                (id, "the critical route and ids"),
+            ],
         ),
         (
             &["vacuity"],
@@ -631,7 +914,12 @@ fn stripping_a_forced_colour_gives_the_refused_one() {
             // form refuses, and a refusal prints nothing, which is the vacuity
             // this census exists to catch (`A1-313`).
             "show" | "why" | "tree" | "version" => vec!["T-001"],
+            "test" => vec!["list"],
             "check-docs" => vec!["DOC.md"],
+            "rekey" => vec!["T-001", "T-900"],
+            "blueprint" => blueprint_render_args(),
+            "dep" => dependency_render_args(),
+            "capture" => vec!["An open capture", "--source", "colour:census"],
             _ => Vec::new(),
         }
     };
@@ -649,6 +937,10 @@ fn stripping_a_forced_colour_gives_the_refused_one() {
             args
         })
         .collect();
+    // Graph's terminal rendering is named `text` rather than `human`, because
+    // the same surface also has Mermaid and DOT. It carries the identical
+    // stream-resolved styling contract and must not fall out of this census.
+    shapes.push(vec!["graph", "--format", "text", "--width", "240"]);
     shapes.push(vec!["show", "NOPE"]);
     shapes.push(vec!["check", "--root", "nope"]);
     shapes.push(vec!["check", "--nonsense"]);
@@ -660,15 +952,23 @@ fn stripping_a_forced_colour_gives_the_refused_one() {
         refused.extend_from_slice(args);
 
         let a = common::run(dir.path(), &forced);
-        let n = common::run(dir.path(), &refused);
+        let n = if args.first() == Some(&"rekey") {
+            let other = tempfile::Builder::new()
+                .tempdir_in(aplan_core::fixture::fixture_root())
+                .expect("tempdir");
+            fixture(other.path());
+            common::run(other.path(), &refused)
+        } else {
+            common::run(dir.path(), &refused)
+        };
         assert!(
             !a.text().is_empty(),
             "`aplan {}` said nothing at all, so nothing was compared",
             args.join(" ")
         );
         assert_eq!(
-            plain(&a.text()),
-            n.text(),
+            stable_human_text(args[0], &plain(&a.text())),
+            stable_human_text(args[0], &n.text()),
             "`aplan {}` says something in colour that it does not say without it",
             args.join(" ")
         );
@@ -707,7 +1007,12 @@ fn the_machine_formats_carry_no_colour_when_it_is_forced() {
     let extra = |command: &str| -> Vec<&'static str> {
         match command {
             "show" | "why" | "tree" | "version" => vec!["T-001"],
+            "test" => vec!["list"],
             "check-docs" => vec!["DOC.md"],
+            "rekey" => vec!["T-001", "T-900"],
+            "blueprint" => blueprint_render_args(),
+            "dep" => dependency_render_args(),
+            "capture" => vec!["An open capture", "--source", "colour:census"],
             // **The clock is pinned, and it has to be.** This test runs each
             // command twice and compares the bytes, and `due`'s JSON carries
             // `overdue_seconds` measured from *now* -- so two runs that straddle
@@ -724,8 +1029,8 @@ fn the_machine_formats_carry_no_colour_when_it_is_forced() {
     let mut checked = 0_usize;
     for (command, surface, _) in aplan::COMMAND_SURFACES {
         for format in surface.formats() {
-            if format == aplan_output::Format::Human {
-                continue; // the one surface colour is *for*
+            if format.supports_terminal_styling() {
+                continue; // the two human terminal renderings colour is for
             }
             let mut args: Vec<&str> = vec![command];
             args.extend(extra(command));
@@ -750,15 +1055,32 @@ fn the_machine_formats_carry_no_colour_when_it_is_forced() {
                 "`aplan {}` emitted an escape under `--color=always`, into output a \
                  parser reads: {:?}",
                 args.join(" "),
-                sgr(&a.stdout)
+                csi(&a.stdout)
             );
-            let n = common::run(dir.path(), &args);
-            assert_eq!(
-                a.stdout,
-                n.stdout,
-                "`aplan {}` rendered differently under `--color=always`",
-                args.join(" ")
-            );
+            let n = if *command == "rekey" {
+                let other = tempfile::Builder::new()
+                    .tempdir_in(aplan_core::fixture::fixture_root())
+                    .expect("tempdir");
+                fixture(other.path());
+                common::run(other.path(), &args)
+            } else {
+                common::run(dir.path(), &args)
+            };
+            if matches!(format.as_str(), "json" | "agent") {
+                assert_eq!(
+                    stable_machine_json(command, &a.stdout),
+                    stable_machine_json(command, &n.stdout),
+                    "`aplan {}` rendered differently under `--color=always`",
+                    args.join(" ")
+                );
+            } else {
+                assert_eq!(
+                    a.stdout,
+                    n.stdout,
+                    "`aplan {}` rendered differently under `--color=always`",
+                    args.join(" ")
+                );
+            }
         }
     }
 
@@ -782,7 +1104,7 @@ fn the_machine_formats_carry_no_colour_when_it_is_forced() {
             !has_colour(&a.stdout),
             "`aplan {}` emitted an escape under `--color=always`: {:?}",
             args.join(" "),
-            sgr(&a.stdout)
+            csi(&a.stdout)
         );
         assert_eq!(
             a.stdout,
@@ -807,7 +1129,7 @@ fn the_machine_formats_carry_no_colour_when_it_is_forced() {
 /// exactly the kind that stops being true when somebody unifies the two.
 #[test]
 fn mcp_is_unchanged_under_every_setting() {
-    use std::io::Write as _;
+    use std::io::{BufRead as _, Read as _, Write as _};
 
     let dir = tempfile::Builder::new()
         .tempdir_in(aplan_core::fixture::fixture_root())
@@ -822,16 +1144,34 @@ fn mcp_is_unchanged_under_every_setting() {
             .spawn()
             .expect("the server starts");
         let mut stdin = child.stdin.take().expect("stdin");
-        for line in [
-            r#"{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2024-11-05","capabilities":{},"clientInfo":{"name":"t","version":"1"}}}"#,
-            r#"{"jsonrpc":"2.0","method":"notifications/initialized"}"#,
-            r#"{"jsonrpc":"2.0","id":2,"method":"tools/list"}"#,
-        ] {
-            writeln!(stdin, "{line}").expect("write");
-        }
+        let stdout = child.stdout.take().expect("stdout");
+        let mut stdout = std::io::BufReader::new(stdout);
+        let mut output = String::new();
+        let initialize = r#"{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2024-11-05","capabilities":{},"clientInfo":{"name":"t","version":"1"}}}"#;
+        let initialized = r#"{"jsonrpc":"2.0","method":"notifications/initialized"}"#;
+        let tools = r#"{"jsonrpc":"2.0","id":2,"method":"tools/list"}"#;
+
+        writeln!(stdin, "{initialize}").expect("write initialize");
+        stdin.flush().expect("flush initialize");
+        assert_ne!(
+            stdout.read_line(&mut output).expect("read initialize"),
+            0,
+            "server closed before initialize response"
+        );
+
+        writeln!(stdin, "{initialized}").expect("write initialized notification");
+        writeln!(stdin, "{tools}").expect("write tool list");
+        stdin.flush().expect("flush tool list");
+        assert_ne!(
+            stdout.read_line(&mut output).expect("read tool list"),
+            0,
+            "server closed before tool-list response"
+        );
         drop(stdin);
-        let out = child.wait_with_output().expect("the server exits");
-        String::from_utf8_lossy(&out.stdout).into_owned()
+        stdout.read_to_string(&mut output).expect("drain stdout");
+        let status = child.wait().expect("the server exits");
+        assert!(status.success(), "server exited with {status}");
+        output
     };
 
     let plainly = speak(&["mcp"]);
@@ -861,29 +1201,117 @@ fn mcp_is_unchanged_under_every_setting() {
 /// refused by `clap` and prints nothing, and nothing carries no escape -- which
 /// is how three pairs in the machine census above were passing against an empty
 /// string until a non-emptiness guard was added (`A1-286`, audit).
-const STYLED: &[(&[&str], &str)] = &[
-    (&["check"], "DAG acyclic"),
-    (&["verify"], "evidence resolved"),
-    (&["check-docs", "DOC.md"], "document(s)"),
-    (&["ready"], "T-001"),
+const STYLED: &[(&str, &[&str], &str)] = &[
+    ("check", &["check"], "DAG acyclic"),
+    ("verify", &["verify"], "evidence resolved"),
+    ("test list", &["test", "list"], "test catalogue:"),
+    (
+        "blueprint apply",
+        &[
+            "blueprint",
+            "apply",
+            "--file",
+            "feature.blueprint.yml",
+            "--cut",
+            "M-c1",
+            "--dry-run",
+        ],
+        "blueprint application: predicted",
+    ),
+    (
+        "dep apply",
+        &["dep", "apply", "--from", "edges.yml", "--dry-run"],
+        "dependency batch: predicted",
+    ),
+    ("check-docs", &["check-docs", "DOC.md"], "document(s)"),
+    ("ready", &["ready"], "T-001"),
     // `why` on a task with no blockers prints one unstyled sentence, so the
     // census has to point it at one that has some.
-    (&["why", "M-c1"], "is blocked by"),
-    (&["show", "T-001"], "phase 0"),
-    (&["tree", "T-001"], "releases:"),
-    (&["roadmap"], "roadmap:"),
-    (&["summary"], "effort"),
-    (&["tasks"], "status"),
-    (&["critical-path"], "critical path:"),
-    (&["vacuity"], "rule/task pair"),
-    (&["paths"], "commit(s) sampled"),
-    (&["stale"], "idle"),
-    (&["deprecations"], "announced in"),
-    (&["due", "--as-of", "2027-01-01T00:00:00Z"], "revisit"),
+    ("why", &["why", "M-c1"], "is blocked by"),
+    ("show", &["show", "T-001"], "phase 0"),
+    ("explain", &["explain", "rule", "APLAN012"], "APLAN012"),
+    ("tree", &["tree", "T-001"], "releases:"),
+    ("roadmap", &["roadmap"], "roadmap:"),
+    ("summary", &["summary"], "effort"),
+    ("tasks", &["tasks"], "status"),
+    (
+        "graph",
+        &[
+            "graph",
+            "--format",
+            "text",
+            "--focus",
+            "T-002",
+            "--critical",
+        ],
+        "legend:",
+    ),
+    ("critical-path", &["critical-path"], "critical path:"),
+    ("vacuity", &["vacuity"], "rule/task pair"),
+    ("paths", &["paths"], "commit(s) sampled"),
+    ("stale", &["stale"], "idle"),
+    ("deprecations", &["deprecations"], "announced in"),
+    (
+        "due",
+        &["due", "--as-of", "2027-01-01T00:00:00Z"],
+        "revisit",
+    ),
+    (
+        "capture",
+        &["capture", "A capture created by the colour census"],
+        "capture",
+    ),
+    ("inbox", &["inbox"], "inbox:"),
+    (
+        "inbox show",
+        &["inbox", "show", "I-01K8Z3A4H00000000000000000"],
+        "I-01K8Z3A4H00000000000000000",
+    ),
+    (
+        "inbox amend",
+        &[
+            "inbox",
+            "amend",
+            "I-01K8Z3A4H00000000000000000",
+            "--title",
+            "A capture amended by the colour census",
+        ],
+        "I-01K8Z3A4H00000000000000000",
+    ),
+    (
+        "inbox discard",
+        &["inbox", "discard", "I-01K8Z3A4H00000000000000000"],
+        "I-01K8Z3A4H00000000000000000",
+    ),
+    (
+        "inbox restore",
+        &["inbox", "restore", "I-01K8Z3A4H00000000000000001"],
+        "I-01K8Z3A4H00000000000000001",
+    ),
+    (
+        "inbox promote",
+        &[
+            "inbox",
+            "promote",
+            "I-01K8Z3A4H00000000000000000",
+            "--task-id",
+            "T-900",
+            "--phase",
+            "0",
+            "--effort",
+            "1",
+            "--path",
+            "DOC.md",
+            "--tag",
+            "cross-cutting",
+        ],
+        "T-900",
+    ),
     // The mutations that print a row of the plan rather than a sentence about
     // it. Each gets a fixture of its own below, so one writing cannot change
     // what the next one prints.
     (
+        "add",
         &[
             "add",
             "a task the census adds",
@@ -895,6 +1323,7 @@ const STYLED: &[(&[&str], &str)] = &[
         "wrote ",
     ),
     (
+        "close",
         &[
             "close",
             "T-001",
@@ -904,7 +1333,13 @@ const STYLED: &[(&[&str], &str)] = &[
         ],
         "closed ",
     ),
-    (&["drop", "T-003"], "dropped "),
+    ("drop", &["drop", "T-003"], "dropped "),
+    (
+        "park",
+        &["park", "T-001", "--reason", "portfolio decision"],
+        "parked ",
+    ),
+    ("unpark", &["unpark", "T-003"], "unparked "),
 ];
 
 /// Commands whose output carries no role, and why each one does not.
@@ -916,9 +1351,19 @@ const STYLED: &[(&[&str], &str)] = &[
 /// an omission from one, which is the shape `A1-206` settled on for width.
 const UNSTYLED: &[(&str, &str, Option<&[&str]>)] = &[
     (
-        "graph",
-        "Mermaid or Graphviz: a machine format, and `the_machine_formats_carry_no_colour_when_it_is_forced` asserts the opposite property for it",
-        Some(&["graph", "--membership"]),
+        "blueprint",
+        "a parent with no output of its own: `clap` prints its help and exits",
+        None,
+    ),
+    (
+        "test",
+        "a parent with no output of its own: `clap` prints its help and exits",
+        None,
+    ),
+    (
+        "test receipt",
+        "a canonical machine statement whose bytes are correctness-bearing",
+        None,
     ),
     (
         "facts",
@@ -955,6 +1400,11 @@ const UNSTYLED: &[(&str, &str, Option<&[&str]>)] = &[
     (
         "mcp",
         "speaks JSON-RPC on a pipe and never to a terminal",
+        None,
+    ),
+    (
+        "tui",
+        "owns a Ratatui cell grid and semantic palette rather than emitting the CLI's styled prose; its visual roles are gated with its fixed-size buffers",
         None,
     ),
     (
@@ -1011,6 +1461,11 @@ const UNSTYLED: &[(&str, &str, Option<&[&str]>)] = &[
         "stop",
         "a sentence about the status just cleared, naming the id the reader typed",
         Some(&["stop", "T-001"]),
+    ),
+    (
+        "rekey",
+        "a migration confirmation and review locations, whose ids and paths carry no semantic role",
+        Some(&["rekey", "T-001", "T-900"]),
     ),
     (
         "dep",
@@ -1071,8 +1526,7 @@ const UNSTYLED: &[(&str, &str, Option<&[&str]>)] = &[
 /// that exists but has stopped being listed is still counted.
 #[test]
 fn every_command_is_either_styled_or_held() {
-    let styled: std::collections::HashSet<String> =
-        STYLED.iter().map(|(args, _)| args[0].to_string()).collect();
+    let styled: std::collections::HashSet<&str> = STYLED.iter().map(|(name, ..)| *name).collect();
     let held: std::collections::HashSet<&str> = UNSTYLED.iter().map(|(name, ..)| *name).collect();
 
     let mut unclassified = Vec::new();
@@ -1088,7 +1542,7 @@ fn every_command_is_either_styled_or_held() {
         .collect();
     while let Some((path, command)) = stack.pop() {
         total += 1;
-        match (styled.contains(&path), held.contains(path.as_str())) {
+        match (styled.contains(path.as_str()), held.contains(path.as_str())) {
             (false, false) => unclassified.push(path.clone()),
             (true, true) => both.push(path.clone()),
             _ => {}
@@ -1136,7 +1590,7 @@ fn every_command_is_either_styled_or_held() {
 #[test]
 fn every_styled_command_emits_a_role_at_a_terminal() {
     let mut checked = 0_usize;
-    for (args, marker) in STYLED {
+    for (_, args, marker) in STYLED {
         // A fixture each. Three of these write -- `add`, `close`, `drop` -- and a
         // census whose fifteenth command reads what its third one wrote is one
         // where the order is load-bearing and nobody wrote the order down.
@@ -1349,7 +1803,7 @@ fn no_human_surface_lets_a_plan_write_to_the_terminal() {
     // audit).
     let runs: Vec<&[&str]> = STYLED
         .iter()
-        .map(|(args, _)| *args)
+        .map(|(_, args, _)| *args)
         .chain(UNSTYLED.iter().filter_map(|(.., run)| *run))
         .collect();
 
@@ -1369,7 +1823,7 @@ fn no_human_surface_lets_a_plan_write_to_the_terminal() {
             // Every escape in the output must be one the palette emits. The
             // palette is SGR and nothing else, so a sequence ending in anything
             // but `m` came from the plan.
-            let smuggled: Vec<String> = sgr(&text)
+            let smuggled: Vec<String> = csi(&text)
                 .into_iter()
                 .filter(|seq| !seq.ends_with('m'))
                 .collect();

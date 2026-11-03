@@ -13,7 +13,7 @@
 
 use std::path::Path;
 
-mod common;
+use crate::common;
 
 /// A blocker outside the subset, a task inside it that the blocker holds, and a
 /// task inside it that is genuinely ready.
@@ -28,13 +28,13 @@ fn fixture(dir: &Path) {
         ),
         (
             "S-2",
-            "---\nid: S-2\ntitle: inside the subset, blocked from outside\nphase: 0\n\
+            "---\nid: S-2\ntitle: inside the subset, blocked from outside\nphase: 1\n\
              status: todo\nowner: kim\neffort_days: 1\nblocked_by: [S-1]\ntags: [cli]\n\
              ---\n\nbody\n",
         ),
         (
             "S-3",
-            "---\nid: S-3\ntitle: inside and genuinely ready\nphase: 0\nstatus: todo\n\
+            "---\nid: S-3\ntitle: inside and genuinely ready\nphase: 1\nstatus: todo\n\
              owner: kim\neffort_days: 1\ntags: [cli]\n---\n\nbody\n",
         ),
     ];
@@ -74,6 +74,16 @@ fn selection_narrows_what_is_shown_never_what_is_computed() {
         "a task blocked from outside the subset was offered as ready:\n{ready}"
     );
 
+    // The same invariant holds for the phase coordinate specifically. Phase is
+    // a reporting selector, never an instruction to discard the phase-0 blocker
+    // before readiness is derived.
+    let ready_phase = stdout(dir.path(), &["ready", "--phase", "1"]);
+    assert!(ready_phase.contains("S-3"), "{ready_phase}");
+    assert!(
+        !ready_phase.contains("S-2"),
+        "phase selection erased an external blocker:\n{ready_phase}"
+    );
+
     // The row says the same thing.
     let doc: serde_json::Value = serde_json::from_str(&stdout(
         dir.path(),
@@ -109,11 +119,11 @@ fn selection_narrows_what_is_shown_never_what_is_computed() {
     assert_eq!(tasks, 2, "the rollup counted outside the subset: {summary}");
 }
 
-/// One definition, so every command that takes a subset takes the same four.
+/// One definition, so every command that takes a subset takes the same five.
 #[test]
 fn every_selecting_command_takes_the_same_flags() {
     const SELECTS: &[&str] = &[
-        "ready", "tasks", "summary", "stale", "vacuity", "paths", "graph",
+        "ready", "tasks", "summary", "due", "stale", "vacuity", "paths", "graph",
     ];
     /// Commands that report but take no subset, and why.
     const WITHOUT: &[(&str, &str)] = &[
@@ -150,7 +160,7 @@ fn every_selecting_command_takes_the_same_flags() {
             .get_arguments()
             .filter_map(clap::Arg::get_long)
             .collect();
-        for dimension in ["cut", "tag", "owner", "status"] {
+        for dimension in ["cut", "phase", "tag", "owner", "status"] {
             assert!(
                 flags.contains(&dimension),
                 "`{name}` does not take `--{dimension}`, so selection is not one thing"
@@ -205,6 +215,11 @@ fn one_dimension_widens_and_two_narrow() {
         Vec::<String>::new()
     );
     assert_eq!(ids(&["--status", "todo"]).len(), 3);
+    assert_eq!(ids(&["--phase", "1"]), ["S-2", "S-3"]);
+    assert_eq!(
+        ids(&["--phase", "0", "--phase", "1"]),
+        ["S-1", "S-2", "S-3"]
+    );
 }
 
 /// A gate over a subset would report a clean plan while ignoring the rest.
@@ -219,7 +234,7 @@ fn a_gate_refuses_a_selection_rather_than_qualifying_it() {
     fixture(dir.path());
 
     // Every dimension, not one of them. A refusal wired to `--owner` alone would
-    // leave the other three qualifying the gate silently, which is the answer
+    // leave the other four qualifying the gate silently, which is the answer
     // this refusal exists to prevent -- and the suite exercised only `--owner`
     // until `A1-208` counted (`A1-208`).
     let mut checked = 0_usize;
@@ -227,6 +242,7 @@ fn a_gate_refuses_a_selection_rather_than_qualifying_it() {
         for (flag, value) in [
             ("--owner", "kim"),
             ("--cut", "a"),
+            ("--phase", "1"),
             ("--tag", "cli"),
             ("--status", "todo"),
         ] {
@@ -257,7 +273,7 @@ fn a_gate_refuses_a_selection_rather_than_qualifying_it() {
             "`{gate}` refused a selection nobody made: {whole_said}"
         );
     }
-    assert_eq!(checked, 8, "a (gate, dimension) pair was skipped");
+    assert_eq!(checked, 10, "a (gate, dimension) pair was skipped");
 }
 
 /// A status the model does not have is refused with the ones it does.
@@ -447,7 +463,7 @@ fn a_reason_may_name_a_task_the_selection_excluded() {
 
 // --- every dimension, on every command, through the binary (`A1-208`) --------
 
-/// A plan with two of everything: two cuts, two tags, two owners, two statuses.
+/// A plan with two of everything: two cuts, phases, tags, owners and statuses.
 ///
 /// [`every_selecting_command_takes_the_same_flags`] asks clap whether the flags
 /// exist, which is a declaration checked against a declaration. This is the
@@ -469,25 +485,25 @@ fn two_of_everything(dir: &Path) {
         ),
         (
             "D-1",
-            "---\nid: D-1\ntitle: in cut a, kim, cli, todo\nphase: 0\nstatus: todo\n\
+            "---\nid: D-1\ntitle: in cut a, kim, cli, todo\nphase: 1\nstatus: todo\n\
              owner: kim\neffort_days: 1\npaths:\n- src/one/**\ntags: [cli]\n---\n\nbody\n",
         ),
         (
             "D-2",
-            "---\nid: D-2\ntitle: in cut a, ada, docs, in_progress\nphase: 0\n\
+            "---\nid: D-2\ntitle: in cut a, ada, docs, in_progress\nphase: 1\n\
              status: in_progress\nowner: ada\neffort_days: 2\nblocked_by: [D-1]\n\
              paths:\n- src/two/**\ntags: [docs]\n---\n\nbody\n",
         ),
         (
             "D-3",
-            "---\nid: D-3\ntitle: in cut b, ada, cli, todo\nphase: 0\nstatus: todo\n\
+            "---\nid: D-3\ntitle: in cut b, ada, cli, todo\nphase: 2\nstatus: todo\n\
              owner: ada\neffort_days: 3\npaths:\n- src/three/**\ntags: [cli]\n---\n\nbody\n",
         ),
         (
             "D-4",
-            "---\nid: D-4\ntitle: in cut b, kim, docs, todo\nphase: 0\nstatus: todo\n\
-             owner: kim\neffort_days: 4\nblocked_by: [D-3]\npaths:\n- src/four/**\n\
-             tags: [docs]\n---\n\nbody\n",
+            "---\nid: D-4\ntitle: in cut b, ada, cli, blocked\nphase: 2\nstatus: blocked\n\
+             owner: ada\neffort_days: 4\nblocked_by: [D-3]\npaths:\n- src/four/**\n\
+             tags: [cli]\nrevisit_at: 2020-01-01T00:00:00Z\n---\n\nbody\n",
         ),
         // Two closed tasks citing a commit and declaring no `paths`, which is
         // what gives `vacuity` a subject to be blind about: with no evidence
@@ -495,13 +511,13 @@ fn two_of_everything(dir: &Path) {
         // narrows nothing to nothing looks like a flag that does nothing.
         (
             "D-5",
-            "---\nid: D-5\ntitle: closed in cut a, kim, cli\nphase: 0\nstatus: done\n\
+            "---\nid: D-5\ntitle: closed in cut a, kim, cli\nphase: 1\nstatus: done\n\
              owner: kim\neffort_days: 1\ntags: [cli]\n\
              evidence:\n  - kind: commit\n    ref: 0000000\n---\n\nbody\n",
         ),
         (
             "D-6",
-            "---\nid: D-6\ntitle: closed in cut b, ada, docs\nphase: 0\nstatus: done\n\
+            "---\nid: D-6\ntitle: closed in cut b, ada, docs\nphase: 2\nstatus: done\n\
              owner: ada\neffort_days: 1\ntags: [docs]\n\
              evidence:\n  - kind: commit\n    ref: 0000000\n---\n\nbody\n",
         ),
@@ -528,25 +544,28 @@ fn two_of_everything(dir: &Path) {
 
 /// **Every selecting command, every dimension, run.**
 ///
-/// The parity test above proves the four flags are declared on all seven
+/// The parity test above proves the five flags are declared on all eight
 /// commands. That is a table checked against a table: it would pass just as
 /// happily if `--status` were parsed and thrown away, which is the defect
 /// `A1-209` is about and the one `A1-208` found twenty-eight instances of --
-/// seven commands times four dimensions, of which the suite invoked a handful.
+/// eight commands times five dimensions, of which the suite invoked a handful.
 ///
 /// The property asked is the weakest honest one, and it is enough: a selection
 /// matching a strict subset must not render what the whole plan renders. A flag
 /// that changes nothing fails it.
+/// This is the executable proof for `selection.phase_coordinate`: a phase is a
+/// real selector dimension on every command, rather than a parsed no-op.
 #[test]
 fn every_dimension_narrows_on_every_selecting_command() {
     const SELECTS: &[&str] = &[
-        "ready", "tasks", "summary", "stale", "vacuity", "paths", "graph",
+        "ready", "tasks", "summary", "due", "stale", "vacuity", "paths", "graph",
     ];
     // A value each dimension holds for some tasks and not others. `stale`
     // reports on age rather than on the subset, so it is given a window that
     // makes every task stale and the selection is what differs.
     const DIMENSIONS: &[(&str, &str)] = &[
         ("--cut", "a"),
+        ("--phase", "1"),
         ("--tag", "docs"),
         ("--owner", "kim"),
         ("--status", "in_progress"),
@@ -662,7 +681,7 @@ fn two_cuts_and_a_release(dir: &Path) {
 #[test]
 fn a_release_is_refused_as_a_cut_on_every_command_that_selects() {
     const SELECTS: &[&str] = &[
-        "ready", "tasks", "summary", "stale", "vacuity", "paths", "graph",
+        "ready", "tasks", "summary", "due", "stale", "vacuity", "paths", "graph",
     ];
 
     let dir = tempfile::Builder::new()

@@ -12,6 +12,7 @@
 - [ ] `cargo fmt --all --check` and `cargo clippy --workspace --all-targets -- -D warnings`
       are clean
 - [ ] `cargo xtask gen-schema --check` passes (schema regenerated if types changed)
-- [ ] `cargo run -p aplan -- check` is green (the dogfood)
+- [ ] `cargo run -p aplan -- check` and `cargo run -p aplan -- verify` are green
+      (structural and whole-plan L1/L2 dogfood)
 - [ ] docs updated where the change touches them (README rule table, HLD, ROADMAP,
       CHANGELOG), no doc left disagreeing with the code

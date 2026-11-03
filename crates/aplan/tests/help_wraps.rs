@@ -17,7 +17,7 @@
 use aplan::cli_command;
 use aplan_output::MAX_WIDTH;
 
-mod common;
+use crate::common;
 
 /// Every command in the tree, by the path a reader would type.
 fn every_command(cmd: &clap::Command, prefix: &str, out: &mut Vec<(String, clap::Command)>) {

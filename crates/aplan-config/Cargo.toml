@@ -13,9 +13,10 @@ workspace = true
 
 [dependencies]
 aplan-core.workspace = true
+globset.workspace = true
 serde.workspace = true
 serde_json.workspace = true
-serde_yaml_ng.workspace = true
+yaml_compat.workspace = true
 schemars.workspace = true
 thiserror.workspace = true
 

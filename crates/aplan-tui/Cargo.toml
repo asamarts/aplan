@@ -1,0 +1,32 @@
+[package]
+name = "aplan-tui"
+description = "Interactive terminal interface for aplan."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+authors.workspace = true
+
+[dependencies]
+aplan-app.workspace = true
+aplan-core.workspace = true
+aplan-evidence.workspace = true
+aplan-output.workspace = true
+ratatui.workspace = true
+shell-words.workspace = true
+thiserror.workspace = true
+unicode-segmentation.workspace = true
+unicode-width.workspace = true
+
+[target.'cfg(unix)'.dependencies]
+crossterm.workspace = true
+libc = "0.2"
+signal-hook.workspace = true
+
+[dev-dependencies]
+aplan-config.workspace = true
+tempfile.workspace = true
+
+[lints]
+workspace = true

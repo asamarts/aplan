@@ -47,7 +47,7 @@
 //! reading their source, and diagnostics are additionally covered by construction
 //! where the scenario corpus lives (`crates/aplan-e2e/tests/coverage.rs`).
 
-mod common;
+use crate::common;
 
 use aplan_core::Status;
 use aplan_core::task::Task;
@@ -217,6 +217,7 @@ fn no_generated_roadmap_cites_this_projects_adrs() {
         paths: Vec::new(),
         traces: Vec::new(),
         trace_fingerprints: std::collections::BTreeMap::new(),
+        evidence_fingerprints: std::collections::BTreeMap::new(),
         tags: Vec::new(),
         revisit_at: None,
         version_impact: None,

@@ -14,7 +14,7 @@
       "additionalProperties": false,
       "properties": {
         "root": {
-          "description": "Plan root. Defaults to the server's configured root.",
+          "description": "Repository root containing `.aplan.yml`, or that repository's configured plan directory. The server resolves plan, configuration, traces, evidence providers and Git as one context; an ambiguous partial directory is refused. Omit this field to use the server's launch context. An explicit selection returns `{context, result}` so the resolved frame is auditable.",
           "type": "string"
         }
       },
@@ -36,7 +36,7 @@
           "type": "string"
         },
         "root": {
-          "description": "Plan root. Defaults to the server's configured root.",
+          "description": "Repository root containing `.aplan.yml`, or that repository's configured plan directory. The server resolves plan, configuration, traces, evidence providers and Git as one context; an ambiguous partial directory is refused. Omit this field to use the server's launch context. An explicit selection returns `{context, result}` so the resolved frame is auditable.",
           "type": "string"
         }
       },
@@ -53,7 +53,7 @@
       "additionalProperties": false,
       "properties": {
         "root": {
-          "description": "Plan root. Defaults to the server's configured root.",
+          "description": "Repository root containing `.aplan.yml`, or that repository's configured plan directory. The server resolves plan, configuration, traces, evidence providers and Git as one context; an ambiguous partial directory is refused. Omit this field to use the server's launch context. An explicit selection returns `{context, result}` so the resolved frame is auditable.",
           "type": "string"
         }
       },
@@ -62,12 +62,12 @@
     "name": "aplan_check"
   },
   {
-    "description": "Resolve the plan's evidence against the repository (L1/L2): a cited commit must exist and touch the task's `paths`, a cited file must exist. Opens git. Never runs tests.",
+    "description": "Resolve the plan's evidence against the repository (L1/L2): a cited commit must be reachable from HEAD and touch the task's `paths`, a cited file must exist. Opens git and may run configured discovery/check providers, but never executes a cited test.",
     "inputSchema": {
       "additionalProperties": false,
       "properties": {
         "root": {
-          "description": "Plan root. Defaults to the server's configured root.",
+          "description": "Repository root containing `.aplan.yml`, or that repository's configured plan directory. The server resolves plan, configuration, traces, evidence providers and Git as one context; an ambiguous partial directory is refused. Omit this field to use the server's launch context. An explicit selection returns `{context, result}` so the resolved frame is auditable.",
           "type": "string"
         }
       },
@@ -76,11 +76,51 @@
     "name": "aplan_verify"
   },
   {
-    "description": "Create a task: the next id in this plan's own convention (or its prefix and a ULID, where the repository set `id_strategy: ulid`), placed in a cut, whose `phase` it takes. Refuses before writing what `check` would reject after, by running the rules on the plan this would produce; what it would only warn about is named in `notes` instead.",
+    "description": "Create a task with an explicit id and phase, or mint the next id in this plan's own convention (including its configured ULID strategy) and derive the phase from its cut. It accepts live initial states, every creation-time relationship, revisit scheduling and version impact; terminal history uses the CLI's evidence-resolving manifest ledger. With `members`, both identity fields are required: create that milestone and move existing live work from its source cuts in one guarded batch. Refuses before writing what `check` would reject after, by running the rules on the plan this would produce; what it would only warn about is named in `notes` instead.",
     "inputSchema": {
       "additionalProperties": false,
+      "allOf": [
+        {
+          "if": {
+            "properties": {
+              "members": {
+                "minItems": 1
+              }
+            },
+            "required": [
+              "members"
+            ]
+          },
+          "then": {
+            "not": {
+              "required": [
+                "cut"
+              ]
+            },
+            "properties": {
+              "tags": {
+                "contains": {
+                  "const": "milestone"
+                }
+              }
+            },
+            "required": [
+              "id",
+              "phase",
+              "tags"
+            ]
+          }
+        }
+      ],
       "properties": {
         "blocked_by": {
+          "items": {
+            "type": "string"
+          },
+          "type": "array"
+        },
+        "contains": {
+          "description": "Release or container member ids.",
           "items": {
             "type": "string"
           },
@@ -94,6 +134,18 @@
           "description": "Estimate in days.",
           "type": "number"
         },
+        "id": {
+          "description": "Explicit id. An ordinary add may omit it to mint from the plan convention; a non-empty members request requires it.",
+          "type": "string"
+        },
+        "members": {
+          "description": "Existing live task ids moved from exactly one source cut each into the new milestone this add creates. A non-empty list requires id, phase and a tags entry equal to milestone, forbids cut, and reserves blocked_by for milestone predecessors.",
+          "items": {
+            "type": "string"
+          },
+          "type": "array",
+          "uniqueItems": true
+        },
         "owner": {
           "type": "string"
         },
@@ -104,8 +156,41 @@
           },
           "type": "array"
         },
+        "phase": {
+          "description": "Reporting phase. An ordinary add may omit it to derive from the selected cut or plan; a non-empty members request requires it.",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "prefer_after": {
+          "description": "Advisory predecessor ids.",
+          "items": {
+            "type": "string"
+          },
+          "type": "array"
+        },
+        "ratified_by": {
+          "description": "Decision-record task ids.",
+          "items": {
+            "type": "string"
+          },
+          "type": "array"
+        },
+        "revisit_at": {
+          "description": "RFC 3339 instant for an initially blocked task.",
+          "format": "date-time",
+          "type": "string"
+        },
         "root": {
-          "description": "Plan root. Defaults to the server's configured root.",
+          "description": "Repository root containing `.aplan.yml`, or that repository's configured plan directory. The server resolves plan, configuration, traces, evidence providers and Git as one context; an ambiguous partial directory is refused. Omit this field to use the server's launch context. An explicit selection returns `{context, result}` so the resolved frame is auditable.",
+          "type": "string"
+        },
+        "status": {
+          "description": "Initial live status. Terminal history uses the CLI evidence-resolving manifest ledger.",
+          "enum": [
+            "todo",
+            "in_progress",
+            "blocked"
+          ],
           "type": "string"
         },
         "tags": {
@@ -124,6 +209,19 @@
             "type": "string"
           },
           "type": "array"
+        },
+        "version_impact": {
+          "enum": [
+            "none",
+            "fix",
+            "feature",
+            "breaking"
+          ],
+          "type": "string"
+        },
+        "version_impact_reason": {
+          "description": "Why the declared version impact applies.",
+          "type": "string"
         }
       },
       "required": [
@@ -134,7 +232,7 @@
     "name": "aplan_add"
   },
   {
-    "description": "One task whole: its `paths`, `traces` and `evidence`, which no other tool returns, plus what the graph resolves (its cut, whether it is ready, what it waits on and what it releases) and every finding attached to it. Reads the evidence ladder, so a closed task whose citation rotted looks different from a healthy one.",
+    "description": "One task whole: its `paths`, `traces` and `evidence`, which no other tool returns, plus what the graph resolves (its cut, whether it is ready, what it waits on and what it releases) and every finding attached to it. Reads repository-backed evidence and retained typed provider observations without starting configured processes; `aplan_verify` explicitly refreshes providers.",
     "inputSchema": {
       "additionalProperties": false,
       "properties": {
@@ -143,7 +241,7 @@
           "type": "string"
         },
         "root": {
-          "description": "Plan root. Defaults to the server's configured root.",
+          "description": "Repository root containing `.aplan.yml`, or that repository's configured plan directory. The server resolves plan, configuration, traces, evidence providers and Git as one context; an ambiguous partial directory is refused. Omit this field to use the server's launch context. An explicit selection returns `{context, result}` so the resolved frame is auditable.",
           "type": "string"
         }
       },
@@ -172,7 +270,7 @@
           "type": "string"
         },
         "root": {
-          "description": "Plan root. Defaults to the server's configured root.",
+          "description": "Repository root containing `.aplan.yml`, or that repository's configured plan directory. The server resolves plan, configuration, traces, evidence providers and Git as one context; an ambiguous partial directory is refused. Omit this field to use the server's launch context. An explicit selection returns `{context, result}` so the resolved frame is auditable.",
           "type": "string"
         }
       },
@@ -186,7 +284,7 @@
     "name": "aplan_dep"
   },
   {
-    "description": "Close a task with evidence, resolved before it is written: a cited commit must exist and touch the task's `paths`, a cited file must exist, and a cited test must be one a configured runner lists. Refuses exactly what the CLI refuses; evidence is a citation to be resolved, never a score the caller asserts. It never runs a test and never fetches a url, and whatever nothing here could check is named in `unchecked` rather than left looking like a pass. `aplan_verify` resolves the whole plan.",
+    "description": "Close a task with evidence, resolved at L2 before it is written: a cited commit must be reachable from HEAD and touch the task's `paths`, a cited file must exist, and a cited test must be one a configured runner lists. Refuses exactly what the CLI refuses; evidence is a citation to be resolved, never a score the caller asserts. This agent tool never runs a test; it never starts `test.run` or `test.batch`. Focused L3 closure is an explicit trusted CLI or interactive action. It never fetches a url, and whatever nothing here could check is named in `unchecked` rather than left looking like a pass. `aplan_verify` resolves the whole plan.",
     "inputSchema": {
       "additionalProperties": false,
       "properties": {
@@ -202,7 +300,7 @@
           "type": "string"
         },
         "root": {
-          "description": "Plan root. Defaults to the server's configured root.",
+          "description": "Repository root containing `.aplan.yml`, or that repository's configured plan directory. The server resolves plan, configuration, traces, evidence providers and Git as one context; an ambiguous partial directory is refused. Omit this field to use the server's launch context. An explicit selection returns `{context, result}` so the resolved frame is auditable.",
           "type": "string"
         }
       },
@@ -215,12 +313,12 @@
     "name": "aplan_close"
   },
   {
-    "description": "Record that you are working on a task, so other agents sharing this repository can see it and `aplan_ready` can be filtered to what nobody holds. Two agents cannot both be told they hold one task: the write is a compare-and-swap, and the second is refused rather than overwriting the first. Taking a task somebody holds needs `from` naming them, which is checked. The name comes from `as`, else `APLAN_OWNER`, else the repository's git user, else the operating system's; it is never read from `.aplan.yml`, because several actors share one repository.",
+    "description": "Record that you are working on a task, so other agents sharing this Git repository and all of its linked worktrees can see the same local ephemeral claim. It never edits the task or its durable `owner`. Two agents cannot both be told they hold one task: the common-directory record is a compare-and-swap. Taking a held task needs `from` naming the displaced holder. Labels are attribution, not authentication; the response includes time, origin, source and coordination scope.",
     "inputSchema": {
       "additionalProperties": false,
       "properties": {
         "as": {
-          "description": "The name to record. Otherwise `APLAN_OWNER`, then this repository's `git config user.name`, then the operating system's user. Never read from `.aplan.yml`.",
+          "description": "The name to record. Otherwise `APLAN_OWNER`, then per-user `me`, this repository's `git config user.name`, then the operating system's user. Never read from `.aplan.yml`.",
           "type": "string"
         },
         "from": {
@@ -232,7 +330,7 @@
           "type": "string"
         },
         "root": {
-          "description": "Plan root. Defaults to the server's configured root.",
+          "description": "Repository root containing `.aplan.yml`, or that repository's configured plan directory. The server resolves plan, configuration, traces, evidence providers and Git as one context; an ambiguous partial directory is refused. Omit this field to use the server's launch context. An explicit selection returns `{context, result}` so the resolved frame is auditable.",
           "type": "string"
         }
       },
@@ -244,7 +342,7 @@
     "name": "aplan_claim"
   },
   {
-    "description": "Drop a claim, reporting whose it was. Any caller may release, because a claim lasts until it is released or taken over and an abandoned one has to be clearable by somebody else; the record of who held it is in the diff. Releasing a task nobody holds changes nothing and says so.",
+    "description": "Drop a claim, reporting whose it was. Any caller may release, because a claim lasts until it is released or taken over and an abandoned one has to be clearable by somebody else. A missing task's orphaned local claim can still be released explicitly. Releasing a visible task nobody holds changes nothing and says so.",
     "inputSchema": {
       "additionalProperties": false,
       "properties": {
@@ -253,7 +351,7 @@
           "type": "string"
         },
         "root": {
-          "description": "Plan root. Defaults to the server's configured root.",
+          "description": "Repository root containing `.aplan.yml`, or that repository's configured plan directory. The server resolves plan, configuration, traces, evidence providers and Git as one context; an ambiguous partial directory is refused. Omit this field to use the server's launch context. An explicit selection returns `{context, result}` so the resolved frame is auditable.",
           "type": "string"
         }
       },
@@ -274,7 +372,7 @@
           "type": "string"
         },
         "root": {
-          "description": "Plan root. Defaults to the server's configured root.",
+          "description": "Repository root containing `.aplan.yml`, or that repository's configured plan directory. The server resolves plan, configuration, traces, evidence providers and Git as one context; an ambiguous partial directory is refused. Omit this field to use the server's launch context. An explicit selection returns `{context, result}` so the resolved frame is auditable.",
           "type": "string"
         }
       },
@@ -295,7 +393,7 @@
           "type": "string"
         },
         "root": {
-          "description": "Plan root. Defaults to the server's configured root.",
+          "description": "Repository root containing `.aplan.yml`, or that repository's configured plan directory. The server resolves plan, configuration, traces, evidence providers and Git as one context; an ambiguous partial directory is refused. Omit this field to use the server's launch context. An explicit selection returns `{context, result}` so the resolved frame is auditable.",
           "type": "string"
         }
       },

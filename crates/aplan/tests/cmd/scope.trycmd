@@ -163,21 +163,22 @@ $ aplan graph --cut s0 --tag output --format json
 
 ```
 
-And the same view drawn where a person is standing (`A1-219`). One row per task,
+And the same view through the explicit compatibility layout (`A1-219`). One row per task,
 one lane per edge in flight, and edges merging where they arrive: fan-in is the
-question a reader brings to a dependency graph. A filled node is done and a
-hollow one is not, which is what Mermaid rounds a box for. Box drawing is not
-guaranteed in a CI log, so a pipe gets the fallback table -- the same drawing,
-different characters.
+question a reader brings to a dependency graph. A filled node is done, a
+hollow one is not, and the exact status remains beside the id. The fixed role
+column is blank until `--focus` or `--critical` gives it something to say. Box
+drawing is not guaranteed in a CI log, so a pipe gets the fallback table -- the
+same drawing, different characters -- followed by its compact legend.
 
 What it could not draw it says, in the sentence beneath: a scoped view that
 quietly loses the edges leaving it answers a question the reader did not ask,
 and every shape owes that answer, not only the two with a comment syntax.
 
 ```
-$ aplan graph --cut s0 --format text
-o A-2  What it made possible
-o A-3  And the one after that
+$ aplan graph --cut s0 --format text --layout lanes
+      o A-2  [todo] What it made possible
+      o A-3  [todo] And the one after that
 
 scoped to cut `s0`.
 
@@ -185,6 +186,9 @@ scoped to cut `s0`.
 members is grouping, which `aplan roadmap` prints as a heading. `--membership` draws them.
 
 1 edge to a task outside this view is not drawn. `aplan tree <id>` follows them.
+
+legend: [F] focus; [B] direct blocker; [R] direct dependent; [C] critical route; `>` an exact critical step enters this node; letters combine.
+status: `[status]` is exact; `*` dependency satisfied; `o` dependency unsatisfied; `=`/`!` critical edge.
 
 ```
 

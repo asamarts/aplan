@@ -4,7 +4,7 @@ set -euo pipefail
 REPO_ROOT="$(cd "$(dirname "$0")/../.." && pwd)"
 cd "$REPO_ROOT"
 
-export RUSTFLAGS="${RUSTFLAGS:--D warnings}"
+export CARGO_BUILD_WARNINGS=deny
 
 # House style: no typographic tells (fancy dashes, curly quotes, ellipsis), no
 # non-ASCII dash variants, no invisible/exotic-space characters.

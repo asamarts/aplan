@@ -1,0 +1,228 @@
+{
+  "$defs": {
+    "CaptureOrigin": {
+      "description": "The immutable adapter that first wrote a capture.",
+      "enum": [
+        "cli",
+        "mcp",
+        "tui"
+      ],
+      "type": "string"
+    },
+    "CaptureSchema": {
+      "description": "The closed on-disk capture schema version.",
+      "enum": [
+        "aplan/capture/v1"
+      ],
+      "type": "string"
+    },
+    "CaptureSource": {
+      "additionalProperties": false,
+      "description": "Optional caller identity for retry-safe creation.",
+      "properties": {
+        "key": {
+          "description": "Opaque repository data. It is shown only by focused reads.",
+          "maxLength": 1024,
+          "minLength": 1,
+          "type": "string"
+        },
+        "namespace": {
+          "description": "A portable lower-case dotted or kebab-case namespace.",
+          "type": "string"
+        }
+      },
+      "required": [
+        "namespace",
+        "key"
+      ],
+      "type": "object"
+    },
+    "CaptureState": {
+      "description": "The closed lifecycle vocabulary for intake records.",
+      "enum": [
+        "open",
+        "promoted",
+        "discarded"
+      ],
+      "type": "string"
+    },
+    "PromotionDefaults": {
+      "additionalProperties": false,
+      "description": "Task-creation defaults snapshotted onto a capture.\n\nThese are inert data until promotion. They contain no status, dependency,\nevidence, trace or command field, so a profile cannot weaken task policy by\nconstruction.",
+      "properties": {
+        "cut": {
+          "description": "Default destination cut id.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "effort_days": {
+          "description": "Default positive finite effort estimate.",
+          "format": "double",
+          "type": [
+            "number",
+            "null"
+          ]
+        },
+        "owner": {
+          "description": "Default task owner.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "paths": {
+          "description": "Default task path globs.",
+          "items": {
+            "type": "string"
+          },
+          "type": "array"
+        },
+        "phase": {
+          "description": "Default task phase.",
+          "format": "uint32",
+          "minimum": 0,
+          "type": [
+            "integer",
+            "null"
+          ]
+        },
+        "tags": {
+          "description": "Default task tags.",
+          "items": {
+            "type": "string"
+          },
+          "type": "array"
+        }
+      },
+      "type": "object"
+    }
+  },
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "additionalProperties": false,
+  "description": "One versioned capture file.",
+  "properties": {
+    "body": {
+      "description": "Optional intake detail.",
+      "maxLength": 1048576,
+      "type": [
+        "string",
+        "null"
+      ]
+    },
+    "captured_at": {
+      "description": "UTC RFC 3339, whole-second precision.",
+      "type": "string"
+    },
+    "disposed_at": {
+      "description": "UTC whole-second instant at which this record left `open`.",
+      "type": [
+        "string",
+        "null"
+      ]
+    },
+    "id": {
+      "description": "`I-` followed by one canonical Crockford ULID.",
+      "type": "string"
+    },
+    "kind": {
+      "description": "Built-in or repository-declared organizational kind.",
+      "type": "string"
+    },
+    "labels": {
+      "description": "Sorted unique non-vacuous intake labels.",
+      "items": {
+        "type": "string"
+      },
+      "maxItems": 64,
+      "type": "array"
+    },
+    "origin": {
+      "$ref": "#/$defs/CaptureOrigin",
+      "description": "Immutable adapter of origin."
+    },
+    "profile": {
+      "description": "Explicit applied repository profile.",
+      "type": [
+        "string",
+        "null"
+      ]
+    },
+    "promoted_to": {
+      "description": "Resulting task id, required only for `promoted`.",
+      "type": [
+        "string",
+        "null"
+      ]
+    },
+    "promotion_defaults": {
+      "anyOf": [
+        {
+          "$ref": "#/$defs/PromotionDefaults"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "description": "Effective task-promotion defaults frozen at creation or amendment."
+    },
+    "promotion_fingerprint": {
+      "description": "Canonical promotion-request digest, required only for `promoted`.",
+      "type": [
+        "string",
+        "null"
+      ]
+    },
+    "reason": {
+      "description": "Optional disposition explanation.",
+      "type": [
+        "string",
+        "null"
+      ]
+    },
+    "revisit_at": {
+      "description": "Optional UTC instant before which an open capture is deferred.",
+      "type": [
+        "string",
+        "null"
+      ]
+    },
+    "schema": {
+      "$ref": "#/$defs/CaptureSchema",
+      "description": "Always `aplan/capture/v1`."
+    },
+    "source": {
+      "anyOf": [
+        {
+          "$ref": "#/$defs/CaptureSource"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "description": "Optional namespaced retry identity."
+    },
+    "state": {
+      "$ref": "#/$defs/CaptureState",
+      "description": "Closed capture lifecycle state."
+    },
+    "title": {
+      "description": "Non-vacuous intake title.",
+      "maxLength": 512,
+      "minLength": 1,
+      "type": "string"
+    }
+  },
+  "required": [
+    "schema",
+    "id",
+    "title",
+    "kind",
+    "state",
+    "captured_at",
+    "origin"
+  ],
+  "title": "Capture",
+  "type": "object"
+}

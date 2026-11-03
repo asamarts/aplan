@@ -14,7 +14,7 @@
 
 use std::path::Path;
 
-mod common;
+use crate::common;
 
 /// A plan whose closed task cites a commit, in a directory that is deliberately
 /// **not** a git repository.

@@ -8,8 +8,9 @@
 //!
 //! - **human**, coloured, terminal-first, for a person reading a failure;
 //! - **json**, stable machine shape, for deterministic automation;
-//! - **agent**, every diagnostic carries an `agent_instruction` a coding agent
-//!   can act on without reading the source;
+//! - **agent**, diagnostics carry an `agent_instruction`, a configured
+//!   catalogue carries one instruction for selecting an exact citation, and an
+//!   action result carries the exact identities the next action must use;
 //! - **github**, workflow-command annotations, so a PR shows the failure inline;
 //! - **sarif**, SARIF 2.1.0, so code-scanning dashboards ingest the same report;
 //! - **markdown**, a document to commit beside the plan: the roadmap and the
@@ -30,13 +31,369 @@ use std::fmt::Write as _;
 use std::io::Write as _;
 
 use aplan_core::TaskExport;
+use aplan_core::capture::{Capture, CaptureList};
 use aplan_core::deprecation::{DEPRECATION_TAG, Deprecations, REMOVAL_TAG};
 use aplan_core::diagnostic::Binding;
 use aplan_core::vacuity::RuleReach;
 use aplan_core::{
-    CriticalPath, Cut, Diagnostic, EdgeKind, Graph, Report, Roadmap, RoadmapTask, Rule, Severity,
-    Show, Status, Summary, Task, Verdict,
+    CriticalPath, Cut, Diagnostic, EdgeKind, Graph, GroupedSummary, Report, Roadmap, RoadmapTask,
+    Rule, RuleExplanation, Severity, Show, Status, Summary, Task, Verdict,
 };
+
+pub mod progress;
+
+/// Whether a capture mutation is a preview, publication or idempotent no-op.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum CaptureActionOutcome {
+    Predicted,
+    Applied,
+    Unchanged,
+    Refused,
+}
+
+/// Complete mutation answer, including the exact reviewed input identity.
+#[derive(Debug, Clone, serde::Serialize)]
+pub struct CaptureActionReport {
+    pub input: serde_json::Value,
+    pub inbox_sha256: String,
+    pub outcome: CaptureActionOutcome,
+    pub publishable: bool,
+    pub capture: Capture,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub task_id: Option<String>,
+    pub files: Vec<String>,
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub findings: Vec<String>,
+}
+
+/// Machine and human envelope for one bounded inbox collection.
+#[derive(Debug, Clone, serde::Serialize)]
+pub struct CaptureCollectionReport {
+    pub input: serde_json::Value,
+    pub inbox_sha256: String,
+    pub complete: bool,
+    #[serde(flatten)]
+    pub list: CaptureList,
+}
+
+/// Machine and human envelope for one focused capture.
+#[derive(Debug, Clone, serde::Serialize)]
+pub struct CaptureFocusedReport {
+    pub input: serde_json::Value,
+    pub inbox_sha256: String,
+    pub complete: bool,
+    pub capture: Capture,
+}
+
+/// Render a bounded capture collection without exposing opaque source keys.
+pub fn render_capture_collection(
+    report: &CaptureCollectionReport,
+    format: Format,
+) -> std::io::Result<()> {
+    if format == Format::Json {
+        return render_capture_json("aplan/capture-list/v1", report);
+    }
+    if format != Format::Human {
+        return unsupported_capture_format(format, "an inbox collection");
+    }
+    let mut out = anstream::stdout().lock();
+    render_capture_collection_human_to(&mut out, report)
+}
+
+fn render_capture_collection_human_to(
+    out: &mut impl std::io::Write,
+    report: &CaptureCollectionReport,
+) -> std::io::Result<()> {
+    let heading = crate::style::HEADING;
+    writeln!(
+        out,
+        "{heading}inbox:{heading:#} {} row(s), {} deferred open",
+        report.list.captures.len(),
+        report.list.deferred
+    )?;
+    writeln!(
+        out,
+        "{heading}evaluated at:{heading:#} {}",
+        report.list.evaluated_at
+    )?;
+    for capture in &report.list.captures {
+        let source = capture
+            .source_namespace
+            .as_deref()
+            .map(|namespace| format!(" source={}", one_line(namespace)))
+            .unwrap_or_default();
+        let revisit = capture
+            .revisit_at
+            .as_deref()
+            .map(|at| format!(" revisit={at}"))
+            .unwrap_or_default();
+        let prefix = format!("{id}{}{id:#}  ", capture.id, id = crate::style::ID);
+        let detail = format!(
+            "{} [{} / {state}{}{state:#}]{revisit}{source}",
+            one_line(&capture.title),
+            one_line(&capture.kind),
+            capture_state(capture.state),
+            state = crate::style::capture_state(capture_state(capture.state)),
+        );
+        writeln!(out, "{}", fold::row(&prefix, &detail))?;
+    }
+    Ok(())
+}
+
+/// Render one focused capture. This is the only read projection that exposes
+/// the opaque external source key.
+pub fn render_capture_focused(
+    report: &CaptureFocusedReport,
+    format: Format,
+) -> std::io::Result<()> {
+    if format == Format::Json {
+        return render_capture_json("aplan/capture/v1", report);
+    }
+    if format != Format::Human {
+        return unsupported_capture_format(format, "one focused capture");
+    }
+    let mut out = anstream::stdout().lock();
+    render_capture_human_to(&mut out, &report.capture, None)
+}
+
+/// Render one capture mutation result. Machine results always carry the full
+/// id even when a human selected it by prefix.
+pub fn render_capture_action(report: &CaptureActionReport, format: Format) -> std::io::Result<()> {
+    match format {
+        Format::Human => render_capture_action_human(report),
+        Format::Json | Format::Agent => {
+            let schema = if format == Format::Agent {
+                "aplan/agent-capture-action/v1"
+            } else {
+                "aplan/capture-action/v1"
+            };
+            let mut value = serde_json::to_value(report)?;
+            let object = value
+                .as_object_mut()
+                .expect("CaptureActionReport serializes as an object");
+            object.insert("schema".to_string(), schema.into());
+            if format == Format::Agent {
+                let instruction = if report.task_id.is_some() {
+                    "Use the reported full capture id and task id for later machine requests; never shorten the capture id to the human prefix."
+                } else {
+                    "Use the reported full capture id for any later machine request; never shorten it to the human prefix."
+                };
+                object.insert("agent_instruction".to_string(), instruction.into());
+            }
+            let mut out = std::io::stdout().lock();
+            writeln!(out, "{}", serde_json::to_string_pretty(&value)?)
+        }
+        other => unsupported_capture_format(other, "a capture action"),
+    }
+}
+
+fn render_capture_action_human(report: &CaptureActionReport) -> std::io::Result<()> {
+    let mut out = anstream::stdout().lock();
+    render_capture_human_to(&mut out, &report.capture, Some(report.outcome))?;
+    render_capture_action_details_to(&mut out, report)
+}
+
+fn render_capture_action_details_to(
+    out: &mut impl std::io::Write,
+    report: &CaptureActionReport,
+) -> std::io::Result<()> {
+    for (label, value) in [
+        ("input snapshot", report.input["sha256"].as_str()),
+        ("plan snapshot", report.input["plan_sha256"].as_str()),
+        (
+            "configuration snapshot",
+            report.input["configuration"]["sha256"].as_str(),
+        ),
+        ("plan root", report.input["plan_root"].as_str()),
+        (
+            "configuration",
+            report.input["configuration"]["path"].as_str(),
+        ),
+    ] {
+        if let Some(value) = value {
+            render_capture_field(out, label, &one_line(value))?;
+        }
+    }
+    render_capture_field(out, "inbox snapshot", &report.inbox_sha256)?;
+    if let Some(task) = &report.task_id {
+        render_capture_field(out, "task", &one_line(task))?;
+    }
+    render_capture_field(
+        out,
+        "publishable",
+        if report.publishable { "yes" } else { "no" },
+    )?;
+    if report.files.is_empty() {
+        render_capture_field(out, "files", "none")?;
+    } else {
+        for file in &report.files {
+            render_capture_field(out, "file", &one_line(file))?;
+        }
+    }
+    for finding in &report.findings {
+        render_capture_field(out, "finding", &one_line(finding))?;
+    }
+    Ok(())
+}
+
+fn render_capture_human_to(
+    out: &mut impl std::io::Write,
+    capture: &Capture,
+    outcome: Option<CaptureActionOutcome>,
+) -> std::io::Result<()> {
+    let heading = crate::style::HEADING;
+    let id = crate::style::ID;
+    if let Some(outcome) = outcome {
+        writeln!(
+            out,
+            "{heading}capture{heading:#} {id}{}{id:#}: {}",
+            capture.id,
+            capture_action_outcome(outcome)
+        )?;
+    } else {
+        writeln!(out, "{heading}capture{heading:#} {id}{}{id:#}", capture.id)?;
+    }
+    render_capture_field(out, "schema", aplan_core::capture::CAPTURE_SCHEMA)?;
+    render_capture_field(out, "title", &one_line(&capture.title))?;
+    render_capture_field(out, "kind", &one_line(&capture.kind))?;
+    let state_word = capture_state(capture.state);
+    let state = crate::style::capture_state(state_word);
+    render_capture_field(out, "state", &format!("{state}{state_word}{state:#}"))?;
+    render_capture_field(out, "captured at", &capture.captured_at)?;
+    render_capture_field(out, "origin", capture_origin(capture.origin))?;
+    if let Some(at) = &capture.revisit_at {
+        render_capture_field(out, "revisit at", at)?;
+    }
+    if !capture.labels.is_empty() {
+        render_capture_field(
+            out,
+            "labels",
+            &capture
+                .labels
+                .iter()
+                .map(|label| one_line(label))
+                .collect::<Vec<_>>()
+                .join(", "),
+        )?;
+    }
+    if let Some(profile) = &capture.profile {
+        render_capture_field(out, "profile", &one_line(profile))?;
+    }
+    if let Some(defaults) = &capture.promotion_defaults {
+        if let Some(phase) = defaults.phase {
+            render_capture_field(out, "promotion phase", &phase.to_string())?;
+        }
+        if let Some(cut) = &defaults.cut {
+            render_capture_field(out, "promotion cut", &one_line(cut))?;
+        }
+        if let Some(effort) = defaults.effort_days {
+            render_capture_field(out, "promotion effort", &effort.to_string())?;
+        }
+        if let Some(owner) = &defaults.owner {
+            render_capture_field(out, "promotion owner", &one_line(owner))?;
+        }
+        if !defaults.paths.is_empty() {
+            render_capture_field(
+                out,
+                "promotion paths",
+                &defaults
+                    .paths
+                    .iter()
+                    .map(|path| one_line(path))
+                    .collect::<Vec<_>>()
+                    .join(", "),
+            )?;
+        }
+        if !defaults.tags.is_empty() {
+            render_capture_field(
+                out,
+                "promotion tags",
+                &defaults
+                    .tags
+                    .iter()
+                    .map(|tag| one_line(tag))
+                    .collect::<Vec<_>>()
+                    .join(", "),
+            )?;
+        }
+    }
+    if let Some(source) = &capture.source {
+        render_capture_field(out, "source namespace", &one_line(&source.namespace))?;
+        render_capture_field(out, "source key", &one_line(&source.key))?;
+    }
+    if let Some(at) = &capture.disposed_at {
+        render_capture_field(out, "disposed at", at)?;
+    }
+    if let Some(reason) = &capture.reason {
+        render_capture_field(out, "reason", &one_line(reason))?;
+    }
+    if let Some(task) = &capture.promoted_to {
+        render_capture_field(out, "promoted to", &one_line(task))?;
+    }
+    if let Some(fingerprint) = &capture.promotion_fingerprint {
+        render_capture_field(out, "promotion fingerprint", fingerprint)?;
+    }
+    if let Some(body) = &capture.body {
+        writeln!(out, "  {heading}body:{heading:#}")?;
+        for line in body.lines() {
+            writeln!(out, "{}", fold::row("    ", &sanitize::visible(line)))?;
+        }
+    }
+    Ok(())
+}
+
+fn render_capture_field(
+    out: &mut impl std::io::Write,
+    label: &str,
+    value: &str,
+) -> std::io::Result<()> {
+    let heading = crate::style::HEADING;
+    let prefix = format!("  {heading}{label}:{heading:#} ");
+    writeln!(out, "{}", fold::row(&prefix, value))
+}
+
+const fn capture_action_outcome(outcome: CaptureActionOutcome) -> &'static str {
+    match outcome {
+        CaptureActionOutcome::Predicted => "predicted",
+        CaptureActionOutcome::Applied => "applied",
+        CaptureActionOutcome::Unchanged => "unchanged",
+        CaptureActionOutcome::Refused => "refused",
+    }
+}
+
+fn render_capture_json(schema: &str, report: &impl serde::Serialize) -> std::io::Result<()> {
+    let mut value = serde_json::to_value(report)?;
+    value
+        .as_object_mut()
+        .expect("capture report serializes as an object")
+        .insert("schema".to_string(), schema.into());
+    let mut out = std::io::stdout().lock();
+    writeln!(out, "{}", serde_json::to_string_pretty(&value)?)
+}
+
+fn unsupported_capture_format(format: Format, what: &str) -> std::io::Result<()> {
+    Err(std::io::Error::new(
+        std::io::ErrorKind::InvalidInput,
+        format!("`{}` does not render {what}", format.as_str()),
+    ))
+}
+
+const fn capture_state(state: aplan_core::capture::CaptureState) -> &'static str {
+    match state {
+        aplan_core::capture::CaptureState::Open => "open",
+        aplan_core::capture::CaptureState::Promoted => "promoted",
+        aplan_core::capture::CaptureState::Discarded => "discarded",
+    }
+}
+
+const fn capture_origin(origin: aplan_core::capture::CaptureOrigin) -> &'static str {
+    match origin {
+        aplan_core::capture::CaptureOrigin::Cli => "cli",
+        aplan_core::capture::CaptureOrigin::Mcp => "mcp",
+        aplan_core::capture::CaptureOrigin::Tui => "tui",
+    }
+}
 
 /// What a command prints, which is what decides the formats it can take.
 ///
@@ -62,6 +419,13 @@ pub enum Surface {
     /// A dependency graph: `graph`. The one surface with no `human` rendering,
     /// which is why a surface has to carry its own default.
     Graph,
+    /// A configured evidence catalogue, for a person, a general machine
+    /// consumer or an agent selecting one exact citation.
+    Catalogue,
+    /// The complete result of an explicit mutation preview or application.
+    /// Unlike a general report, an agent rendering is part of the contract:
+    /// it carries the exact identities the next action must use.
+    Action,
 }
 
 impl Surface {
@@ -73,6 +437,8 @@ impl Surface {
             Surface::Report => "a report",
             Surface::Document => "a document",
             Surface::Graph => "a dependency graph",
+            Surface::Catalogue => "a configured evidence catalogue",
+            Surface::Action => "an action result",
         }
     }
 
@@ -86,7 +452,11 @@ impl Surface {
     #[must_use]
     pub const fn default_format(self) -> Format {
         match self {
-            Surface::Diagnostics | Surface::Report | Surface::Document => Format::Human,
+            Surface::Diagnostics
+            | Surface::Report
+            | Surface::Document
+            | Surface::Catalogue
+            | Surface::Action => Format::Human,
             Surface::Graph => Format::Mermaid,
         }
     }
@@ -97,6 +467,8 @@ impl Surface {
         Surface::Report,
         Surface::Document,
         Surface::Graph,
+        Surface::Catalogue,
+        Surface::Action,
     ];
 
     /// The formats this surface can be rendered in.
@@ -153,18 +525,31 @@ macro_rules! define_formats {
             pub fn renders(self, surface: Surface) -> bool {
                 self.surfaces().contains(&surface)
             }
+
+            /// Whether this is a human terminal rendering whose ANSI styling
+            /// is resolved by the output stream.
+            ///
+            /// `text` is graph-specific rather than the generic `human`
+            /// format, but it has the same terminal/pipe colour contract. The
+            /// distinction matters to audits that must keep every parser shape
+            /// byte-identical under `--color=always` without misclassifying a
+            /// human drawing as a machine document.
+            #[must_use]
+            pub const fn supports_terminal_styling(self) -> bool {
+                matches!(self, Format::Human | Format::Text)
+            }
         }
     };
 }
 
 define_formats! {
     /// Coloured, terminal-first, for a person reading a failure.
-    Human = "human", renders: &[Surface::Diagnostics, Surface::Report, Surface::Document];
+    Human = "human", renders: &[Surface::Diagnostics, Surface::Report, Surface::Document, Surface::Catalogue, Surface::Action];
     /// A stable machine shape, for deterministic automation.
-    Json = "json", renders: &[Surface::Diagnostics, Surface::Report, Surface::Document, Surface::Graph];
+    Json = "json", renders: &[Surface::Diagnostics, Surface::Report, Surface::Document, Surface::Graph, Surface::Catalogue, Surface::Action];
     /// Every diagnostic carries an `agent_instruction` a coding agent can act
     /// on without reading the source.
-    Agent = "agent", renders: &[Surface::Diagnostics];
+    Agent = "agent", renders: &[Surface::Diagnostics, Surface::Catalogue, Surface::Action];
     /// Workflow-command annotations, so a PR shows the failure inline.
     Github = "github", renders: &[Surface::Diagnostics];
     /// SARIF 2.1.0, so code-scanning dashboards ingest the same report.
@@ -210,6 +595,330 @@ impl std::str::FromStr for Format {
     }
 }
 
+/// Whether one explicit blueprint request was only reviewed or was published.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum BlueprintOutcome {
+    /// IDs are predictions for the named plan snapshot and no file was written.
+    Predicted,
+    /// The guarded publisher wrote exactly the reported files and IDs.
+    Applied,
+    /// The requested post-state already existed and required no publication.
+    Unchanged,
+    /// The post-state gate refused publication.
+    Refused,
+}
+
+impl BlueprintOutcome {
+    const fn label(self) -> &'static str {
+        match self {
+            Self::Predicted => "predicted",
+            Self::Applied => "applied",
+            Self::Unchanged => "unchanged",
+            Self::Refused => "refused",
+        }
+    }
+
+    const fn task_label(self) -> &'static str {
+        match self {
+            Self::Predicted | Self::Refused => "predicted",
+            Self::Applied => "created",
+            Self::Unchanged => "unchanged",
+        }
+    }
+
+    const fn agent_instruction(self) -> &'static str {
+        match self {
+            Self::Predicted => {
+                "Review every predicted task and affected file. Apply the same captured file without --dry-run only if this post-state is intended; IDs may be re-minted if the plan changes."
+            }
+            Self::Applied => {
+                "Use the exact created task IDs in this result; these are the identities the guarded publisher wrote."
+            }
+            Self::Unchanged => {
+                "No plan file changed; inspect the reported snapshot before deciding whether another action is needed."
+            }
+            Self::Refused => {
+                "Fix the reported post-state findings or change the blueprint input, then preview the complete request again. Nothing was written."
+            }
+        }
+    }
+}
+
+/// One task identity and title in a blueprint result.
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
+pub struct BlueprintTask {
+    pub id: String,
+    pub title: String,
+}
+
+/// How one path participates in the proposed or published post-state.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum BlueprintFileKind {
+    Create,
+    Update,
+}
+
+impl BlueprintFileKind {
+    const fn label(self) -> &'static str {
+        match self {
+            Self::Create => "create",
+            Self::Update => "update",
+        }
+    }
+}
+
+/// One affected path in a blueprint result.
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
+pub struct BlueprintFile {
+    pub path: String,
+    pub kind: BlueprintFileKind,
+}
+
+/// Complete delivery answer for one captured blueprint input.
+///
+/// The source spelling and digest identify the bytes the caller selected;
+/// `plan_sha256` identifies the snapshot against which IDs were minted. Tasks,
+/// files and post-state findings are carried together so a dry run is the same
+/// answer as an application except for its explicit outcome.
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
+pub struct BlueprintApplicationReport {
+    pub source_path: String,
+    pub source_sha256: String,
+    pub plan_sha256: String,
+    pub cut: String,
+    pub outcome: BlueprintOutcome,
+    pub publishable: bool,
+    pub attempts: u32,
+    pub tasks: Vec<BlueprintTask>,
+    pub files: Vec<BlueprintFile>,
+    pub findings: Vec<String>,
+}
+
+/// Render one blueprint preview or application without changing its answer.
+pub fn render_blueprint_application(
+    report: &BlueprintApplicationReport,
+    format: Format,
+) -> std::io::Result<()> {
+    match format {
+        Format::Human => render_blueprint_application_human(report),
+        Format::Json | Format::Agent => render_blueprint_application_json(report, format),
+        other => Err(std::io::Error::new(
+            std::io::ErrorKind::InvalidInput,
+            format!("`{}` does not render an action result", other.as_str()),
+        )),
+    }
+}
+
+fn render_blueprint_application_human(report: &BlueprintApplicationReport) -> std::io::Result<()> {
+    let mut out = anstream::stdout().lock();
+    let heading = crate::style::HEADING;
+    writeln!(
+        out,
+        "{heading}blueprint application: {}{heading:#}",
+        report.outcome.label()
+    )?;
+    writeln!(out, "  source: {}", one_line(&report.source_path))?;
+    writeln!(out, "  sha256: {}", report.source_sha256)?;
+    writeln!(out, "  plan snapshot: {}", report.plan_sha256)?;
+    writeln!(out, "  cut: {}", one_line(&report.cut))?;
+    writeln!(out, "  publishable: {}", report.publishable)?;
+    writeln!(out, "  attempts: {}", report.attempts)?;
+    writeln!(out, "  tasks:")?;
+    for task in &report.tasks {
+        writeln!(
+            out,
+            "    {} {id}{}{id:#}  {}",
+            report.outcome.task_label(),
+            task.id,
+            one_line(&task.title),
+            id = crate::style::ID,
+        )?;
+    }
+    writeln!(out, "  files:")?;
+    for file in &report.files {
+        writeln!(out, "    {} {}", file.kind.label(), one_line(&file.path))?;
+    }
+    if !report.findings.is_empty() {
+        writeln!(out, "  findings:")?;
+        for finding in &report.findings {
+            writeln!(
+                out,
+                "{}",
+                fold::fold(&format!("    {}", one_line(finding)), fold::out_width(), 4,)
+            )?;
+        }
+    }
+    Ok(())
+}
+
+fn render_blueprint_application_json(
+    report: &BlueprintApplicationReport,
+    format: Format,
+) -> std::io::Result<()> {
+    let mut out = std::io::stdout().lock();
+    let mut document = serde_json::to_value(report)?;
+    let object = document.as_object_mut().ok_or_else(|| {
+        std::io::Error::new(
+            std::io::ErrorKind::InvalidData,
+            "a blueprint application report did not serialize to an object",
+        )
+    })?;
+    let (schema, instruction) = if format == Format::Agent {
+        let instruction = report.outcome.agent_instruction();
+        ("aplan/agent-blueprint-application/v1", Some(instruction))
+    } else {
+        ("aplan/blueprint-application/v1", None)
+    };
+    object.insert("schema".to_string(), schema.into());
+    if let Some(instruction) = instruction {
+        object.insert("agent_instruction".to_string(), instruction.into());
+    }
+    writeln!(out, "{}", serde_json::to_string_pretty(&document)?)
+}
+
+/// Whether an atomic dependency rewrite was reviewed or published.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum DependencyBatchOutcome {
+    Predicted,
+    Applied,
+    Unchanged,
+    Refused,
+}
+
+impl DependencyBatchOutcome {
+    const fn label(self) -> &'static str {
+        match self {
+            Self::Predicted => "predicted",
+            Self::Applied => "applied",
+            Self::Unchanged => "unchanged",
+            Self::Refused => "refused",
+        }
+    }
+
+    const fn agent_instruction(self) -> &'static str {
+        match self {
+            Self::Predicted => {
+                "Review the complete proposed edge set and every affected file. Apply it without --dry-run only if this exact post-state is intended."
+            }
+            Self::Applied => {
+                "Treat the reported additions and removals as one published dependency post-state."
+            }
+            Self::Unchanged => {
+                "The requested dependency post-state already existed; no plan file changed."
+            }
+            Self::Refused => {
+                "Fix the reported final-state findings or revise the complete edge request, then preview it again. Nothing was written."
+            }
+        }
+    }
+}
+
+/// One requested dependency operation, in deterministic reporting order.
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
+pub struct DependencyBatchOperation {
+    pub task: String,
+    pub operation: String,
+    pub after: String,
+    pub changes_state: bool,
+}
+
+/// Complete answer for one dependency rewrite transaction.
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
+pub struct DependencyBatchReport {
+    pub plan_sha256: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub source_path: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub source_sha256: Option<String>,
+    pub outcome: DependencyBatchOutcome,
+    pub publishable: bool,
+    pub operations: Vec<DependencyBatchOperation>,
+    pub files: Vec<String>,
+    pub findings: Vec<String>,
+}
+
+pub fn render_dependency_batch(
+    report: &DependencyBatchReport,
+    format: Format,
+) -> std::io::Result<()> {
+    match format {
+        Format::Human => render_dependency_batch_human(report),
+        Format::Json | Format::Agent => render_dependency_batch_json(report, format),
+        other => Err(std::io::Error::new(
+            std::io::ErrorKind::InvalidInput,
+            format!("`{}` does not render an action result", other.as_str()),
+        )),
+    }
+}
+
+fn render_dependency_batch_human(report: &DependencyBatchReport) -> std::io::Result<()> {
+    let mut out = anstream::stdout().lock();
+    let heading = crate::style::HEADING;
+    writeln!(
+        out,
+        "{heading}dependency batch: {}{heading:#}",
+        report.outcome.label()
+    )?;
+    writeln!(out, "  plan snapshot: {}", report.plan_sha256)?;
+    if let Some(source) = &report.source_path {
+        writeln!(out, "  source: {}", one_line(source))?;
+    }
+    if let Some(digest) = &report.source_sha256 {
+        writeln!(out, "  source sha256: {digest}")?;
+    }
+    writeln!(out, "  publishable: {}", report.publishable)?;
+    writeln!(out, "  operations:")?;
+    for operation in &report.operations {
+        let state = if operation.changes_state {
+            "change"
+        } else {
+            "already"
+        };
+        writeln!(
+            out,
+            "    {} {} after {} ({state})",
+            operation.operation,
+            one_line(&operation.task),
+            one_line(&operation.after)
+        )?;
+    }
+    writeln!(out, "  files:")?;
+    for file in &report.files {
+        writeln!(out, "    {}", one_line(file))?;
+    }
+    if !report.findings.is_empty() {
+        writeln!(out, "  findings:")?;
+        for finding in &report.findings {
+            writeln!(out, "    {}", one_line(finding))?;
+        }
+    }
+    Ok(())
+}
+
+fn render_dependency_batch_json(
+    report: &DependencyBatchReport,
+    format: Format,
+) -> std::io::Result<()> {
+    let mut out = std::io::stdout().lock();
+    let mut object = serde_json::to_value(report)?
+        .as_object()
+        .expect("DependencyBatchReport serializes as an object")
+        .clone();
+    let schema = match format {
+        Format::Agent => "aplan/agent-dependency-batch/v1",
+        _ => "aplan/dependency-batch/v1",
+    };
+    let instruction = (format == Format::Agent).then(|| report.outcome.agent_instruction());
+    object.insert("schema".to_string(), schema.into());
+    if let Some(instruction) = instruction {
+        object.insert("agent_instruction".to_string(), instruction.into());
+    }
+    writeln!(out, "{}", serde_json::to_string_pretty(&object)?)
+}
+
 /// What produced the report, so the affirmative summary tells the truth. A
 /// clean `check` proved the DAG; a clean `verify` resolved the evidence. The
 /// diagnostic lines are identical either way.
@@ -224,7 +933,10 @@ enum Kind<'a> {
     ///
     /// Borrowed rather than owned so this stays `Copy`: the kinds are a `Vec`,
     /// and the renderer only reads them.
-    Verify(&'a aplan_core::Unopened),
+    Verify {
+        unopened: &'a aplan_core::Unopened,
+        observation: Option<&'a aplan_core::show::EvidenceObservation>,
+    },
     /// The evidence a `close` or `amend` proposes, resolved before anything is
     /// written. Not a verdict on a plan: nothing here checked the graph.
     Evidence,
@@ -232,6 +944,10 @@ enum Kind<'a> {
     /// and resolves nothing. Carries how many files did not load, because that is
     /// the reason for the verdict and the summary has to be able to say it.
     VerifyPartial(usize),
+    /// `verify` when capture structure was invalid. The task plan loaded, but
+    /// evidence was deliberately not resolved against a repository whose full
+    /// versioned intake boundary could not be trusted.
+    VerifyInboxInvalid(usize),
     /// `check` on the same plan. Separate from [`Kind::Check`] for the same
     /// reason: a plan that did not load is not a verdict a policy can soften, and
     /// `ready`, `why` and `verify` all already refuse one.
@@ -252,13 +968,13 @@ impl Kind<'_> {
             // A run that opened some citations and had no resolver for others
             // resolved evidence, and did not resolve *this* evidence. The count
             // is the difference, said where the verdict is read.
-            Kind::Verify(u) if u.any() => Some(format!(
+            Kind::Verify { unopened: u, .. } if u.any() => Some(format!(
                 "evidence resolved, {} citation(s) unchecked",
                 u.citations
             )),
-            Kind::Verify(_) => Some("evidence resolved".to_string()),
+            Kind::Verify { .. } => Some("evidence resolved".to_string()),
             Kind::Evidence => Some("this evidence resolves".to_string()),
-            Kind::VerifyPartial(_) | Kind::CheckPartial(_) => None,
+            Kind::VerifyPartial(_) | Kind::VerifyInboxInvalid(_) | Kind::CheckPartial(_) => None,
         }
     }
 
@@ -266,7 +982,10 @@ impl Kind<'_> {
     fn json_schema(&self) -> &'static str {
         match self {
             Kind::Check | Kind::CheckPartial(_) => "aplan/check-report/v1",
-            Kind::Verify(_) | Kind::VerifyPartial(_) | Kind::Evidence => "aplan/verify-report/v1",
+            Kind::Verify { .. }
+            | Kind::VerifyPartial(_)
+            | Kind::VerifyInboxInvalid(_)
+            | Kind::Evidence => "aplan/verify-report/v1",
         }
     }
 
@@ -279,7 +998,7 @@ impl Kind<'_> {
     /// ways is how two surfaces disagree about one plan (`A1-104`).
     fn evidence_unresolved(&self) -> Option<serde_json::Value> {
         match self {
-            Kind::Verify(u) if u.any() => Some(serde_json::json!({
+            Kind::Verify { unopened: u, .. } if u.any() => Some(serde_json::json!({
                 "citations": u.citations,
                 "tasks": u.tasks,
                 "unconfigured_kinds": u.kind_names(),
@@ -298,7 +1017,17 @@ impl Kind<'_> {
             Kind::VerifyPartial(n) | Kind::CheckPartial(n) => {
                 format!("{n} task file(s) did not load, ")
             }
+            Kind::VerifyInboxInvalid(n) => {
+                format!("{n} capture inbox finding(s) prevented evidence resolution, ")
+            }
             _ => String::new(),
+        }
+    }
+
+    fn evidence_observation(&self) -> Option<&aplan_core::show::EvidenceObservation> {
+        match self {
+            Self::Verify { observation, .. } => *observation,
+            _ => None,
         }
     }
 }
@@ -331,7 +1060,34 @@ pub fn render_verified(
     policy: &Verdict,
     unopened: &aplan_core::Unopened,
 ) -> std::io::Result<()> {
-    render_kind(report, format, Kind::Verify(unopened), policy)
+    render_kind(
+        report,
+        format,
+        Kind::Verify {
+            unopened,
+            observation: None,
+        },
+        policy,
+    )
+}
+
+/// Render a verify report with its explicit provider provenance and freshness.
+pub fn render_verified_observed(
+    report: &Report,
+    format: Format,
+    policy: &Verdict,
+    unopened: &aplan_core::Unopened,
+    observation: &aplan_core::show::EvidenceObservation,
+) -> std::io::Result<()> {
+    render_kind(
+        report,
+        format,
+        Kind::Verify {
+            unopened,
+            observation: Some(observation),
+        },
+        policy,
+    )
 }
 
 /// Render the evidence a `close` or `amend` proposes, before it is written.
@@ -351,6 +1107,20 @@ pub fn render_verified_partial(
     unloadable: usize,
 ) -> std::io::Result<()> {
     render_kind(report, format, Kind::VerifyPartial(unloadable), policy)
+}
+
+/// Render a `verify` report whose capture inbox failed structural validation.
+///
+/// Evidence resolution did not run, so this is neither a check report nor a
+/// normal verified report. The distinct kind preserves the verify machine
+/// schema and carries the early refusal cause on stdout.
+pub fn render_verified_inbox_invalid(
+    report: &Report,
+    format: Format,
+    policy: &Verdict,
+    findings: usize,
+) -> std::io::Result<()> {
+    render_kind(report, format, Kind::VerifyInboxInvalid(findings), policy)
 }
 
 fn render_kind(
@@ -531,6 +1301,23 @@ fn sarif_uri(path: &std::path::Path) -> String {
     }
 }
 
+fn render_human_evidence_observation(
+    out: &mut impl std::io::Write,
+    kind: Kind<'_>,
+) -> std::io::Result<()> {
+    let Some(observation) = kind.evidence_observation() else {
+        return Ok(());
+    };
+    writeln!(
+        out,
+        "evidence: scope={}, provider_source={}, freshness={}, completeness={}",
+        observation.scope.label(),
+        observation.provider_source.label(),
+        observation.state.label().replace(' ', "_"),
+        observation.completeness.label(),
+    )
+}
+
 fn render_human(report: &Report, kind: Kind<'_>, policy: &Verdict) -> std::io::Result<()> {
     let mut out = anstream::stdout().lock();
     let red = crate::style::ERROR;
@@ -621,6 +1408,16 @@ fn render_human(report: &Report, kind: Kind<'_>, policy: &Verdict) -> std::io::R
                 suppressed += 1;
             }
         }
+        if let Some(repair) = &d.repair {
+            writeln!(
+                out,
+                "{}",
+                fold::row(
+                    &format!("  {dim}repair: "),
+                    &sanitize::visible(&repair_description(repair))
+                )
+            )?;
+        }
     }
     if suppressed > 0 {
         writeln!(
@@ -633,6 +1430,7 @@ fn render_human(report: &Report, kind: Kind<'_>, policy: &Verdict) -> std::io::R
              `--format agent` prints every one){dim:#}"
         )?;
     }
+    render_human_evidence_observation(&mut out, kind)?;
 
     // Counted against the *verdict*, not the raw severities: a repository that
     // made a rule advisory passes, and a summary that said `failed` while the
@@ -707,6 +1505,10 @@ fn render_json(
             if agent && let Some(ai) = &d.agent_instruction {
                 o["agent_instruction"] = serde_json::Value::String(ai.clone());
             }
+            if let Some(repair) = &d.repair {
+                o["repair"] = serde_json::to_value(repair)
+                    .expect("a diagnostic repair is always serializable");
+            }
             // An array rather than a joined string, so a consumer reads the
             // lines it was given instead of splitting a sentence back up
             // (`A1-365`). Present in both shapes, not only under `agent`: a
@@ -741,6 +1543,13 @@ fn render_json(
     // is published at all (`A1-253`).
     if let (Some(v), Some(obj)) = (kind.evidence_unresolved(), doc.as_object_mut()) {
         obj.insert("evidence_unresolved".to_string(), v);
+    }
+    if let (Some(observation), Some(obj)) = (kind.evidence_observation(), doc.as_object_mut()) {
+        obj.insert(
+            "evidence_observation".to_string(),
+            serde_json::to_value(observation)
+                .expect("an evidence observation is always serializable"),
+        );
     }
     let mut out = std::io::stdout().lock();
     serde_json::to_writer_pretty(&mut out, &doc)?;
@@ -822,6 +1631,128 @@ pub fn render_summary(summary: &Summary, format: Format) -> std::io::Result<()> 
         Format::Human => render_summary_human(summary),
         _ => render_summary_json(summary),
     }
+}
+
+/// Render a summary grouped by a declared tag family.
+pub fn render_grouped_summary(summary: &GroupedSummary, format: Format) -> std::io::Result<()> {
+    match format {
+        Format::Human => render_grouped_summary_human(summary),
+        _ => render_grouped_summary_json(summary),
+    }
+}
+
+fn render_grouped_summary_human(summary: &GroupedSummary) -> std::io::Result<()> {
+    let mut out = anstream::stdout().lock();
+    let bold = crate::style::HEADING;
+    let labels: Vec<String> = summary
+        .groups
+        .iter()
+        .map(|group| grouped_label(group.label.as_deref()))
+        .collect();
+    let group_width = labels
+        .iter()
+        .map(|label| fold::display_width(label))
+        .max()
+        .unwrap_or(0)
+        .max("member".len());
+    writeln!(
+        out,
+        "grouped by {}",
+        grouped_label(Some(summary.family.as_str()))
+    )?;
+    writeln!(
+        out,
+        "{bold}{}  {:>5}  {:>4}  {:>5}  {:>6}{bold:#}",
+        pad_display("member", group_width),
+        "tasks",
+        "done",
+        "ready",
+        "effort"
+    )?;
+    for (group, label) in summary.groups.iter().zip(labels) {
+        writeln!(
+            out,
+            "{}  {:>5}  {:>4}  {:>5}  {:>5.1}d",
+            pad_display(&label, group_width),
+            group.tasks,
+            group.done,
+            group.ready,
+            group.effort_days
+        )?;
+    }
+    writeln!(
+        out,
+        "{bold}{}  {:>5}  {:>4}  {:>5}  {:>5.1}d{bold:#}",
+        pad_display("total", group_width),
+        summary.total_tasks(),
+        summary.total_done(),
+        summary.ready(),
+        summary.total_effort_days()
+    )?;
+    if summary.groups_overlap() {
+        writeln!(out, "group rows overlap; totals count each task once")?;
+    }
+    writeln!(out)?;
+    if let (Some(per_week), Some(weeks), Some(left)) = (
+        summary.effort_days_per_week(),
+        summary.total_weeks(),
+        summary.remaining_weeks(),
+    ) {
+        writeln!(
+            out,
+            "at {per_week:.1} effort days a week: {} weeks of work, {} remaining",
+            weeks_cell(weeks),
+            weeks_cell(left)
+        )?;
+    }
+    if summary.total_dropped() > 0 {
+        writeln!(
+            out,
+            "dropped: {} task(s), {:.1}d, not counted above",
+            summary.total_dropped(),
+            summary.total_dropped_effort_days()
+        )?;
+    }
+    Ok(())
+}
+
+/// A family member as an unambiguous terminal-safe scalar.
+///
+/// Quotes distinguish a real member called `(no group)` or `total` from the
+/// table's synthetic rows. Escaping rather than flattening whitespace keeps two
+/// distinct legal tags distinct (`A1-467`). Backslashes are escaped first so a
+/// literal `\u{a}` cannot impersonate a newline.
+fn grouped_label(label: Option<&str>) -> String {
+    let Some(label) = label else {
+        return "(no group)".to_string();
+    };
+    let mut rendered = String::with_capacity(label.len() + 2);
+    rendered.push('"');
+    for ch in label.chars() {
+        let one = ch.to_string();
+        let dangerous = sanitize::visible(&one) != one;
+        if dangerous || (ch.is_whitespace() && ch != ' ') {
+            use std::fmt::Write as _;
+            let _ = write!(rendered, "\\u{{{:x}}}", ch as u32);
+        } else {
+            match ch {
+                '\\' => rendered.push_str("\\\\"),
+                '"' => rendered.push_str("\\\""),
+                _ => rendered.push(ch),
+            }
+        }
+    }
+    rendered.push('"');
+    rendered
+}
+
+/// Pad a terminal cell by the columns it occupies, not its UTF-8 byte length.
+fn pad_display(text: &str, width: usize) -> String {
+    let missing = width.saturating_sub(fold::display_width(text));
+    let mut padded = String::with_capacity(text.len() + missing);
+    padded.push_str(text);
+    padded.extend(std::iter::repeat_n(' ', missing));
+    padded
 }
 
 fn render_summary_human(summary: &Summary) -> std::io::Result<()> {
@@ -1027,6 +1958,44 @@ fn render_summary_json(summary: &Summary) -> std::io::Result<()> {
     writeln!(out)
 }
 
+fn render_grouped_summary_json(summary: &GroupedSummary) -> std::io::Result<()> {
+    let groups: Vec<serde_json::Value> = summary
+        .groups
+        .iter()
+        .map(|group| {
+            serde_json::json!({
+                "group": group.label,
+                "tasks": group.tasks,
+                "done": group.done,
+                "ready": group.ready,
+                "effort_days": group.effort_days,
+                "dropped": group.dropped,
+                "dropped_effort_days": group.dropped_effort_days,
+                "done_effort_days": group.done_effort_days,
+            })
+        })
+        .collect();
+    let doc = serde_json::json!({
+        "schema": "aplan/summary-grouped/v1",
+        "group_by": summary.family,
+        "groups": groups,
+        "groups_overlap": summary.groups_overlap(),
+        "ready": summary.ready(),
+        "total_tasks": summary.total_tasks(),
+        "total_done": summary.total_done(),
+        "total_effort_days": summary.total_effort_days(),
+        "total_dropped": summary.total_dropped(),
+        "total_dropped_effort_days": summary.total_dropped_effort_days(),
+        "total_done_effort_days": summary.total_done_effort_days(),
+        "effort_days_per_week": summary.effort_days_per_week(),
+        "total_weeks": summary.total_weeks(),
+        "remaining_weeks": summary.remaining_weeks(),
+    });
+    let mut out = std::io::stdout().lock();
+    serde_json::to_writer_pretty(&mut out, &doc)?;
+    writeln!(out)
+}
+
 /// Render a [`CriticalPath`] to stdout: an aligned table for `human`, a stable
 /// JSON document for every other format.
 pub fn render_critical_path(
@@ -1200,6 +2169,22 @@ fn show_facts(show: &Show) -> Vec<String> {
     if let Some(o) = &show.owner {
         facts.push(format!("owner {}", sanitize::visible(o)));
     }
+    if let Some(claim) = &show.claim {
+        let age = show
+            .claim_age_seconds
+            .map_or_else(String::new, |seconds| format!(" for {seconds}s"));
+        facts.push(format!(
+            "held by {}{}",
+            sanitize::visible(&claim.holder),
+            age
+        ));
+    }
+    if let Some(impact) = show.version_impact {
+        facts.push(format!("version impact {impact}"));
+    }
+    if let Some(version) = &show.version {
+        facts.push(format!("version {}", sanitize::visible(version)));
+    }
     // Only for work that could be picked up. `ready` is a word about offered
     // work: a milestone is a checkpoint (ADR-0008) and a `done` task is over, so
     // "ready no" about either reads as "blocked", which is the wrong word `why`
@@ -1216,22 +2201,58 @@ fn show_facts(show: &Show) -> Vec<String> {
 /// Lifted out of `render_show` because that function is at its line ceiling, and
 /// these three are one shape repeated.
 fn show_lists(s: &mut String, show: &Show) {
+    let mut traces: Vec<_> = show
+        .traces
+        .iter()
+        .map(|trace| {
+            show.trace_fingerprints.get(trace).map_or_else(
+                || format!("{trace} (unstamped)"),
+                |stamp| format!("{trace} (fingerprint {stamp})"),
+            )
+        })
+        .collect();
+    traces.extend(
+        show.trace_fingerprints
+            .iter()
+            .filter(|(trace, _)| !show.traces.contains(trace))
+            .map(|(trace, stamp)| format!("{trace} (orphaned fingerprint {stamp})")),
+    );
+    let mut evidence_keys = Vec::new();
+    let mut evidence: Vec<_> = show
+        .evidence
+        .iter()
+        .map(|e| {
+            let key = format!("{}:{}", e.kind, e.reference);
+            evidence_keys.push(key.clone());
+            let captured = e
+                .captured
+                .as_ref()
+                .map_or_else(String::new, |c| format!(" ({c})"));
+            let cited = show.evidence_fingerprints.get(&key).map_or_else(
+                || format!("{key}{captured}"),
+                |stamp| format!("{key}{captured} (fingerprint {stamp})"),
+            );
+            let outcome = e
+                .observation
+                .outcome
+                .as_ref()
+                .map_or_else(String::new, |outcome| format!(", {outcome}"));
+            format!(
+                "{cited} [evidence: {}{outcome}]",
+                e.observation.state.label()
+            )
+        })
+        .collect();
+    evidence.extend(
+        show.evidence_fingerprints
+            .iter()
+            .filter(|(citation, _)| !evidence_keys.contains(citation))
+            .map(|(citation, stamp)| format!("{citation} (orphaned fingerprint {stamp})")),
+    );
     for (heading, items) in [
         ("paths", show.paths.clone()),
-        ("traces", show.traces.clone()),
-        (
-            "evidence",
-            show.evidence
-                .iter()
-                .map(|e| {
-                    let captured = e
-                        .captured
-                        .as_ref()
-                        .map_or_else(String::new, |c| format!(" ({c})"));
-                    format!("{}:{}{captured}", e.kind, e.reference)
-                })
-                .collect(),
-        ),
+        ("traces", traces),
+        ("evidence", evidence),
     ] {
         if items.is_empty() {
             continue;
@@ -1242,6 +2263,133 @@ fn show_lists(s: &mut String, show: &Show) {
             // all strings the plan wrote (`A1-289`).
             let _ = writeln!(s, "    {}", sanitize::visible(&item));
         }
+    }
+}
+
+fn show_relationships(s: &mut String, show: &Show) {
+    for (heading, items) in [
+        ("waits on", &show.waits_on),
+        ("releases", &show.releases),
+        ("prefers after", &show.prefer_after),
+        ("ratified by", &show.ratified_by),
+        ("contains", &show.contains),
+    ] {
+        if items.is_empty() {
+            continue;
+        }
+        let _ = writeln!(s, "  {hd}{heading}:{hd:#}", hd = crate::style::HEADING);
+        for related in items {
+            let availability = match related.availability {
+                aplan_core::show::RelatedAvailability::Loaded => related.status.as_str(),
+                aplan_core::show::RelatedAvailability::Missing => "missing",
+                aplan_core::show::RelatedAvailability::Unloadable => "unloadable",
+            };
+            let source = related.source.as_ref().map_or_else(String::new, |path| {
+                format!(" at {}", sanitize::visible(path))
+            });
+            let _ = writeln!(
+                s,
+                "    {id}{}{id:#}  {st}{}{st:#}{source}",
+                related.id,
+                availability,
+                id = crate::style::ID,
+                st = crate::style::status(&related.status),
+            );
+        }
+    }
+}
+
+fn show_claim(s: &mut String, show: &Show) {
+    if let Some(claim) = &show.claim {
+        let origin = match (&claim.origin.host, &claim.origin.worktree) {
+            (Some(host), Some(worktree)) => format!(
+                "host {}, worktree {}",
+                sanitize::visible(host),
+                sanitize::visible(worktree)
+            ),
+            (Some(host), None) => format!("host {}", sanitize::visible(host)),
+            (None, Some(worktree)) => format!("worktree {}", sanitize::visible(worktree)),
+            (None, None) => "unknown local origin".to_string(),
+        };
+        let _ = writeln!(
+            s,
+            "  claim recorded at Unix time {} from {origin} (identity source {})",
+            claim.claimed_at_epoch_seconds,
+            sanitize::visible(&claim.identity_source)
+        );
+    } else if !show.coordination.available {
+        let _ = writeln!(
+            s,
+            "  claim coordination unavailable: {}",
+            sanitize::visible(
+                show.coordination
+                    .reason
+                    .as_deref()
+                    .unwrap_or("no local coordination scope")
+            )
+        );
+    }
+}
+
+fn show_findings(s: &mut String, show: &Show) {
+    if show.findings.is_empty() {
+        // The distinction the whole command exists for: "nothing to report" and
+        // "nothing was checked" are different answers, and a file cannot tell you
+        // which one you have.
+        let _ = writeln!(
+            s,
+            "  {hd}findings:{hd:#} none{}",
+            if show.resolved {
+                ""
+            } else {
+                "; evidence is not current"
+            },
+            hd = crate::style::HEADING
+        );
+        return;
+    }
+
+    let _ = writeln!(s, "  {hd}findings:{hd:#}", hd = crate::style::HEADING);
+    for d in &show.findings {
+        // The message is the trailing column and folds under itself; it did
+        // not until `A1-291`, and `show` was measured against a task with no
+        // findings so nothing said so.
+        let _ = writeln!(
+            s,
+            "{}",
+            fold::row(
+                &format!("    {}[{}] ", d.severity, d.code),
+                &sanitize::visible(&d.message),
+            )
+        );
+        if let Some(fix) = &d.fix {
+            let _ = writeln!(s, "{}", fold::row("      fix: ", &sanitize::visible(fix)));
+        }
+        if let Some(repair) = &d.repair {
+            let _ = writeln!(
+                s,
+                "{}",
+                fold::row(
+                    "      repair: ",
+                    &sanitize::visible(&repair_description(repair))
+                )
+            );
+        }
+    }
+    if !show.resolved {
+        let detail = show
+            .evidence_observation
+            .detail
+            .as_deref()
+            .unwrap_or("no current observation is available");
+        let _ = writeln!(
+            s,
+            "{}",
+            fold::row(
+                &format!("  (evidence {}: ", show.evidence_observation.state.label()),
+                &format!("{detail})")
+            )
+        );
     }
 }
 
@@ -1263,6 +2411,7 @@ pub fn render_show(show: &Show) -> String {
     );
 
     let _ = writeln!(s, "  {}", show_facts(show).join("   "));
+    show_claim(&mut s, show);
     if !show.tags.is_empty() {
         let _ = writeln!(
             s,
@@ -1282,70 +2431,77 @@ pub fn render_show(show: &Show) -> String {
             sanitize::visible(at)
         );
     }
+    if let Some(reason) = &show.version_impact_reason {
+        let _ = writeln!(s, "  version impact reason: {}", sanitize::visible(reason));
+    }
 
     show_lists(&mut s, show);
-
-    for (heading, items) in [("waits on", &show.waits_on), ("releases", &show.releases)] {
-        if items.is_empty() {
-            continue;
-        }
-        let _ = writeln!(s, "  {hd}{heading}:{hd:#}", hd = crate::style::HEADING);
-        for r in items {
-            let _ = writeln!(
-                s,
-                "    {id}{}{id:#}  {st}{}{st:#}",
-                r.id,
-                r.status,
-                id = crate::style::ID,
-                st = crate::style::status(&r.status),
-            );
-        }
+    let identity = show
+        .evidence_observation
+        .identity
+        .as_deref()
+        .map_or_else(String::new, |identity| {
+            format!("; observation {}", &identity[..identity.len().min(12)])
+        });
+    let observed = show
+        .evidence_observation
+        .observed_at_epoch_seconds
+        .map_or_else(String::new, |at| format!("; observed at Unix time {at}"));
+    let _ = writeln!(
+        s,
+        "  {hd}evidence state:{hd:#} {}{identity}{observed}",
+        show.evidence_observation.state.label(),
+        hd = crate::style::HEADING
+    );
+    if show.evidence_observation.state != aplan_core::show::EvidenceObservationState::Current
+        && let Some(detail) = &show.evidence_observation.detail
+    {
+        let _ = writeln!(s, "    reason: {}", sanitize::visible(detail));
     }
-
-    if show.findings.is_empty() {
-        // The distinction the whole command exists for: "nothing to report" and
-        // "nothing was checked" are different answers, and a file cannot tell you
-        // which one you have.
-        let _ = writeln!(
-            s,
-            "  {hd}findings:{hd:#} none{}",
-            if show.resolved {
-                ""
-            } else {
-                ", and the evidence was not resolved (--no-resolve)"
-            },
-            hd = crate::style::HEADING
-        );
-    } else {
-        let _ = writeln!(s, "  {hd}findings:{hd:#}", hd = crate::style::HEADING);
-        for d in &show.findings {
-            // The message is the trailing column and folds under itself; it did
-            // not until `A1-291`, and `show` was measured against a task with no
-            // findings so nothing said so.
-            let _ = writeln!(
-                s,
-                "{}",
-                fold::row(
-                    &format!("    {}[{}] ", d.severity, d.code),
-                    &sanitize::visible(&d.message),
-                )
-            );
-            if let Some(fix) = &d.fix {
-                let _ = writeln!(s, "{}", fold::row("      fix: ", &sanitize::visible(fix)));
-            }
-        }
-        if !show.resolved {
-            let _ = writeln!(
-                s,
-                "  (hermetic rules only; --no-resolve skipped the ladder)"
-            );
-        }
-    }
+    show_relationships(&mut s, show);
+    show_findings(&mut s, show);
 
     if let Some(body) = &show.body {
         let _ = writeln!(s, "\n{}", body.trim_end());
     }
     s
+}
+
+fn repair_description(repair: &aplan_core::Repair) -> String {
+    match repair {
+        aplan_core::Repair::ReplaceEvidence { from, to } => format!(
+            "replace evidence `{}:{}` with `{}:{}`; apply with `aplan verify --fix`",
+            from.kind.as_str(),
+            from.reference,
+            to.kind.as_str(),
+            to.reference
+        ),
+    }
+}
+
+/// Render the stable meaning of one rule for a person (`A1-198`).
+///
+/// The three values come from the same `Rule` row that generates the matching
+/// heading in `docs/rule-catalogue.md`; this renderer contributes layout and
+/// terminal roles, never another description.
+#[must_use]
+pub fn render_rule_explanation(explanation: &RuleExplanation) -> String {
+    let mut out = String::new();
+    let severity = explanation.severity.to_string();
+    let severity_style = crate::style::severity(&severity);
+    let _ = writeln!(
+        out,
+        "{id}{}{id:#} ({severity_style}{}{severity_style:#})\n",
+        explanation.code,
+        severity,
+        id = crate::style::ID,
+    );
+    let _ = writeln!(
+        out,
+        "{}",
+        fold::fold(&sanitize::visible(explanation.title), fold::out_width(), 0)
+    );
+    out
 }
 
 /// Render the whole graph as Mermaid, **grouping and all**.
@@ -1464,6 +2620,49 @@ impl Grouping {
     pub const fn any(&self) -> bool {
         self.edges > 0 || self.tasks > 0
     }
+
+    /// Human explanation of the grouping relationships a dependency view
+    /// deliberately left out.
+    ///
+    /// Every human graph renderer uses this one sentence so changing layouts
+    /// cannot silently change what the scoped graph admits omitting.
+    #[must_use]
+    pub fn omission_note(&self) -> Option<String> {
+        self.any().then(|| {
+            format!(
+                "{} cut-membership edge(s) and {} task(s) with no dependency are not drawn: a \
+                 cut listing its members is grouping, which `aplan roadmap` prints as a \
+                 heading. `--membership` draws them.",
+                self.edges, self.tasks
+            )
+        })
+    }
+}
+
+/// The semantic reason a graph renderer has an explanatory note.
+///
+/// Renderers receive the already-decided meaning and the prose together. This
+/// keeps a viewport from recognizing a note by its sentence, while avoiding a
+/// second implementation of the policy that decides when the note exists.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+pub enum GraphNoteKind {
+    /// The view was narrowed by selectors or reachability.
+    Scope,
+    /// The view has nodes but no edges between them.
+    NoEdges,
+    /// Cut-membership edges were deliberately excluded.
+    Grouping,
+    /// One or more edges cross the boundary of the scoped view.
+    HiddenEdges,
+}
+
+/// One semantic omission or scope note attached to a [`GraphView`].
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct GraphNote {
+    /// Stable identity for selection and hit testing.
+    pub kind: GraphNoteKind,
+    /// Human explanation shared by every human graph painter.
+    pub text: String,
 }
 
 impl GraphView {
@@ -1482,11 +2681,57 @@ impl GraphView {
     #[must_use]
     pub fn of_kinds(graph: &Graph<'_>, include: &BTreeSet<&str>, membership: bool) -> Self {
         let whole = Self::build(graph, include);
+        whole.with_membership(membership)
+    }
+
+    /// Narrow an existing semantic view without reconstructing the plan graph.
+    ///
+    /// This is the viewport/application counterpart to [`Self::of_kinds`]: it
+    /// preserves the source view's node and edge facts, counts newly crossing
+    /// edges, and applies the same membership omission policy. A consumer can
+    /// therefore compose selectors and reachability over one canonical view
+    /// without introducing a second edge derivation.
+    #[must_use]
+    pub fn scoped(&self, include: &BTreeSet<&str>, membership: bool) -> Self {
+        let mut crossing = 0usize;
+        let edges = self
+            .edges
+            .iter()
+            .filter_map(|edge| {
+                match (
+                    include.contains(edge.from.as_str()),
+                    include.contains(edge.to.as_str()),
+                ) {
+                    (true, true) => Some(edge.clone()),
+                    (true, false) | (false, true) => {
+                        crossing += 1;
+                        None
+                    }
+                    (false, false) => None,
+                }
+            })
+            .collect();
+        let narrowed = Self {
+            nodes: self
+                .nodes
+                .iter()
+                .filter(|node| include.contains(node.id.as_str()))
+                .cloned()
+                .collect(),
+            edges,
+            hidden_edges: self.hidden_edges.saturating_add(crossing),
+            grouping: self.grouping.clone(),
+            scope: self.scope.clone(),
+        };
+        narrowed.with_membership(membership)
+    }
+
+    fn with_membership(self, membership: bool) -> Self {
         if membership {
-            return whole;
+            return self;
         }
 
-        let (kept, dropped): (Vec<GraphEdge>, Vec<GraphEdge>) = whole
+        let (kept, dropped): (Vec<GraphEdge>, Vec<GraphEdge>) = self
             .edges
             .into_iter()
             .partition(|e| e.kind == EdgeKind::Dependency);
@@ -1503,7 +2748,7 @@ impl GraphView {
             .iter()
             .flat_map(|e| [e.from.as_str(), e.to.as_str()])
             .collect();
-        let (nodes, orphans): (Vec<GraphNode>, Vec<GraphNode>) = whole
+        let (nodes, orphans): (Vec<GraphNode>, Vec<GraphNode>) = self
             .nodes
             .into_iter()
             .partition(|n| touched.contains(n.id.as_str()) || !had_an_edge.contains(n.id.as_str()));
@@ -1511,11 +2756,11 @@ impl GraphView {
         Self {
             nodes,
             edges: kept,
-            scope: whole.scope,
-            hidden_edges: whole.hidden_edges,
+            scope: self.scope,
+            hidden_edges: self.hidden_edges,
             grouping: Grouping {
-                edges: dropped.len(),
-                tasks: orphans.len(),
+                edges: self.grouping.edges.saturating_add(dropped.len()),
+                tasks: self.grouping.tasks.saturating_add(orphans.len()),
             },
         }
     }
@@ -1567,26 +2812,31 @@ impl GraphView {
     ///
     /// Shared by the two shapes that carry comments, so Mermaid and DOT cannot
     /// come to disagree about a view neither of them drew fully.
-    pub(crate) fn notes(&self) -> Vec<String> {
+    #[must_use]
+    pub fn notes(&self) -> Vec<GraphNote> {
         let mut out = Vec::new();
         if !self.scope.is_empty() {
-            out.push(format!("scoped to {}.", self.scope.join(", and ")));
+            out.push(GraphNote {
+                kind: GraphNoteKind::Scope,
+                text: format!("scoped to {}.", self.scope.join(", and ")),
+            });
         }
         if self.edges.is_empty() {
             let n = self.nodes.len();
             let plural = if n == 1 { "" } else { "s" };
-            out.push(format!(
-                "{n} task{plural} in view and no edges between them: nothing here waits on \
-                 anything else here."
-            ));
+            out.push(GraphNote {
+                kind: GraphNoteKind::NoEdges,
+                text: format!(
+                    "{n} task{plural} in view and no edges between them: nothing here waits on \
+                     anything else here."
+                ),
+            });
         }
-        if self.grouping.any() {
-            out.push(format!(
-                "{} cut-membership edge(s) and {} task(s) with no dependency are not drawn: a cut \
-                 listing its members is grouping, which `aplan roadmap` prints as a heading. \
-                 `--membership` draws them.",
-                self.grouping.edges, self.grouping.tasks
-            ));
+        if let Some(text) = self.grouping.omission_note() {
+            out.push(GraphNote {
+                kind: GraphNoteKind::Grouping,
+                text,
+            });
         }
         if self.hidden_edges > 0 {
             let said = if self.hidden_edges == 1 {
@@ -1597,7 +2847,10 @@ impl GraphView {
                     self.hidden_edges
                 )
             };
-            out.push(format!("{said}. `aplan tree <id>` follows them."));
+            out.push(GraphNote {
+                kind: GraphNoteKind::HiddenEdges,
+                text: format!("{said}. `aplan tree <id>` follows them."),
+            });
         }
         out
     }
@@ -1629,7 +2882,7 @@ pub fn mermaid_of_view(view: &GraphView) -> String {
     }
     // Comments, so the diagram a reader pastes anywhere is still a diagram.
     for note in view.notes() {
-        let _ = writeln!(s, "%% {note}");
+        let _ = writeln!(s, "%% {}", note.text);
     }
     s
 }
@@ -1664,7 +2917,7 @@ pub fn dot_of_view(view: &GraphView) -> String {
         );
     }
     for note in view.notes() {
-        let _ = writeln!(s, "    // {note}");
+        let _ = writeln!(s, "    // {}", note.text);
     }
     s.push_str("}\n");
     s
@@ -1803,6 +3056,40 @@ pub fn tree<'a>(graph: &Graph<'a>, id: &str, depth: Option<usize>, live: bool) -
         }
     }
     Some(s)
+}
+
+/// Task identities shown by [`tree`] in either direction.
+///
+/// This deliberately drives the same walk as the textual tree. Interactive
+/// clients can request a neighbourhood without copying its depth, cycle, live
+/// or satisfied-node semantics. Unknown blockers remain explanatory tree rows,
+/// not invented graph nodes, so only identities present in `graph` are
+/// returned.
+#[must_use]
+pub fn tree_ids(
+    graph: &Graph<'_>,
+    id: &str,
+    depth: Option<usize>,
+    live: bool,
+) -> Option<BTreeSet<String>> {
+    let (root, _) = graph.by_id.get_key_value(id)?;
+    let dependents = graph.dependents_index();
+    let mut all = BTreeSet::from([*root]);
+    for up in [true, false] {
+        let mut shown = BTreeSet::from([*root]);
+        let mut discarded = Vec::new();
+        walk(
+            graph,
+            &dependents,
+            root,
+            up,
+            Bounds { depth, live },
+            &mut shown,
+            &mut discarded,
+        );
+        all.extend(shown);
+    }
+    Some(all.into_iter().map(str::to_string).collect())
 }
 
 /// One direction of [`tree`], depth-first in id order so the output is stable.
@@ -2674,6 +3961,593 @@ mod tests {
     use aplan_core::TaskRow;
 
     #[test]
+    fn surface_and_terminal_style_classification_is_total() {
+        let surfaces = [
+            (Surface::Diagnostics, "a set of findings"),
+            (Surface::Report, "a report"),
+            (Surface::Document, "a document"),
+            (Surface::Graph, "a dependency graph"),
+            (Surface::Catalogue, "a configured evidence catalogue"),
+            (Surface::Action, "an action result"),
+        ];
+        for (surface, description) in surfaces {
+            assert_eq!(surface.describe(), description);
+            assert!(surface.default_format().renders(surface));
+        }
+        for format in Format::ALL {
+            assert_eq!(
+                format.supports_terminal_styling(),
+                matches!(format, Format::Human | Format::Text),
+                "{format:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn show_human_exposes_orphans_relationship_states_and_current_findings() {
+        use aplan_core::ClaimScope;
+        use aplan_core::show::{
+            Cited, EvidenceObservation, Finding, Related, RelatedAvailability, Show,
+        };
+        use std::collections::BTreeMap;
+
+        let related = |id: &str, availability, source: Option<&str>| Related {
+            id: id.into(),
+            status: "todo".into(),
+            availability,
+            source: source.map(str::to_string),
+        };
+        let mut cited_observation = EvidenceObservation::current();
+        cited_observation.outcome = Some("resolved".into());
+        let mut evidence_observation = EvidenceObservation::not_observed("provider unavailable");
+        evidence_observation.identity = Some("0123456789abcdef".into());
+        evidence_observation.observed_at_epoch_seconds = Some(42);
+        let show = Show {
+            schema: "aplan/show/v1".into(),
+            id: "A-1".into(),
+            title: "One task".into(),
+            status: "todo".into(),
+            phase: 1,
+            owner: None,
+            claim: None,
+            claim_age_seconds: None,
+            coordination: ClaimScope::unavailable("not a repository"),
+            effort_days: Some(1.0),
+            tags: vec!["feature".into()],
+            cut: Some("M-next".into()),
+            milestone: Some("Next".into()),
+            ready: false,
+            workable: true,
+            paths: vec!["src/**".into()],
+            traces: vec!["HLD.md#current".into(), "HLD.md#unstamped".into()],
+            trace_fingerprints: BTreeMap::from([
+                ("HLD.md#current".into(), "a".repeat(64)),
+                ("HLD.md#orphan".into(), "b".repeat(64)),
+            ]),
+            evidence: vec![Cited {
+                kind: "test".into(),
+                reference: "suite::case".into(),
+                captured: Some("captured output".into()),
+                observation: cited_observation,
+            }],
+            evidence_fingerprints: BTreeMap::from([
+                ("test:suite::case".into(), "c".repeat(64)),
+                ("commit:orphan".into(), "d".repeat(64)),
+            ]),
+            waits_on: vec![related("A-2", RelatedAvailability::Loaded, None)],
+            releases: vec![related(
+                "A-3",
+                RelatedAvailability::Missing,
+                Some("tasks/A-3.md"),
+            )],
+            prefer_after: vec![related("A-4", RelatedAvailability::Unloadable, None)],
+            ratified_by: vec![related("A-5", RelatedAvailability::Loaded, None)],
+            contains: vec![related("A-6", RelatedAvailability::Missing, None)],
+            findings: vec![Finding {
+                code: "APLAN009".into(),
+                severity: "warning".into(),
+                message: "effort is absent".into(),
+                fix: Some("add effort_days".into()),
+                repair: Some(aplan_core::Repair::ReplaceEvidence {
+                    from: aplan_core::Evidence {
+                        kind: aplan_core::EvidenceKind::Commit,
+                        reference: "0123456789abcdef".into(),
+                        captured: None,
+                    },
+                    to: aplan_core::Evidence {
+                        kind: aplan_core::EvidenceKind::Test,
+                        reference: "suite::case".into(),
+                        captured: None,
+                    },
+                }),
+            }],
+            resolved: false,
+            evidence_observation,
+            body: Some("Task body\n".into()),
+            revisit_at: Some("2026-01-02T00:00:00Z".into()),
+            version_impact: None,
+            version_impact_reason: Some("consumer contract changes".into()),
+            version: Some("1.0.0".into()),
+        };
+
+        let rendered = plain(&render_show(&show));
+        for expected in [
+            "orphaned fingerprint",
+            "unstamped",
+            "waits on:",
+            "releases:",
+            "prefers after:",
+            "ratified by:",
+            "contains:",
+            "missing",
+            "unloadable",
+            "at tasks/A-3.md",
+            "findings:",
+            "warning[APLAN009] effort is absent",
+            "fix: add effort_days",
+            "repair: replace evidence `commit:0123456789abcdef` with `test:suite::case`",
+            "evidence not observed: provider unavailable",
+            "observation 0123456789ab",
+            "observed at Unix time 42",
+        ] {
+            assert!(
+                rendered.contains(expected),
+                "missing `{expected}` in:\n{rendered}"
+            );
+        }
+
+        let mut claimed = show.clone();
+        claimed.owner = Some("delivery-team".into());
+        claimed.claim_age_seconds = Some(17);
+        claimed.claim = Some(aplan_core::ClaimRecord {
+            holder: "operator".into(),
+            identity_source: "APLAN_OWNER".into(),
+            claimed_at_epoch_seconds: 41,
+            origin: aplan_core::ClaimOrigin {
+                host: Some("build-host".into()),
+                worktree: Some("/repo/worktree".into()),
+            },
+        });
+        let claimed = plain(&render_show(&claimed));
+        for expected in [
+            "owner delivery-team",
+            "held by operator for 17s",
+            "claim recorded at Unix time 41",
+            "host build-host, worktree /repo/worktree",
+            "identity source APLAN_OWNER",
+        ] {
+            assert!(
+                claimed.contains(expected),
+                "missing `{expected}` in:\n{claimed}"
+            );
+        }
+    }
+
+    #[test]
+    fn capture_human_documents_expose_complete_lifecycle_and_input_identity() {
+        let capture = aplan_core::capture::Capture {
+            schema: aplan_core::capture::CaptureSchema::V1,
+            id: "I-01K8Z3A4H00000000000000000".into(),
+            title: "captured\nidea".into(),
+            kind: "idea".into(),
+            state: aplan_core::capture::CaptureState::Promoted,
+            captured_at: "2026-01-01T00:00:00Z".into(),
+            origin: aplan_core::capture::CaptureOrigin::Mcp,
+            body: Some("first line\nsecond line".into()),
+            labels: vec!["alpha".into(), "beta".into()],
+            revisit_at: Some("2026-01-02T00:00:00Z".into()),
+            profile: Some("triage".into()),
+            promotion_defaults: Some(aplan_core::capture::PromotionDefaults {
+                phase: Some(2),
+                cut: Some("M-next".into()),
+                effort_days: Some(3.0),
+                owner: Some("team".into()),
+                paths: vec!["src/**".into()],
+                tags: vec!["feature".into()],
+            }),
+            source: Some(aplan_core::capture::CaptureSource {
+                namespace: "tracker".into(),
+                key: "opaque-key".into(),
+            }),
+            disposed_at: Some("2026-01-03T00:00:00Z".into()),
+            reason: Some("ready".into()),
+            promoted_to: Some("A-1".into()),
+            promotion_fingerprint: Some("a".repeat(64)),
+        };
+
+        for (outcome, word) in [
+            (CaptureActionOutcome::Predicted, "predicted"),
+            (CaptureActionOutcome::Applied, "applied"),
+            (CaptureActionOutcome::Unchanged, "unchanged"),
+            (CaptureActionOutcome::Refused, "refused"),
+        ] {
+            let mut bytes = Vec::new();
+            render_capture_human_to(&mut bytes, &capture, Some(outcome)).expect("capture human");
+            let rendered = plain(&String::from_utf8(bytes).expect("UTF-8 output"));
+            for required in [
+                word,
+                "title: captured idea",
+                "state: promoted",
+                "origin: mcp",
+                "labels: alpha, beta",
+                "profile: triage",
+                "promotion phase: 2",
+                "promotion cut: M-next",
+                "promotion effort: 3",
+                "promotion owner: team",
+                "promotion paths: src/**",
+                "promotion tags: feature",
+                "source namespace: tracker",
+                "source key: opaque-key",
+                "disposed at: 2026-01-03T00:00:00Z",
+                "reason: ready",
+                "promoted to: A-1",
+                "promotion fingerprint:",
+                "first line",
+                "second line",
+            ] {
+                assert!(
+                    rendered.contains(required),
+                    "missing `{required}`:\n{rendered}"
+                );
+            }
+        }
+
+        let report = CaptureActionReport {
+            input: serde_json::json!({
+                "sha256": "input",
+                "plan_sha256": "plan",
+                "plan_root": "/repo/aplan",
+                "configuration": {"sha256": "config", "path": "/repo/.aplan.yml"}
+            }),
+            inbox_sha256: "inbox".into(),
+            outcome: CaptureActionOutcome::Applied,
+            publishable: true,
+            capture: capture.clone(),
+            task_id: Some("A-1".into()),
+            files: vec!["aplan/.inbox/I.yml".into()],
+            findings: vec!["APLAN009 warning: estimate missing".into()],
+        };
+        let mut details = Vec::new();
+        render_capture_action_details_to(&mut details, &report).expect("action details");
+        let details = plain(&String::from_utf8(details).expect("UTF-8 details"));
+        for required in [
+            "input snapshot: input",
+            "plan snapshot: plan",
+            "configuration snapshot: config",
+            "plan root: /repo/aplan",
+            "configuration: /repo/.aplan.yml",
+            "inbox snapshot: inbox",
+            "task: A-1",
+            "publishable: yes",
+            "file: aplan/.inbox/I.yml",
+            "finding: APLAN009 warning: estimate missing",
+        ] {
+            assert!(
+                details.contains(required),
+                "missing `{required}`:\n{details}"
+            );
+        }
+
+        let mut no_files = report;
+        no_files.publishable = false;
+        no_files.files.clear();
+        let mut details = Vec::new();
+        render_capture_action_details_to(&mut details, &no_files).expect("no-op details");
+        let details = plain(&String::from_utf8(details).expect("UTF-8 details"));
+        assert!(details.contains("publishable: no"));
+        assert!(details.contains("files: none"));
+
+        assert_eq!(
+            capture_origin(aplan_core::capture::CaptureOrigin::Tui),
+            "tui"
+        );
+        assert_eq!(
+            capture_state(aplan_core::capture::CaptureState::Discarded),
+            "discarded"
+        );
+        assert_eq!(
+            capture_state(aplan_core::capture::CaptureState::Open),
+            "open"
+        );
+        let collection = CaptureCollectionReport {
+            input: serde_json::json!({}),
+            inbox_sha256: "inbox".into(),
+            complete: true,
+            list: CaptureList {
+                evaluated_at: "2026-01-01T00:00:00Z".into(),
+                deferred: 0,
+                captures: vec![aplan_core::capture::CaptureSummary::from(&capture)],
+            },
+        };
+        let mut collection_bytes = Vec::new();
+        render_capture_collection_human_to(&mut collection_bytes, &collection)
+            .expect("collection human");
+        let collection_human =
+            plain(&String::from_utf8(collection_bytes).expect("UTF-8 collection"));
+        for required in [
+            "inbox: 1 row(s), 0 deferred open",
+            "evaluated at: 2026-01-01T00:00:00Z",
+            "captured idea",
+            "revisit=2026-01-02T00:00:00Z",
+            "source=tracker",
+        ] {
+            assert!(collection_human.contains(required), "{collection_human}");
+        }
+        let focused = CaptureFocusedReport {
+            input: serde_json::json!({}),
+            inbox_sha256: "inbox".into(),
+            complete: true,
+            capture: no_files.capture.clone(),
+        };
+        for (result, subject) in [
+            (
+                render_capture_collection(&collection, Format::Agent),
+                "an inbox collection",
+            ),
+            (
+                render_capture_focused(&focused, Format::Markdown),
+                "one focused capture",
+            ),
+            (
+                render_capture_action(&no_files, Format::Text),
+                "a capture action",
+            ),
+        ] {
+            let error = result.expect_err("unsupported");
+            assert_eq!(error.kind(), std::io::ErrorKind::InvalidInput);
+            assert!(error.to_string().contains(subject));
+        }
+    }
+
+    /// Child-process CLI tests hold the bytes on all three public formats; this
+    /// in-process complement keeps every outcome and renderer branch visible to
+    /// the crate coverage gate as well.
+    #[test]
+    fn every_blueprint_action_outcome_renders_in_process() {
+        for (outcome, task_label, instruction_fragment) in [
+            (BlueprintOutcome::Predicted, "predicted", "Apply the same"),
+            (
+                BlueprintOutcome::Applied,
+                "created",
+                "exact created task IDs",
+            ),
+            (
+                BlueprintOutcome::Unchanged,
+                "unchanged",
+                "No plan file changed",
+            ),
+            (
+                BlueprintOutcome::Refused,
+                "predicted",
+                "Nothing was written",
+            ),
+        ] {
+            assert_eq!(outcome.task_label(), task_label);
+            assert!(
+                outcome.agent_instruction().contains(instruction_fragment),
+                "{outcome:?} omitted its actionable consequence"
+            );
+            let report = BlueprintApplicationReport {
+                source_path: "feature\nblueprint.yml".to_string(),
+                source_sha256: "a".repeat(64),
+                plan_sha256: "b".repeat(64),
+                cut: "M-v1".to_string(),
+                outcome,
+                publishable: outcome != BlueprintOutcome::Refused,
+                attempts: 2,
+                tasks: vec![BlueprintTask {
+                    id: "A-2".to_string(),
+                    title: "First\ntask".to_string(),
+                }],
+                files: vec![
+                    BlueprintFile {
+                        path: "tasks/A-2.md".to_string(),
+                        kind: BlueprintFileKind::Create,
+                    },
+                    BlueprintFile {
+                        path: "tasks/M-v1.md".to_string(),
+                        kind: BlueprintFileKind::Update,
+                    },
+                ],
+                findings: vec!["APLAN004: cycle\nin graph".to_string()],
+            };
+            for format in [Format::Human, Format::Json, Format::Agent] {
+                render_blueprint_application(&report, format)
+                    .unwrap_or_else(|error| panic!("{outcome:?} {format:?}: {error}"));
+            }
+        }
+
+        for format in [
+            Format::Github,
+            Format::Sarif,
+            Format::Markdown,
+            Format::Mermaid,
+            Format::Dot,
+            Format::Text,
+        ] {
+            let report = BlueprintApplicationReport {
+                source_path: "feature.yml".to_string(),
+                source_sha256: "a".repeat(64),
+                plan_sha256: "b".repeat(64),
+                cut: "M-v1".to_string(),
+                outcome: BlueprintOutcome::Predicted,
+                publishable: true,
+                attempts: 1,
+                tasks: Vec::new(),
+                files: Vec::new(),
+                findings: Vec::new(),
+            };
+            let error = render_blueprint_application(&report, format)
+                .expect_err("unsupported action format");
+            assert_eq!(error.kind(), std::io::ErrorKind::InvalidInput);
+            assert!(error.to_string().contains(format.as_str()));
+        }
+
+        let empty_path = CriticalPath {
+            total_effort_days: 0.0,
+            tasks: Vec::new(),
+        };
+        assert_eq!(remaining_clause(&empty_path, None), "");
+        render_critical_path(&empty_path, None, None, Format::Json)
+            .expect("critical-path JSON renders");
+        let error = "unsupported".parse::<Format>().expect_err("unknown format");
+        assert!(error.contains("expected human, json, agent"), "{error}");
+    }
+
+    #[test]
+    fn every_dependency_batch_outcome_and_format_renders_in_process() {
+        for outcome in [
+            DependencyBatchOutcome::Predicted,
+            DependencyBatchOutcome::Applied,
+            DependencyBatchOutcome::Unchanged,
+            DependencyBatchOutcome::Refused,
+        ] {
+            let report = DependencyBatchReport {
+                plan_sha256: "a".repeat(64),
+                source_path: Some("edge\nmanifest.yml".to_string()),
+                source_sha256: Some("b".repeat(64)),
+                outcome,
+                publishable: outcome != DependencyBatchOutcome::Refused,
+                operations: vec![DependencyBatchOperation {
+                    task: "A-2\ncontinued".to_string(),
+                    operation: "add".to_string(),
+                    after: "A-1\ncontinued".to_string(),
+                    changes_state: outcome != DependencyBatchOutcome::Unchanged,
+                }],
+                files: vec!["tasks/A-2.md\ncontinued".to_string()],
+                findings: vec!["APLAN004: cycle\nin graph".to_string()],
+            };
+            for format in [Format::Human, Format::Json, Format::Agent] {
+                render_dependency_batch(&report, format)
+                    .unwrap_or_else(|error| panic!("{outcome:?} {format:?}: {error}"));
+            }
+        }
+
+        let report = DependencyBatchReport {
+            plan_sha256: "a".repeat(64),
+            source_path: None,
+            source_sha256: None,
+            outcome: DependencyBatchOutcome::Predicted,
+            publishable: true,
+            operations: Vec::new(),
+            files: Vec::new(),
+            findings: Vec::new(),
+        };
+        for format in [
+            Format::Github,
+            Format::Sarif,
+            Format::Markdown,
+            Format::Mermaid,
+            Format::Dot,
+            Format::Text,
+        ] {
+            let error = render_dependency_batch(&report, format)
+                .expect_err("unsupported dependency action format");
+            assert_eq!(error.kind(), std::io::ErrorKind::InvalidInput);
+            assert!(error.to_string().contains(format.as_str()));
+        }
+    }
+
+    #[test]
+    fn report_kind_metadata_covers_clean_and_partial_verdicts() {
+        assert_eq!(Kind::Check.clean_note().as_deref(), Some("DAG acyclic"));
+        assert_eq!(
+            Kind::Evidence.clean_note().as_deref(),
+            Some("this evidence resolves")
+        );
+        assert_eq!(Kind::Check.json_schema(), "aplan/check-report/v1");
+        assert_eq!(Kind::Evidence.json_schema(), "aplan/verify-report/v1");
+        assert_eq!(Kind::Check.evidence_unresolved(), None);
+        assert_eq!(Kind::Check.failure_cause(), "");
+        assert_eq!(Kind::Check.evidence_observation(), None);
+
+        let partial = Kind::VerifyPartial(2);
+        assert_eq!(partial.clean_note(), None);
+        assert_eq!(partial.json_schema(), "aplan/verify-report/v1");
+        assert_eq!(partial.failure_cause(), "2 task file(s) did not load, ");
+
+        let inbox = Kind::VerifyInboxInvalid(3);
+        assert_eq!(inbox.clean_note(), None);
+        assert_eq!(inbox.json_schema(), "aplan/verify-report/v1");
+        assert_eq!(
+            inbox.failure_cause(),
+            "3 capture inbox finding(s) prevented evidence resolution, "
+        );
+    }
+
+    #[test]
+    fn diagnostic_renderer_refuses_document_and_graph_formats() {
+        let report = Report {
+            tasks_checked: 0,
+            diagnostics: Vec::new(),
+        };
+        for format in [Format::Markdown, Format::Mermaid, Format::Dot, Format::Text] {
+            let error = render_kind(&report, format, Kind::Check, &Verdict::default())
+                .expect_err("wrong surface");
+            assert_eq!(error.kind(), std::io::ErrorKind::InvalidInput);
+            assert!(error.to_string().contains(format.as_str()));
+        }
+    }
+
+    #[test]
+    fn human_diagnostics_render_detail_repair_suppression_and_advisory_verdicts() {
+        let evidence = |reference: &str| aplan_core::Evidence {
+            kind: aplan_core::EvidenceKind::Commit,
+            reference: reference.into(),
+            captured: None,
+        };
+        let first = Diagnostic::warning("APLAN009", "first finding")
+            .with_task("A-1")
+            .with_detail(vec!["captured line one".into(), "captured line two".into()])
+            .with_agent_instruction("add an estimate")
+            .with_repair(aplan_core::Repair::ReplaceEvidence {
+                from: evidence("old"),
+                to: evidence("new"),
+            });
+        let second = Diagnostic::warning("APLAN009", "second finding")
+            .with_task("A-2")
+            .with_agent_instruction("add the other estimate");
+        let report = Report {
+            tasks_checked: 2,
+            diagnostics: vec![first, second],
+        };
+        let policy = Verdict {
+            deny_warnings: true,
+            advisory: vec!["APLAN009".into()],
+        };
+
+        render_kind(&report, Format::Human, Kind::Check, &policy)
+            .expect("complete human diagnostic");
+    }
+
+    #[test]
+    fn legacy_verified_wrapper_renders_and_sarif_keeps_plan_wide_messages() {
+        let report = Report {
+            tasks_checked: 0,
+            diagnostics: Vec::new(),
+        };
+        render_verified(
+            &report,
+            Format::Json,
+            &Verdict::default(),
+            &aplan_core::Unopened::default(),
+        )
+        .expect("legacy verified rendering");
+        render_verified_observed(
+            &report,
+            Format::Human,
+            &Verdict::default(),
+            &aplan_core::Unopened::default(),
+            &aplan_core::show::EvidenceObservation::current(),
+        )
+        .expect("observed verified rendering");
+
+        let finding = Diagnostic::warning("APLAN009", "plan-wide message");
+        assert_eq!(sarif_message(&finding), "plan-wide message");
+    }
+
+    #[test]
     fn every_format_round_trips_through_its_name() {
         use std::str::FromStr as _;
         for f in Format::ALL {
@@ -2742,6 +4616,7 @@ mod tests {
             paths: Vec::new(),
             traces: Vec::new(),
             trace_fingerprints: std::collections::BTreeMap::new(),
+            evidence_fingerprints: std::collections::BTreeMap::new(),
             tags: tags.iter().map(|s| (*s).to_string()).collect(),
             revisit_at: None,
             version_impact: None,
@@ -2814,6 +4689,56 @@ mod tests {
         assert!(alone.contains("waits on: nothing"), "{alone}");
 
         assert!(tree(&g, "NOPE", None, false).is_none());
+    }
+
+    #[test]
+    fn semantic_tree_ids_share_depth_and_live_semantics_with_the_text_walk() {
+        use aplan_core::task::Status;
+        let tasks = [
+            tsk("A", Status::Todo, &[], &[]),
+            tsk("B", Status::Done, &["A"], &[]),
+            tsk("C", Status::Todo, &["B"], &[]),
+            tsk("D", Status::Todo, &["C"], &[]),
+        ];
+        let graph = Graph::new(tasks.iter());
+
+        assert_eq!(
+            tree_ids(&graph, "A", Some(1), false).expect("known root"),
+            BTreeSet::from(["A".to_string(), "B".to_string()])
+        );
+        assert_eq!(
+            tree_ids(&graph, "A", Some(1), true).expect("known root"),
+            BTreeSet::from(["A".to_string(), "C".to_string()]),
+            "a satisfied node is transparent to the exact shared walk"
+        );
+        assert_eq!(
+            tree_ids(&graph, "C", None, true).expect("known root"),
+            BTreeSet::from(["A".to_string(), "C".to_string(), "D".to_string()])
+        );
+        assert!(tree_ids(&graph, "missing", None, false).is_none());
+    }
+
+    #[test]
+    fn narrowing_a_canonical_view_matches_direct_graph_projection() {
+        use aplan_core::task::Status;
+        let tasks = [
+            tsk("A", Status::Todo, &[], &[]),
+            tsk("B", Status::Todo, &["A"], &[]),
+            tsk("C", Status::Todo, &["B"], &[]),
+            tsk("M", Status::Todo, &["A", "B"], &["milestone"]),
+        ];
+        let graph = Graph::new(tasks.iter());
+        let all = BTreeSet::from(["A", "B", "C", "M"]);
+        let include = BTreeSet::from(["A", "B", "M"]);
+        let whole = GraphView::of(&graph, &all);
+
+        for membership in [false, true] {
+            assert_eq!(
+                whole.scoped(&include, membership),
+                GraphView::of_kinds(&graph, &include, membership),
+                "composed view and direct graph walk must have one membership policy"
+            );
+        }
     }
 
     /// Walking the tree must not scan the plan per node, which the first version
@@ -2969,6 +4894,7 @@ mod tests {
             paths: Vec::new(),
             traces: Vec::new(),
             trace_fingerprints: std::collections::BTreeMap::new(),
+            evidence_fingerprints: std::collections::BTreeMap::new(),
             tags: Vec::new(),
             revisit_at: None,
             version_impact: None,
@@ -3401,6 +5327,63 @@ mod tests {
     }
 
     #[test]
+    fn grouped_labels_keep_identity_and_pad_by_terminal_columns() {
+        assert_eq!(grouped_label(None), "(no group)");
+        assert_eq!(grouped_label(Some("(no group)")), "\"(no group)\"");
+        assert_eq!(grouped_label(Some("total")), "\"total\"");
+        assert_ne!(
+            grouped_label(Some("kind\nrow")),
+            grouped_label(Some("kind row")),
+            "flattening must not merge two declared members"
+        );
+        assert_eq!(grouped_label(Some("kind\nrow")), "\"kind\\u{a}row\"");
+        assert_eq!(grouped_label(Some("\\u{a}")), "\"\\\\u{a}\"");
+        assert_eq!(grouped_label(Some("say \"yes\"")), "\"say \\\"yes\\\"\"");
+        assert_eq!(
+            grouped_label(Some("kind\u{2003}row")),
+            "\"kind\\u{2003}row\"",
+            "visible Unicode whitespace must not steer terminal layout"
+        );
+
+        let wide = grouped_label(Some("\u{65e5}\u{672c}"));
+        assert_eq!(fold::display_width(&wide), 6);
+        assert_eq!(fold::display_width(&pad_display(&wide, 9)), 9);
+        assert_eq!(
+            pad_display(&wide, 2),
+            wide,
+            "a caller's narrow width must not truncate a member"
+        );
+    }
+
+    #[test]
+    fn a_grouped_summary_renders_every_accounting_branch() {
+        use aplan_core::task::Status;
+
+        let mut both = tsk("A", Status::Done, &[], &["kind-a", "kind-b"]);
+        both.effort_days = Some(2.0);
+        let mut live = tsk("B", Status::Todo, &[], &["kind-b"]);
+        live.effort_days = Some(3.0);
+        let mut dropped = tsk("C", Status::Dropped, &[], &["kind-a"]);
+        dropped.effort_days = Some(4.0);
+        let ungrouped = tsk("D", Status::Todo, &["B"], &[]);
+        let graph = Graph::new([&both, &live, &dropped, &ungrouped]);
+        let members = ["kind-a".to_string(), "kind-b".to_string()];
+        let grouped = graph
+            .summary_grouped_by("kind", &members)
+            .with_throughput(Some(2.0));
+
+        assert!(grouped.groups_overlap());
+        render_grouped_summary(&grouped, Format::Human).expect("human");
+        render_grouped_summary(&grouped, Format::Json).expect("json");
+
+        let one = tsk("E", Status::Todo, &[], &["kind-a"]);
+        let graph = Graph::new([&one]);
+        let disjoint = graph.summary_grouped_by("kind", &members);
+        assert!(!disjoint.groups_overlap());
+        render_grouped_summary(&disjoint, Format::Human).expect("human without overlap");
+    }
+
+    #[test]
     fn a_title_cannot_break_a_row() {
         // The JSON escapes a newline; the human table used to print it, splitting
         // one task across two lines and corrupting anything reading the columns.
@@ -3418,7 +5401,9 @@ mod tests {
         // see these lines, and the human table has branches the JSON does not:
         // an unestimated task, a milestone, and a task with no cut.
         let export = TaskExport {
-            schema: "aplan/tasks/v1".to_string(),
+            schema: "aplan/tasks/v2".to_string(),
+            coordination: aplan_core::ClaimScope::unavailable("test"),
+            claim_observed_at_epoch_seconds: 0,
             tasks: vec![
                 TaskRow {
                     id: "A1".into(),
@@ -3427,6 +5412,7 @@ mod tests {
                     status: aplan_core::task::Status::Todo,
                     effort_days: Some(2.0),
                     owner: None,
+                    claim: None,
                     tags: vec!["kind-b".into()],
                     blocked_by: Vec::new(),
                     cut: Some("s0".into()),
@@ -3441,6 +5427,7 @@ mod tests {
                     ratified_by: Vec::new(),
                     contains: Vec::new(),
                     trace_fingerprints: std::collections::BTreeMap::new(),
+                    evidence_fingerprints: std::collections::BTreeMap::new(),
                     revisit_at: None,
                     version_impact: None,
                     version_impact_reason: None,
@@ -3453,6 +5440,7 @@ mod tests {
                     status: aplan_core::task::Status::Todo,
                     effort_days: None,
                     owner: None,
+                    claim: None,
                     tags: Vec::new(),
                     blocked_by: vec!["A1".into()],
                     cut: None,
@@ -3467,6 +5455,7 @@ mod tests {
                     ratified_by: Vec::new(),
                     contains: Vec::new(),
                     trace_fingerprints: std::collections::BTreeMap::new(),
+                    evidence_fingerprints: std::collections::BTreeMap::new(),
                     revisit_at: None,
                     version_impact: None,
                     version_impact_reason: None,
@@ -3479,6 +5468,7 @@ mod tests {
                     status: aplan_core::task::Status::Todo,
                     effort_days: None,
                     owner: None,
+                    claim: None,
                     tags: vec!["milestone".into()],
                     blocked_by: Vec::new(),
                     cut: Some("s0".into()),
@@ -3493,6 +5483,7 @@ mod tests {
                     ratified_by: Vec::new(),
                     contains: Vec::new(),
                     trace_fingerprints: std::collections::BTreeMap::new(),
+                    evidence_fingerprints: std::collections::BTreeMap::new(),
                     revisit_at: None,
                     version_impact: None,
                     version_impact_reason: None,
@@ -4182,7 +6173,9 @@ pub const MAX_WIDTH: usize = 95;
 
 pub mod color;
 pub mod fold;
+pub mod graph_scene;
 pub mod lanes;
+pub mod layered;
 pub mod sanitize;
 pub mod style;
 
@@ -4230,6 +6223,42 @@ fn first_sentence(text: &str) -> &str {
         Some(at) => &text[..=at],
         None => text,
     }
+}
+
+/// The blueprint workflow every generated contract teaches (`A1-393`).
+///
+/// Kept as one renderer so the command, occasion and trust boundary cannot be
+/// edited as independent fragments inside the larger policy contract.
+fn blueprint_agent_guidance() -> String {
+    let mut s = String::new();
+    let _ = writeln!(s, "## Reusing a plan shape\n");
+    let _ = writeln!(
+        s,
+        "{}\n",
+        wrap(
+            "Reach for a repository-supplied blueprint when task fields or sibling topology recur. \
+             A blueprint is one explicit local plan-authoring file, not a catalogue entry or an \
+             executable program. It can still propose a complete task graph, so inspect the \
+             selected file and preview its whole effect before applying it."
+        )
+    );
+    let _ = writeln!(s, "```sh");
+    let _ = writeln!(
+        s,
+        "aplan blueprint apply --file FILE_PATH --cut CUT_ID --set NAME=VALUE --dry-run"
+    );
+    let _ = writeln!(s, "```\n");
+    let _ = writeln!(
+        s,
+        "{}\n",
+        wrap(
+            "Repeat `--set` exactly once for each declared parameter, and omit it when none are \
+             declared. Inside the file, `local:key` names a new sibling and `task:id` names an \
+             existing task. Review the reported source path and digest, predicted tasks, ids, \
+             files and findings; apply by rerunning the same command without `--dry-run`."
+        )
+    );
+    s
 }
 
 /// Render the agent contract as the block that goes in `AGENTS.md`.
@@ -4316,11 +6345,14 @@ pub fn render_agents_md(c: &AgentContract, written_by: Option<&WrittenBy<'_>>) -
         "{}\n",
         wrap(
             "**A status is a claim, and `close` requires proof of it.** Evidence is a citation \
-             something else resolves: a commit whose diff touched this task's declared `paths`, \
-             or a test a runner can list and run. There is no \"mark it done\". If a task cannot \
-             be closed honestly, it is not done, and saying so beats finding a weaker citation."
+             something else resolves: a commit reachable from `HEAD` whose diff touched this \
+             task's declared `paths`, or a test a runner can list and run. There is no \"mark it \
+             done\". If a task cannot be closed honestly, it is not done, and saying so beats \
+             finding a weaker citation."
         )
     );
+
+    s.push_str(&blueprint_agent_guidance());
 
     let _ = writeln!(s, "## What closes a task here\n");
     let _ = writeln!(s, "{}", policy_lines(c));
@@ -4483,9 +6515,9 @@ fn rule_lines(c: &AgentContract) -> String {
     let mut s = String::new();
     // True of every plan, and the one thing a task author forgets: `paths` is
     // what makes a `commit` citation mean anything, and its absence degrades
-    // that citation from "a commit that touched this work" to "a commit exists"
-    // (`APLAN023`, and the first pilot's own hand-written contract says the same
-    // in its own words).
+    // that citation from "a reachable commit that touched this work" to "HEAD
+    // reaches some commit" (`APLAN023`, and the first pilot's own hand-written
+    // contract says the same in its own words).
     //
     // "Every task that is not a milestone", on each of the three bullets whose
     // rule exempts one. A milestone is a checkpoint over work rather than work,
@@ -4504,7 +6536,7 @@ fn rule_lines(c: &AgentContract) -> String {
             "Every task that is not a milestone declares `paths`, and a `done` one without them \
              is reported (`APLAN023`). That is what makes a `commit` citation checkable: `verify` \
              refuses one whose diff touched nothing the task claims, and a task without `paths` \
-             has quietly weakened its own evidence to \"a commit exists\"."
+             has quietly weakened its own evidence to \"`HEAD` reaches some commit\"."
         )
     );
     if c.switches.contains(&Switch::RequireEffort) {
@@ -4622,6 +6654,40 @@ mod agents_tests {
         // One sentence per tool: the surface, not the manual.
         assert!(out.contains("- `aplan_ready` -- List tasks whose blockers are done."));
         assert!(!out.contains("Longer prose follows"), "truncated: {out}");
+    }
+
+    /// Proves `agent_contract.guides_explicit_blueprint_application`: an agent
+    /// is told both when the reusable shape applies and how to cross its trust
+    /// boundary. Removing the generated section, its preview, or the explicit
+    /// source identity makes this fail rather than leaving generic drift tests
+    /// green over a less useful block (`A1-393`).
+    #[test]
+    fn the_agent_contract_guides_explicit_blueprint_application() {
+        let out = render_agents_md(&contract(), None);
+        let flat = out.split_whitespace().collect::<Vec<_>>().join(" ");
+
+        assert!(
+            flat.contains(
+                "Reach for a repository-supplied blueprint when task fields or sibling topology recur"
+            ),
+            "the contract does not say when a blueprint earns use: {out}"
+        );
+        assert!(
+            out.contains(
+                "aplan blueprint apply --file FILE_PATH --cut CUT_ID --set NAME=VALUE --dry-run"
+            ),
+            "the contract does not give the explicit-file preview command: {out}"
+        );
+        for fact in [
+            "not a catalogue entry or an executable program",
+            "Repeat `--set` exactly once for each declared parameter",
+            "`local:key` names a new sibling",
+            "`task:id` names an existing task",
+            "source path and digest",
+            "without `--dry-run`",
+        ] {
+            assert!(flat.contains(fact), "missing `{fact}`: {out}");
+        }
     }
 
     /// A plan without `deny_warnings` has an advisory tier, and the block used to
@@ -4905,6 +6971,8 @@ pub struct StaleTask {
     /// task that *can* start and has not is drift a tracker cannot see, because
     /// the tracker never knew when the last blocker cleared.
     pub ready: bool,
+    /// Stable task responsibility, independent of active coordination.
+    pub owner: Option<String>,
     /// Who holds this task, when somebody does (`A1-359`).
     ///
     /// **This is what makes a claim without an expiry safe.** A claim lasts
@@ -4915,6 +6983,11 @@ pub struct StaleTask {
     /// abandoned claim, and naming the holder is what lets a reader see that
     /// rather than infer it.
     pub held_by: Option<String>,
+    /// Complete ephemeral claim record; `held_by` is derived from this value.
+    pub claim: Option<aplan_core::ClaimRecord>,
+    /// Claim age at `claim_observed_at_epoch_seconds`, not at the Git staleness
+    /// report's optional historical `--as-of` date.
+    pub claim_age_seconds: Option<i64>,
 }
 
 /// One parked task whose revisit instant has arrived.
@@ -5063,6 +7136,9 @@ pub struct StaleReport {
     /// against two different "now"s is two different questions, and a reader who
     /// cannot tell them apart cannot act on either (`A1-162`).
     pub as_of: Option<String>,
+    /// Local coordination scope and observation clock for claim fields.
+    pub coordination: aplan_core::ClaimScope,
+    pub claim_observed_at_epoch_seconds: i64,
 }
 
 /// Render the staleness report.
@@ -5131,8 +7207,14 @@ pub fn stale_human(report: &StaleReport) -> String {
         // Beside the marker rather than in a column, for the reason above it: a
         // reader scanning for an abandoned claim wants the held ones to stand
         // out, and most rows have no holder to show.
+        let owner = t.owner.as_deref().map_or_else(String::new, |who| {
+            format!(" [owner {}]", crate::sanitize::visible(who))
+        });
         let held = t.held_by.as_deref().map_or_else(String::new, |who| {
-            format!(" [{}]", crate::sanitize::visible(who))
+            let age = t
+                .claim_age_seconds
+                .map_or_else(String::new, |seconds| format!(" {seconds}s"));
+            format!(" [claim {}{age}]", crate::sanitize::visible(who))
         });
         let _ = writeln!(
             s,
@@ -5147,7 +7229,7 @@ pub fn stale_human(report: &StaleReport) -> String {
                     dim = crate::style::DIM,
                     st = crate::style::status(&t.status)
                 ),
-                &format!("{}{ready}{held}", one_line(&t.title)),
+                &format!("{}{ready}{owner}{held}", one_line(&t.title)),
             )
         );
     }
@@ -5234,23 +7316,28 @@ fn push_untracked(s: &mut String, report: &StaleReport) {
 
 fn render_stale_json(report: &StaleReport) -> std::io::Result<()> {
     let doc = serde_json::json!({
-        "schema": "aplan/stale/v1",
+        "schema": "aplan/stale/v2",
         "window_days": report.window_days,
         "fresh": report.fresh,
         "untracked": report.untracked,
         // `null` means `HEAD`'s commit time, which is the default and the
         // reproducible one.
         "as_of": report.as_of,
+        "coordination": report.coordination,
+        "claim_observed_at_epoch_seconds": report.claim_observed_at_epoch_seconds,
         "tasks": report.tasks.iter().map(|t| serde_json::json!({
             "id": t.id,
             "title": t.title,
             "status": t.status,
             "idle_days": t.idle_days,
             "ready": t.ready,
+            "owner": t.owner,
             // Always present, `null` when nobody holds it: a consumer
             // filtering for abandoned claims should not have to tell a missing
             // key from an unheld task (`A1-359`).
             "held_by": t.held_by,
+            "claim": t.claim,
+            "claim_age_seconds": t.claim_age_seconds,
         })).collect::<Vec<_>>(),
     });
     let mut out = std::io::stdout().lock();
@@ -5267,9 +7354,24 @@ mod stale_tests {
             id: id.to_string(),
             title: format!("{id} title"),
             status: "todo".to_string(),
+            owner: None,
             held_by: None,
+            claim: None,
+            claim_age_seconds: None,
             idle_days,
             ready,
+        }
+    }
+
+    fn report(tasks: Vec<StaleTask>, fresh: usize, untracked: usize) -> StaleReport {
+        StaleReport {
+            as_of: None,
+            window_days: 30,
+            tasks,
+            fresh,
+            untracked,
+            coordination: aplan_core::ClaimScope::unavailable("test fixture"),
+            claim_observed_at_epoch_seconds: 0,
         }
     }
 
@@ -5279,29 +7381,11 @@ mod stale_tests {
     fn every_branch_of_the_report_renders() {
         for report in [
             // Something to report, one of it ready.
-            StaleReport {
-                as_of: None,
-                window_days: 30,
-                tasks: vec![task("A-01", 90, true), task("A-02", 40, false)],
-                fresh: 3,
-                untracked: 1,
-            },
+            report(vec![task("A-01", 90, true), task("A-02", 40, false)], 3, 1),
             // Nothing over the window, and nothing hidden either.
-            StaleReport {
-                as_of: None,
-                window_days: 30,
-                tasks: Vec::new(),
-                fresh: 4,
-                untracked: 0,
-            },
+            report(Vec::new(), 4, 0),
             // The blind case: no history at all for anything live.
-            StaleReport {
-                as_of: None,
-                window_days: 30,
-                tasks: Vec::new(),
-                fresh: 0,
-                untracked: 5,
-            },
+            report(Vec::new(), 0, 5),
         ] {
             render_stale(&report, Format::Human).expect("human");
             render_stale(&report, Format::Json).expect("json");
@@ -5313,26 +7397,14 @@ mod stale_tests {
     /// eye, because this is the sentence the defect lived in.
     #[test]
     fn a_blind_report_does_not_say_the_reassuring_thing() {
-        let blind = StaleReport {
-            as_of: None,
-            window_days: 30,
-            tasks: Vec::new(),
-            fresh: 0,
-            untracked: 5,
-        };
+        let blind = report(Vec::new(), 0, 5);
         let text = capture(&blind);
         assert!(text.contains("no live task has any history"), "{text}");
         assert!(!text.contains("nothing live has sat"), "{text}");
 
         // And the ordinary empty case still answers, while naming what it could
         // not date rather than dropping it.
-        let quiet = StaleReport {
-            as_of: None,
-            window_days: 30,
-            tasks: Vec::new(),
-            fresh: 4,
-            untracked: 2,
-        };
+        let quiet = report(Vec::new(), 4, 2);
         let text = capture(&quiet);
         assert!(
             text.contains("nothing live has sat longer than 30"),
@@ -5344,13 +7416,7 @@ mod stale_tests {
     /// The ready marker is what a reader scans for, so it is on the row.
     #[test]
     fn a_task_that_could_start_is_marked_on_its_row() {
-        let report = StaleReport {
-            as_of: None,
-            window_days: 30,
-            tasks: vec![task("A-01", 90, true), task("A-02", 40, false)],
-            fresh: 0,
-            untracked: 0,
-        };
+        let report = report(vec![task("A-01", 90, true), task("A-02", 40, false)], 0, 0);
         let text = capture(&report);
         assert!(text.contains("A-01"), "{text}");
         assert!(text.contains("(ready)"), "{text}");
@@ -5563,6 +7629,7 @@ fn needs(binds: &[Binding]) -> String {
             Binding::Paths => "`paths`",
             Binding::Traces => "`traces`",
             Binding::TraceFingerprints => "`trace_fingerprints`",
+            Binding::EvidenceFingerprints => "`evidence_fingerprints`",
             Binding::Evidence(_) => "evidence",
         })
         .collect::<Vec<_>>()
@@ -5590,6 +7657,7 @@ fn render_vacuity_json(report: &[RuleReach]) -> std::io::Result<()> {
                 Binding::Paths => "paths",
                 Binding::Traces => "traces",
                 Binding::TraceFingerprints => "trace_fingerprints",
+                Binding::EvidenceFingerprints => "evidence_fingerprints",
                 Binding::Evidence(_) => "evidence",
             }).collect::<Vec<_>>(),
         })).collect::<Vec<_>>(),
@@ -5652,7 +7720,7 @@ pub fn paths_human(report: &PathsReport) -> String {
             let _ = writeln!(
                 s,
                 "no task declares `paths`, so nothing here is measurable: a `commit` citation \
-                 on such a task proves only that the commit exists."
+                 on such a task proves only that `HEAD` reaches the commit."
             );
         }
         return s;
@@ -5707,7 +7775,7 @@ pub fn paths_human(report: &PathsReport) -> String {
             "{}",
             fold::note(&format!(
                 "{} task(s) declare no `paths`; a `commit` citation there proves the \
-                 commit exists and no more.",
+                 commit is reachable from `HEAD` and no more.",
                 report.without_paths
             ))
         );

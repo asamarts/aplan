@@ -37,7 +37,7 @@
 //! `aplan mv --to`, a flag that does not exist, was caught minutes after being
 //! written into the file this gate protects.
 
-mod common;
+use crate::common;
 
 use std::collections::{BTreeMap, BTreeSet};
 
@@ -48,6 +48,123 @@ fn repo_file(name: &str) -> String {
         .join("../..")
         .join(name);
     std::fs::read_to_string(&path).unwrap_or_else(|e| panic!("read {}: {e}", path.display()))
+}
+
+fn repository_root() -> std::path::PathBuf {
+    std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../..")
+}
+
+fn assert_public_plan_epoch() {
+    let boundary = repository_root().join("aplan/tasks/A2-001.md");
+    let text = std::fs::read_to_string(&boundary)
+        .unwrap_or_else(|error| panic!("read {}: {error}", boundary.display()));
+    assert!(
+        text.contains("explicit epoch boundary")
+            && text.contains("Earlier implementation records remain in the private"),
+        "private repository audits may be absent only at the documented A2 import boundary"
+    );
+}
+
+#[test]
+fn roadmap_narrative_declares_every_current_cut_member() {
+    let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
+    let run = common::run(&root, &["check-docs", "ROADMAP.md"]);
+    assert_eq!(run.code, 0, "{}", run.text());
+    assert!(run.stdout.contains("ok: 1 document(s)"), "{}", run.text());
+}
+
+#[test]
+fn validation_assurance_vocabulary_has_one_documented_authority() {
+    let ci = repo_file("ci/README.md");
+    let contributing = repo_file("CONTRIBUTING.md");
+
+    for term in ["selected", "full", "release"] {
+        let definition = format!("- **{term}**");
+        assert_eq!(
+            ci.matches(&definition).count(),
+            1,
+            "ci/README.md must define `{term}` exactly once"
+        );
+        assert!(
+            !contributing.contains(&definition),
+            "CONTRIBUTING.md must link to the vocabulary, not redefine `{term}`"
+        );
+    }
+    assert!(
+        contributing.contains("ci/README.md#run-the-gates-locally"),
+        "CONTRIBUTING.md must point to the canonical assurance vocabulary"
+    );
+    assert!(
+        contributing.contains("selected feedback,\nnot a full or verified claim"),
+        "the contribution guide must not overstate selected development feedback"
+    );
+}
+
+/// End-to-end proof for `check_docs.complete_multi_hyphen_ids`: the CLI learns
+/// the P00024-shaped family solely from the loaded plan, resolves exact ids and
+/// reports an unknown sibling under its complete spelling.
+#[test]
+fn check_docs_resolves_complete_multi_hyphen_ids_end_to_end() {
+    let dir = tempfile::Builder::new()
+        .tempdir_in(aplan_core::fixture::fixture_root())
+        .expect("tempdir");
+    let tasks = dir.path().join("aplan/tasks");
+    std::fs::create_dir_all(&tasks).expect("plan directory");
+    for id in ["M-p0-design", "M-p0-build", "M-p1-read"] {
+        std::fs::write(
+            tasks.join(format!("{id}.md")),
+            format!("---\nid: {id}\ntitle: {id}\nphase: 1\nstatus: todo\ntags: [milestone]\n---\n"),
+        )
+        .expect("task");
+    }
+    std::fs::write(
+        dir.path().join("NOTES.md"),
+        "Known: `M-p0-design`, M-p0-build; M-p1-read.\nUnknown: `M-p0-review`.\n",
+    )
+    .expect("document");
+
+    let run = common::run(dir.path(), &["check-docs", "NOTES.md"]);
+    assert_eq!(run.code, 1, "{}", run.text());
+    assert!(run.stdout.contains("`M-p0-review`"), "{}", run.text());
+    assert!(!run.stdout.contains("`M-p0` "), "{}", run.text());
+    assert!(
+        run.stdout.contains("1 reference(s) naming no task"),
+        "known complete ids were misreported: {}",
+        run.text()
+    );
+}
+
+/// End-to-end proof for `check_docs.identifier_boundaries_are_symmetric`: the
+/// CLI must not accept or report a shorter task id cut from a larger word.
+#[test]
+fn check_docs_does_not_truncate_ids_before_an_underscore() {
+    let dir = tempfile::Builder::new()
+        .tempdir_in(aplan_core::fixture::fixture_root())
+        .expect("tempdir");
+    let tasks = dir.path().join("aplan/tasks");
+    std::fs::create_dir_all(&tasks).expect("plan directory");
+    for id in ["A1-557", "M-v0.8", "M-p0-design"] {
+        std::fs::write(
+            tasks.join(format!("{id}.md")),
+            format!("---\nid: {id}\ntitle: {id}\nphase: 1\nstatus: todo\ntags: [milestone]\n---\n"),
+        )
+        .expect("task");
+    }
+    std::fs::write(
+        dir.path().join("NOTES.md"),
+        "Joined: A1-557_suffix A1-999_suffix M-v0.8_suffix M-p0-design_suffix.\n\
+         Real: A1-999.\n",
+    )
+    .expect("document");
+
+    let run = common::run(dir.path(), &["check-docs", "NOTES.md"]);
+    assert_eq!(run.code, 1, "{}", run.text());
+    assert!(run.stdout.contains("`A1-999`"), "{}", run.text());
+    assert!(
+        run.stdout.contains("1 reference(s) naming no task"),
+        "joined tokens were truncated: {}",
+        run.text()
+    );
 }
 
 fn facts() -> Value {
@@ -548,6 +665,88 @@ fn every_command_is_in_the_readme_command_list() {
     );
 }
 
+/// The blueprint guidance is one product boundary on five reader surfaces
+/// (`A1-393`), not five opportunities to widen it independently.
+///
+/// This checks stable facts and names rather than whole sentences: the
+/// generated agent block must tell an author how to preview, the adopter guide
+/// must retain the parameter/reference and trust contracts, the HLD must retain
+/// the evidence limit and staged exclusions, and the changelog must publish the
+/// require-able behavior. The README's separate command census above proves the
+/// command remains discoverable and exhaustive.
+#[test]
+fn blueprint_guidance_agrees_on_scope_trust_and_evidence_limits() {
+    let readme = repo_file("README.md");
+    let upgrading = repo_file("docs/upgrading.md");
+    let hld = repo_file("HLD.md");
+    let changelog = repo_file("CHANGELOG.md");
+    let agents = repo_file("AGENTS.md");
+    let flatten = |text: &str| text.split_whitespace().collect::<Vec<_>>().join(" ");
+    let upgrading_flat = flatten(&upgrading);
+    let hld_flat = flatten(&hld);
+    let agents_flat = flatten(&agents);
+
+    for (name, text, command) in [
+        ("README.md", readme.as_str(), "aplan blueprint apply"),
+        (
+            "docs/upgrading.md",
+            upgrading.as_str(),
+            "aplan blueprint apply",
+        ),
+        ("HLD.md", hld.as_str(), "`aplan blueprint`"),
+        ("CHANGELOG.md", changelog.as_str(), "aplan blueprint apply"),
+        ("AGENTS.md", agents.as_str(), "aplan blueprint apply"),
+    ] {
+        assert!(
+            text.contains(command),
+            "{name} no longer names the shipped command"
+        );
+    }
+
+    for fact in [
+        "--set NAME=VALUE",
+        "local:<key>",
+        "task:<existing-id>",
+        "non-executable plan-authoring data",
+        "SHA-256",
+        "no discovery, catalogue, composition, replay, built-ins, installation or fetch path",
+    ] {
+        assert!(
+            upgrading_flat.contains(fact),
+            "the adopter guide lost blueprint fact `{fact}`"
+        );
+    }
+
+    for fact in [
+        "no adjacent open-source request",
+        "first-party history establishes recurring one-task conventions",
+        "neither proves one universal template or market pull",
+        "discovery, catalogues, composition, replay, built-ins, installation and fetching",
+    ] {
+        assert!(
+            hld_flat.contains(fact),
+            "the HLD lost evidence limit `{fact}`"
+        );
+    }
+
+    let behavior = "agent_contract.guides_explicit_blueprint_application";
+    assert!(
+        changelog.contains(behavior) && upgrading.contains(behavior),
+        "the shipped generated-contract change is not stageable by `{behavior}`"
+    );
+    for fact in [
+        "task fields or sibling topology recur",
+        "--file FILE_PATH --cut CUT_ID",
+        "source path and digest",
+        "without `--dry-run`",
+    ] {
+        assert!(
+            agents_flat.contains(fact),
+            "the generated agent contract lost `{fact}`"
+        );
+    }
+}
+
 /// Every `aplan ...` an adopter is told to run, in the document they read while
 /// staging a binary.
 ///
@@ -576,6 +775,10 @@ fn every_command_is_in_the_readme_command_list() {
 #[test]
 fn every_pilot_finding_names_the_work_it_became() {
     let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
+    if !root.join("docs/pilots").is_dir() {
+        assert_public_plan_epoch();
+        return;
+    }
     let mut problems = Vec::new();
     let mut checked = 0usize;
 
@@ -1863,6 +2066,52 @@ fn every_behaviour_is_documented_where_an_adopter_stages_a_binary() {
     );
 }
 
+#[test]
+fn tui_docs_separate_read_only_views_from_guarded_mutations() {
+    // The read-only A1-431 workbench row remained literally true about its own
+    // result view after A1-441 shipped, but its unqualified statement that
+    // repairs were unavailable made the final operations cut contradict the
+    // very next row. Pin both halves of the final product contract.
+    let upgrading = repo_file("docs/upgrading.md");
+    let row = upgrading
+        .lines()
+        .find(|line| line.starts_with("| TUI evidence-verification workbench"))
+        .expect("the verification workbench upgrade row");
+    assert!(
+        row.contains("result view itself remains read-only"),
+        "the workbench must not imply that merely viewing a result writes the plan"
+    );
+    assert!(
+        row.contains("tui.evidence_mutation_previews_bind_identified_inputs")
+            && row.contains("Apply verification repairs"),
+        "the final guide must route exact repairs to the separately guarded action"
+    );
+    assert!(
+        !row.contains("Applying proposed repairs is unavailable"),
+        "the pre-A1-441 limitation returned to the current upgrade guide"
+    );
+
+    let overview = upgrading
+        .lines()
+        .find(|line| line.starts_with("| TUI plan-health overview"))
+        .expect("the overview upgrade row");
+    assert!(overview.contains("overview projection itself is read-only"));
+    assert!(
+        !overview.contains("The TUI remains read-only"),
+        "a read-only view was broadened into a false product-wide claim"
+    );
+
+    let design = repo_file("docs/design/tui.md");
+    assert!(design.contains("The loaded snapshot itself is immutable"));
+    assert!(!design.contains("The current TUI is read-only"));
+    assert!(
+        !design.contains(
+            "remaining Reports, onboarding and mutation operations stay in the later feature milestones"
+        ),
+        "the current design still describes delivered surfaces as future work"
+    );
+}
+
 /// **The MSRV gate derives its toolchain instead of naming one** (`A1-330`).
 ///
 /// The gate compiles this workspace with the declared `rust-version`, and the
@@ -1973,6 +2222,175 @@ fn the_documented_timeout_defaults_match_the_ones_that_ship() {
             );
         }
     }
+}
+
+/// The sequential-id recovery runbook keeps the part only a reader can decide
+/// explicit (`A1-372`).
+///
+/// Git can expose both files while the add/add conflict is unresolved, but no
+/// final-tree check can recover a task somebody chose not to keep. The guide
+/// therefore has to name that inspection point, every structured reference a
+/// renumber moves, and the prose it must not guess at. Merely saying "renumber
+/// it" is the unsafe procedure this task replaced.
+#[test]
+fn the_branch_collision_runbook_names_the_irreducible_steps() {
+    let guide = repo_file("docs/upgrading.md");
+    let section = guide
+        .split_once("\n## Resolving a sequential-id add/add conflict\n")
+        .expect("the upgrading guide has the branch-collision runbook")
+        .1;
+    let section = section
+        .split_once("\n## ")
+        .map_or(section, |(section, _)| section);
+
+    for required in [
+        "git show :2:",
+        "git show :3:",
+        "title and body",
+        "frontmatter `id`",
+        "identity is the field rather than the path",
+        "`blocked_by`",
+        "`prefer_after`",
+        "`ratified_by`",
+        "`contains`",
+        "`policy[].when.cut`",
+        "git grep -n -F",
+        "repository-wide substitution is therefore unsafe",
+        "cargo xtask gen-roadmap",
+        "cargo xtask check-docs",
+        "aplan check",
+        "aplan verify",
+        "`A1-409`",
+    ] {
+        assert!(
+            section.contains(required),
+            "the collision runbook does not name `{required}`"
+        );
+    }
+}
+
+/// The eleven collided names became eleven accounted-for tasks, not whichever
+/// side happened to win an add/add conflict (`A1-372`).
+///
+/// This is intentionally an audit of the repository-specific recovery. The
+/// two consolidations are where a count of new files alone would lie, and the
+/// two pilot sections are where a global string replacement actually produced
+/// a false citation while the work was landed.
+const BRANCH_COLLISION_RECOVERY: [(u16, u16, &str); 11] = [
+    (
+        351,
+        358,
+        "close duplicates a live task's existing trace fingerprints",
+    ),
+    (
+        352,
+        373,
+        "p00011 adoption pilot (the repository that had its own plan linter)",
+    ),
+    (
+        353,
+        374,
+        "A stale installed binary cannot read a newer plan, and the adopter must notice",
+    ),
+    (
+        354,
+        375,
+        "No way to ask a document which traces anchors it offers",
+    ),
+    (
+        355,
+        376,
+        "export-agents-md --check reads as a mode and is an option with a required value",
+    ),
+    (356, 377, "An adopter with CI has nothing to install"),
+    (
+        357,
+        378,
+        "The generated agent contract omits revisit_at, so an authoring agent never parks a task with one",
+    ),
+    (
+        358,
+        379,
+        "A YAML front-matter delimiter mints a heading anchor the rendered document does not have",
+    ),
+    (
+        359,
+        380,
+        "require_min_strength is a set of accepted kinds, and its name says floor",
+    ),
+    (
+        360,
+        381,
+        "An exempt tag no task carries is silent, where a declared tag family is not",
+    ),
+    (
+        361,
+        371,
+        "A parked task's revisit instant passes in silence, because due is wired nowhere",
+    ),
+];
+
+#[test]
+fn the_branch_collision_recovery_keeps_both_sides_and_every_disposition() {
+    if !repository_root().join("aplan/tasks/A1-372.md").is_file() {
+        assert_public_plan_epoch();
+        return;
+    }
+    let audit = repo_file("aplan/tasks/A1-372.md");
+    for (old, current, title) in BRANCH_COLLISION_RECOVERY {
+        let id = format!("A1-{current:03}");
+        let task = repo_file(&format!("aplan/tasks/{id}.md"));
+        assert!(task.lines().any(|line| line == format!("id: {id}")));
+        assert!(
+            task.lines().any(|line| line == format!("title: {title}")),
+            "{id} is no longer the recovered `{title}` task"
+        );
+        assert!(
+            audit.contains(&format!("| `A1-{old:03}` | `{id}` |")),
+            "A1-{old:03} -> {id} is absent from the collision audit"
+        );
+    }
+
+    let p00011 = repo_file("docs/pilots/p00011.md");
+    for old in 352..=361 {
+        assert!(
+            !p00011.contains(&format!("A1-{old:03}")),
+            "p00011 still cites the collided A1-{old:03} name"
+        );
+    }
+    for current in 373..=381 {
+        assert!(
+            p00011.contains(&format!("`A1-{current:03}`")),
+            "p00011 lost its disposition to A1-{current:03}"
+        );
+    }
+    let baseid_fifteen = p00011
+        .split_once("\n### 15.")
+        .expect("p00011 has finding 15")
+        .1;
+    let baseid_fifteen = baseid_fifteen
+        .split_once("\n### ")
+        .map_or(baseid_fifteen, |(section, _)| section);
+    assert!(baseid_fifteen.contains("`A1-371`"));
+    assert!(!baseid_fifteen.contains("`A1-361`"));
+
+    let heroes = repo_file("docs/pilots/p0000000015.md");
+    let heroes_twenty_nine = heroes
+        .split_once("\n### 29.")
+        .expect("p0000000015 has finding 29")
+        .1;
+    let heroes_twenty_nine = heroes_twenty_nine
+        .split_once("\n### ")
+        .map_or(heroes_twenty_nine, |(section, _)| section);
+    assert!(heroes_twenty_nine.contains("`A1-358`"));
+    assert!(!heroes_twenty_nine.contains("`A1-379`"));
+
+    let consolidated = repo_file("aplan/tasks/A1-371.md");
+    assert!(
+        consolidated.contains(
+            "two runs at one commit produce identical output whatever the wall clock says"
+        )
+    );
 }
 
 /// Every relative link this repository's own documents make resolves: the file
@@ -2126,6 +2544,10 @@ fn relative_links(text: &str) -> Vec<String> {
 #[test]
 fn every_pilot_log_is_indexed() {
     let dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../docs/pilots");
+    if !dir.is_dir() {
+        assert_public_plan_epoch();
+        return;
+    }
     let mut logs: Vec<String> = std::fs::read_dir(&dir)
         .expect("docs/pilots")
         .flatten()

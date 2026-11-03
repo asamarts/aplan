@@ -9,7 +9,7 @@
 
 use std::path::Path;
 
-mod common;
+use crate::common;
 
 /// A chain of finished work under one live task, plus a dropped blocker, which
 /// is the case a status filter must *not* hide.

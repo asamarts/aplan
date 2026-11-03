@@ -11,7 +11,7 @@
 
 use std::path::Path;
 
-mod common;
+use crate::common;
 
 /// A plan with one warning and nothing wrong: no `effort_days`, which is
 /// `APLAN009`. The same shape `deny-warnings.trycmd` uses for `check`.

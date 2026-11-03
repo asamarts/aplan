@@ -20,7 +20,14 @@ work counts (`A1-074`).
 ```
 $ aplan tasks --format json
 {
-  "schema": "aplan/tasks/v1",
+  "schema": "aplan/tasks/v2",
+  "coordination": {
+    "available": true,
+    "kind": "git_common_directory",
+    "id": "sha256:[..]",
+    "durability": "local_ephemeral_until_explicit_release"
+  },
+  "claim_observed_at_epoch_seconds": [..],
   "tasks": [
     {
       "id": "A-001",
@@ -29,6 +36,7 @@ $ aplan tasks --format json
       "status": "done",
       "effort_days": 1.0,
       "owner": null,
+      "claim": null,
       "tags": [
         "kind-b"
       ],
@@ -58,6 +66,7 @@ $ aplan tasks --format json
       "ratified_by": [],
       "contains": [],
       "trace_fingerprints": {},
+      "evidence_fingerprints": {},
       "revisit_at": null,
       "version_impact": null,
       "version_impact_reason": null,
@@ -70,6 +79,7 @@ $ aplan tasks --format json
       "status": "todo",
       "effort_days": 2.0,
       "owner": null,
+      "claim": null,
       "tags": [
         "kind-b"
       ],
@@ -88,6 +98,7 @@ $ aplan tasks --format json
       "ratified_by": [],
       "contains": [],
       "trace_fingerprints": {},
+      "evidence_fingerprints": {},
       "revisit_at": null,
       "version_impact": null,
       "version_impact_reason": null,
@@ -100,6 +111,7 @@ $ aplan tasks --format json
       "status": "todo",
       "effort_days": 3.0,
       "owner": null,
+      "claim": null,
       "tags": [
         "kind-m"
       ],
@@ -118,6 +130,7 @@ $ aplan tasks --format json
       "ratified_by": [],
       "contains": [],
       "trace_fingerprints": {},
+      "evidence_fingerprints": {},
       "revisit_at": null,
       "version_impact": null,
       "version_impact_reason": null,
@@ -130,6 +143,7 @@ $ aplan tasks --format json
       "status": "dropped",
       "effort_days": 4.0,
       "owner": null,
+      "claim": null,
       "tags": [
         "kind-r"
       ],
@@ -146,6 +160,7 @@ $ aplan tasks --format json
       "ratified_by": [],
       "contains": [],
       "trace_fingerprints": {},
+      "evidence_fingerprints": {},
       "revisit_at": null,
       "version_impact": null,
       "version_impact_reason": null,

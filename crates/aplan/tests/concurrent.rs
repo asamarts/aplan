@@ -18,7 +18,7 @@
 
 use std::path::Path;
 
-mod common;
+use crate::common;
 
 /// A plan with one cut already holding `members` tasks, and ULID ids so two
 /// concurrent `add`s cannot derive the same id. That is a different race, now

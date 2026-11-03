@@ -1,5 +1,67 @@
 {
   "$defs": {
+    "CaptureConfig": {
+      "additionalProperties": false,
+      "description": "Repository-owned capture organization and portable defaults.",
+      "properties": {
+        "kinds": {
+          "default": [],
+          "description": "Additional lower-case ASCII kebab-case kinds. `task`, `idea` and `note`\nare always present and must not be repeated here.",
+          "items": {
+            "type": "string"
+          },
+          "type": "array"
+        },
+        "profiles": {
+          "additionalProperties": {
+            "$ref": "#/$defs/CaptureProfile"
+          },
+          "default": {},
+          "description": "Explicitly selected profiles; there is no implicit personal default.",
+          "type": "object"
+        }
+      },
+      "type": "object"
+    },
+    "CaptureProfile": {
+      "additionalProperties": false,
+      "description": "Portable repository defaults for capture creation and later promotion.",
+      "properties": {
+        "body": {
+          "description": "Default body scaffold.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "kind": {
+          "description": "Default capture kind.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "labels": {
+          "description": "Default capture labels.",
+          "items": {
+            "type": "string"
+          },
+          "type": "array"
+        },
+        "promotion": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/PromotionDefaults"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "description": "Defaults snapshotted for later task promotion."
+        }
+      },
+      "type": "object"
+    },
     "Cardinality": {
       "description": "How many members of a family a task in scope must carry (`APLAN030`).",
       "oneOf": [
@@ -42,7 +104,7 @@
     },
     "DeclaredCommand": {
       "additionalProperties": false,
-      "description": "A command `.aplan.yml` declares under `version` (`A1-313`, `A1-314`).\n\n**One type for the two of them**, because they are the same idea with\ndifferent questions: `version.current` prints the version the artifact ships,\nand `version.check` exits zero when the artifact is compatible with the last\nrelease. What each *means* is documented on the key that takes it; what they\nshare -- how it is spawned and what it may spend -- is documented here.\n\nIt carries the same four limit keys `test` and `url` carry, because ADR-0033\ncovers *every* spawned command: the machine does not care which one ate it.\nA third implementation of the configured-checker idea is what `A1-185` is\nabout, and adding a fourth here rather than a second would have been that\ntask's subject arriving twice in one cut.",
+      "description": "A command `.aplan.yml` declares under `version` (`A1-313`, `A1-314`).\n\n**One type for the two of them**, because they are the same idea with\ndifferent questions: `version.current` prints the version the artifact ships,\nand `version.check` exits zero when the artifact is compatible with the last\nrelease. What each *means* is documented on the key that takes it; what they\nshare -- how it is spawned and what it may spend -- is documented here.\n\nIt carries the same five limit keys `test` and `url` carry, because ADR-0033\ncovers *every* spawned command: the machine does not care which one ate it.\nA third implementation of the configured-checker idea is what `A1-185` is\nabout, and adding a fourth here rather than a second would have been that\ntask's subject arriving twice in one cut.",
       "properties": {
         "command": {
           "description": "argv, e.g. `[\"ci/scripts/version.sh\"]`.\n\nSpawned with no shell (HLD section 5.5). A pipeline is declared as one:\n`[\"sh\", \"-c\", \"...\"]` is this repository's business to write and not this\ntool's to synthesise.",
@@ -54,6 +116,14 @@
         "max_memory": {
           "default": null,
           "description": "The most memory this command may hold, as a size (`256M`) (`A1-310`,\nADR-0033).",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "max_output": {
+          "default": null,
+          "description": "The most output from each stream that aplan retains in its own process,\nas a size. Default: `1M` (`A1-366`).\n\nIndependent of `max_memory`, which applies to the declared command only.\nOutput past this bound is still drained so the command cannot block on a\nfull pipe.",
           "type": [
             "string",
             "null"
@@ -98,12 +168,24 @@
     },
     "DocsConfig": {
       "additionalProperties": false,
-      "description": "What `aplan check-docs` may check beyond references resolving.",
+      "description": "What `aplan check-docs` reads by default and how it interprets cut\nmembership declarations.",
       "properties": {
         "membership": {
+          "default": null,
           "description": "Documents that declare a cut's membership, and where in them it is\ndeclared.\n\nA plan document listing a cut's tasks beside a `M-<cut>` milestone holds\ntwo copies of one fact, and until something reads both, one of them is\nungated. Declared rather than inferred: measured on the two real documents\nof this shape, reading a cut's whole section instead of its declaration\ncalls fourteen ordinary cross-references false declarations, and a\ndocument's shape means whatever its author intended (ADR-0019).\n\nAbsent, `check-docs` checks references alone, exactly as before.",
           "items": {
             "$ref": "#/$defs/MembershipDoc"
+          },
+          "type": [
+            "array",
+            "null"
+          ]
+        },
+        "paths": {
+          "default": null,
+          "description": "Documents whose task references `aplan check-docs` checks when no\npaths are passed on the command line.\n\nEach value may be a literal path or a glob. Relative values resolve from\nthe configuration file's directory. A single `*` stays within one path\nsegment; crossing directories needs `**`. Every declared pattern must\nmatch at least one file when the command runs, so a misspelled or\noutgrown declaration cannot turn the gate into a vacuous pass.\n\nCommand-line paths override this list for a one-off check. Documents in\n`membership` join the implicit set automatically and need not be\nrepeated here.",
+          "items": {
+            "type": "string"
           },
           "type": [
             "array",
@@ -135,6 +217,17 @@
           "minimum": 0,
           "type": [
             "integer",
+            "null"
+          ]
+        },
+        "observation_inputs": {
+          "default": null,
+          "description": "Exhaustive repository-relative material inputs to configured evidence\ndiscovery, as glob patterns.\n\nThis is a trust claim, not a performance hint. A persisted test\ncatalogue is reusable only while every matched input, the provider\nconfiguration, inherited environment and configured executable\nidentity are unchanged. Absent means provider observations are\ndeliberately non-cacheable. Keep generated outputs out of this set: a\nprovider changing its own declared input while it runs cannot publish a\ncurrent observation.",
+          "items": {
+            "type": "string"
+          },
+          "type": [
+            "array",
             "null"
           ]
         },
@@ -249,7 +342,7 @@
           "description": "Which shape the declaration takes."
         },
         "doc": {
-          "description": "The document, relative to the repository root. It is only read when\n`check-docs` is given that path, so a run over one file does not report\nevery cut in a document nobody asked about.",
+          "description": "The document. A relative value resolves from the configuration file. It\njoins the default no-argument document set automatically. Explicit\ncommand-line paths still select only the documents named there, so a\none-file run does not report every cut in a document nobody asked about.",
           "type": "string"
         },
         "marker": {
@@ -287,6 +380,58 @@
         }
       ]
     },
+    "PromotionDefaults": {
+      "additionalProperties": false,
+      "description": "Task-creation defaults snapshotted onto a capture.\n\nThese are inert data until promotion. They contain no status, dependency,\nevidence, trace or command field, so a profile cannot weaken task policy by\nconstruction.",
+      "properties": {
+        "cut": {
+          "description": "Default destination cut id.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "effort_days": {
+          "description": "Default positive finite effort estimate.",
+          "format": "double",
+          "type": [
+            "number",
+            "null"
+          ]
+        },
+        "owner": {
+          "description": "Default task owner.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "paths": {
+          "description": "Default task path globs.",
+          "items": {
+            "type": "string"
+          },
+          "type": "array"
+        },
+        "phase": {
+          "description": "Default task phase.",
+          "format": "uint32",
+          "minimum": 0,
+          "type": [
+            "integer",
+            "null"
+          ]
+        },
+        "tags": {
+          "description": "Default task tags.",
+          "items": {
+            "type": "string"
+          },
+          "type": "array"
+        }
+      },
+      "type": "object"
+    },
     "RoadmapConfig": {
       "additionalProperties": false,
       "description": "Roadmap rendering options.",
@@ -304,7 +449,7 @@
     },
     "Scope": {
       "additionalProperties": false,
-      "description": "The subset a [`ScopedPolicy`] applies to: the four dimensions `--cut`,\n`--tag`, `--owner` and `--status` name on the command line (`A1-214`).",
+      "description": "The subset a [`ScopedPolicy`] applies to: the five dimensions `--cut`,\n`--phase`, `--tag`, `--owner` and `--status` name on the command line (`A1-214`).",
       "properties": {
         "cut": {
           "default": [],
@@ -319,6 +464,16 @@
           "description": "Owners. A task matches if any is its owner.",
           "items": {
             "type": "string"
+          },
+          "type": "array"
+        },
+        "phase": {
+          "default": [],
+          "description": "Numeric phases. A task matches if it carries any of them.",
+          "items": {
+            "format": "uint32",
+            "minimum": 0,
+            "type": "integer"
           },
           "type": "array"
         },
@@ -383,6 +538,7 @@
               "type": "null"
             }
           ],
+          "default": null,
           "description": "The dials this scope sets. Absent keys fall through to the next widest\nscope that matches, and finally to the whole-plan value."
         },
         "when": {
@@ -425,6 +581,21 @@
         }
       ]
     },
+    "SummaryConfig": {
+      "additionalProperties": false,
+      "description": "Summary rollup options.",
+      "properties": {
+        "group_by": {
+          "default": null,
+          "description": "The tag family whose members replace phases as the summary's rows.\n\nMust name a family declared in [`Config::tag_families`]. Tasks carrying\nmore than one member appear in every matching row, while the total still\ncounts each task once (`A1-186`).",
+          "type": [
+            "string",
+            "null"
+          ]
+        }
+      },
+      "type": "object"
+    },
     "TagFamily": {
       "anyOf": [
         {
@@ -461,6 +632,7 @@
               "type": "null"
             }
           ],
+          "default": null,
           "description": "Whether milestone tasks are subject to it. Absent means they are."
         },
         "require": {
@@ -472,6 +644,7 @@
               "type": "null"
             }
           ],
+          "default": null,
           "description": "How many of them a task in scope carries. Absent means `optional`, which\nis what a bare list declares."
         },
         "status": {
@@ -483,11 +656,38 @@
               "type": "null"
             }
           ],
+          "default": null,
           "description": "Which statuses the requirement applies to. Absent means every status."
         }
       },
       "required": [
         "members"
+      ],
+      "type": "object"
+    },
+    "TestBatch": {
+      "additionalProperties": false,
+      "description": "One complete adapter invocation for every exact test this runner must execute.\n\nThe adapter consumes an aplan-owned JSON manifest and publishes the\nversioned JSON result. Test names never enter the command line. Framework\nselection and native report parsing stay in the adapter; aplan validates the\ncomplete requested/result set before accepting any outcome.",
+      "properties": {
+        "protocol": {
+          "description": "Protocol major. Only [`TEST_BATCH_PROTOCOL`] is accepted by this build.",
+          "format": "uint32",
+          "maximum": 1,
+          "minimum": 1,
+          "type": "integer"
+        },
+        "run": {
+          "description": "Adapter argv. Each path placeholder occurs exactly once as a whole\nnon-command argument.",
+          "items": {
+            "type": "string"
+          },
+          "minItems": 1,
+          "type": "array"
+        }
+      },
+      "required": [
+        "protocol",
+        "run"
       ],
       "type": "object"
     },
@@ -516,10 +716,47 @@
       ],
       "type": "object"
     },
+    "TestInputDependency": {
+      "additionalProperties": false,
+      "description": "Repository inputs whose change can affect a named subset of tests.\n\nUnlike [`TestCoverage`], this is execution-selection policy. It is an\nexhaustive trust claim and therefore has its own type and configuration\nkey; proof locality must never be mistaken for invalidation locality.",
+      "properties": {
+        "paths": {
+          "description": "Repository-relative path globs that can affect those tests.",
+          "items": {
+            "type": "string"
+          },
+          "type": "array"
+        },
+        "tests": {
+          "description": "Test-name glob patterns, matched against the complete current catalogue.",
+          "items": {
+            "type": "string"
+          },
+          "type": "array"
+        }
+      },
+      "required": [
+        "tests",
+        "paths"
+      ],
+      "type": "object"
+    },
     "TestRunner": {
       "additionalProperties": false,
-      "description": "How to list and run tests, for `aplan verify`. Both are argv vectors, spawned\nwithout a shell (HLD §5.5).",
+      "description": "How to list and run tests, for `aplan verify`. Commands are argv vectors,\nspawned without a shell (HLD section 5.5).",
       "properties": {
+        "batch": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/TestBatch"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "description": "Optional one-process adapter for every distinct cited test this runner\nowns. Legacy `run` remains required and is the compatible fallback."
+        },
         "covers": {
           "default": null,
           "description": "Path globs this runner's tests cover, for `APLAN025`.\n\nSeparate from [`dir`](Self::dir) because *where a runner runs* is not\n*what it covers*: `cargo test --manifest-path server/Cargo.toml`, an npm\nworkspace filter, and `pytest --rootdir` all select a component while\nrunning at the repository root, which is usually where the lockfile is.\nReading `dir` alone left `APLAN025` unable to fire on any real pilot\n(`A1-065`).\n\nTakes precedence over `dir` when both are set, being the more specific\nclaim. Absent, and with no `dir` either, the runner makes no claim about\nlocality and `APLAN025` stays silent.",
@@ -532,6 +769,7 @@
           ]
         },
         "covers_by_test": {
+          "default": null,
           "description": "Paths covered by *some* of this runner's tests, named by test.\n\nOne runner's tests do not always cover one thing. A repository whose only\nharness that can read the tree is a tools crate keeps its repository-wide\ninvariants there: those tests assert facts about directories they do not\nlive in, while the rest of the same crate's tests cover the crate. A\nsingle `covers` cannot say both, and saying the coarse thing made\n`APLAN025` report proof as borrowed (`A1-069`).\n\nThe first entry whose `tests` match wins; anything unmatched falls back to\n`covers`, then `dir`.",
           "items": {
             "$ref": "#/$defs/TestCoverage"
@@ -549,11 +787,33 @@
             "null"
           ]
         },
+        "exclusive": {
+          "default": null,
+          "description": "Named capacity-one resources this runner must hold exclusively. The\nscheduler acquires the complete sorted set atomically, so two runners\ncannot overlap on a fixed port, database, compiler lock or fixture.",
+          "items": {
+            "type": "string"
+          },
+          "type": [
+            "array",
+            "null"
+          ]
+        },
         "expect_tests": {
           "default": null,
           "description": "Whether this runner is expected to list any tests at all. Default: `true`.\n\nA runner that lists nothing is usually a mistake -- a `dir` that moved, a\nmanifest path that is wrong -- and until `APLAN036` nothing said so: every\ncitation against it failed later as \"no runner lists this\", which blames\nthe citation. Sometimes it is not a mistake: a component that genuinely\nhas no tests yet is correct and inert, and the first repository to\nconfigure five runners had two of them in exactly that state.\n\nSet `false` to say so. That is the whole point of the field: without it a\nrepository has to choose between a permanent warning and deleting a runner\nit will need next month.",
           "type": [
             "boolean",
+            "null"
+          ]
+        },
+        "inputs_by_test": {
+          "default": null,
+          "description": "Exhaustive repository inputs for subsets of this runner's tests.\n\nThis is deliberately separate from `covers_by_test`: coverage says what\na passing test proves, while an input dependency says what can change\nthat test's result. Incremental evidence refresh may reuse an earlier\noutcome only when every currently listed test matches exactly one entry.\nA missing or overlapping match widens to the complete runner.",
+          "items": {
+            "$ref": "#/$defs/TestInputDependency"
+          },
+          "type": [
+            "array",
             "null"
           ]
         },
@@ -567,6 +827,14 @@
         "max_memory": {
           "default": null,
           "description": "The most memory this runner's commands may hold, as a size (`4G`, `512M`)\n(`A1-310`, ADR-0033).\n\nEnforced by a cgroup, which sets `memory.max` **and** `memory.swap.max`:\nprototyped, a process under a 64MB `memory.max` alone allocated 3GB with\n`oom_kill` still `0`, because the pages went to swap. A cap that a box\nwith swap turns into a paging target is not a cap.\n\nWhat a command spends is the harness's and varies by two orders of\nmagnitude: measured on one machine, `cargo test` warm peaks at 156MB,\n`go test ./...` at 1.2GB, and `npm test` (vitest) at 33GB. Size it from\nwhat your own run reports rather than from a number here.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "max_output": {
+          "default": null,
+          "description": "The most output from each of stdout and stderr that aplan retains in its\nown process, as a size (`1M`, `256K`). Default: `1M` (`A1-366`).\n\nThis is not [`max_memory`](Self::max_memory): that bounds the child where\ncgroups are available, while this bounds the parent on every platform.\nNor is it [`output_lines`](Self::output_lines), which bounds only the\nsanitized excerpt written to a finding after capture. The pipe is always\ndrained so a command cannot deadlock; bytes past this limit are discarded\nwhile the first and last halves are retained, and a failure excerpt says\nhow many bytes were dropped.\n\nThe limit is per stream rather than shared between them. That keeps the\nresult deterministic -- a scheduling race between the stdout and stderr\nreader threads cannot decide which stream receives the budget -- and\nbounds retained command output at twice this value in total.",
           "type": [
             "string",
             "null"
@@ -636,6 +904,16 @@
             "null"
           ]
         },
+        "weight": {
+          "default": null,
+          "description": "Aggregate scheduler capacity consumed while one of this runner's\nprovider commands is active. Default: 1. Raise it for harnesses that\nfan out internally so top-level concurrency accounts for their cost.",
+          "format": "uint32",
+          "minimum": 1,
+          "type": [
+            "integer",
+            "null"
+          ]
+        },
         "wrap": {
           "default": null,
           "description": "argv prepended to every command this runner runs (`A1-310`, ADR-0033).\n\nThe escape hatch beside the dials, and the shape HLD 5.5 already implies\nfor `url.check`: `nice`, `taskset`, `cgexec`, a container runner, or a\ncgroup property the dials do not model. `[systemd-run, --user, --scope,\n-p, MemoryMax=4G, --]` is the whole of `max_memory` written by hand.\n\nTop-level config only, like every other command here: a task file must\nnever be able to name one (HLD 5.5).",
@@ -654,6 +932,29 @@
       ],
       "type": "object"
     },
+    "TestRunnerGroup": {
+      "additionalProperties": false,
+      "description": "The opt-in scheduled form of `test` configuration.",
+      "properties": {
+        "runners": {
+          "description": "Configured runners in deterministic evidence-identity order.",
+          "items": {
+            "$ref": "#/$defs/TestRunner"
+          },
+          "minItems": 1,
+          "type": "array"
+        },
+        "schedule": {
+          "$ref": "#/$defs/TestSchedule",
+          "description": "Aggregate weighted provider budget."
+        }
+      },
+      "required": [
+        "schedule",
+        "runners"
+      ],
+      "type": "object"
+    },
     "TestRunners": {
       "anyOf": [
         {
@@ -666,9 +967,29 @@
             "$ref": "#/$defs/TestRunner"
           },
           "type": "array"
+        },
+        {
+          "$ref": "#/$defs/TestRunnerGroup",
+          "description": "Explicit scheduling policy and the runners it governs. The legacy\nmapping and sequence forms remain serial; concurrency is opt-in."
         }
       ],
       "description": "One runner, or several.\n\nUntagged so today's single mapping keeps parsing exactly as written: every\nexisting adopter, this repository included, has one, and a config change that\nmade them all edit their file would be a poor trade for a feature most of them\ndo not need.\n\nSeveral is not an exotic case. An umbrella repository of independent projects\n(no root workspace, so no `cargo test` sees more than one), a polyglot tree\nwith a runner per language, and a repository separating unit from e2e runs all\nhit the same wall: one `list` command cannot see the whole corpus, so most\ntasks cannot cite `test` evidence at all and fall back to weaker kinds\n(`A1-054`)."
+    },
+    "TestSchedule": {
+      "additionalProperties": false,
+      "description": "One aggregate scheduling budget over every configured test-provider stage.",
+      "properties": {
+        "capacity": {
+          "description": "Weighted capacity available to provider work. Every runner consumes its\ndeclared `weight` (one by default) for the lifetime of one command.",
+          "format": "uint32",
+          "minimum": 1,
+          "type": "integer"
+        }
+      },
+      "required": [
+        "capacity"
+      ],
+      "type": "object"
     },
     "UrlCheck": {
       "additionalProperties": false,
@@ -684,6 +1005,14 @@
         "max_memory": {
           "default": null,
           "description": "The most memory this checker's command may hold, as a size (`256M`)\n(`A1-310`, ADR-0033).\n\nThe same key `test` takes, and enforced the same way. Here because\nADR-0033 decided the cap covers *every* spawned command rather than the\ntest runner's alone: the machine does not care which command ate it, and\na checker is argv an adopter chose exactly as a runner is.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "max_output": {
+          "default": null,
+          "description": "The most output from each stream that aplan retains in its own process,\nas a size. Default: `1M` (`A1-366`).\n\nIndependent of `max_memory`, which applies to the checker process only.\nOutput past this bound is still drained so the checker cannot block on a\nfull pipe.",
           "type": [
             "string",
             "null"
@@ -727,7 +1056,7 @@
       "type": "object"
     },
     "VersionImpact": {
-      "description": "What a change did to the thing that ships (`A1-312`, ADR-0034).\n\nOrdered, and the order is the whole type: aggregation takes the strongest of\nwhat a level floors and what its members claim, so `None < Fix < Feature <\nBreaking` is what makes a `Breaking` task raise the cut above it.\n\nIt describes the **change**, and each scheme maps it to its own arithmetic:\nsemver at or past 1.0 sends `Breaking` to major, semver below 1.0 sends it to\nminor, and `CalVer` takes its number from the calendar and keeps only the\ncompatibility claim.",
+      "description": "What a change did to the thing that ships.\n\nOrdered, and the order is the whole type: aggregation takes the strongest of\nwhat a level floors and what its members claim, so `None < Fix < Feature <\nBreaking` is what makes a `Breaking` task raise the cut above it.\n\nIt describes the **change**, and each scheme maps it to its own arithmetic:\nsemver at or past 1.0 sends `Breaking` to major, semver below 1.0 sends it to\nminor, and `CalVer` takes its number from the calendar and keeps only the\ncompatibility claim.",
       "oneOf": [
         {
           "const": "none",
@@ -764,6 +1093,7 @@
               "type": "null"
             }
           ],
+          "default": null,
           "description": "How to ask the artifact whether it is compatible with the last release\n(`A1-314`, `APLAN049`).\n\n**Exit zero when it is, non-zero when it is not.** That is the question\n`cargo semver-checks check-release` already answers natively, and asking\nit this way is what keeps this tool's vocabulary out of somebody else's\nchecker: a command that had to print `none|fix|feature|breaking` would be\nthis project teaching an ecosystem its words, which is the refusal\n`A1-037` makes about `vN.N` one layer along.\n\nIt is the L3 rung of a version claim, and it behaves like the other one:\nopt-in, run only where declared, reported as a finding about the *claim*\nrather than as a crash, and bounded by the limits above -- an API differ\nis exactly the kind of command that compiles a workspace twice.\n\nNothing here reimplements API diffing. The tool runs the checker the\nrepository declares and reports what it said, exactly as it runs\n`test.run`."
         },
         "current": {
@@ -775,6 +1105,7 @@
               "type": "null"
             }
           ],
+          "default": null,
           "description": "How to read the version the artifact ships today (`A1-313`, ADR-0040).\n\nA command, never a parse. This tool does not know what a `pyproject.toml`\nmeans, what a `version` key in one of four build backends refers to, or\nwhich of a monorepo's eleven manifests is the one that ships -- and a\nguess about any of those is a wrong number stated confidently, which is\nthe one thing the arithmetic must never produce.\n\nIt prints the version on stdout and exits zero. The first non-empty line\nis taken, trimmed, with a leading `v` removed -- because `git describe`\nand `cargo pkgid` disagree about that one character and neither is wrong.\n\nWithout it the plan still answers what a node *owes*, which needs nothing\noutside the plan. What it cannot do is turn that into a number, because\nthe number is relative to one this tool has no way to learn."
         },
         "levels": {
@@ -786,6 +1117,7 @@
               "type": "null"
             }
           ],
+          "default": null,
           "description": "What each level owes before any member speaks. Default: a unit of work\n`fix`, a cut `feature`, a release nothing of its own."
         },
         "release_tag": {
@@ -823,6 +1155,18 @@
         "null"
       ]
     },
+    "capture": {
+      "anyOf": [
+        {
+          "$ref": "#/$defs/CaptureConfig"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": null,
+      "description": "Portable capture kinds and named creation/promotion profiles.\n\nThis is repository policy, never per-user configuration: the same\ncapture request must persist the same effective values for every actor.\nProfiles contain only inert defaults and cannot set task status,\ndependencies, evidence, traces or commands."
+    },
     "deny_warnings": {
       "default": null,
       "description": "Treat any warning as a finding that fails the command, so `check` and\n`verify` exit `1` rather than `0` when a plan has warnings and nothing\nworse. Off unless set.\n\nFor a repository whose policy is that every gate either passes or blocks:\nthe advisory tier is useful by default (`APLAN023` warns because a\ncitation may be perfectly honest and the repository is the judge of that),\nand this is how a repository says it would rather be the judge in the\nstrict direction. The exit code is unchanged: `1` still means \"at least\none finding\", not a new code a consumer's CI has to learn (ADR-0007).",
@@ -833,7 +1177,7 @@
     },
     "detect_drift": {
       "default": null,
-      "description": "Turn on stale-`done` drift detection (`APLAN018`): `aplan close` stamps a\ncontent fingerprint of each traced section, and `check` warns when a closed\ntask's traced section changes afterward. Off unless set.",
+      "description": "Turn on stale-`done` drift detection (`APLAN018`, `APLAN054`): `aplan\nclose` stamps traced sections and mutable file evidence, then `check` and\n`verify` report changes under the same references. Off unless set.",
       "type": [
         "boolean",
         "null"
@@ -848,7 +1192,8 @@
           "type": "null"
         }
       ],
-      "description": "Where this repository's prose declares a cut's membership, so\n`aplan check-docs` can read it against the milestones (`A1-165`)."
+      "default": null,
+      "description": "Which prose `aplan check-docs` checks, and where that prose declares a\ncut's membership (`A1-165`, `A1-203`)."
     },
     "effort_days_per_week": {
       "default": null,
@@ -868,6 +1213,7 @@
           "type": "null"
         }
       ],
+      "default": null,
       "description": "Evidence-strength policy (`APLAN017`)."
     },
     "id_strategy": {
@@ -890,8 +1236,20 @@
         "null"
       ]
     },
+    "owners": {
+      "default": null,
+      "description": "Canonical values for the task model's free-text `owner` field.\n\nAbsent leaves every owner legal, exactly as before. When declared,\n`APLAN056` reports a task whose owner is not a member and suggests a\ndeclared spelling when it is one edit away. This is deliberately a\nfield-specific vocabulary rather than a generic mapping: `owner` is the\nonly free-text categorical scalar in the task model today, and a generic\nmechanism with one member would expose field names as a second schema.",
+      "items": {
+        "type": "string"
+      },
+      "type": [
+        "array",
+        "null"
+      ]
+    },
     "policy": {
-      "description": "Policy scoped to a subset of the plan, narrowest match winning\n(`A1-183`).\n\nEvery other dial here is whole-plan, and the one exception --\n`evidence.exempt_tags` -- is the degenerate case of this: \"required\nstrength is *none* for these tags\". A repository that wants stricter\nevidence on a release cut than on ordinary work, or none on spikes, can\nonly say it by exemption today, which is all or nothing.\n\nThe subset is named with the same four dimensions `--cut`, `--tag`,\n`--owner` and `--status` take on the command line, with the same reading:\nwithin a dimension any, across dimensions all (ADR-0026's selector,\n`A1-214`). One model of what a subset is, two renderings of it.",
+      "default": null,
+      "description": "Policy scoped to a subset of the plan, narrowest match winning\n(`A1-183`).\n\nEvery other dial here is whole-plan, and the one exception --\n`evidence.exempt_tags` -- is the degenerate case of this: \"required\nstrength is *none* for these tags\". A repository that wants stricter\nevidence on a release cut than on ordinary work, or none on spikes, can\nonly say it by exemption today, which is all or nothing.\n\nThe subset is named with the same five dimensions `--cut`, `--phase`,\n`--tag`, `--owner` and `--status` take on the command line, with the same reading:\nwithin a dimension any, across dimensions all (ADR-0026's selector,\n`A1-214`). One model of what a subset is, two renderings of it.",
       "items": {
         "$ref": "#/$defs/ScopedPolicy"
       },
@@ -925,6 +1283,7 @@
           "type": "null"
         }
       ],
+      "default": null,
       "description": "How `aplan roadmap` renders (`A1-078`)."
     },
     "root": {
@@ -945,11 +1304,24 @@
         "null"
       ]
     },
+    "summary": {
+      "anyOf": [
+        {
+          "$ref": "#/$defs/SummaryConfig"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": null,
+      "description": "How `aplan summary` rolls work up (`A1-186`)."
+    },
     "tag_families": {
       "additionalProperties": {
         "$ref": "#/$defs/TagFamily"
       },
-      "description": "Tag vocabularies this plan uses, as family name to its members\n(`APLAN026`).\n\nA second grouping level always ends up in tags, because tags are what\nexists: a pilot put 22 epics there and a build/measure/review taxonomy\nbeside them, and nothing noticed a typo in either. Declaring the\nvocabulary makes a claim the repository already believes checkable,\nwithout making tags into a model and so without pre-empting `A1-032`.\n\n```yaml\ntag_families:\n  epic: [epic-a, epic-b]\n  kind: [kind-b, kind-m, kind-r]\n```\n\nAbsent, nothing changes. Tags outside every declared family stay legal\nand silent, or the feature would be a migration.",
+      "default": null,
+      "description": "Tag vocabularies this plan uses, as family name to its members\n(`APLAN026`).\n\nA second task-membership dimension ends up in tags, because tags are\nwhat exists: a pilot put 22 epics there and a build/measure/review\ntaxonomy beside them, and nothing noticed a typo in either. Declaring\nthe vocabulary makes a claim the repository already believes checkable,\nwithout making tags into a containment model.\n\n```yaml\ntag_families:\n  epic: [epic-a, epic-b]\n  kind: [kind-b, kind-m, kind-r]\n```\n\nAbsent, nothing changes. Tags outside every declared family stay legal\nand silent, or the feature would be a migration.",
       "type": [
         "object",
         "null"
@@ -964,6 +1336,7 @@
           "type": "null"
         }
       ],
+      "default": null,
       "description": "The test runner(s) for `aplan verify`. A single mapping, or a sequence\nwhen one command cannot list every test in the repository."
     },
     "traces_external": {
@@ -994,6 +1367,7 @@
           "type": "null"
         }
       ],
+      "default": null,
       "description": "How to check that a `url` citation is reachable (`APLAN016`).\n\nA configured command rather than a built-in HTTP client, for the reason\n`test` is: the tool must not decide on an adopter's behalf what touching\nthe network means. It keeps the trust boundary where the repository can\nsee it, adds no TLS or async runtime to a binary whose other work is\nhermetic, and makes the rule opt-in by construction -- no key, no\nnetwork, which is what `check`'s hermetic contract requires.\n\nTimeout and redirect policy live in the command, where they are visible\nand the adopter's to set, rather than as knobs this tool invents."
     },
     "version": {
@@ -1005,6 +1379,7 @@
           "type": "null"
         }
       ],
+      "default": null,
       "description": "What a task is expected to say about the released version (`A1-312`,\nADR-0034). Absent by default, and a plan that never declares it is\nunaffected."
     }
   },

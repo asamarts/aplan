@@ -1,0 +1,30 @@
++ Plan health -----------------------------------------------------------------------------------------------------------------------------+
+| aplan x ERROR  2 tasks  1 error  2 warnings  repo/very-long-root                                                                         |
++------------------------------------------------------------------------------------------------------------------------------------------+
++> Destinations <----++ Overview - where attention goes next ------------------------++ Snapshot identity ---------------------------------+
+|[1 Overview]        ||> CUTS 0 | DONE 0/0 | [........]                              ||plan: repo/very-long-root sha:plan-identit          |
+|[2 Tasks]           ||  EFFORT 0.0/2.0d | complete estimates                        ||config: none selected sha:config-ident              |
+|[3 Diagnostics]     ||  READY 0 | [........]                                        ||repository: repo/very-long-root                     |
+|[4 Graph]           ||  REVISIT DUE 0 | LATER 0 | AS-OF 0                           ||repository state: not observed: synthetic snapshot  |
+|[5 Reports]         ||  FINDINGS E:1 W:2 | DENIED | [!??.....]                      ||build: 0.test src:test-source                       |
+|[6 Inbox]           ||  CRITICAL 0.0d | TASKS 0 | [........]                        ||facts:facts binary:binary                           |
+|                    ||                                                              ||input: identity working_tree Hermetic               |
+|                    ||                                                              ||snapshot: current; memory dirty: no                 |
+|                    ||                                                              ||load: complete                                      |
+|                    ||                                                              ||work: active work; effort: complete                 |
+|                    ||                                                              ||                                                    |
+|                    ||                                                              ||                                                    |
+|                    ||                                                              ||                                                    |
+|                    ||                                                              ||                                                    |
+|                    ||                                                              ||                                                    |
+|                    ||                                                              ||                                                    |
+|                    ||                                                              ||                                                    |
+|                    ||                                                              ||                                                    |
+|                    ||                                                              ||                                                    |
+|                    ||                                                              ||                                                    |
+|                    ||                                                              ||                                                    |
++--------------------++--------------------------------------------------------------++----------------------------------------------------+
++ Commands --------------------------------------------------------------------------------------------------------------------------------+
+|Esc quit | C-p command palette | ? contextual help | q/C-c quit | i build capabilities | Tab next region | r refresh | V verify evidence  |
+|Idle                                                                                                                                      |
++------------------------------------------------------------------------------------------------------------------------------------------+

@@ -1,4 +1,5 @@
 [package]
+autotests = false
 name = "xtask"
 description = "Cargo-xtask helpers for aplan (schema generation, drift checks)."
 version.workspace = true
@@ -14,10 +15,12 @@ name = "xtask"
 path = "src/main.rs"
 
 [dependencies]
+aplan-attest.workspace = true
 aplan-core.workspace = true
 aplan-config.workspace = true
 aplan-output.workspace = true
 aplan-interop.workspace = true
+aplan-tui.workspace = true
 # The CLI surface gate reads clap's own tree (`A1-208`), which only the binary
 # crate can hand over. A dev tool depending on the crate it gates is the point.
 aplan.workspace = true
@@ -25,10 +28,18 @@ clap.workspace = true
 anyhow.workspace = true
 serde.workspace = true
 serde_json.workspace = true
-serde_yaml_ng.workspace = true
+yaml_compat.workspace = true
+sha2.workspace = true
+
+[target.'cfg(unix)'.dependencies]
+signal-hook.workspace = true
 
 [dev-dependencies]
 tempfile.workspace = true
 
 [lints]
 workspace = true
+
+[[test]]
+name = "integration"
+path = "tests/integration/main.rs"
