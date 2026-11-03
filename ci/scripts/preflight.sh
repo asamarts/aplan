@@ -91,7 +91,9 @@ if [[ -n "$base" ]] && is_null_revision "$base"; then
     printf 'validation: initial push has no base commit; running full validation\n'
     export APLAN_VALIDATION_HEAD_REV
     export APLAN_VALIDATION_INPUT_KIND=working-tree
-    exec "$SCRIPT_DIR/validate.sh" --profile full
+    profile=full
+    base=""
+    head=""
 fi
 
 if [[ "$profile" == "full" ]]; then
