@@ -443,6 +443,38 @@ fn development_preflight_accepts_one_exact_revision_pair() {
 }
 
 #[test]
+fn development_preflight_widens_an_initial_push_to_the_complete_profile() {
+    let fixture = PreflightFixture::new();
+    for width in [40, 64] {
+        fixture.reset();
+        let zero_base = "0".repeat(width);
+        let selected = fixture.run_args(&["--base", &zero_base, "--head", &fixture.source], &[]);
+        assert!(
+            selected.status.success(),
+            "{}{}",
+            String::from_utf8_lossy(&selected.stdout),
+            String::from_utf8_lossy(&selected.stderr)
+        );
+        let output = String::from_utf8(selected.stdout).expect("preflight output is UTF-8");
+        assert!(output.contains("classifier input=initial-push update_count=0"));
+        assert!(output.contains("initial push has no base commit; running full validation"));
+        assert!(output.contains("profile=full passed 11 selected"));
+        assert_eq!(
+            fixture.log(),
+            "fmt\nclippy\ndoc\ntest\nspec\nmsrv-build\nstyle\nsupply-chain\ncoverage\nstructural\nevidence\n",
+            "an absent base must not narrow validation of a newly published tree"
+        );
+    }
+
+    fixture.reset();
+    let zero_base = "0".repeat(40);
+    let foreign_head = "1".repeat(40);
+    let refused = fixture.run_args(&["--base", &zero_base, "--head", &foreign_head], &[]);
+    assert_eq!(refused.status.code(), Some(2));
+    assert_eq!(fixture.log(), "", "a foreign head must run no gate");
+}
+
+#[test]
 fn one_profile_value_routes_the_same_source_through_every_full_gate() {
     let fixture = PreflightFixture::new();
     let full = fixture.run_args(

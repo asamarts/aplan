@@ -62,6 +62,38 @@ while [[ "$#" -gt 0 ]]; do
     esac
 done
 
+is_null_revision() {
+    case "$1" in
+        0000000000000000000000000000000000000000|0000000000000000000000000000000000000000000000000000000000000000)
+            return 0
+            ;;
+        *)
+            return 1
+            ;;
+    esac
+}
+
+# GitHub uses an all-zero `before` object ID when a pushed branch did not exist.
+# There is no honest diff to classify in that case: the complete checked-out
+# tree is new to the remote. Bind the head exactly and widen to the full profile.
+if [[ -n "$base" ]] && is_null_revision "$base"; then
+    [[ -n "$head" && "${#updates[@]}" -eq 0 && "$full_alias" -eq 0 ]] || usage
+    if ! APLAN_VALIDATION_HEAD_REV="$(git -C "$REPO_ROOT" rev-parse --verify "${head}^{commit}" 2>/dev/null)"; then
+        echo "validation: initial-push head is not a commit" >&2
+        exit 2
+    fi
+    checked_out="$(git -C "$REPO_ROOT" rev-parse --verify 'HEAD^{commit}')"
+    if [[ "$APLAN_VALIDATION_HEAD_REV" != "$checked_out" ]]; then
+        echo "validation: initial-push head is not the checked-out source" >&2
+        exit 2
+    fi
+    printf 'validation: classifier input=initial-push update_count=0\n'
+    printf 'validation: initial push has no base commit; running full validation\n'
+    export APLAN_VALIDATION_HEAD_REV
+    export APLAN_VALIDATION_INPUT_KIND=working-tree
+    exec "$SCRIPT_DIR/validate.sh" --profile full
+fi
+
 if [[ "$profile" == "full" ]]; then
     [[ "${#updates[@]}" -eq 0 ]] || usage
     if [[ "$full_alias" -eq 1 && ( -n "$base" || -n "$head" ) ]]; then
