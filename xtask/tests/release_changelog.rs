@@ -829,6 +829,8 @@ fn crates_publication_runs_the_registry_transaction_in_dependency_order() {
         .current_dir(root)
         .env("PATH", path)
         .env("TAG", "v0.5.0")
+        // A release-profile parent exports its own source. This isolated
+        // checkout must bind the copied scripts to the fixture commit.
         .env("APLAN_RELEASE_SHA", fixture_source)
         .env("RELEASE_FIXTURE_ROOT", root)
         .env("APLAN_REGISTRY_ATTEMPTS", "2")
