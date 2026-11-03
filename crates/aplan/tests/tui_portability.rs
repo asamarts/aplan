@@ -188,10 +188,7 @@ fn editor_environment(directory: &Path, marker: &Path, gate: &Path) -> Vec<(Stri
         "@echo off\r\n\
          type nul > \"%APLAN_EDITOR_MARKER%\"\r\n\
          :wait\r\n\
-         if exist \"%APLAN_EDITOR_GATE%\" (\r\n\
-           ping -n 2 127.0.0.1 > nul\r\n\
-           goto wait\r\n\
-         )\r\n\
+         if exist \"%APLAN_EDITOR_GATE%\" goto wait\r\n\
          > \"%~1\" (\r\n\
            echo ## Why\r\n\
            echo(\r\n\
@@ -225,45 +222,6 @@ fn blocked_provider(fixture: &Fixture, marker: &Path, gate: &Path) -> Vec<(Strin
     std::fs::write(
         fixture.directory().join(".aplan.yml"),
         "root: plan\ntest:\n  list: [/bin/sh, blocked-provider.sh]\n  run: ['true', '{test}']\n",
-    )
-    .expect("provider configuration");
-    let mut environment = portable_process_environment();
-    environment.extend([
-        (
-            "APLAN_PROVIDER_MARKER".to_string(),
-            marker.display().to_string(),
-        ),
-        (
-            "APLAN_PROVIDER_GATE".to_string(),
-            gate.display().to_string(),
-        ),
-    ]);
-    environment
-}
-
-#[cfg(windows)]
-fn blocked_provider(fixture: &Fixture, marker: &Path, gate: &Path) -> Vec<(String, String)> {
-    let script = fixture.directory().join("blocked-provider.cmd");
-    std::fs::write(
-        &script,
-        "@echo off\r\n\
-         type nul > \"%APLAN_PROVIDER_MARKER%\"\r\n\
-         :wait\r\n\
-         if exist \"%APLAN_PROVIDER_GATE%\" (\r\n\
-           ping -n 2 127.0.0.1 > nul\r\n\
-           goto wait\r\n\
-         )\r\n\
-         echo suite::proof\r\n",
-    )
-    .expect("provider script");
-    std::fs::write(
-        fixture.directory().join("successful-run.cmd"),
-        "@exit /B 0\r\n",
-    )
-    .expect("successful runner script");
-    std::fs::write(
-        fixture.directory().join(".aplan.yml"),
-        "root: plan\ntest:\n  list: [cmd.exe, /D, /Q, /C, blocked-provider.cmd]\n  run: [cmd.exe, /D, /Q, /C, successful-run.cmd, '{test}']\n",
     )
     .expect("provider configuration");
     let mut environment = portable_process_environment();
@@ -361,7 +319,11 @@ fn external_editor_handoff_restores_modes_and_refreshes_identity() -> termlens::
     terminal.wait_until_for(
         |screen| {
             screen.alternate_screen()
-                && screen.contains("External body: 32 byte(s)")
+                && screen.contains(if cfg!(windows) {
+                    "External body: 35 byte(s)"
+                } else {
+                    "External body: 32 byte(s)"
+                })
                 && screen.contains("Ctrl-E reopens it")
         },
         TIMEOUT,
@@ -397,6 +359,12 @@ fn portable_control_c_restores_terminal_modes() -> termlens::Result<()> {
 /// a real slow provider removes the attended progress row, leaves the cursor
 /// visible and returns a non-success process result without acquiring TUI
 /// modes.
+///
+/// `termlens` can deliver the POSIX signal produced by a cooked PTY's Ctrl-C
+/// byte. `ConPTY` accepts the byte but exposes no equivalent API for generating
+/// a Windows console control event in the child's pseudoconsole, so claiming
+/// this observation there would test the harness rather than aplan's handler.
+#[cfg(unix)]
 #[test]
 fn portable_cli_progress_interrupt_cleans_its_terminal_row() -> termlens::Result<()> {
     let fixture = Fixture::new();
