@@ -8,9 +8,9 @@ branding:
 inputs:
   version:
     description: |
-      Release to install, as a tag like `v0.4.0`. Leave unset to install the
+      Release to install, as a tag like `v0.5.1`. Leave unset to install the
       release matching the tag the action itself is pinned to, so
-      `uses: asamarts/aplan@v0.4.0` installs v0.4.0 and pinning the action pins
+      `uses: asamarts/aplan@v0.5.1` installs v0.5.1 and pinning the action pins
       the binary.
 
       There is deliberately no `latest`: an install that resolves at run time is
@@ -117,7 +117,7 @@ runs:
           if [[ "${ACTION_REF:-}" =~ ^v[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
             tag="$ACTION_REF"
           else
-            echo "::error::No version to install. Pin the action to a release tag (uses: ${SOURCE_REPO}@v0.4.0), or set the 'version' input. This action never resolves 'latest', because an unpinned gate is not a gate." >&2
+            echo "::error::No version to install. Pin the action to a release tag (uses: ${SOURCE_REPO}@v0.5.1), or set the 'version' input. This action never resolves 'latest', because an unpinned gate is not a gate." >&2
             exit 1
           fi
         fi

@@ -167,6 +167,9 @@ fn the_runbook_checks_the_changelog_before_tagging() {
     let changelog = runbook
         .find("close `CHANGELOG.md`")
         .expect("runbook closes the changelog");
+    let pins = runbook
+        .find("update every current install pin")
+        .expect("runbook updates install pins in release preparation");
     let gate = runbook
         .find("TAG=vX.Y.Z ci/scripts/release.sh")
         .expect("runbook runs the release gate");
@@ -174,8 +177,98 @@ fn the_runbook_checks_the_changelog_before_tagging() {
         .find("create the annotated `vX.Y.Z` tag")
         .expect("runbook creates the tag");
     assert!(
-        changelog < gate && gate < tag,
-        "the runbook must close, check, and only then tag the release"
+        changelog < pins && pins < gate && gate < tag,
+        "the runbook must close, pin, check, and only then tag the release"
+    );
+}
+
+fn prepare_version_pin_fixture(root: &Path, version: &str, pin: &str) {
+    fs::create_dir_all(root.join("ci/scripts")).expect("create scripts directory");
+    for name in ["check-version-pins.sh", "current-version.sh"] {
+        copy_release_script(root, name);
+    }
+    fs::write(
+        root.join("Cargo.toml"),
+        format!("[workspace]\nresolver = \"3\"\n\n[workspace.package]\nversion = \"{version}\"\n"),
+    )
+    .expect("write fixture manifest");
+    fs::write(root.join("README.md"), action_pin(pin)).expect("write fixture install pin");
+}
+
+fn action_pin(pin: &str) -> String {
+    // Construct the fixture syntax at runtime so the repository gate does not
+    // mistake a test vector for an instruction to an adopter.
+    format!("- {} asamarts/aplan@{pin}\n", "uses:")
+}
+
+fn run_version_pin_gate(root: &Path) -> std::process::Output {
+    Command::new(root.join("ci/scripts/check-version-pins.sh"))
+        .current_dir(root)
+        .output()
+        .expect("run version pin gate")
+}
+
+#[test]
+fn a_release_version_requires_its_install_pin_before_the_tag_exists() {
+    let fixture = tempfile::Builder::new()
+        .prefix("release-version-pin-")
+        .tempdir_in(aplan_core::fixture::fixture_root())
+        .expect("create version pin fixture");
+    let root = fixture.path();
+    prepare_version_pin_fixture(root, "0.5.0", "v0.4.0");
+    commit_fixture(root);
+
+    let stale = run_version_pin_gate(root);
+    let error = String::from_utf8_lossy(&stale.stderr);
+    assert!(!stale.status.success(), "the previous release pin passed");
+    assert!(
+        error.contains("v0.5.0, the release being prepared"),
+        "the pre-tag correction was not actionable: {error}"
+    );
+
+    fs::write(root.join("README.md"), action_pin("v0.5.0")).expect("write prepared release pin");
+    let current = run_version_pin_gate(root);
+    assert!(
+        current.status.success(),
+        "the release's own pre-tag pin was refused: {}",
+        String::from_utf8_lossy(&current.stderr)
+    );
+}
+
+#[test]
+fn a_development_version_uses_the_latest_reachable_release_pin() {
+    let fixture = tempfile::Builder::new()
+        .prefix("development-version-pin-")
+        .tempdir_in(aplan_core::fixture::fixture_root())
+        .expect("create version pin fixture");
+    let root = fixture.path();
+    prepare_version_pin_fixture(root, "0.6.0-dev", "v0.5.0");
+    commit_fixture(root);
+    let tag = Command::new("git")
+        .args(["tag", "v0.5.0"])
+        .current_dir(root)
+        .output()
+        .expect("tag version pin fixture");
+    assert!(
+        tag.status.success(),
+        "fixture tag failed: {}",
+        String::from_utf8_lossy(&tag.stderr)
+    );
+
+    let current = run_version_pin_gate(root);
+    assert!(
+        current.status.success(),
+        "the latest release pin was refused: {}",
+        String::from_utf8_lossy(&current.stderr)
+    );
+
+    fs::write(root.join("README.md"), action_pin("v0.4.0")).expect("write stale development pin");
+    let stale = run_version_pin_gate(root);
+    let error = String::from_utf8_lossy(&stale.stderr);
+    assert!(!stale.status.success(), "an older release pin passed");
+    assert!(
+        error.contains("v0.5.0, the newest release"),
+        "the development correction was not actionable: {error}"
     );
 }
 

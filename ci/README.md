@@ -343,15 +343,17 @@ to public `aplan` as a temporary fix.
 
 ## Cutting a release
 
-`main` carries a pre-release version (`0.5.0-dev`), on purpose: a staged build must never
-report the same string as a published release, or a consumer pinning by `--version` pins
-nothing (`A1-060`). So a release is an explicit bump, in this order:
+Development commits on `main` carry the next pre-release version, on purpose: a staged build must
+never report the same string as a published release, or a consumer pinning by `--version` pins
+nothing (`A1-060`). A release commit temporarily carries the bare release version. Cutting one is
+an explicit bump, in this order:
 
 1. close `CHANGELOG.md`: leave an empty `## [Unreleased]` at the top and move its entries under
    `## [X.Y.Z] - YYYY-MM-DD`
-2. set `[workspace.package].version` to the release version, and the internal `path`
-   dependencies in `[workspace.dependencies]` with it (a stale one fails the build loudly, not
-   silently)
+2. set `[workspace.package].version` to the release version, move the internal `path`
+   dependencies in `[workspace.dependencies]` with it, and update every current install pin to
+   `vX.Y.Z`. The pin gate recognizes a bare release workspace version before its tag exists, so a
+   stale example fails here instead of making the tagged source fail later
 3. run a build so `Cargo.lock` records the new version: `release.sh` builds `--locked`, so a
    lockfile still naming the old one fails the release with
    `cannot update the lock file ... because --locked was passed`
@@ -365,9 +367,13 @@ nothing (`A1-060`). So a release is an explicit bump, in this order:
 5. for the first crates.io release only, publish the ten new package names from that same clean
    commit with `TAG=vX.Y.Z ci/scripts/publish-crates.sh`; then create a trusted publisher for each
    package naming `asamarts/aplan`, `release.yml`, and the `release` environment, and require
-   trusted publishing for later versions
+   trusted publishing for later versions. crates.io rate-limits creation of new package names and
+   reports the exact retry time in its HTTP 429 response. Wait until that time and rerun the same
+   command; it proves the checksum of every completed package before resuming at the first missing
+   one. Calls to the crates.io API during this bootstrap must send a descriptive `User-Agent`;
+   crates.io rejects curl's default agent with HTTP 403
 6. create the annotated `vX.Y.Z` tag on that checked commit and push it
-7. after the release lands, set the version to the next `-dev` and update current install pins
+7. after the release lands, set the version to the next `-dev`
 
 The release workflow performs full validation, artifact construction, crates.io publication and
 GitHub publication sequentially in one checkout and one job. Each script independently refuses
@@ -381,7 +387,10 @@ missing asset but never replaces different bytes.
 The GitHub `release` environment has no secrets. It requires approval from `kaminsod`, prevents
 self-review, and admits only `v*` tags plus manual runs from `main`. The tag path is the publishing
 path; the `main` branch rule exists only so a maintainer can stage validation and artifact
-construction with `workflow_dispatch`.
+construction with `workflow_dispatch`. The repository Actions allowlist admits GitHub-owned
+actions and `rust-lang/crates-io-auth-action@*` only. Repository-wide SHA pinning remains enabled,
+and the workflow pins that OIDC action to its audited full commit SHA; omitting the allowlist entry
+causes GitHub to reject the workflow at startup before creating a job.
 
 The validation log and Actions summary record the exact source, tag/version, toolchain, SHA-256 of
 `ci/validation.yml`, and every gate outcome and duration. Artifact construction reports its total
@@ -664,7 +673,7 @@ directly, including across GitHub accounts, without a repository token:
 - uses: actions/checkout@v4
   with:
     fetch-depth: 0
-- uses: asamarts/aplan@v0.4.0
+- uses: asamarts/aplan@v0.5.1
   with:
     command: verify
 ```
