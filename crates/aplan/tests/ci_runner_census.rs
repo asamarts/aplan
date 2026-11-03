@@ -1957,6 +1957,10 @@ fn portability_toolchain_reader_accepts_the_macos_system_bash_surface() {
             "ci/scripts/toolchain.sh uses `{unsupported}`, which macOS /bin/bash 3.2 does not provide"
         );
     }
+    assert!(
+        !reader.contains("seen_components=()"),
+        "an empty indexed array is unbound under Bash 3.2 nounset; use a scalar set"
+    );
 }
 
 #[test]
