@@ -23,7 +23,7 @@ fn write_executable(path: &Path, text: &str) {
     fs::set_permissions(path, permissions).expect("make fixture executable");
 }
 
-fn commit_fixture(root: &Path) {
+fn commit_fixture(root: &Path) -> String {
     for arguments in [
         vec!["init", "--quiet"],
         vec!["config", "user.name", "Release Test"],
@@ -42,6 +42,20 @@ fn commit_fixture(root: &Path) {
             String::from_utf8_lossy(&output.stderr)
         );
     }
+    let output = Command::new("git")
+        .args(["rev-parse", "--verify", "HEAD^{commit}"])
+        .current_dir(root)
+        .output()
+        .expect("resolve release fixture source");
+    assert!(
+        output.status.success(),
+        "release fixture source lookup failed: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    String::from_utf8(output.stdout)
+        .expect("release fixture source is UTF-8")
+        .trim()
+        .to_string()
 }
 
 fn copy_release_script(root: &Path, name: &str) {
@@ -706,7 +720,7 @@ fn publish_script_uses_dependency_order_and_registry_confirmation() {
     );
 }
 
-fn prepare_crates_publication_fixture(root: &Path) {
+fn prepare_crates_publication_fixture(root: &Path) -> String {
     fs::create_dir_all(root.join("ci/scripts")).expect("create scripts directory");
     fs::create_dir_all(root.join("bin")).expect("create command directory");
     for name in [
@@ -778,8 +792,9 @@ fi
 "#,
     );
     write_executable(&root.join("bin/sleep"), "#!/usr/bin/env bash\nexit 0\n");
-    commit_fixture(root);
+    let source = commit_fixture(root);
     fs::create_dir(root.join("state")).expect("create fixture state");
+    source
 }
 
 fn expected_crates_publication_log() -> String {
@@ -803,7 +818,7 @@ fn crates_publication_runs_the_registry_transaction_in_dependency_order() {
         .tempdir_in(aplan_core::fixture::fixture_root())
         .expect("create crates publication fixture");
     let root = fixture.path();
-    prepare_crates_publication_fixture(root);
+    let fixture_source = prepare_crates_publication_fixture(root);
 
     let path = format!(
         "{}:{}",
@@ -814,6 +829,9 @@ fn crates_publication_runs_the_registry_transaction_in_dependency_order() {
         .current_dir(root)
         .env("PATH", path)
         .env("TAG", "v0.5.0")
+        // A release-profile parent exports its own source. This isolated
+        // checkout must bind the copied scripts to the fixture commit.
+        .env("APLAN_RELEASE_SHA", fixture_source)
         .env("RELEASE_FIXTURE_ROOT", root)
         .env("APLAN_REGISTRY_ATTEMPTS", "2")
         .env("APLAN_REGISTRY_INTERVAL_SECONDS", "0")
@@ -830,7 +848,7 @@ fn crates_publication_runs_the_registry_transaction_in_dependency_order() {
     assert_eq!(observed.trim(), expected_crates_publication_log());
 }
 
-fn prepare_github_publication_fixture(root: &Path) -> (&'static str, String) {
+fn prepare_github_publication_fixture(root: &Path) -> (&'static str, String, String) {
     fs::create_dir_all(root.join("ci/scripts")).expect("create scripts directory");
     fs::create_dir_all(root.join("bin")).expect("create command directory");
     for name in [
@@ -881,7 +899,7 @@ case "$operation" in
 esac
 "#,
     );
-    commit_fixture(root);
+    let source = commit_fixture(root);
     fs::create_dir_all(root.join("state/remote")).expect("create remote fixture state");
     fs::create_dir(root.join("dist")).expect("create local release assets");
     let archive = "aplan-v0.5.0-x86_64-unknown-linux-musl.tar.gz";
@@ -904,14 +922,19 @@ esac
         root.join("bin").display(),
         std::env::var("PATH").expect("PATH")
     );
-    (archive, command_path)
+    (archive, command_path, source)
 }
 
-fn run_github_publication(root: &Path, command_path: &str) -> std::process::Output {
+fn run_github_publication(
+    root: &Path,
+    command_path: &str,
+    fixture_source: &str,
+) -> std::process::Output {
     Command::new(root.join("ci/scripts/publish-github-release.sh"))
         .current_dir(root)
         .env("PATH", command_path)
         .env("TAG", "v0.5.0")
+        .env("APLAN_RELEASE_SHA", fixture_source)
         .env("GITHUB_REPOSITORY", "asamarts/aplan")
         .env("GH_TOKEN", "fixture-token")
         .env("RELEASE_FIXTURE_ROOT", root)
@@ -926,10 +949,10 @@ fn github_publication_refuses_drift_and_only_fills_missing_assets() {
         .tempdir_in(aplan_core::fixture::fixture_root())
         .expect("create GitHub publication fixture");
     let root = fixture.path();
-    let (archive, command_path) = prepare_github_publication_fixture(root);
+    let (archive, command_path, fixture_source) = prepare_github_publication_fixture(root);
     let checksum = format!("{archive}.sha256");
 
-    let drift = run_github_publication(root, &command_path);
+    let drift = run_github_publication(root, &command_path, &fixture_source);
     assert!(
         !drift.status.success(),
         "different remote bytes were accepted"
@@ -947,7 +970,7 @@ fn github_publication_refuses_drift_and_only_fills_missing_assets() {
     )
     .expect("repair remote archive");
     fs::remove_file(root.join("state/remote").join(&checksum)).expect("remove remote checksum");
-    let missing = run_github_publication(root, &command_path);
+    let missing = run_github_publication(root, &command_path, &fixture_source);
     assert!(
         missing.status.success(),
         "missing asset was not filled: {}",
