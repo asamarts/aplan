@@ -652,6 +652,27 @@ the future environment here would therefore create a lifecycle cycle. `A1-652`, 
 of `M-public`, repeats the same canonical harness on the actual standard hosted production path and
 records that observation before the public cut closes.
 
+That deferred compatibility check completed after publication in Actions run `41581679126`, job
+`125737950459`, against immutable public `main` commit
+`f720381e6fc14cc916eb80fc39c67a3555dfa06b`. The standard `ubuntu-latest` label resolved to
+GitHub-hosted runner `GitHub Actions 1000033202`, Linux x86_64, Ubuntu 26.04.1, with Python 3.14.4.
+The canonical `validation-select-performance.py --runs 7 --check` harness reported 86.015 ms cold,
+86.538 ms p50, and 98.939 ms p95/max for both warm and cache-free distributions. All seven samples
+produced the same output digest
+`53e5c959203e0ba7ea93694ee975e640f5f3ebcf43932b9bc3cfb4b0cca058ac`, started exactly six Git
+processes, and started zero Cargo and zero rustc processes. The clean source, harness, selector and
+policy digests were respectively the commit above,
+`6e76f8ff22bee799130b08bb5b09ee908bc88dedb2cdbf251d7d7ccd04679d75`,
+`7d84a00afea0039c28b835a1015acdd3c115a874d3e976ee1df07394d897c2ae`, and
+`15adc96263a4b69a873e57011c907d6afff6a51fe69a5e557c66cf2311e9ce92`.
+
+The hosted p95 is less than one tenth of the one-second warm objective and less than one fiftieth
+of the five-second cache-free objective. The public production environment therefore preserves the
+compiler-free boundary with no compatibility accommodation. The measurement used a one-run
+external-fork trigger that checked out the immutable source directly; it is removed rather than
+becoming another standing workflow. The ordinary protected development workflow passed that same
+revision in run `41578153087`, job `125726387644`, and remains the production verdict.
+
 This is a repository-CI selection audit, not evidence-observation authority. `A1-647` still owns at
 least twenty separate shadow runs for `A1-590`'s receipt-backed product evidence mode, including
 forged, stale, cross-revision, partial and untrusted artifacts. Neither corpus contributes to the
