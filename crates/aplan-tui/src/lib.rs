@@ -1552,6 +1552,13 @@ enum SessionExit {
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[cfg_attr(
+    all(not(unix), not(test)),
+    expect(
+        dead_code,
+        reason = "non-Unix lifecycle sources cannot produce Unix signal states; tests inject them into the shared reducer"
+    )
+)]
 enum LifecycleEvent {
     Terminate(i32),
     Suspend,
