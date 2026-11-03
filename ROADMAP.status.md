@@ -22,6 +22,6 @@
 | A2-005 | Remove private build paths from release artifacts | done | A2-001 | test:ci_runner_census::release_artifact_paths_are_host_neutral, test:publication_boundary::release_archive_payloads_apply_forbidden_content_rules_across_chunks |
 | A2-006 | Record the public hosted selector performance boundary | done | A2-001 | test:validation_selection::tests::performance_harness_binds_one_clean_source_and_process_census |
 | A2-007 | Reconcile public guidance and replace the exhaustive README | in_progress | A2-006 | - |
-| A2-008 | Validate an initial public branch push without a base commit | in_progress | A2-001 | - |
+| A2-008 | Validate an initial public branch push without a base commit | done | A2-001 | commit:d741e87, test:pre_push_hook::development_preflight_widens_an_initial_push_to_the_complete_profile |
 
 > Statuses are as claimed in the plan and gated by `aplan verify` in CI.
