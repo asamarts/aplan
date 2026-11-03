@@ -5835,8 +5835,8 @@ its bounds are the CHANGELOG.md the tag itself carries, not a later reading of i
   drift weaker. The tool surface is small on purpose so discovery and context remain bounded.
 - **SARIF output** (`A1-023`), `aplan check --format sarif`: SARIF 2.1.0, the interchange
   format static-analysis dashboards already read, so a plan violation lands where a team
-  already looks instead of only in a CI log. It is a pure formatter over the
-  existing `Report`, adding no rule and no evidence, only a consumer. The rule catalog is
+  already looks instead of only in a CI log. It is a pure formatter over the existing
+  `Report`, adding no rule and no evidence, only a consumer. The rule catalog is
   built from `Rule::ALL` rather than from whatever fired in this run, so a result's `ruleId`
   always resolves to a described rule and a clean run still tells a dashboard what aplan
   checks. Validity is machine-checked, not asserted: the official SARIF 2.1.0 schema is
@@ -5853,7 +5853,9 @@ its bounds are the CHANGELOG.md the tag itself carries, not a later reading of i
 ### Added
 
 - **`aplan import`, and the `aplan-interop` crate** (`A1-019`, ADR-0012), the first import
-  path: `--format kep` reads a Kubernetes `kep.yaml` into tasks. Proposal formats distinguish an accepted design from an implemented result. A `todo` task already represents accepted but unfinished work, so a proposal's stage becomes a **tag**
+  path: `--format kep` reads a Kubernetes `kep.yaml` into tasks. Proposal formats distinguish
+  an accepted design from an implemented result. A `todo` task already represents accepted but
+  unfinished work, so a proposal's stage becomes a **tag**
   (`kep:implementable`, `kep:stage:beta`, `sig:node`), never a new `Status` variant.
   - **Lossy, and says so.** Every field the task model cannot hold is reported, never dropped
     in silence (HLD Section 13). The unmodelled fields are collected by `#[serde(flatten)]`
@@ -6073,7 +6075,7 @@ its bounds are the CHANGELOG.md the tag itself carries, not a later reading of i
   never legitimately start, so the plan is deadlocked, but `check` used to pass it
   clean. `Dropped` failing to satisfy a dependency already shaped `ready` and `why`;
   the gate itself stayed silent, which made the "an invariant nobody checks" claim in
-  `HLD.md` and `pre-public product research` false about aplan itself. It takes `020` because
+  `HLD.md` false about aplan itself. It takes `020` because
   `APLAN011`-`APLAN019` were already reserved for the planned evidence ladder, and a
   rule code is a contract, not a tidy sequence.
 - A CLI black-box corpus (`trycmd`, `crates/aplan/tests/cmd/`): every command, format,

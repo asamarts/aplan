@@ -126,7 +126,7 @@ const COVERAGE_FLOORS: &str = "coverage.json";
 /// Isolation may be anchored only at a path with this final component. The
 /// command creates a private parent beside it and recursively removes only a
 /// same-named child it created there. That keeps an empty, malformed or overly
-/// broad environment override from positioning cleanup at an ordinary Cargo
+/// broad environment override from publication cleanup at an ordinary Cargo
 /// target, a workspace, or a shared cache (`A1-457`).
 const LLVM_COV_TARGET: &str = "llvm-cov-target";
 

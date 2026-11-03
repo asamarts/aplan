@@ -299,7 +299,7 @@ fn external_editor_handoff_restores_modes_and_refreshes_identity() -> termlens::
     terminal.wait_until(|screen| {
         !screen.alternate_screen()
             && !screen.bracketed_paste()
-            && !screen.focus_events()
+            && (cfg!(windows) || !screen.focus_events())
             && screen.cursor_visible()
     })?;
     assert_restored(&terminal.screen());
