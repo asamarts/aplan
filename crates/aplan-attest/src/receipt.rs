@@ -1116,10 +1116,10 @@ fn sort_json(value: &serde_json::Value) -> serde_json::Value {
     }
 }
 
-fn sync_directory(path: &Path) -> Result<(), ReceiptError> {
+fn sync_directory(_path: &Path) -> Result<(), ReceiptError> {
     #[cfg(unix)]
     {
-        fs::File::open(path)
+        fs::File::open(_path)
             .and_then(|directory| directory.sync_all())
             .map_err(|error| ReceiptError::Io(error.to_string()))?;
     }

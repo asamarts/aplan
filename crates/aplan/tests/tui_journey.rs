@@ -1963,7 +1963,7 @@ fn wait_for_resumed_process(pid: u32) {
     }
 }
 
-#[cfg(target_os = "linux")]
+#[cfg(unix)]
 fn wait_for_file(path: &Path) {
     let deadline = Instant::now() + Duration::from_secs(10);
     while !path.exists() {
