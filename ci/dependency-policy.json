@@ -9,13 +9,11 @@
   },
   "binary_budget": {
     "owner": "A2-002",
-    "foundation_default_bytes": 12850648,
-    "foundation_headless_bytes": 12444008,
-    "measured_default_bytes": 20106544,
-    "measured_headless_bytes": 17817912,
+    "measured_default_bytes": 21684712,
+    "measured_headless_bytes": 19286904,
     "maximum_increment_bytes": 2500000,
     "maximum_increment_basis_points": 1500,
-    "measurement": "stripped native x86_64 release binaries built from the same source and Rust 1.99.1 toolchain"
+    "measurement": "GNU strip 2.47 --strip-all after separate mbx build --locked --release -p aplan --target x86_64-unknown-linux-gnu runs, default and --no-default-features, from public control revision 51a5c95 with Rust 1.99.1"
   },
   "terminal_stack": {
     "crossterm": "0.29.0",

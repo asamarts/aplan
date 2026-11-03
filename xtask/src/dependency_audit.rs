@@ -1,4 +1,4 @@
-//! Executable dependency-shape policy for the shipped CLI and TUI (`A1-450`).
+//! Executable dependency-shape policy for the shipped CLI and TUI (`A2-002`).
 //!
 //! Workspace metadata supplies the locked package census and every declared
 //! direct dependency. Product shape is narrower: workspace metadata unifies
@@ -40,8 +40,6 @@ struct Budgets {
 #[serde(deny_unknown_fields)]
 struct BinaryBudget {
     owner: String,
-    foundation_default_bytes: u64,
-    foundation_headless_bytes: u64,
     measured_default_bytes: u64,
     measured_headless_bytes: u64,
     maximum_increment_bytes: u64,
@@ -128,7 +126,7 @@ fn workspace_metadata(root: &Path) -> Result<serde_json::Value> {
 /// The temporary YAML bridge has two independently versioned layers. Pinning
 /// only the public wrapper still lets a lock refresh select a newer compatible
 /// engine, which would make the executable compatibility evidence describe a
-/// different parser than the one reviewed by A1-702.
+/// different parser than the committed policy reviewed by A2-002.
 fn audit_yaml_bridge(metadata: &serde_json::Value) -> Result<()> {
     let packages = metadata["packages"]
         .as_array()
@@ -354,7 +352,7 @@ fn audit_graphs(
     for package in &policy.forbidden_progress_packages {
         if default.contains(package) || headless.contains(package) {
             bail!(
-                "external progress package `{package}` entered the product graph; A1-665 selected the internal renderer"
+                "external progress package `{package}` entered the product graph; the product uses its internal renderer"
             );
         }
     }
@@ -389,9 +387,6 @@ fn audit_binary_budget(root: &Path, budget: &BinaryBudget) -> Result<()> {
         bail!(
             "recorded binary increment exceeds its owned budget: {increment} bytes, {basis_points} basis points"
         );
-    }
-    if budget.foundation_default_bytes < budget.foundation_headless_bytes {
-        bail!("foundation default binary is smaller than its headless control");
     }
     Ok(())
 }
@@ -456,8 +451,6 @@ mod tests {
             },
             binary_budget: BinaryBudget {
                 owner: "A1-test".to_owned(),
-                foundation_default_bytes: 110,
-                foundation_headless_bytes: 100,
                 measured_default_bytes: 115,
                 measured_headless_bytes: 100,
                 maximum_increment_bytes: 20,
@@ -629,13 +622,22 @@ mod tests {
                 .to_string()
                 .contains("exceeds")
         );
-        budget.measured_default_bytes = 115;
-        budget.foundation_default_bytes = 99;
+    }
+
+    #[test]
+    fn binary_policy_refuses_unchecked_measurement_fields() {
+        let root = crate::workspace_root().expect("workspace root");
+        let mut policy: serde_json::Value = serde_json::from_slice(
+            &std::fs::read(root.join(POLICY)).expect("committed dependency policy"),
+        )
+        .expect("dependency policy JSON");
+        policy["binary_budget"]["foundation_default_bytes"] = 1_u64.into();
+
+        let error = serde_json::from_value::<Policy>(policy)
+            .expect_err("an unchecked historical measurement must be refused");
         assert!(
-            audit_binary_budget(root.path(), &budget)
-                .expect_err("foundation control must be coherent")
-                .to_string()
-                .contains("foundation")
+            error.to_string().contains("foundation_default_bytes"),
+            "{error:#}"
         );
     }
 }

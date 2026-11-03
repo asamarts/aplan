@@ -263,8 +263,8 @@ no kernel id, coordinate, error, option or route type reaches `CellScene`. The l
 graph has graphlay's renderer, JSON, schema, fixture and parallel features off. Its only new package
 is MIT-licensed `libm`; its unconditional derive edge reuses the workspace's existing `serde`.
 Graphlay is MIT OR Apache-2.0 and declares the same Rust 1.88 floor as this workspace. The final
-whole-product license, source, advisory, duplicate-version and binary-size policy remains the
-separate A1-450 gate. Exact methods and evaluation results are in
+whole-product license, source, advisory, duplicate-version and binary-size policy remains a
+separate executable gate. Exact methods and evaluation results are in
 `docs/design/graph-layout-evaluation.md`.
 
 `CellSceneJob` owns its immutable projection, sizes, ordering hints, orientation, prior scene and
@@ -918,67 +918,65 @@ inverting the post-exit alternate-screen assertion made
 `launch_input_resize_and_clean_quit_restore_terminal_modes` fail. Both mutations were reverted and
 the tests passed again.
 
-### Final dependency and binary audit
+### Public dependency and binary re-audit
 
-`A1-450` repeated the dependency audit on 2026-10-29 after the release-quality feature set landed.
-The executable policy is split deliberately: `deny.toml` owns licenses, registries, advisories,
-duplicates and exact selected features, while `ci/dependency-policy.json` maps every direct
-`aplan-tui` runtime/dev dependency to its behavior and admitting task. It also maps the two
-TUI-specific supporting edges outside that crate: `graphlay` in `aplan-app` and dev-only `termlens`
-in `aplan`. `cargo xtask dependency-audit` derives the declarations and lock census from Cargo
-metadata and the two product shapes from Cargo's selected-package tree. A new dependency cannot be
-made to disappear by forgetting to update prose: the exact admission comparison fails.
+`A2-002` repeated the audit from the public repository on 2026-11-03. The executable policy remains
+split deliberately: `deny.toml` owns licenses, registries, advisories, duplicate exceptions and
+exact selected features. `ci/dependency-policy.json` owns direct admissions, package ceilings and
+the measured default/headless binary ceiling. `cargo xtask dependency-audit` derives declarations
+and the lock census from Cargo metadata, then derives both product shapes from Cargo's selected
+package tree.
 
-The selected stack remains one Ratatui/Crossterm backend line. Ratatui 0.30.2 resolves only
-`crossterm` and `std`; `ratatui-crossterm` 0.1.2 necessarily enables its default Crossterm 0.29
-bridge and underline-color support; the direct Crossterm 0.29 edge adds `use-dev-tty`. Graphlay and
-termlens retain empty selected feature sets. Cargo features are additive, so the backend's
-bracketed-paste, events, derive helper and Windows features are recorded as admitted transitive
-defaults rather than falsely described as removed. There is no second terminal backend or version,
-and headless `aplan` resolves no `aplan-tui`, Ratatui or Crossterm package. The internal progress
-renderer selected by `A1-665` also keeps `indicatif`, `console` and `unit-prefix` out of both
-product shapes.
+Every direct `aplan-tui` dependency is mapped exactly. The product crate edges provide typed
+operations and domain/output contracts; Ratatui and the Unicode crates provide terminal layout and
+text boundaries; shell-words and thiserror provide editor parsing and typed errors. Unix-only
+Crossterm, libc and signal-hook edges own terminal input and process lifecycle. The aplan-config and
+tempfile dev edges support isolated fixtures. The three selected supporting admissions outside the
+TUI are also still used: graphlay supplies layered coordinates in `aplan-app`, shell-words and
+tempfile implement CLI capture editing, and termlens drives real-PTY integration tests. No stale,
+missing or target-mismatched admission was found.
 
-The locked graph uses crates.io only and passes the admitted MIT, MIT-0, Apache-2.0, LLVM-exception,
-Unicode-3.0 and Zlib license set. Duplicate versions are denied except six exact, reasoned older
-entries: the getrandom/r-efi pair, hashbrown, syn, and the thiserror/thiserror-impl pair. Each is a
-transitive major-version split, not a duplicate terminal backend. The first advisory run found
-Tokio 1.53.1 in `RUSTSEC-2026-0386`; the lockfile now selects fixed 1.53.3. `A1-702` then removed
-the archived `serde_yaml_ng`/`unsafe-libyaml` stack and the `RUSTSEC-2024-0449` exception. One
-private `yaml_compat` dependency now selects the YAML organization's maintained `yaml_serde` and
-`libyaml-rs` bridge. The latter remains an unsafe C2Rust translation, so `A1-703` owns the
-safe-Rust d0026 cutover before the public milestone; maintenance is not described as memory safety.
+The selected terminal stack remains one Ratatui/Crossterm backend line. Ratatui 0.30.2 resolves
+only `crossterm` and `std`; `ratatui-crossterm` 0.1.2 supplies the Crossterm 0.29 bridge and
+underline-color support; the direct Crossterm edge adds `use-dev-tty`. Graphlay and termlens retain
+empty selected feature sets. Headless `aplan` resolves no `aplan-tui`, Ratatui or Crossterm package.
+The internal progress renderer keeps `indicatif`, `console` and `unit-prefix` out of both product
+shapes.
 
-| final dependency measure | foundation | 2026-10-29 | change |
-|---|---:|---:|---:|
-| complete lockfile packages | 278 | 288 | +10 |
-| default normal/build product packages | 189 | 200 | +11 |
-| headless normal/build product packages | 158 | 168 | +10 |
-| TUI-only product increment | 31 | 32 | +1 |
-| native stripped headless binary | 12,444,008 bytes | 17,817,912 bytes | +5,373,904 bytes |
-| native stripped default binary | 12,850,648 bytes | 20,106,544 bytes | +7,255,896 bytes |
-| native stripped TUI increment | 406,640 bytes (3.27%) | 2,288,632 bytes (12.84%) | +1,881,992 bytes |
+The locked graph uses crates.io only and passes the admitted MIT, MIT-0, Apache-2.0,
+Apache-2.0 WITH LLVM-exception, Unicode-3.0 and Zlib license set. The advisory check is clean.
+Duplicate versions remain denied except for six public, exact exceptions: getrandom 0.3 and its
+r-efi edge remain under jsonschema's ahash while the workspace uses getrandom 0.4; Ratatui's
+kasuari remains on hashbrown 0.16 while the general graph uses 0.17; stable derive dependencies
+still require syn 2 while current clap and darling use syn 3; and Crossterm's filedescriptor keeps
+the thiserror 1 and thiserror-impl 1 pair while the workspace uses version 2. Each inverse tree was
+rechecked and none admits a second terminal backend.
 
-The ten new lock entries are the admitted layered-layout kernel, newer hashing support and
-cross-platform Ctrl-C support. The product shapes add those shared capabilities plus the direct
-`use-dev-tty` support; only one added package is specific to the default TUI increment. The parser
-replacement exchanges two packages for two packages and is shared by both product shapes; the
-19,880-byte change in their difference is whole-program linkage, not a new TUI dependency. The
-headless binary already contains graph layout because layered CLI graph output is a non-TUI
-feature; the remaining delta is Ratatui/Crossterm plus the feature-complete TUI reducer, workflows,
-renderers and graph explorer. Exact feature policy found no unused optional Ratatui, graphlay or
-termlens feature to remove. The committed ceiling is 2.5 MB and 15%, remeasured by `A1-702`;
-exceeding either requires a new measurement and reviewed owner rather than silently moving the
-number.
+| public dependency measure | 2026-11-03 |
+|---|---:|
+| complete lockfile packages | 288 |
+| default normal/build product packages | 200 |
+| headless normal/build product packages | 169 |
+| TUI-only product increment | 31 |
+| native stripped headless binary | 19,286,904 bytes |
+| native stripped default binary | 21,684,712 bytes |
+| native stripped TUI increment | 2,397,808 bytes (12.43%) |
 
-The clean-build comparison remains the A1-419 controlled measurement: 81.379 seconds headless and
-83.538-121.786 seconds with the foundation TUI on isolated clean targets. Host policy now requires
-`mbx`, whose shared compiler cache makes a new target directory a clean Cargo target but not a
-clean compiler experiment. On this shared host, the current release source invalidated local reuse
-and observed 140.763 seconds for the default link/build; the following headless feature switch took
-89.327 seconds with partial reuse. These are bounded observations, not an invented clean-build
-comparison. Package counts are the repeatable cost proxy in CI; a future controlled quiet-host
-rerun may update timing evidence without changing the dependency verdict.
+The binaries were built separately from public control revision `51a5c95` with Rust 1.99.1 using
+locked release builds for `x86_64-unknown-linux-gnu`, first with default features and then with
+`--no-default-features`. GNU strip 2.47 applied `--strip-all`. The resulting SHA-256 digests are
+`b0f9d3701bbef296ba4449bf71172c99604eccb571e5f2b1ca4bd06a41684dd3` for the default binary and
+`88606ad35b690e0e73806a9667455d2d49c19a46ea6b02a2ecf9c3072711d873` for the headless binary. The
+increment remains below both committed ceilings: 2.5 MB and 15 percent. A2-002 changes audit code,
+policy and documentation rather than the shipped `aplan` product source, so the public control is
+the exact product measured. The policy records only measurements that participate in that verdict;
+two unused historical foundation fields were removed rather than retained as inert evidence.
+
+The maintained YAML bridge has no current advisory, but its engine is still C source translated to
+unsafe Rust. That is independently changeable hardening work, not an exception to hide inside this
+admission review. `A2-009` now owns a public cutover once an immutable, licensed safe Rust backend
+passes the compatibility, hostile-input, performance and complete product gates in
+`docs/design/yaml-parser.md`.
 
 ### Mutations
 

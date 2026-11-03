@@ -11,18 +11,19 @@
 
 ## Cross-cutting (in no cut)
 
-6.2d effort, 0.2 weeks (<0.1 left), held by tasks in no cut and not counted in the table above.
+9.2d effort, 0.3 weeks (0.1 left), held by tasks in no cut and not counted in the table above.
 
 | task | title | status | blocked_by | evidence |
 | --- | --- | --- | --- | --- |
 | A2-001 | Qualify the imported public baseline | done | - | test:ci_runner_census::a_public_repository_cannot_name_a_persistent_self_hosted_runner, test:ci_runner_census::the_public_boundary_gate_requires_public_zero_runners_and_all_external_approval, test:publication_boundary::pinned_public_release_refs_refuse_transform_drift |
-| A2-002 | Re-audit imported dependency admissions | todo | A2-001 | - |
+| A2-002 | Re-audit imported dependency admissions | done | A2-001 | test:dependency_audit::tests::binary_policy_refuses_unchecked_measurement_fields, test:dependency_audit::tests::committed_dependency_policy_matches_cargo_metadata |
 | A2-003 | Make the diagnostic workbench journey deterministic under coverage | done | - | test:tui_journey::diagnostic_workbench_runs_end_to_end_in_a_real_terminal |
 | A2-004 | Keep the public-plan exemption audit valid after qualification | done | A2-001 | test:policy::the_exemption_free_epoch_is_only_a2, test:policy::the_exemption_is_used_and_stays_a_minority |
 | A2-005 | Remove private build paths from release artifacts | done | A2-001 | test:ci_runner_census::release_artifact_paths_are_host_neutral, test:publication_boundary::release_archive_payloads_apply_forbidden_content_rules_across_chunks |
 | A2-006 | Record the public hosted selector performance boundary | done | A2-001 | test:validation_selection::tests::performance_harness_binds_one_clean_source_and_process_census |
 | A2-007 | Reconcile public guidance and replace the exhaustive README | done | A2-006 | test:ci_runner_census::portability_toolchain_reader_accepts_the_macos_system_bash_surface, test:greenfield::the_documented_recipe_reaches_a_valid_plan_under_the_strict_policy, test:publication_boundary::every_reachable_public_object_passes_the_privacy_boundary, test:tui_portability::shared_real_pty_lifecycle_handles_focus_resize_and_tiny_terminals |
 | A2-008 | Validate an initial public branch push without a base commit | done | A2-001 | test:pre_push_hook::development_preflight_widens_an_initial_push_to_the_complete_profile |
+| A2-009 | Qualify and replace the YAML bridge with a safe Rust backend | blocked | A2-002 | - |
 | A2-010 | Restore the hosted coverage floor without lowering it | done | A2-001 | test:tests::version_window_refusals_preserve_ambiguity_and_checkout_cause |
 
 > Statuses are as claimed in the plan and gated by `aplan verify` in CI.
