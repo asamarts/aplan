@@ -1434,6 +1434,7 @@ fn publish_observation(
 
 #[derive(Debug)]
 struct CacheLock {
+    #[cfg(not(windows))]
     path: PathBuf,
     #[cfg(windows)]
     file: Option<fs::File>,
@@ -1456,10 +1457,7 @@ impl CacheLock {
                     Ok(()) => {
                         file.set_len(0).ok()?;
                         writeln!(file, "{}", std::process::id()).ok()?;
-                        return Some(Self {
-                            path: path.to_path_buf(),
-                            file: Some(file),
-                        });
+                        return Some(Self { file: Some(file) });
                     }
                     Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => {
                         if std::time::Instant::now() >= deadline {
@@ -1505,6 +1503,7 @@ impl CacheLock {
 
 impl Drop for CacheLock {
     fn drop(&mut self) {
+        #[cfg(not(windows))]
         let _ = fs::remove_file(&self.path);
         #[cfg(windows)]
         drop(self.file.take());
@@ -2035,6 +2034,7 @@ mod tests {
                 .identity,
             "recovered"
         );
+        #[cfg(not(windows))]
         assert!(!lock.exists());
     }
 
