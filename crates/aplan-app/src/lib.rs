@@ -3266,6 +3266,33 @@ fn absolute(path: &Path) -> PathBuf {
     std::path::absolute(path).unwrap_or_else(|_| path.to_path_buf())
 }
 
+/// Atomically replace a staged destination, tolerating only the short-lived
+/// sharing denial Windows reports while another application reader closes the
+/// old file.
+pub(crate) fn rename_replacing(from: &Path, to: &Path) -> std::io::Result<()> {
+    #[cfg(windows)]
+    {
+        const ATTEMPTS: usize = 64;
+        for attempt in 0..ATTEMPTS {
+            match std::fs::rename(from, to) {
+                Ok(()) => return Ok(()),
+                Err(error)
+                    if error.kind() == std::io::ErrorKind::PermissionDenied
+                        && attempt + 1 < ATTEMPTS =>
+                {
+                    std::thread::sleep(std::time::Duration::from_millis(1));
+                }
+                Err(error) => return Err(error),
+            }
+        }
+        unreachable!("the bounded Windows rename loop returns")
+    }
+    #[cfg(not(windows))]
+    {
+        std::fs::rename(from, to)
+    }
+}
+
 fn input_digest(
     plan_sha256: &str,
     repository_root: &Path,
@@ -4008,8 +4035,20 @@ mod tests {
             max_processes: None,
             wrap: None,
             run_selects: None,
-            list: vec!["printf".to_string(), "suite::known_name\n".to_string()],
-            run: vec!["true".to_string(), "{test}".to_string()],
+            list: vec![
+                "git".to_string(),
+                "-c".to_string(),
+                "aplan.tests=suite::known_name".to_string(),
+                "config".to_string(),
+                "--get".to_string(),
+                "aplan.tests".to_string(),
+            ],
+            run: vec![
+                "git".to_string(),
+                "rev-parse".to_string(),
+                "--sq-quote".to_string(),
+                "{test}".to_string(),
+            ],
             batch: None,
             timeout_seconds: None,
         };
@@ -4550,11 +4589,14 @@ mod tests {
         assert_ne!(captured.identity().sha256, invalid_actual.sha256);
 
         std::fs::remove_file(&path).expect("remove selected config");
+        let missing_reason = std::fs::read_to_string(&path)
+            .expect_err("selected config remains absent")
+            .to_string();
         let missing_actual = captured.identity_for(&loaded);
         assert!(matches!(
             missing_actual.configuration.content,
             ConfigurationContentIdentity::Unavailable { ref reason }
-                if reason.contains("No such file")
+                if reason == &missing_reason
         ));
         assert_ne!(captured.identity().sha256, missing_actual.sha256);
         assert_ne!(invalid_actual.sha256, missing_actual.sha256);

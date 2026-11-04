@@ -1733,7 +1733,8 @@ mod tests {
         assert!(!location.file.exists());
     }
 
-    /// Proof for `claim.concurrent_disjoint_updates_compose`.
+    /// Proof for `claim.concurrent_disjoint_updates_compose` and
+    /// `storage.atomic_replacement_is_portable`.
     #[test]
     fn concurrent_claims_and_releases_on_distinct_tasks_all_compose() {
         let dir = fixture();

@@ -2183,6 +2183,7 @@ mod tests {
             "the reviewed edge removal overwrote concurrent bytes"
         );
         git(&repository, &["checkout", "--", "aplan/tasks/A-2.md"]);
+        let checked_out_second = std::fs::read_to_string(&second).expect("checked-out task bytes");
 
         let config_context = make_context();
         let config_preview = preview_dependency(&config_context, &request)
@@ -2208,7 +2209,7 @@ mod tests {
         assert_ne!(expected.sha256, actual.sha256);
         assert_eq!(
             std::fs::read_to_string(&second).expect("unchanged task"),
-            second_text,
+            checked_out_second,
             "a stale config preview published task bytes"
         );
     }

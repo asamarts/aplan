@@ -116,6 +116,20 @@ pub const ALL: &[Behaviour] = &[
                contention so every nonconflicting update is retained",
         proof: &["concurrent_claims_and_releases_on_distinct_tasks_all_compose"],
     },
+    // `A2-013`. The guarded writer and both private application caches already
+    // existed, but Windows can transiently deny an atomic replacement while a
+    // concurrent reader still has the destination open. Older builds surfaced
+    // that ordinary sharing race as a permanent mutation failure.
+    Behaviour {
+        name: "storage.atomic_replacement_is_portable",
+        what: "guarded mutations and private cache refreshes retry transient Windows sharing \
+               denials while retaining the same atomic replacement and stale-input boundaries",
+        proof: &[
+            "concurrent_claims_and_releases_on_distinct_tasks_all_compose",
+            "one_same_size_edit_updates_the_persisted_generation",
+            "observation_publication_replaces_an_older_generation",
+        ],
+    },
     Behaviour {
         name: "coordination.is_not_a_plan_verdict_mutation",
         what: "`claim` and `release` mutate only local ephemeral coordination state, so they do \
