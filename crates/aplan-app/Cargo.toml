@@ -31,6 +31,9 @@ thiserror.workspace = true
 unicode-segmentation.workspace = true
 unicode-width.workspace = true
 
+[target.'cfg(windows)'.dependencies]
+tempfile.workspace = true
+
 [dev-dependencies]
 git2 = { version = "0.21", default-features = false }
 tempfile.workspace = true

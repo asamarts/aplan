@@ -33,6 +33,10 @@
       "what": "guarded mutations and private cache refreshes retry transient Windows sharing denials while retaining the same atomic replacement and stale-input boundaries"
     },
     {
+      "name": "evidence.provider_executable_resolution_is_portable",
+      "what": "provider material identity resolves configured executables with the same native spelling accepted by process launch, including Windows' implicit `.exe` suffix"
+    },
+    {
       "name": "coordination.is_not_a_plan_verdict_mutation",
       "what": "`claim` and `release` mutate only local ephemeral coordination state, so they do not accept plan-verdict overrides or imply that the plan passed a gate"
     },
@@ -1383,7 +1387,7 @@
     "version.require_impact"
   ],
   "counts": {
-    "behaviours": 219,
+    "behaviours": 220,
     "build_capabilities": 1,
     "commands": 48,
     "config_keys": 124,

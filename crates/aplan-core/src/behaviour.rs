@@ -130,6 +130,15 @@ pub const ALL: &[Behaviour] = &[
             "observation_publication_replaces_an_older_generation",
         ],
     },
+    // `A2-013`. Provider material identity already resolved a configured bare
+    // executable through PATH, but unlike Windows process launch it did not
+    // try the implicit `.exe` suffix, so ordinary Git providers were refused.
+    Behaviour {
+        name: "evidence.provider_executable_resolution_is_portable",
+        what: "provider material identity resolves configured executables with the same native \
+               spelling accepted by process launch, including Windows' implicit `.exe` suffix",
+        proof: &["provider_executable_resolution_follows_native_command_lookup"],
+    },
     Behaviour {
         name: "coordination.is_not_a_plan_verdict_mutation",
         what: "`claim` and `release` mutate only local ephemeral coordination state, so they do \
