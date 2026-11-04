@@ -23,6 +23,7 @@ use sha2::{Digest as _, Sha256};
 const MAGIC: &str = "aplan-evidence-observation";
 const PROTOCOL: u32 = 1;
 const MAX_BYTES: u64 = 64 * 1024 * 1024;
+#[cfg(not(windows))]
 const STALE_LOCK_AFTER: Duration = Duration::from_secs(30);
 #[cfg(not(windows))]
 const LOCK_ATTEMPTS: usize = 4_096;
