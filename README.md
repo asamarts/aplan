@@ -47,7 +47,7 @@ Use the built-in command help and `aplan facts` for the complete current surface
 - uses: actions/checkout@v4
   with:
     fetch-depth: 0
-- uses: asamarts/aplan@v0.5.1
+- uses: asamarts/aplan@v0.5.2
   with:
     command: verify
 ```

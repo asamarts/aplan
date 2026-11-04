@@ -1279,6 +1279,41 @@ fn ordinary_profile_has_one_complete_full_rollback_switch() {
     );
 }
 
+/// `A2-011`: the release profile executes coverage before publication, so its
+/// hosted preparation must compose the coverage toolchain with release-only
+/// artifact and publication tools. This invokes the same capability decision
+/// used by the installer instead of maintaining a second expectation in YAML.
+#[test]
+fn hosted_release_prepares_every_tool_required_by_release_validation() {
+    let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
+    let preparation = root.join("ci/scripts/prepare-hosted.sh");
+
+    for (profile, expected) in [
+        ("development", Vec::<&str>::new()),
+        ("full", vec!["coverage"]),
+        ("coverage", vec!["coverage"]),
+        ("release", vec!["coverage", "release"]),
+    ] {
+        let output = Command::new(&preparation)
+            .args(["--resolve-capabilities", profile])
+            .output()
+            .expect("resolve hosted preparation capabilities");
+        assert!(
+            output.status.success(),
+            "{profile}: {}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        assert_eq!(
+            String::from_utf8(output.stdout)
+                .expect("capability output is UTF-8")
+                .lines()
+                .collect::<Vec<_>>(),
+            expected,
+            "hosted preparation capabilities drifted for {profile}"
+        );
+    }
+}
+
 fn assert_validation_cancellation_contract() {
     let (push_a, cancel_push) = validation_group("push", "refs/heads/main", 1);
     let (push_b, _) = validation_group("push", "refs/heads/main", 2);

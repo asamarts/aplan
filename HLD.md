@@ -1548,21 +1548,30 @@ on this foundation.
 
 ## 17. Distribution
 
-`alint` hand-rolls its release pipeline. We should not, and the reason is verified:
-**`cargo-dist` (now `dist`) is alive**, v0.32.0, 2026-05-22, repo active. The
-"Astral forked it because it died" story is *inverted*: Astral's fork is **archived**,
-and its README points back upstream.
+The first public distribution transaction is deliberately small and closed. An immutable version
+tag enters the protected `release` environment, where an external reviewer admits one exact source
+commit. A fresh hosted runner prepares every tool required by the complete release profile: the
+pinned Rust and coverage toolchains, the musl target, and the GitHub publication clients. The exact
+source then passes all release gates before any artifact, registry credential, package, or release
+is created.
 
-| Channel | Mechanism |
+After validation, `ci/scripts/release.sh` builds one static Linux archive and records its SHA-256.
+GitHub OIDC obtains a short-lived crates.io token only for a tag run. The ten public workspace
+packages publish in dependency order, and each new package must become resolvable from the registry
+before a dependent can publish. GitHub release creation is last. Both publication scripts are
+rerunnable: an existing crate or asset passes only when its bytes agree, a missing asset can be
+filled, and drift is refused rather than overwritten. No long-lived crates.io token is stored in
+the repository.
+
+| Channel | Current mechanism |
 |---|---|
-| GitHub Releases | `dist`, plan → build → host → publish → announce |
-| `cargo install` | crates.io (`aplan`, plus internal crates cargo forces us to publish) |
-| `cargo binstall` | free; `dist`'s artifact naming is binstall-compatible |
-| Homebrew | custom tap, formula generated per release |
-| `npx` | platform-specific packages as `optionalDependencies` + a JS shim (esbuild/Biome model) |
-| Docker | multi-stage + `cargo-chef`, musl static → distroless |
-| GitHub Action | composite `action.yml` that installs a pinned release |
-| pre-commit | `.pre-commit-hooks.yaml` |
+| GitHub Releases | guarded static archive after exact-source release validation |
+| `cargo install` | crates.io package `aplan`, after its nine public workspace dependencies |
+| `cargo binstall` | the GitHub archive follows the target-qualified naming convention |
+| GitHub Action | composite `action.yml` installs the release tag the workflow pins |
+
+Homebrew, npm, container, and pre-commit distribution remain later channels. They must consume the
+same qualified source and immutable artifact identity rather than create parallel release paths.
 
 Single source of truth for the version is `[workspace.package].version`. The gate that
 keeps the documentation honest is `ci/scripts/check-version-pins.sh`, and it is

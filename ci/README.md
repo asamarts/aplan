@@ -23,7 +23,8 @@ This directory holds both execution profiles:
 - `scripts/release-source.sh` - the clean, full-commit identity boundary shared by release
   validation and artifact construction.
 - `scripts/prepare-hosted.sh` - the toolchain pieces a clean hosted VM needs; its `development`
-  and `full` aliases are the preparation half of the ordinary-job rollback switch; its narrow
+  and `full` aliases are the preparation half of the ordinary-job rollback switch, while its
+  `release` profile composes coverage tooling with artifact and publication tools; its narrow
   `portability` profile installs only the pinned Rust toolchain used by the portable TUI targets.
 - `scripts/tui-portability.sh` - the shared TUI library/fault suite and portable real-PTY module in
   the existing consolidated integration target
@@ -63,7 +64,9 @@ that script decides what runs and fails closed on missing or ambiguous history. 
 pull-request run cancels obsolete development work for the same ref or pull request. Every nightly
 or manual full run has a unique group and cannot be cancelled by development or silently replaced
 by another full run. Release is a separate, non-cancelling workflow that runs the release profile
-on the exact source SHA before publication.
+on the exact source SHA before publication. Hosted release preparation installs both the pinned
+coverage toolchain needed by that profile's validation and the musl/publication tools needed after
+validation; the executable capability resolver is regression-tested so neither half can drift out.
 
 The ordinary job has one `APLAN_ORDINARY_PROFILE` setting. Its normal value is `development`.
 Changing only that value to `full` makes hosted preparation select the coverage toolchain and
@@ -673,7 +676,7 @@ directly, including across GitHub accounts, without a repository token:
 - uses: actions/checkout@v4
   with:
     fetch-depth: 0
-- uses: asamarts/aplan@v0.5.1
+- uses: asamarts/aplan@v0.5.2
   with:
     command: verify
 ```
