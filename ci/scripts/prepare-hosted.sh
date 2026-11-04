@@ -22,12 +22,46 @@ resolve_profile() {
     esac
 }
 
+# Validation profiles compose capabilities. Release runs every gate, including
+# coverage, and also needs its publication toolchain. Keep that composition in
+# one executable decision so a clean runner cannot prepare only the final
+# artifact step while omitting a tool required by an earlier gate.
+profile_needs_coverage() {
+    case "$1" in
+        coverage|release) return 0 ;;
+        *) return 1 ;;
+    esac
+}
+
+resolve_capabilities() {
+    local resolved
+    resolved="$(resolve_profile "$1")" || return 1
+    if profile_needs_coverage "$resolved"; then
+        echo coverage
+    fi
+    if [[ "$resolved" == "release" ]]; then
+        echo release
+    fi
+}
+
 if [[ "$requested_profile" == "--resolve-profile" ]]; then
     [[ "$#" -eq 2 ]] || {
         echo "usage: ci/scripts/prepare-hosted.sh --resolve-profile PROFILE" >&2
         exit 2
     }
     resolve_profile "$2" || {
+        echo "error: unknown hosted preparation profile '$2'" >&2
+        exit 2
+    }
+    exit 0
+fi
+
+if [[ "$requested_profile" == "--resolve-capabilities" ]]; then
+    [[ "$#" -eq 2 ]] || {
+        echo "usage: ci/scripts/prepare-hosted.sh --resolve-capabilities PROFILE" >&2
+        exit 2
+    }
+    resolve_capabilities "$2" || {
         echo "error: unknown hosted preparation profile '$2'" >&2
         exit 2
     }
@@ -85,7 +119,7 @@ if [[ "$profile" != "msrv" && "$profile" != "latest-stable" ]]; then
     "$REPO_ROOT/ci/scripts/toolchain.sh" verify
 fi
 
-if [[ "$profile" == "coverage" ]]; then
+if profile_needs_coverage "$profile"; then
     rustup component add llvm-tools-preview --toolchain "$toolchain"
 
     # Derive the pin from the private runner image. A second handwritten

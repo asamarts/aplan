@@ -6,6 +6,16 @@ to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+## [0.5.2] - 2026-11-03
+
+### Fixed
+
+- **Hosted release preparation now installs every tool required by release validation**
+  (`A2-011`). The release profile composes the pinned coverage toolchain with its musl and
+  publication tools, so a clean GitHub runner cannot reach the coverage gate without
+  `cargo-llvm-cov`. An executable capability audit covers development, full, coverage, and release
+  preparation through the same decision used by the installer.
+
 ## [0.5.1] - 2026-11-03
 
 ### Fixed
