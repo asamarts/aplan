@@ -2720,6 +2720,19 @@ mod tests {
 
             // The lock `aplan_core::save` takes, held by somebody else.
             let lock = d.path().join("tasks/.A-1.md.lock");
+            #[cfg(windows)]
+            let lock_handle = {
+                let file = std::fs::OpenOptions::new()
+                    .read(true)
+                    .write(true)
+                    .create(true)
+                    .truncate(false)
+                    .open(&lock)
+                    .expect("lock file");
+                fs2::FileExt::lock_exclusive(&file).expect("hold the Windows lock");
+                file
+            };
+            #[cfg(not(windows))]
             std::fs::write(&lock, "").expect("lock");
 
             let err = run(d.path()).expect_err(&format!("`{name}` was not refused"));
@@ -2737,6 +2750,11 @@ mod tests {
                 "`{name}` changed the file it said it had not written"
             );
 
+            #[cfg(windows)]
+            {
+                fs2::FileExt::unlock(&lock_handle).expect("unlock the Windows lock");
+                drop(lock_handle);
+            }
             std::fs::remove_file(&lock).expect("unlock");
             run(d.path()).unwrap_or_else(|e| panic!("`{name}` failed without the lock: {e}"));
             assert_ne!(
@@ -2791,7 +2809,7 @@ mod tests {
             format!(
                 "#!/bin/sh\nprintf '\\n<!-- somebody else was here -->\\n' >> {}\n\
                  echo the-name\n",
-                target.display()
+                target.to_string_lossy().replace('\\', "/")
             ),
         )
         .unwrap();
@@ -2820,7 +2838,7 @@ mod tests {
                 inputs_by_test: None,
                 name: None,
                 dir: None,
-                list: vec![tamper.display().to_string()],
+                list: vec!["sh".into(), tamper.to_string_lossy().replace('\\', "/")],
                 run: vec!["true".into(), "{test}".into()],
                 batch: None,
             },

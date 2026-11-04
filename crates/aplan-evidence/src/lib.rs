@@ -911,11 +911,19 @@ fn historical_trace_path(
     repository_root: &Path,
 ) -> Option<String> {
     let prefix = match traces_root {
-        Some(root) if root.is_absolute() => root.strip_prefix(repository_root).ok()?,
+        Some(root) if root.is_absolute() => {
+            let root = std::fs::canonicalize(root).unwrap_or_else(|_| root.to_path_buf());
+            let repository_root = std::fs::canonicalize(repository_root)
+                .unwrap_or_else(|_| repository_root.to_path_buf());
+            return root
+                .strip_prefix(repository_root)
+                .ok()
+                .map(|prefix| prefix.join(document).to_string_lossy().replace('\\', "/"));
+        }
         Some(root) => root,
         None => return Some(document.to_string()),
     };
-    Some(prefix.join(document).to_string_lossy().into_owned())
+    Some(prefix.join(document).to_string_lossy().replace('\\', "/"))
 }
 
 /// `APLAN045`: a live task whose traced section moved while it waited
@@ -2265,6 +2273,26 @@ mod tests {
         );
     }
 
+    /// Direct `printf` executables do not preserve embedded newlines in one
+    /// Windows argv member. Python is already part of the hosted test image and
+    /// writes the exact bytes this fixture asks a configured runner to list.
+    fn portable_fixture_command(command: &[&str]) -> Vec<String> {
+        if let ["printf", output] = command {
+            let output = output.replace("\\n", "\n");
+            return vec![
+                "python3".into(),
+                "-c".into(),
+                "import sys; sys.stdout.write(sys.argv[1])".into(),
+                output,
+            ];
+        }
+        command.iter().map(|part| (*part).to_string()).collect()
+    }
+
+    fn shell_path(path: &Path) -> String {
+        path.to_string_lossy().replace('\\', "/")
+    }
+
     fn runner(list: &[&str], run: &[&str]) -> TestRunner {
         TestRunner {
             weight: None,
@@ -2283,7 +2311,7 @@ mod tests {
             inputs_by_test: None,
             name: None,
             dir: None,
-            list: list.iter().map(|s| (*s).to_string()).collect(),
+            list: portable_fixture_command(list),
             run: run.iter().map(|s| (*s).to_string()).collect(),
             batch: None,
         }
@@ -2950,6 +2978,7 @@ mod tests {
     /// so this had no live subjects and no way of being noticed.
     #[test]
     fn the_traced_document_is_read_through_the_traces_root() {
+        // Proof for `repository.path_identity_is_portable`.
         let (dir, repo) = init();
         let mut task = done_task("A-1", Vec::new(), Vec::new());
         task.status = Status::Todo;
@@ -4590,7 +4619,7 @@ mod tests {
             inputs_by_test: None,
             name: Some(name.to_string()),
             dir: dir.map(ToString::to_string),
-            list: list.iter().map(|s| (*s).to_string()).collect(),
+            list: portable_fixture_command(list),
             run: run.iter().map(|s| (*s).to_string()).collect(),
             batch: None,
         }
@@ -4693,7 +4722,7 @@ mod tests {
                 "python3".into(),
                 "-c".into(),
                 "import json,sys\nlog,manifest,result=sys.argv[1:]\nwith open(manifest,encoding='utf-8') as stream: request=json.load(stream)\nwith open(log,'w',encoding='utf-8') as stream: json.dump(request['tests'],stream)\nanswer={'schema':'aplan/test-batch-result/v1','nonce':request['nonce'],'provider':request['provider'],'complete':True,'tests':[{'test':name,'outcome':'passed'} for name in request['tests']]}\nwith open(result,'x',encoding='utf-8') as stream: json.dump(answer,stream,sort_keys=True)\n".into(),
-                log.display().to_string(),
+                shell_path(&log),
                 aplan_config::BATCH_MANIFEST_PLACEHOLDER.into(),
                 aplan_config::BATCH_RESULT_PLACEHOLDER.into(),
             ],
@@ -4791,7 +4820,7 @@ mod tests {
     /// A runner whose `run` records the name it was asked for, so a test can
     /// count what really ran.
     fn counting_runner(dir: &Path, passes: bool) -> TestRunner {
-        let log = dir.join("ran.log").display().to_string();
+        let log = shell_path(&dir.join("ran.log"));
         let exit = if passes { "exit 0" } else { "exit 1" };
         named_runner(
             "counting",
@@ -4825,6 +4854,8 @@ mod tests {
             .collect::<Vec<_>>();
         let listed = format!("{}\n", names.join("\n"));
         let script = dir.join(format!("batch-{runner_name}.sh"));
+        let rows_file = dir.join(format!("batch-{runner_name}-rows.json"));
+        std::fs::write(&rows_file, serde_json::to_vec(outcomes).unwrap()).unwrap();
         std::fs::write(
             &script,
             format!(
@@ -4834,8 +4865,9 @@ mod tests {
                  test -n \"$nonce\"\n\
                  test -n \"$provider\"\n\
                  printf 'batch\\n' >> \"$3\"\n\
+                 rows=$(cat \"$4\")\n\
                  printf '{{\"schema\":\"{TEST_BATCH_RESULT_SCHEMA}\",\"nonce\":\"%s\",\"provider\":\"%s\",\"complete\":true,\"tests\":%s}}\\n' \
-                   \"$nonce\" \"$provider\" \"$4\" > \"$2\"\n\
+                   \"$nonce\" \"$provider\" \"$rows\" > \"$2\"\n\
                  if test \"${{5:-ok}}\" != ok; then\n\
                    printf '%s %s\\n' \"$1\" \"$2\" >&2\n\
                    exit 1\n\
@@ -4845,7 +4877,6 @@ mod tests {
         .unwrap();
         let batch_log = dir.join("batch-runs.log");
         let legacy_log = dir.join("legacy-runs.log");
-        let rows = serde_json::to_string(outcomes).unwrap();
         let mut runner = named_runner(
             runner_name,
             None,
@@ -4854,7 +4885,7 @@ mod tests {
                 "sh",
                 "-c",
                 "printf '%s\\n' \"$1\" >> \"$0\"; exit 99",
-                &legacy_log.display().to_string(),
+                &shell_path(&legacy_log),
                 PLACEHOLDER,
             ],
         );
@@ -4862,11 +4893,11 @@ mod tests {
             protocol: aplan_config::TEST_BATCH_PROTOCOL,
             run: vec![
                 "sh".into(),
-                script.display().to_string(),
+                shell_path(&script),
                 aplan_config::BATCH_MANIFEST_PLACEHOLDER.into(),
                 aplan_config::BATCH_RESULT_PLACEHOLDER.into(),
-                batch_log.display().to_string(),
-                rows,
+                shell_path(&batch_log),
+                shell_path(&rows_file),
             ],
         });
         runner
@@ -5376,7 +5407,7 @@ mod tests {
     fn batching_never_turns_a_hostile_test_identity_into_shell_input() {
         let (dir, _repo) = init();
         let marker = dir.path().join("injected");
-        let hostile = format!("$(touch {}) ; echo 'quoted'", marker.display());
+        let hostile = format!("$(touch {}) ; echo 'quoted'", shell_path(&marker));
         let runner = batched_runner(
             dir.path(),
             "hostile",
@@ -5988,7 +6019,7 @@ mod tests {
                 check: vec![
                     "bash".into(),
                     "-c".into(),
-                    format!("echo \"$0\" >> {}", log.display()),
+                    format!("echo \"$0\" >> {}", shell_path(&log)),
                     aplan_config::URL_PLACEHOLDER.to_string(),
                 ],
             }),
@@ -6046,7 +6077,7 @@ mod tests {
                 check: vec![
                     "bash".into(),
                     "-c".into(),
-                    format!("echo x >> {}; exit 1", counter.display()),
+                    format!("echo x >> {}; exit 1", shell_path(&counter)),
                     aplan_config::URL_PLACEHOLDER.to_string(),
                 ],
             }),
@@ -6542,6 +6573,7 @@ mod tests {
     /// than arranging correctness around a fixed sleep.
     /// Proves the named behaviours `verify.configured_commands_are_bounded` and
     /// `verify.url_checker_outcomes_are_stable` (`A1-211`).
+    #[cfg(unix)]
     #[test]
     fn a_url_check_that_never_returns_is_abandoned_and_reported() {
         let (dir, _repo) = init();
@@ -6721,7 +6753,11 @@ mod tests {
         let (dir, _repo) = init();
         let marker = dir.path().join("the-descendant-was-here");
         let mut runner = runner(
-            &["sh", "-c", &format!("sleep 3; touch {}", marker.display())],
+            &[
+                "sh",
+                "-c",
+                &format!("sleep 3; touch {}", shell_path(&marker)),
+            ],
             &["true", PLACEHOLDER],
         );
         // Well below the sleep, so the command is killed mid-sleep.
@@ -6972,7 +7008,10 @@ mod tests {
         // descriptor and the exec fails with `ETXTBSY`. It never reproduced
         // locally in fifteen runs and failed once on CI, which is the worst
         // possible flake. There is no file to be busy now.
-        let script = format!("echo x >> {}; printf 'alpha\\nbeta\\n'", counter.display());
+        let script = format!(
+            "echo x >> {}; printf 'alpha\\nbeta\\n'",
+            shell_path(&counter)
+        );
         let opts = VerifyOptions {
             detect_drift: false,
             version: None,
@@ -9628,6 +9667,7 @@ mod version_behind_tests {
     /// `version.check`'s "no" means *the artifact is incompatible* -- so a
     /// checker that segfaulted reported a break that was not there. An API
     /// differ crashing is exactly the shape that produces it.
+    #[cfg(unix)]
     #[test]
     fn a_checker_the_kernel_killed_contradicts_nothing() {
         let dir = tempfile::Builder::new()

@@ -540,7 +540,7 @@ fn bounded_path(repository: &std::path::Path, path: &std::path::Path) -> String 
     let relative = path.strip_prefix(repository).ok();
     match relative {
         Some(path) if path.as_os_str().is_empty() => ".".to_string(),
-        Some(path) => path.display().to_string(),
+        Some(path) => path.to_string_lossy().replace('\\', "/"),
         None => "<outside-selected-repository>".to_string(),
     }
 }
@@ -1068,6 +1068,7 @@ mod tests {
     #[test]
     fn explicit_root_selects_plan_policy_and_mutation_as_one_context() {
         // Proof for `mcp.explicit_root_resolves_one_repository_context`.
+        // Proof for `mcp.context_paths_are_portable`.
         let launch = repository("aplan-mcp-launch-", "aplan", "root: aplan\n");
         std::fs::write(
             launch.path().join("aplan/A-1.md"),

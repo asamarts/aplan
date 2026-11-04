@@ -122,13 +122,56 @@ pub const ALL: &[Behaviour] = &[
     // that ordinary sharing race as a permanent mutation failure.
     Behaviour {
         name: "storage.atomic_replacement_is_portable",
-        what: "guarded mutations and private cache refreshes retry transient Windows sharing \
-               denials while retaining the same atomic replacement and stale-input boundaries",
+        what: "guarded mutations and private cache refreshes use one resolved identity for \
+               missing and existing paths and retry transient Windows sharing denials while \
+               retaining the same atomic replacement and stale-input boundaries",
         proof: &[
+            "a_relocation_refuses_a_batch_that_also_names_either_identity",
             "concurrent_claims_and_releases_on_distinct_tasks_all_compose",
             "one_same_size_edit_updates_the_persisted_generation",
             "observation_publication_replaces_an_older_generation",
         ],
+    },
+    // `A2-013`. The capture loader already rejected non-regular records after
+    // opening them, but Windows refuses to open a directory before an opened
+    // handle can be classified and therefore exposed a platform-specific I/O
+    // diagnostic for the same repository entry.
+    Behaviour {
+        name: "capture.regular_file_boundary_is_portable",
+        what: "the capture loader classifies every non-regular inbox entry at the same safe \
+               boundary and retains its opened-handle race check on every platform",
+        proof: &["loader_reports_encoding_schema_and_hostile_entry_neighbours"],
+    },
+    // `A2-013`. Trace drift already supplied a pasteable Git command, but a
+    // native Windows path put backslash shell escapes into that command.
+    Behaviour {
+        name: "traces.diff_command_path_is_portable",
+        what: "trace drift renders repository paths in pasteable Git commands with portable \
+               slash separators on every platform",
+        proof: &["the_diff_command_names_the_path_from_the_repository"],
+    },
+    // `A2-013`. Git history readers already converted separators, but an
+    // existing Windows path and the repository worktree could differ only by
+    // the extended-length prefix added during canonicalization. Prefix removal
+    // then failed and silently hid historical task or trace content.
+    Behaviour {
+        name: "repository.path_identity_is_portable",
+        what: "history readers compare canonical repository and document identities before \
+               deriving slash-separated Git paths on every platform",
+        proof: &[
+            "the_traced_document_is_read_through_the_traces_root",
+            "a_task_that_moved_inside_the_window_is_still_read_at_the_tag",
+            "the_window_is_what_went_done_since_the_tag",
+        ],
+    },
+    // `A2-013`. MCP context provenance was already bounded to the selected
+    // repository, but its JSON path values used the host separator. Consumers
+    // therefore saw a platform-dependent spelling for the same plan root.
+    Behaviour {
+        name: "mcp.context_paths_are_portable",
+        what: "bounded MCP context provenance renders repository-relative paths with one stable \
+               slash-separated JSON spelling on every platform",
+        proof: &["explicit_root_selects_plan_policy_and_mutation_as_one_context"],
     },
     // `A2-013`. Rekey already refused a selected configuration outside the
     // repository, but Windows canonicalized an existing repository boundary

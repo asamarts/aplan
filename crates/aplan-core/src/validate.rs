@@ -1272,6 +1272,10 @@ fn command_path(root: &Path, rel: &str) -> String {
         .unwrap_or(&joined)
         .display()
         .to_string()
+        // This is pasted into a Git command, not passed directly to an OS API.
+        // Backslashes can be shell escapes; Git accepts slash-separated paths
+        // on Windows as well as on Unix.
+        .replace('\\', "/")
 }
 
 /// The one commit a task cites, or `None` when it cites none or several.
@@ -8262,6 +8266,7 @@ mod tests {
 
     #[test]
     fn the_diff_command_names_the_path_from_the_repository() {
+        // Proof for `traces.diff_command_path_is_portable`.
         // The default root is `.`, which is the case every adopter meets: the
         // command must read `docs/d.md`, not `./docs/d.md` and not `d.md`.
         assert_eq!(command_path(Path::new("."), "docs/d.md"), "docs/d.md");
