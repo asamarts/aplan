@@ -2656,7 +2656,6 @@ mod tests {
 
         #[cfg(unix)]
         {
-            use std::os::unix::ffi::OsStringExt as _;
             use std::os::unix::fs::{PermissionsExt as _, symlink};
 
             let unreadable = dir.path().join("unreadable").join(INBOX_DIR);
@@ -2675,20 +2674,29 @@ mod tests {
             let error = read_capture(&link).expect_err("safe open refuses symlink");
             assert!(error.message.contains("cannot open"));
 
-            let non_utf8_name =
-                std::ffi::OsString::from_vec(vec![b'I', b'-', 0xff, b'.', b'y', b'm', b'l']);
-            let non_utf8_path = inbox.join(non_utf8_name);
-            std::fs::write(&non_utf8_path, "anything").expect("non-utf8 name");
-            let entry = std::fs::read_dir(&inbox)
-                .expect("entries")
-                .find_map(|entry| {
-                    let entry = entry.expect("entry");
-                    (entry.path() == non_utf8_path).then_some(entry)
-                })
-                .expect("non-utf8 entry");
-            let error = capture_entry_identity(&entry).expect_err("non-utf8 filename");
-            assert!(error.message.contains("filename is not valid UTF-8"));
+            #[cfg(target_os = "linux")]
+            assert_non_utf8_capture_name_is_refused(&inbox);
         }
+    }
+
+    // Darwin refuses this byte sequence at the filesystem boundary, before
+    // the capture loader can inspect the entry.
+    #[cfg(target_os = "linux")]
+    fn assert_non_utf8_capture_name_is_refused(inbox: &Path) {
+        use std::os::unix::ffi::OsStringExt as _;
+
+        let name = std::ffi::OsString::from_vec(vec![b'I', b'-', 0xff, b'.', b'y', b'm', b'l']);
+        let path = inbox.join(name);
+        std::fs::write(&path, "anything").expect("non-utf8 name");
+        let entry = std::fs::read_dir(inbox)
+            .expect("entries")
+            .find_map(|entry| {
+                let entry = entry.expect("entry");
+                (entry.path() == path).then_some(entry)
+            })
+            .expect("non-utf8 entry");
+        let error = capture_entry_identity(&entry).expect_err("non-utf8 filename");
+        assert!(error.message.contains("filename is not valid UTF-8"));
     }
 
     #[test]
