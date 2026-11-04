@@ -1127,7 +1127,9 @@ mod tests {
         let context = server
             .call_context(Some(selected.path().to_str().expect("utf8")))
             .expect("resolved context");
-        assert_eq!(context.policy.repo_root, selected.path());
+        let canonical_selected =
+            std::fs::canonicalize(selected.path()).expect("canonical selected");
+        assert_eq!(context.policy.repo_root, canonical_selected);
         assert_eq!(
             context.policy.id_strategy,
             aplan_core::IdStrategy::Ulid,
@@ -1136,7 +1138,7 @@ mod tests {
         assert!(context.policy.verify.test_runner.is_some());
         assert_eq!(
             context.policy.options.traces_root,
-            Some(selected.path().join("docs"))
+            Some(canonical_selected.join("docs"))
         );
 
         server

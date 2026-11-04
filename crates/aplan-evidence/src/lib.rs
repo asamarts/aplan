@@ -5637,7 +5637,7 @@ mod tests {
             "partial",
             &[batch_entry("alpha", TestBatchOutcome::Passed)],
         );
-        runner.list = vec!["printf".into(), "alpha\nbeta\n".into()];
+        runner.list = portable_fixture_command(&["printf", "alpha\nbeta\n"]);
         let report = verify(
             &plan_of_all(vec![
                 done_task("A", vec![test_ev("alpha")], vec![]),
@@ -6017,9 +6017,10 @@ mod tests {
                 wrap: None,
                 timeout_seconds: None,
                 check: vec![
-                    "bash".into(),
+                    "python3".into(),
                     "-c".into(),
-                    format!("echo \"$0\" >> {}", shell_path(&log)),
+                    "import sys\nwith open(sys.argv[1], 'a', encoding='utf-8') as stream: stream.write(sys.argv[2] + '\\n')".into(),
+                    log.display().to_string(),
                     aplan_config::URL_PLACEHOLDER.to_string(),
                 ],
             }),
@@ -6075,9 +6076,10 @@ mod tests {
                 wrap: None,
                 timeout_seconds: None,
                 check: vec![
-                    "bash".into(),
+                    "python3".into(),
                     "-c".into(),
-                    format!("echo x >> {}; exit 1", shell_path(&counter)),
+                    "import sys\nwith open(sys.argv[1], 'a', encoding='utf-8') as stream: stream.write('x\\n')\nraise SystemExit(1)".into(),
+                    counter.display().to_string(),
                     aplan_config::URL_PLACEHOLDER.to_string(),
                 ],
             }),
@@ -7007,11 +7009,10 @@ mod tests {
         // that spawns a process: a concurrent fork inherits the still-open write
         // descriptor and the exec fails with `ETXTBSY`. It never reproduced
         // locally in fifteen runs and failed once on CI, which is the worst
-        // possible flake. There is no file to be busy now.
-        let script = format!(
-            "echo x >> {}; printf 'alpha\\nbeta\\n'",
-            shell_path(&counter)
-        );
+        // possible flake. Direct Python arguments also avoid host-shell path
+        // translation, so the same fixture runs on Windows.
+        let counter = counter.display().to_string();
+        let script = "import sys\nwith open(sys.argv[1], 'a', encoding='utf-8') as stream: stream.write('x\\n')\nsys.stdout.write('alpha\\nbeta\\n')";
         let opts = VerifyOptions {
             detect_drift: false,
             version: None,
@@ -7019,7 +7020,7 @@ mod tests {
             config_file: None,
             execute: false,
             test_runner: Some(TestRunners::One(runner(
-                &["bash", "-c", &script],
+                &["python3", "-c", script, &counter],
                 &["true", PLACEHOLDER],
             ))),
             max_unrelated_files: None,

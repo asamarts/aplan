@@ -912,7 +912,22 @@ fn invalid_inbox(diagnostic: Diagnostic) -> Inbox {
 fn inbox_entries(directory: &Path) -> Result<Option<Vec<std::fs::DirEntry>>, Box<Diagnostic>> {
     let metadata = match std::fs::symlink_metadata(directory) {
         Ok(metadata) => metadata,
-        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+            // Windows reports `file/.inbox` as not found even though the real
+            // boundary violation is that the existing parent is not a
+            // directory. Preserve the empty-inbox case only when the parent
+            // can actually contain the reserved directory.
+            if directory.parent().is_some_and(|parent| {
+                std::fs::metadata(parent).is_ok_and(|metadata| !metadata.is_dir())
+            }) {
+                return Err(capture_load_error(
+                    directory,
+                    format!("cannot inspect the capture inbox: {error}"),
+                    "Replace the inbox parent with a directory before loading captures.",
+                ));
+            }
+            return Ok(None);
+        }
         Err(error) => {
             return Err(capture_load_error(
                 directory,
