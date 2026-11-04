@@ -6,6 +6,8 @@ to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+## [0.6.0] - 2026-11-04
+
 ### Added
 
 - **Release archives now carry keyless build provenance** (`A2-014`, ADR-0066). The protected
@@ -17,6 +19,13 @@ to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   is stored, and releases through v0.5.2 remain explicitly unattested.
 
 ### Changed
+
+- **The GitHub Action authenticates attested releases before execution** (`A2-015`). The Action
+  validates that the checksum names the exact downloaded archive, then requires releases from
+  v0.6.0 onward to carry SLSA provenance from `asamarts/aplan`, `release.yml`, the exact tag,
+  GitHub's OIDC issuer and a GitHub-hosted runner before extraction. The finite v0.1.0 through
+  v0.5.2 set retains its historical checksum-only contract, while a failed lookup for any later
+  release stops installation instead of weakening verification.
 
 - **Required CI now proves Linux, macOS and Windows on fresh GitHub-hosted machines** (`A2-013`,
   ADR-0065). Pull requests and `main` run stable `ubuntu-24.04`, `macos-15` and `windows-2025`

@@ -202,6 +202,11 @@ This authenticates the archive digest and signer identity. Verify the adjacent S
 independent byte-integrity check. Releases through v0.5.2 predate ADR-0066 and have no attestation;
 do not treat a later workflow invocation as proof of their historical build.
 
+The composite Action performs the same identity check before extracting releases from v0.6.0
+onward. A consuming workflow that narrows `GITHUB_TOKEN` must grant both `contents: read` and
+`attestations: read`. The Action's finite v0.1.0 through v0.5.2 exemption preserves historical
+releases without turning a failed lookup for any later release into a checksum-only fallback.
+
 ## Release audit checklist
 
 For a published version, independently verify:

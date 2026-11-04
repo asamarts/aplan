@@ -1576,13 +1576,16 @@ before either publication channel can proceed. Manual staging exercises the same
 publishing. The archive is verified again after crates.io publication before its GitHub upload, so
 intervening work cannot substitute different bytes. The checksum remains a convenient digest; the attestation authenticates that digest.
 Releases through v0.5.2 predate this contract and do not acquire provenance retroactively.
+The composite Action checks those historical releases against their exact checksum, then requires
+the full repository, workflow, tag, predicate, issuer and hosted-runner provenance policy for every
+release from v0.6.0 onward before it extracts or executes the archive.
 
 | Channel | Current mechanism |
 |---|---|
 | GitHub Releases | guarded static archive after exact-source release validation |
 | `cargo install` | crates.io package `aplan`, after its nine public workspace dependencies |
 | `cargo binstall` | the GitHub archive follows the target-qualified naming convention |
-| GitHub Action | composite `action.yml` installs the release tag the workflow pins |
+| GitHub Action | composite `action.yml` installs the pinned tag and authenticates attested releases before extraction |
 
 Homebrew, npm, container, and pre-commit distribution remain later channels. They must consume the
 same qualified source and immutable artifact identity rather than create parallel release paths.

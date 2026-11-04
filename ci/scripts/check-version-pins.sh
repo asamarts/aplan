@@ -12,8 +12,8 @@ cd "$REPO_ROOT"
 # sentence, deliberately, because the sentence is not implementable as written.
 #
 # **The unit is an occurrence, not a file.** Measured on `docs/upgrading.md`:
-# line 4 says a repository "needs a feature newer than `v0.5.0`", which must
-# move when v0.6.0 ships, and line 5 says the work "shipped across `v0.3.0`
+# line 4 says a repository "needs a feature newer than `v0.6.0`", which must
+# move when v0.7.0 ships, and line 5 says the work "shipped across `v0.3.0`
 # and `v0.4.0`", which must not. Same file, opposite obligations. A file-level
 # scope list cannot separate them and neither can a regex over bare versions.
 #

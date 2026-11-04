@@ -28,6 +28,10 @@ concurrency:
 # commit under test. Those are the stronger checks and the right place for it.
 permissions:
   contents: read
+  # v0.6.0 and later are authenticated before the downloaded archive is
+  # extracted. Keep the permission here even while the live fixture exercises
+  # v0.5.2's explicit historical checksum-only path.
+  attestations: read
 
 jobs:
   selftest:

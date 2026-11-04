@@ -1,11 +1,11 @@
 # Adopting a build that has not been released
 
 For a repository that stages the `aplan` binary itself rather than pinning a published release,
-which today is any repository that needs a feature newer than `v0.5.2`. The work described on this
+which today is any repository that needs a feature newer than `v0.6.0`. The work described on this
 page shipped across `v0.3.0` and `v0.4.0`, so a repository that staged a build to get one of these
 features can now pin a release tag instead.
 
-If you pin the action (`uses: asamarts/aplan@v0.5.2`), none of this applies: you get the release
+If you pin the action (`uses: asamarts/aplan@v0.6.0`), none of this applies: you get the release
 that tag names, and you adopt a new one by changing the tag.
 
 ## Upgrade the binary first, then the config
@@ -58,8 +58,8 @@ is still the old one.
 
 ## Knowing which build you have, and what it can do
 
-A development build from `main` reports the next pre-release version (`0.6.0-dev`) and the
-published release reports its own (`0.5.2`), so the two can never be confused. That was not always
+A development build from `main` reports the next pre-release version (`0.7.0-dev`) and the
+published release reports its own (`0.6.0`), so the two can never be confused. That was not always
 true: every build from
 `main` used to claim the released version, which meant a check like
 `aplan --version | grep -qF 'aplan 0.2.0'` passed for a binary that could not run the gate at all
