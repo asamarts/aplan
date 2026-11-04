@@ -14,5 +14,7 @@ cargo clippy --workspace --all-targets -- -D warnings
 # The authoritative nextest gate serializes process-control tests through its
 # workspace mutex. Windows has no admitted nextest artifact yet, so direct
 # libtest uses one thread rather than reintroducing those shared-signal races.
-cargo test --workspace --lib --bins -- --test-threads=1
+# Keep running later workspace test binaries after a failure so one cold hosted
+# run reports every portability gap it can reach.
+cargo test --workspace --lib --bins --no-fail-fast -- --test-threads=1
 cargo test -p aplan --test integration tui_portability::

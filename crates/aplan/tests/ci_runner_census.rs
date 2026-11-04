@@ -1942,7 +1942,7 @@ fn required_platform_checks_compile_lint_test_and_exercise_a_real_terminal() {
         .expect("read required platform contract");
     let commands = [
         "cargo clippy --workspace --all-targets -- -D warnings",
-        "cargo test --workspace --lib --bins -- --test-threads=1",
+        "cargo test --workspace --lib --bins --no-fail-fast -- --test-threads=1",
         "cargo test -p aplan --test integration tui_portability::",
     ];
     let offsets = commands.map(|command| {
