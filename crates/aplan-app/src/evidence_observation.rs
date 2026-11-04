@@ -1448,6 +1448,7 @@ impl CacheLock {
                     .read(true)
                     .write(true)
                     .create(true)
+                    .truncate(false)
                     .open(path)
                     .ok()?;
                 match fs2::FileExt::try_lock_exclusive(&file) {
