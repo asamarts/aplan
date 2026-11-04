@@ -1411,7 +1411,7 @@ fn publish_observation(
     ));
     let wrote = private_create_new(&temporary)
         .and_then(|mut file| file.write_all(&bytes))
-        .and_then(|()| fs::rename(&temporary, &path));
+        .and_then(|()| crate::rename_replacing(&temporary, &path));
     if wrote.is_err() {
         let _ = fs::remove_file(&temporary);
     }
@@ -1656,7 +1656,7 @@ mod tests {
 
     fn one_runner() -> aplan_evidence::TestRunners {
         aplan_config::parse_config(
-            "test:\n  list: [printf, 'suite::one: test\\n']\n  run: ['true', '{test}']\n",
+            "test:\n  list: [git, -c, 'aplan.tests=suite::one: test', config, --get, aplan.tests]\n  run: [git, rev-parse, --sq-quote, '{test}']\n",
             Path::new(".aplan.yml"),
         )
         .expect("runner config")
@@ -1911,11 +1911,14 @@ mod tests {
         ));
     }
 
+    /// Proof for `storage.atomic_replacement_is_portable`: a newer retained
+    /// observation replaces an existing generation before late work is refused.
     #[test]
-    fn observation_publication_is_atomic_private_and_rejects_late_results() {
+    fn observation_publication_replaces_an_older_generation() {
         let (root, _cache, options) = fixture();
-        publish(root.path(), &options, stored(20, "newer"));
         publish(root.path(), &options, stored(10, "older"));
+        publish(root.path(), &options, stored(20, "newer"));
+        publish(root.path(), &options, stored(5, "late"));
         let retained = read_observation(root.path(), &options).expect("complete envelope");
         assert_eq!(
             retained.identity, "newer",
@@ -2150,7 +2153,12 @@ mod tests {
         let baseline = aplan_evidence::VerifyOptions::default();
         let with_url = aplan_evidence::VerifyOptions {
             url_check: Some(aplan_config::UrlCheck {
-                check: vec!["true".to_string(), "{url}".to_string()],
+                check: vec![
+                    "git".to_string(),
+                    "rev-parse".to_string(),
+                    "--sq-quote".to_string(),
+                    "{url}".to_string(),
+                ],
                 timeout_seconds: None,
                 max_memory: None,
                 max_processes: None,

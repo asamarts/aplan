@@ -17,6 +17,11 @@ to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Fixed
 
+- **Guarded replacement and retained caches now preserve their contracts on Windows** (`A2-013`).
+  Atomic publication retries only transient file-sharing denials, so concurrent claims compose and
+  updated plan and evidence cache generations replace their predecessors without weakening stale
+  input checks.
+
 - **Release artifacts now compile in one immutable native toolchain** (`A2-012`). The local and
   hosted entry points build inside the same x86_64 image pinned by platform-manifest digest, with
   Debian packages frozen to one snapshot. Rust, GCC, binutils, musl, tar, and gzip can no longer

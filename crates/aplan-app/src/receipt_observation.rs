@@ -711,8 +711,8 @@ mod tests {
     fn runner(marker: &Path) -> TestRunner {
         serde_json::from_value(serde_json::json!({
             "name": "receipt",
-            "list": ["sh", "-c", format!("touch '{}'; exit 91", marker.display())],
-            "run": ["false", PLACEHOLDER],
+            "list": ["git", "init", marker.display().to_string()],
+            "run": ["git", "rev-parse", "--sq-quote", PLACEHOLDER],
         }))
         .expect("runner")
     }
@@ -818,7 +818,12 @@ mod tests {
             test_runner: Some(TestRunners::One(configured)),
             observation_inputs: Some(vec!["input.txt".into()]),
             url_check: Some(aplan_config::UrlCheck {
-                check: vec!["true".into(), "{url}".into()],
+                check: vec![
+                    "git".into(),
+                    "rev-parse".into(),
+                    "--sq-quote".into(),
+                    "{url}".into(),
+                ],
                 timeout_seconds: None,
                 max_memory: None,
                 max_processes: None,

@@ -1124,8 +1124,19 @@ mod tests {
             max_processes: None,
             wrap: None,
             run_selects: None,
-            list: vec!["printf".to_string(), format!("{listed}\n")],
-            run: vec!["true".to_string(), "{test}".to_string()],
+            list: vec![
+                "git".to_string(),
+                "-c".to_string(),
+                format!("aplan.tests={listed}"),
+                "config".to_string(),
+                "--get".to_string(),
+                "aplan.tests".to_string(),
+            ],
+            run: vec![
+                "git".to_string(),
+                "--version".to_string(),
+                "{test}".to_string(),
+            ],
             batch: None,
             timeout_seconds: None,
         }
@@ -1262,13 +1273,15 @@ mod tests {
         let support = tempfile::Builder::new()
             .tempdir_in(aplan_core::fixture::fixture_root())
             .expect("provider support");
-        let script = support.path().join("run.sh");
-        write(&script, "#!/bin/sh\nexit 0\n");
+        let provider_input = support.path().join("provider.input");
+        write(&provider_input, "provider version one\n");
         let mut configured = runner("unit", "suite::proof");
         configured.run = vec![
-            "sh".to_string(),
-            script.display().to_string(),
+            "git".to_string(),
+            "rev-parse".to_string(),
+            "--sq-quote".to_string(),
             "{test}".to_string(),
+            provider_input.display().to_string(),
         ];
         configured.run_selects = Some(true);
         let context = fixture_context(
@@ -1300,7 +1313,7 @@ mod tests {
                         == aplan_evidence::CitationOutcome::Resolved
         ));
         let before = std::fs::read_to_string(fixture.task_path()).expect("task before stale run");
-        write(&script, "#!/bin/sh\nexit 1\n");
+        write(&provider_input, "provider version two\n");
         let outcome = commit_change_set(&context, preview.into_change_set());
         let CommitOutcome::Stale { change, .. } = outcome else {
             panic!("provider movement was not stale: {outcome:?}")

@@ -515,8 +515,8 @@ fn publish_with_backup(
                 return Err(error);
             }
         };
-        if let Err(source) = std::fs::rename(&temp, &to) {
-            let _ = std::fs::rename(&backup_path, &from);
+        if let Err(source) = rename_replacing(&temp, &to) {
+            let _ = rename_replacing(&backup_path, &from);
             let _ = std::fs::remove_file(&temp);
             return Err(SaveError::Io { path: to, source });
         }
@@ -542,7 +542,7 @@ fn publish_with_backup(
                 None
             };
             let _ = pending.files.pop();
-            if let Err(source) = std::fs::rename(&temp, &path) {
+            if let Err(source) = rename_replacing(&temp, &path) {
                 let _ = std::fs::remove_file(&temp);
                 committed.push((path.clone(), replacement_backup));
                 rollback_relocation(&committed, from, to, source_backup);
@@ -571,7 +571,7 @@ fn publish_with_backup(
                 None
             };
             let _ = pending.files.pop();
-            if let Err(source) = std::fs::rename(&temp, &path) {
+            if let Err(source) = rename_replacing(&temp, &path) {
                 let _ = std::fs::remove_file(&temp);
                 committed.push((path.clone(), replacement_backup));
                 rollback_batch(&committed);
@@ -586,7 +586,7 @@ fn publish_with_backup(
         }
     } else {
         while let Some((path, temp)) = pending.files.pop() {
-            std::fs::rename(&temp, &path).map_err(|source| {
+            rename_replacing(&temp, &path).map_err(|source| {
                 let _ = std::fs::remove_file(&temp);
                 SaveError::Io { path, source }
             })?;
@@ -600,7 +600,7 @@ fn rollback_batch(committed: &[(PathBuf, Option<PathBuf>)]) {
     for (path, backup) in committed.iter().rev() {
         let _ = std::fs::remove_file(path);
         if let Some(backup) = backup {
-            let _ = std::fs::rename(backup, path);
+            let _ = rename_replacing(backup, path);
         }
     }
 }
@@ -621,11 +621,11 @@ fn rollback_relocation(
     for (path, backup) in committed.iter().rev() {
         let _ = std::fs::remove_file(path);
         if let Some(backup) = backup {
-            let _ = std::fs::rename(backup, path);
+            let _ = rename_replacing(backup, path);
         }
     }
     let _ = std::fs::remove_file(to);
-    let _ = std::fs::rename(source_backup, from);
+    let _ = rename_replacing(source_backup, from);
 }
 
 /// The path whose lock every spelling of `path` agrees on, including a target
@@ -653,11 +653,42 @@ fn move_to_backup(path: &Path) -> Result<PathBuf, SaveError> {
         path: backup.clone(),
         source,
     })?;
-    std::fs::rename(path, &backup).map_err(|source| SaveError::Io {
+    rename_replacing(path, &backup).map_err(|source| SaveError::Io {
         path: path.to_path_buf(),
         source,
     })?;
     Ok(backup)
+}
+
+/// Atomically move one staged file over its destination.
+///
+/// Windows can temporarily refuse an otherwise valid replacement while a
+/// concurrent reader still has the destination open. The caller already holds
+/// the writer lock, so a short bounded retry preserves the same atomic rename
+/// boundary without weakening compare-and-swap or treating a durable
+/// permission failure as contention.
+fn rename_replacing(from: &Path, to: &Path) -> std::io::Result<()> {
+    #[cfg(windows)]
+    {
+        const ATTEMPTS: usize = 64;
+        for attempt in 0..ATTEMPTS {
+            match std::fs::rename(from, to) {
+                Ok(()) => return Ok(()),
+                Err(error)
+                    if error.kind() == std::io::ErrorKind::PermissionDenied
+                        && attempt + 1 < ATTEMPTS =>
+                {
+                    std::thread::sleep(std::time::Duration::from_millis(1));
+                }
+                Err(error) => return Err(error),
+            }
+        }
+        unreachable!("the bounded Windows rename loop returns")
+    }
+    #[cfg(not(windows))]
+    {
+        std::fs::rename(from, to)
+    }
 }
 
 /// Temporary files written but not yet renamed, removed if the batch does not

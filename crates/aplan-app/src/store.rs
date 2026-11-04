@@ -1538,7 +1538,7 @@ fn publish_generation(
     };
     let written = file
         .write_all(&bytes)
-        .and_then(|()| fs::rename(&temporary, &location.generation));
+        .and_then(|()| crate::rename_replacing(&temporary, &location.generation));
     if written.is_ok() {
         stats.cache_bytes_written = u64::try_from(bytes.len()).unwrap_or(u64::MAX);
     } else {
@@ -2078,8 +2078,10 @@ mod tests {
         assert_eq!(titles(&second), titles(&first));
     }
 
+    /// Proof for `storage.atomic_replacement_is_portable`: a changed cache
+    /// generation is durable after the updating process goes away.
     #[test]
-    fn one_same_size_edit_parses_exactly_that_candidate() {
+    fn one_same_size_edit_updates_the_persisted_generation() {
         let (_temporary, root, cache) = fixture();
         PlanStore::open(&root, &options(&cache)).expect("cold load");
         fs::write(root.join("A-1.md"), task("A-1", "two")).expect("same-size edit");
@@ -2090,6 +2092,12 @@ mod tests {
         assert_eq!(changed.stats().artifacts_parsed, 1);
         assert_eq!(changed.stats().load.task_files_parsed, 1);
         assert_eq!(titles(&changed), [("A-1", "two")]);
+
+        let retained = PlanStore::open(&root, &options(&cache)).expect("updated generation");
+        assert!(retained.stats().cache_generation_hit);
+        assert_eq!(retained.stats().artifacts_reused, 2);
+        assert_eq!(retained.stats().artifacts_parsed, 0);
+        assert_eq!(titles(&retained), [("A-1", "two")]);
     }
 
     #[test]
@@ -2228,7 +2236,7 @@ mod tests {
             |generation| generation.schema_sha256 = "0".repeat(64),
             |generation| generation.root.encoded.push_str("00"),
             |generation| {
-                generation.candidates[0].path.encoded = "2e2e".to_string();
+                generation.candidates[0].path = EncodedPath::from_path(Path::new(".."));
             },
         ];
         for mutate in cases {

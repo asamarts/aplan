@@ -1077,7 +1077,7 @@ mod tests {
 
     fn runners() -> aplan_config::TestRunners {
         aplan_config::parse_config(
-            "test:\n  name: unit\n  list: [printf, 'alpha\\n']\n  run: ['true', '{test}']\n  run_selects: true\n",
+            "test:\n  name: unit\n  list: [git, -c, 'aplan.tests=alpha', config, --get, aplan.tests]\n  run: [git, rev-parse, --sq-quote, '{test}']\n  run_selects: true\n",
             Path::new(".aplan.yml"),
         )
         .expect("test config")
@@ -1428,7 +1428,10 @@ mod tests {
         runner.batch = Some(aplan_config::TestBatch {
             protocol: aplan_config::TEST_BATCH_PROTOCOL,
             run: vec![
-                "false".into(),
+                "git".into(),
+                "config".into(),
+                "--get".into(),
+                "aplan.missing".into(),
                 aplan_config::BATCH_MANIFEST_PLACEHOLDER.into(),
                 aplan_config::BATCH_RESULT_PLACEHOLDER.into(),
             ],
