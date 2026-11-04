@@ -1918,7 +1918,21 @@ mod tests {
         let locked_context = context(&root);
         let locked_preview =
             preview_dependency_batch(&locked_context, &request).expect("locked preview");
-        std::fs::write(tasks.join(".A-2.md.lock"), "").expect("hold lock");
+        let lock_path = tasks.join(".A-2.md.lock");
+        #[cfg(not(windows))]
+        std::fs::write(&lock_path, "").expect("hold lock");
+        #[cfg(windows)]
+        let _held_lock = {
+            let file = std::fs::File::options()
+                .read(true)
+                .write(true)
+                .create(true)
+                .truncate(false)
+                .open(&lock_path)
+                .expect("open lock identity");
+            fs2::FileExt::lock_exclusive(&file).expect("hold lock");
+            file
+        };
         let CommitOutcome::PublicationFailed { report, .. } =
             commit_dependency_batch(&locked_context, locked_preview)
         else {

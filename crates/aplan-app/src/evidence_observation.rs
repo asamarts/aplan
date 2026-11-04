@@ -1446,13 +1446,7 @@ impl CacheLock {
         {
             let deadline = std::time::Instant::now() + Duration::from_secs(2);
             loop {
-                let mut file = OpenOptions::new()
-                    .read(true)
-                    .write(true)
-                    .create(true)
-                    .truncate(false)
-                    .open(path)
-                    .ok()?;
+                let mut file = open_windows_cache_lock_file(path).ok()?;
                 match fs2::FileExt::try_lock_exclusive(&file) {
                     Ok(()) => {
                         file.set_len(0).ok()?;
@@ -1501,6 +1495,16 @@ impl CacheLock {
             None
         }
     }
+}
+
+#[cfg(windows)]
+fn open_windows_cache_lock_file(path: &Path) -> std::io::Result<fs::File> {
+    OpenOptions::new()
+        .read(true)
+        .write(true)
+        .create(true)
+        .truncate(false)
+        .open(path)
 }
 
 impl Drop for CacheLock {
@@ -2023,7 +2027,10 @@ mod tests {
         assert!(read_observation(root.path(), &options).is_none());
 
         let lock = path.with_extension("lock");
+        #[cfg(not(windows))]
         private_create_new(&lock).expect("stale lock");
+        #[cfg(windows)]
+        assert!(lock.is_file(), "publication keeps its stable lock identity");
         fs::File::options()
             .write(true)
             .open(&lock)

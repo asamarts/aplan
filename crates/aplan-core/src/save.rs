@@ -874,16 +874,10 @@ impl Lock {
         {
             let deadline = std::time::Instant::now() + std::time::Duration::from_secs(2);
             loop {
-                let file = std::fs::OpenOptions::new()
-                    .read(true)
-                    .write(true)
-                    .create(true)
-                    .truncate(false)
-                    .open(&path)
-                    .map_err(|source| SaveError::Io {
-                        path: target.to_path_buf(),
-                        source,
-                    })?;
+                let file = open_windows_plan_lock_file(&path).map_err(|source| SaveError::Io {
+                    path: target.to_path_buf(),
+                    source,
+                })?;
                 match fs2::FileExt::try_lock_exclusive(&file) {
                     Ok(()) => {
                         return Ok(Self { file: Some(file) });
@@ -947,6 +941,16 @@ impl Lock {
             }
         }
     }
+}
+
+#[cfg(windows)]
+fn open_windows_plan_lock_file(path: &Path) -> std::io::Result<std::fs::File> {
+    std::fs::OpenOptions::new()
+        .read(true)
+        .write(true)
+        .create(true)
+        .truncate(false)
+        .open(path)
 }
 
 impl Drop for Lock {

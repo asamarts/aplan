@@ -409,6 +409,18 @@ fn every_plan_write_goes_through_save() {
              operation, there is nothing to rename onto, and a partial write is rejected by the \
              kernel rather than torn. It never touches a plan file",
         ),
+        (
+            "open_windows_plan_lock_file",
+            "the inert identity for a Windows OS advisory lock (`A2-013`). It contains no plan \
+             data, is deliberately retained across writers to avoid a delete-pending race, and \
+             the guarded plan bytes still publish only through this module's atomic replacement",
+        ),
+        (
+            "open_windows_cache_lock_file",
+            "the inert identity for a Windows OS advisory lock (`A2-013`). It contains only the \
+             current holder's diagnostic pid inside the private cache directory, while the cache \
+             envelope itself still publishes through native atomic replacement",
+        ),
     ];
     let mut raw = Vec::new();
     let mut scanned = 0usize;
