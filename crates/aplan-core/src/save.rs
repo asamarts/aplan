@@ -855,6 +855,7 @@ pub const STALE: std::time::Duration = std::time::Duration::from_secs(30);
 
 /// An exclusive lock on one file, released when dropped.
 struct Lock {
+    #[cfg(not(windows))]
     path: PathBuf,
     #[cfg(windows)]
     file: Option<std::fs::File>,
@@ -885,10 +886,7 @@ impl Lock {
                     })?;
                 match fs2::FileExt::try_lock_exclusive(&file) {
                     Ok(()) => {
-                        return Ok(Self {
-                            path,
-                            file: Some(file),
-                        });
+                        return Ok(Self { file: Some(file) });
                     }
                     Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => {
                         if std::time::Instant::now() >= deadline {
@@ -951,9 +949,12 @@ impl Lock {
 
 impl Drop for Lock {
     fn drop(&mut self) {
-        // Remove before closing the Windows handle: standard-library files
-        // share deletion, so the path remains unavailable until every handle
-        // closes. On Unix a failed best-effort removal is broken after `STALE`.
+        // Windows deliberately keeps the inert file: deleting it while another
+        // waiter has an open handle creates a delete-pending race in which a
+        // third writer receives access denied. The OS lock itself disappears
+        // when this handle closes. On Unix a failed best-effort removal is
+        // broken after `STALE`.
+        #[cfg(not(windows))]
         let _ = std::fs::remove_file(&self.path);
         #[cfg(windows)]
         drop(self.file.take());
@@ -1907,9 +1908,10 @@ mod tests {
             "before\n",
             "a read-only file must keep its contents"
         );
+        #[cfg(not(windows))]
         assert!(
             !dir.path().join(".m.md.lock").exists(),
-            "the lock outlived the refusal"
+            "the lock file outlived the refusal"
         );
     }
 
@@ -1967,9 +1969,10 @@ mod tests {
         let p = at(dir.path(), "m.md", "before\n");
         std::fs::write(&p, "moved\n").expect("interleave");
         let _ = replace(&p, "before\n", "after\n");
+        #[cfg(not(windows))]
         assert!(
             !dir.path().join(".m.md.lock").exists(),
-            "the lock outlived the refusal"
+            "the lock file outlived the refusal"
         );
         replace(&p, "moved\n", "next\n").expect("the next writer must not be blocked");
     }
