@@ -583,6 +583,7 @@ impl FileIdentity {
     }
 
     #[cfg(not(unix))]
+    #[allow(clippy::unused_self)] // Preserve one call shape where ownership metadata is unavailable.
     fn owner(&self) {
         // Ownership is not part of the portable metadata API.
     }
@@ -608,6 +609,7 @@ fn reject_unsafe_result_identity(
 }
 
 #[cfg(not(unix))]
+#[allow(clippy::unnecessary_wraps)] // Preserve one fallible identity-check interface on every OS.
 fn reject_unsafe_result_identity(
     _identity: &FileIdentity,
     _expected_owner: ExpectedOwner,
@@ -623,6 +625,7 @@ fn set_private_directory(path: &Path) -> Result<(), String> {
 }
 
 #[cfg(not(unix))]
+#[allow(clippy::unnecessary_wraps)] // Preserve one fallible directory-hardening interface on every OS.
 fn set_private_directory(_path: &Path) -> Result<(), String> {
     Ok(())
 }
