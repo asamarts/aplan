@@ -992,7 +992,9 @@ impl EncodedPath {
             return None;
         }
         let units = bytes
-            .chunks_exact(2)
+            .as_chunks::<2>()
+            .0
+            .iter()
             .map(|pair| u16::from_le_bytes([pair[0], pair[1]]))
             .collect::<Vec<_>>();
         Some(PathBuf::from(std::ffi::OsString::from_wide(&units)))
@@ -1668,6 +1670,7 @@ fn set_private_directory_permissions(path: &Path) -> io::Result<()> {
 }
 
 #[cfg(not(unix))]
+#[allow(clippy::unnecessary_wraps)] // Preserve one fallible permission interface on every OS.
 fn set_private_directory_permissions(_path: &Path) -> io::Result<()> {
     Ok(())
 }
@@ -1764,10 +1767,12 @@ mod tests {
 
     #[cfg(unix)]
     use super::FileObservation;
+    #[cfg(unix)]
+    use super::TimeValue;
     use super::{
         CacheMode, CachedDiagnostic, CachedReport, EncodedPath, Envelope, MAX_CACHE_BYTES,
-        MAX_CACHE_TOTAL, MAX_DIAGNOSTIC_TEXT_BYTES, PlanStore, PlanStoreOptions, TimeValue, evict,
-        hex_sha256, unhex,
+        MAX_CACHE_TOTAL, MAX_DIAGNOSTIC_TEXT_BYTES, PlanStore, PlanStoreOptions, evict, hex_sha256,
+        unhex,
     };
 
     #[test]

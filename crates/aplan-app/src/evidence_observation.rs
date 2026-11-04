@@ -1531,6 +1531,7 @@ fn set_private_directory_permissions(path: &Path) -> std::io::Result<()> {
 }
 
 #[cfg(not(unix))]
+#[allow(clippy::unnecessary_wraps)] // Preserve one fallible permission interface on every OS.
 fn set_private_directory_permissions(_path: &Path) -> std::io::Result<()> {
     Ok(())
 }
