@@ -130,6 +130,16 @@ pub const ALL: &[Behaviour] = &[
             "observation_publication_replaces_an_older_generation",
         ],
     },
+    // `A2-013`. Rekey already refused a selected configuration outside the
+    // repository, but Windows canonicalized an existing repository boundary
+    // with an extended-length prefix while leaving a missing child absolute.
+    // That made a missing in-repository configuration look external.
+    Behaviour {
+        name: "authoring.rekey_repository_boundary_is_portable",
+        what: "rekey applies one canonical repository boundary to existing and missing selected \
+               configuration paths on every platform before reading or rewriting policy",
+        proof: &["rekey_policy_failures_are_typed_before_publication"],
+    },
     // `A2-013`. Provider material identity already resolved a configured bare
     // executable through PATH, but unlike Windows process launch it did not
     // try the implicit `.exe` suffix, so ordinary Git providers were refused.

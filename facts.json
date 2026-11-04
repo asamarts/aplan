@@ -33,6 +33,10 @@
       "what": "guarded mutations and private cache refreshes retry transient Windows sharing denials while retaining the same atomic replacement and stale-input boundaries"
     },
     {
+      "name": "authoring.rekey_repository_boundary_is_portable",
+      "what": "rekey applies one canonical repository boundary to existing and missing selected configuration paths on every platform before reading or rewriting policy"
+    },
+    {
       "name": "evidence.provider_executable_resolution_is_portable",
       "what": "provider material identity resolves configured executables with the same native spelling accepted by process launch, including Windows' implicit `.exe` suffix"
     },
@@ -1387,7 +1391,7 @@
     "version.require_impact"
   ],
   "counts": {
-    "behaviours": 220,
+    "behaviours": 221,
     "build_capabilities": 1,
     "commands": 48,
     "config_keys": 124,

@@ -21,7 +21,9 @@ to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   Atomic publication uses the native replace-existing primitive and retries only transient
   file-sharing denials, so concurrent claims compose and updated plan and evidence cache
   generations replace their predecessors without weakening stale input checks. Provider material
-  identity also follows Windows' implicit `.exe` command lookup.
+  identity also follows Windows' implicit `.exe` command lookup. Rekey now applies one canonical
+  repository boundary to existing and missing configuration paths instead of misclassifying a
+  missing in-repository Windows path as external.
 
 - **Release artifacts now compile in one immutable native toolchain** (`A2-012`). The local and
   hosted entry points build inside the same x86_64 image pinned by platform-manifest digest, with
