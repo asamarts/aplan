@@ -6,6 +6,13 @@ to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+### Fixed
+
+- **Release artifacts now compile in one immutable native toolchain** (`A2-012`). The local and
+  hosted entry points build inside the same x86_64 image pinned by platform-manifest digest, with
+  Debian packages frozen to one snapshot. Rust, GCC, binutils, musl, tar, and gzip can no longer
+  drift with the caller while the release archive still claims cross-builder reproducibility.
+
 ## [0.5.2] - 2026-11-03
 
 ### Fixed

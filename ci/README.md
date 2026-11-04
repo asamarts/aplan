@@ -367,6 +367,10 @@ an explicit bump, in this order:
    TAG=vX.Y.Z ci/scripts/validate.sh --profile release
    TAG=vX.Y.Z ci/scripts/release.sh
    ```
+   Artifact construction requires Docker or Podman. The script builds and enters the immutable
+   x86_64 environment in `ci/release.Containerfile`; it never compiles a release binary with the
+   caller's C toolchain. Builder scratch data goes under `~/.tmp` by default and is discarded after
+   the archive is copied to `dist/`.
 5. for the first crates.io release only, publish the ten new package names from that same clean
    commit with `TAG=vX.Y.Z ci/scripts/publish-crates.sh`; then create a trusted publisher for each
    package naming `asamarts/aplan`, `release.yml`, and the `release` environment, and require
@@ -378,8 +382,9 @@ an explicit bump, in this order:
 6. create the annotated `vX.Y.Z` tag on that checked commit and push it
 7. after the release lands, set the version to the next `-dev`
 
-The release workflow performs full validation, artifact construction, crates.io publication and
-GitHub publication sequentially in one checkout and one job. Each script independently refuses
+The release workflow performs full validation, pinned-builder artifact construction, crates.io
+publication and GitHub publication sequentially in one checkout and one job. Each script
+independently refuses
 unless that clean checkout is the full commit ID in `github.sha`; another workflow's result, a ref
 name or an abbreviated SHA cannot authorize publication. A failed, cancelled, skipped or stale
 validation therefore cannot reach publication. A manual dispatch on a non-tag may stage the

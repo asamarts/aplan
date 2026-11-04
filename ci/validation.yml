@@ -21,6 +21,7 @@ selection:
       gates: [clippy, doc, test, spec, msrv-build, supply-chain]
       exact:
         - .containerignore
+        - .dockerignore
         - .config/nextest.toml
         - Cargo.lock
         - Cargo.toml

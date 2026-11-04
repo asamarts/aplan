@@ -165,15 +165,14 @@ if profile_needs_coverage "$profile"; then
 fi
 
 if [[ "$profile" == "release" ]]; then
-    rustup target add x86_64-unknown-linux-musl --toolchain "$toolchain"
-    sudo apt-get update -qq
-    sudo apt-get install -y --no-install-recommends musl-tools
-    for command in gh jq; do
+    for command in docker gh jq; do
         command -v "$command" >/dev/null 2>&1 || {
             echo "error: a GitHub-hosted release runner is expected to provide '$command'" >&2
             exit 1
         }
     done
+    docker info >/dev/null
+    docker build --help | grep -q -- '--platform'
 fi
 
 echo "hosted runner prepared for ${requested_profile} (${profile})"
