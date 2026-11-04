@@ -1179,11 +1179,24 @@ fn hash_external_identity_file(digest: &mut blake3::Hasher, path: &Path) -> Resu
 fn resolve_program(program: &str) -> Option<PathBuf> {
     let direct = Path::new(program);
     if direct.components().count() > 1 {
-        return direct.exists().then(|| direct.to_path_buf());
+        return executable_path(direct);
     }
     std::env::split_paths(&std::env::var_os("PATH")?)
-        .map(|directory| directory.join(program))
-        .find(|candidate| candidate.is_file())
+        .find_map(|directory| executable_path(&directory.join(program)))
+}
+
+fn executable_path(path: &Path) -> Option<PathBuf> {
+    if path.is_file() {
+        return Some(path.to_path_buf());
+    }
+    #[cfg(windows)]
+    if path.extension().is_none() {
+        let executable = path.with_extension("exe");
+        if executable.is_file() {
+            return Some(executable);
+        }
+    }
+    None
 }
 
 pub(crate) fn repository_identity(repo_root: &Path) -> Result<String, aplan_evidence::Error> {
@@ -2146,6 +2159,20 @@ mod tests {
         );
         assert!(absolute_path(Path::new("relative")).is_absolute());
         assert_eq!(absolute_path(directory.path()), directory.path());
+    }
+
+    /// Proof for `evidence.provider_executable_resolution_is_portable`:
+    /// provider material follows the native executable spelling accepted by
+    /// process launch, including Windows' implicit `.exe` suffix.
+    #[test]
+    fn provider_executable_resolution_follows_native_command_lookup() {
+        let git = resolve_program("git").expect("Git executable on the test runner");
+        assert!(git.is_file());
+        #[cfg(windows)]
+        assert_eq!(
+            git.extension().and_then(std::ffi::OsStr::to_str),
+            Some("exe")
+        );
     }
 
     #[test]

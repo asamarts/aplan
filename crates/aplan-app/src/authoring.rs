@@ -3566,7 +3566,6 @@ mod tests {
 
         let missing = fixture();
         let missing_path = missing.path().join("missing.yml");
-        let expected_missing_path = absolute(&missing_path);
         let context = PlanContext::new(
             aplan_core::load_plan_identified(&missing.path().join("aplan")),
             ContextInputs {
@@ -3584,7 +3583,10 @@ mod tests {
                 new: "M-v9".to_string(),
                 allow_terminal: false,
             }),
-            Err(AuthoringError::Read { path, .. }) if path == expected_missing_path
+            Err(AuthoringError::Read { path, source })
+                if path.is_absolute()
+                    && path.ends_with("missing.yml")
+                    && source.kind() == std::io::ErrorKind::NotFound
         ));
 
         let stale = fixture();

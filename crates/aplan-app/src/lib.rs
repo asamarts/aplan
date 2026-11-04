@@ -3272,17 +3272,35 @@ fn absolute(path: &Path) -> PathBuf {
 pub(crate) fn rename_replacing(from: &Path, to: &Path) -> std::io::Result<()> {
     #[cfg(windows)]
     {
-        const ATTEMPTS: usize = 64;
+        let parent = to
+            .parent()
+            .filter(|parent| !parent.as_os_str().is_empty())
+            .unwrap_or_else(|| Path::new("."));
+        let mut replacement = tempfile::Builder::new()
+            .prefix(".aplan-replace-")
+            .tempfile_in(parent)?;
+        let mut staged = std::fs::File::open(from)?;
+        std::io::copy(&mut staged, replacement.as_file_mut())?;
+        replacement.as_file_mut().sync_all()?;
+        drop(staged);
+        std::fs::remove_file(from)?;
+
+        const ATTEMPTS: usize = 128;
         for attempt in 0..ATTEMPTS {
-            match std::fs::rename(from, to) {
-                Ok(()) => return Ok(()),
+            match replacement.persist(to) {
+                Ok(file) => {
+                    drop(file);
+                    return Ok(());
+                }
                 Err(error)
-                    if error.kind() == std::io::ErrorKind::PermissionDenied
+                    if (error.error.kind() == std::io::ErrorKind::PermissionDenied
+                        || matches!(error.error.raw_os_error(), Some(32 | 33)))
                         && attempt + 1 < ATTEMPTS =>
                 {
-                    std::thread::sleep(std::time::Duration::from_millis(1));
+                    replacement = error.file;
+                    std::thread::sleep(std::time::Duration::from_millis(2));
                 }
-                Err(error) => return Err(error),
+                Err(error) => return Err(error.error),
             }
         }
         unreachable!("the bounded Windows rename loop returns")
