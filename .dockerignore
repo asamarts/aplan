@@ -1,0 +1,18 @@
+# Docker and Podman must send the same reviewed image inputs. Podman reads
+# .containerignore first; Docker reads this file.
+**
+!rust-toolchain.toml
+!ci
+!ci/Containerfile
+!ci/release.Containerfile
+!ci/cargo-ci-config.toml
+!ci/nextest.env
+!ci/deny.env
+!ci/scripts
+!ci/scripts/install-cargo-deny.sh
+!ci/scripts/install-nextest.sh
+!ci/scripts/toolchain.sh
+!ci/runner
+!ci/runner/entrypoint.sh
+!ci/runner/job-started.sh
+!ci/runner/reclaim-coverage.py

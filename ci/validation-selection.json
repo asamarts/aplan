@@ -158,6 +158,7 @@
           "disposition": "global",
           "exact": [
             ".containerignore",
+            ".dockerignore",
             ".config/nextest.toml",
             "Cargo.lock",
             "Cargo.toml",
@@ -277,7 +278,7 @@
   "schema": "aplan/validation-selection-policy/v1",
   "source": {
     "path": "ci/validation.yml",
-    "sha256": "499ff2f615f977a3a12c26d00c670fd1c68eb277474ca5ece3d1f01229886c6c"
+    "sha256": "5d4e87991ba1fd4e1790da0ba710247e1fc08e57d0317623b892575b5acb2cb4"
   },
   "workspace": {
     "inputs": [
@@ -287,11 +288,11 @@
       },
       {
         "path": "Cargo.lock",
-        "sha256": "b76c4323f775bbf5692265ae2a0ab8f79a99203333f77ad724e0b0b40d0e29d3"
+        "sha256": "8847989550747bee99f1de0fe1fbca8b8f0d0b329ed8f9f6b9acedd6bae8eb85"
       },
       {
         "path": "Cargo.toml",
-        "sha256": "e30635d78a5b00702c88086192d0cbd4295178834d6a55a90e50c234201c8ee6"
+        "sha256": "cf13f5f952feeec79fc1ba4647712835dfac0a8a7fe1d4e9d42d81742ecedde6"
       },
       {
         "path": "crates/aplan-app/Cargo.toml",

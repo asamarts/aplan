@@ -64,13 +64,12 @@ jobs:
           TAG: ${{ github.ref_type == 'tag' && github.ref_name || '' }}
         run: ci/scripts/validate.sh --profile release
 
-      # The script first proves that --no-default-features omits the terminal
-      # stack, then explicitly enables `tui` in the artifact it leaves behind.
-      # The artifact is statically linked (musl), so it runs on a consumer's
-      # runner whatever glibc that image ships. `release.sh` refuses a tag that
-      # disagrees with `[workspace.package].version`, checks the binary is really
-      # static, and confirms it reports the version it was built for, so a bad
-      # release fails here rather than in someone else's CI.
+      # Artifact compilation runs in the digest-pinned builder declared by
+      # ci/release.Containerfile, so native C and archive tools cannot drift with
+      # the hosted image. The script first proves that --no-default-features
+      # omits the terminal stack, then explicitly enables `tui`. The resulting
+      # musl binary is static, and tag, version, source and plan arithmetic are
+      # checked before anything can be published.
       - name: build the release artifact
         env:
           TAG: ${{ github.ref_type == 'tag' && github.ref_name || '' }}

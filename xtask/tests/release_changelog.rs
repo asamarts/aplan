@@ -523,27 +523,36 @@ fn artifact_source_problem(script: &str) -> Option<&'static str> {
         .match_indices("ci/scripts/release-source.sh")
         .map(|(index, _)| index)
         .collect::<Vec<_>>();
-    if checks.len() != 2 {
-        return Some("artifact construction must verify its source before and after building");
+    if checks.len() != 3 {
+        return Some(
+            "artifact construction must bind the container call and verify inside it before and after building",
+        );
     }
+    let Some(builder_call) = script.find("\"$image\" bash ci/scripts/release.sh") else {
+        return Some("artifact construction does not enter the pinned builder");
+    };
     let Some(toolchain) = script.find("ci/scripts/toolchain.sh verify") else {
         return Some("artifact construction does not verify the exact toolchain");
     };
     let Some(first_build) = script.find("cargo build --release") else {
         return Some("artifact construction does not build an artifact");
     };
-    let Some(package) = script.find("rm -rf \"$OUT_DIR\"") else {
+    let Some(package) = script.find("find \"$OUT_DIR\" -mindepth 1 -maxdepth 1 -delete") else {
         return Some("artifact construction does not reach packaging");
     };
-    if !(checks[0] < toolchain
+    if !(checks[0] < builder_call
+        && builder_call < checks[1]
+        && checks[1] < toolchain
         && toolchain < first_build
-        && first_build < checks[1]
-        && checks[1] < package)
+        && first_build < checks[2]
+        && checks[2] < package)
     {
         return Some("source checks do not surround artifact construction");
     }
-    if !script.contains("export APLAN_RELEASE_SHA=\"$release_source\"") {
-        return Some("the second source check is not bound to the first one");
+    if !script.contains("--env \"APLAN_RELEASE_SHA=$release_source\"")
+        || !script.contains("export APLAN_RELEASE_SHA=\"$release_source\"")
+    {
+        return Some("the container and second source check are not bound to the first one");
     }
     None
 }
@@ -676,7 +685,7 @@ fn release_workflow_publishes_crates_before_github_assets() {
     let hosted = std::fs::read_to_string(workspace_root().join("ci/scripts/prepare-hosted.sh"))
         .expect("read hosted release preparation");
     assert!(
-        hosted.contains("for command in gh jq; do"),
+        hosted.contains("for command in docker gh jq; do"),
         "hosted release setup must fail before validation when publication tools are absent"
     );
 }

@@ -17,6 +17,95 @@ set -euo pipefail
 REPO_ROOT="$(cd "$(dirname "$0")/../.." && pwd)"
 cd "$REPO_ROOT"
 
+run_in_pinned_builder() {
+    local engine image contract scratch_root build_root release_source status
+
+    container_engine_usable() {
+        command -v "$1" >/dev/null 2>&1 \
+            && "$1" info >/dev/null 2>&1 \
+            && "$1" build --help 2>&1 | grep -q -- '--platform'
+    }
+
+    release_source="$(ci/scripts/release-source.sh "$REPO_ROOT")"
+    contract="$(sha256sum \
+        ci/release.Containerfile rust-toolchain.toml ci/scripts/toolchain.sh \
+        | sha256sum | awk '{print $1}')"
+    image="aplan-release-builder:${contract}"
+
+    if [[ -n "${APLAN_RELEASE_CONTAINER_ENGINE:-}" ]]; then
+        case "$APLAN_RELEASE_CONTAINER_ENGINE" in
+            docker|podman) engine="$APLAN_RELEASE_CONTAINER_ENGINE" ;;
+            *)
+                echo "ERROR: APLAN_RELEASE_CONTAINER_ENGINE must be docker or podman" >&2
+                return 1
+                ;;
+        esac
+        container_engine_usable "$engine" || {
+            echo "ERROR: configured release container engine '$engine' cannot build images" >&2
+            return 1
+        }
+    elif container_engine_usable docker; then
+        engine=docker
+    elif container_engine_usable podman; then
+        engine=podman
+    else
+        echo "ERROR: release artifact construction requires Docker or Podman" >&2
+        return 1
+    fi
+
+    if [[ -e "$REPO_ROOT/dist" && ( ! -d "$REPO_ROOT/dist" || -L "$REPO_ROOT/dist" ) ]]; then
+        echo "ERROR: release output path '$REPO_ROOT/dist' is not a real directory" >&2
+        return 1
+    fi
+    mkdir -p "$REPO_ROOT/dist"
+    find "$REPO_ROOT/dist" -mindepth 1 -maxdepth 1 -delete
+
+    scratch_root="${APLAN_RELEASE_SCRATCH_ROOT:-${HOME:?}/.tmp}"
+    mkdir -p "$scratch_root"
+    build_root="$(mktemp -d "${scratch_root%/}/aplan-release-builder.XXXXXX")"
+    mkdir -p "$build_root/cargo" "$build_root/home" "$build_root/target"
+    cleanup_release_builder() {
+        rm -rf "$build_root"
+    }
+    trap cleanup_release_builder RETURN
+
+    echo "==> Building pinned release environment ${image}"
+    "$engine" build \
+        --platform linux/amd64 \
+        --file ci/release.Containerfile \
+        --tag "$image" \
+        "$REPO_ROOT"
+
+    echo "==> Building the artifact inside ${image}"
+    set +e
+    "$engine" run --rm \
+        --platform linux/amd64 \
+        --user "$(id -u):$(id -g)" \
+        --volume "$REPO_ROOT:/aplan/source:ro" \
+        --volume "$REPO_ROOT/dist:/aplan/dist:rw" \
+        --volume "$build_root:/aplan/build:rw" \
+        --env APLAN_RELEASE_IN_BUILDER=1 \
+        --env APLAN_RELEASE_DIST_DIR=/aplan/dist \
+        --env "APLAN_RELEASE_SHA=$release_source" \
+        --env "GITHUB_SHA=${GITHUB_SHA:-}" \
+        --env "TAG=${TAG:-}" \
+        --env CARGO_HOME=/aplan/build/cargo \
+        --env HOME=/aplan/build/home \
+        --env CARGO_TARGET_DIR=/aplan/build/target \
+        --env GIT_CONFIG_COUNT=1 \
+        --env GIT_CONFIG_KEY_0=safe.directory \
+        --env GIT_CONFIG_VALUE_0=/aplan/source \
+        "$image" bash ci/scripts/release.sh
+    status=$?
+    set -e
+    return "$status"
+}
+
+if [[ "${APLAN_RELEASE_IN_BUILDER:-}" != 1 ]]; then
+    run_in_pinned_builder
+    exit $?
+fi
+
 export CARGO_BUILD_WARNINGS=deny
 
 # Release binaries retain line-table source paths, including paths belonging to
@@ -62,7 +151,7 @@ echo "==> Release source ${release_source} is committed, clean, and exact"
 ci/scripts/toolchain.sh verify
 
 TARGET="x86_64-unknown-linux-musl"
-OUT_DIR="${REPO_ROOT}/dist"
+OUT_DIR="${APLAN_RELEASE_DIST_DIR:-${REPO_ROOT}/dist}"
 
 # The single source of truth for the version is `[workspace.package].version`
 # (HLD section 17). Read it from there rather than from the tag, so the tag is
@@ -241,8 +330,12 @@ if [[ "$source_after" != "$release_source" ]]; then
     exit 1
 fi
 
-rm -rf "$OUT_DIR"
+if [[ -e "$OUT_DIR" && ( ! -d "$OUT_DIR" || -L "$OUT_DIR" ) ]]; then
+    echo "ERROR: release output path '$OUT_DIR' is not a real directory" >&2
+    exit 1
+fi
 mkdir -p "$OUT_DIR"
+find "$OUT_DIR" -mindepth 1 -maxdepth 1 -delete
 archive="aplan-v${version}-${TARGET}.tar.gz"
 
 echo "==> Packaging ${archive}"

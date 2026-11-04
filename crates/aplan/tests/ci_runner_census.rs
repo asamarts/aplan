@@ -437,6 +437,123 @@ fn release_artifact_paths_are_host_neutral() {
     }
 }
 
+/// `A2-012`: a release artifact has one native build environment, not one per
+/// caller. v0.5.2 proved why the Rust pin alone is insufficient: Arch GCC 16
+/// and hosted Ubuntu's compiler produced different libgit2/zlib objects from
+/// the same tagged Rust source. The platform digest freezes the upstream image,
+/// the Debian snapshot freezes every added native package, and both local and
+/// hosted callers enter that environment through the same script.
+#[test]
+fn release_artifact_builder_pins_native_inputs_for_every_caller() {
+    let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
+    let builder = std::fs::read_to_string(root.join("ci/release.Containerfile"))
+        .expect("read release builder");
+    let release = std::fs::read_to_string(root.join("ci/scripts/release.sh"))
+        .expect("read release entry point");
+    let hosted = std::fs::read_to_string(root.join("ci/scripts/prepare-hosted.sh"))
+        .expect("read hosted preparation");
+    let workflow = std::fs::read_to_string(root.join(".github/workflows/release.yml"))
+        .expect("read release workflow");
+    let dockerignore =
+        std::fs::read_to_string(root.join(".dockerignore")).expect("read Docker context policy");
+    let containerignore =
+        std::fs::read_to_string(root.join(".containerignore")).expect("read Podman context policy");
+    let toolchain = std::fs::read_to_string(root.join("rust-toolchain.toml"))
+        .expect("read Rust toolchain contract");
+
+    let from = builder
+        .lines()
+        .find(|line| line.starts_with("FROM "))
+        .expect("release builder has a base image");
+    let (image, digest) = from
+        .strip_prefix("FROM ghcr.io/rust-lang/rust:")
+        .and_then(|value| value.split_once("@sha256:"))
+        .expect("release builder pins the official Rust image by platform digest");
+    assert_eq!(digest.len(), 64, "release builder digest is not SHA-256");
+    assert!(
+        digest.bytes().all(|byte| byte.is_ascii_hexdigit()),
+        "release builder digest is not hexadecimal"
+    );
+    let channel = toolchain
+        .lines()
+        .find_map(|line| line.trim().strip_prefix("channel = \"")?.strip_suffix('"'))
+        .expect("toolchain channel");
+    assert!(
+        image.starts_with(&format!("{channel}-")),
+        "release builder tag {image} does not name toolchain {channel}"
+    );
+
+    for required in [
+        "ARG DEBIAN_SNAPSHOT=20261101T000000Z",
+        "snapshot.debian.org/archive/debian/${DEBIAN_SNAPSHOT}/",
+        "snapshot.debian.org/archive/debian-security/${DEBIAN_SNAPSHOT}/",
+        "git \\",
+        "musl-tools \\",
+        "pkg-config \\",
+        "zlib1g-dev \\",
+        "actual=\"$(rustc --version | awk '{print $2}')\"",
+        "test \"$actual\" = \"$required\"",
+        "rustup target add x86_64-unknown-linux-musl --toolchain \"$required\"",
+    ] {
+        assert!(
+            builder.contains(required),
+            "release builder lost {required}"
+        );
+    }
+
+    for required in [
+        "if [[ \"${APLAN_RELEASE_IN_BUILDER:-}\" != 1 ]]",
+        "--file ci/release.Containerfile",
+        "--platform linux/amd64",
+        "--volume \"$REPO_ROOT:/aplan/source:ro\"",
+        "--env APLAN_RELEASE_IN_BUILDER=1",
+        "--env CARGO_TARGET_DIR=/aplan/build/target",
+        "${APLAN_RELEASE_SCRATCH_ROOT:-${HOME:?}/.tmp}",
+    ] {
+        assert!(
+            release.contains(required),
+            "release entry point lost {required}"
+        );
+    }
+    assert!(
+        workflow.contains("run: ci/scripts/release.sh"),
+        "hosted publication bypasses the shared release entry point"
+    );
+    assert!(
+        hosted.contains("for command in docker gh jq; do")
+            && hosted.contains("docker info >/dev/null")
+            && hosted.contains("docker build --help | grep -q -- '--platform'")
+            && !hosted.contains("musl-tools")
+            && !hosted.contains("rustup target add x86_64-unknown-linux-musl"),
+        "hosted preparation must provide the engine, not a second native artifact toolchain"
+    );
+    for allowed in [
+        "**",
+        "!rust-toolchain.toml",
+        "!ci/release.Containerfile",
+        "!ci/scripts/toolchain.sh",
+    ] {
+        assert!(
+            dockerignore.lines().any(|line| line == allowed),
+            "release builder context lost {allowed}"
+        );
+    }
+    let docker_policy = dockerignore
+        .lines()
+        .map(str::trim)
+        .filter(|line| !line.is_empty() && !line.starts_with('#'))
+        .collect::<Vec<_>>();
+    let podman_policy = containerignore
+        .lines()
+        .map(str::trim)
+        .filter(|line| !line.is_empty() && !line.starts_with('#'))
+        .collect::<Vec<_>>();
+    assert_eq!(
+        docker_policy, podman_policy,
+        "Docker and Podman must build from the same bounded context"
+    );
+}
+
 fn audit_workflow_warning_policy() {
     let files = workflows();
     let mut workflow_rustflags = Vec::new();

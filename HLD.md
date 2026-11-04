@@ -1551,11 +1551,15 @@ on this foundation.
 The first public distribution transaction is deliberately small and closed. An immutable version
 tag enters the protected `release` environment, where an external reviewer admits one exact source
 commit. A fresh hosted runner prepares every tool required by the complete release profile: the
-pinned Rust and coverage toolchains, the musl target, and the GitHub publication clients. The exact
-source then passes all release gates before any artifact, registry credential, package, or release
-is created.
+pinned Rust and coverage toolchains, a container engine, and the GitHub publication clients. The
+exact source then passes all release gates before any artifact, registry credential, package, or
+release is created.
 
-After validation, `ci/scripts/release.sh` builds one static Linux archive and records its SHA-256.
+After validation, `ci/scripts/release.sh` builds one static Linux archive inside the x86_64 builder
+in `ci/release.Containerfile` and records its SHA-256. The builder's upstream image is bound by
+platform-manifest digest, and native packages resolve only from one immutable Debian snapshot.
+Local and hosted callers therefore use the same Rust, C, musl, linker, archive, and compression
+inputs. A toolchain change that does not update the builder pin fails while constructing the image.
 GitHub OIDC obtains a short-lived crates.io token only for a tag run. The ten public workspace
 packages publish in dependency order, and each new package must become resolvable from the registry
 before a dependent can publish. GitHub release creation is last. Both publication scripts are
