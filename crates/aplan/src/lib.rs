@@ -21128,6 +21128,9 @@ mod tests {
         let inner = plan.join(aplan_config::CONFIG_FILE);
         std::fs::write(&outer, "root: plan\n").expect("invocation config");
         std::fs::write(&inner, "root: [\n").expect("invalid plan-local config");
+        let canonical_plan = plan.canonicalize().expect("canonical plan");
+        let canonical_outer = outer.canonicalize().expect("canonical invocation config");
+        let canonical_inner = inner.canonicalize().expect("canonical plan config");
         let before = tree_state(dir.path());
 
         let onboarding = onboarding_from(
@@ -21143,15 +21146,15 @@ mod tests {
             onboarding.cause,
             aplan_app::OnboardingCause::InvalidConfiguration
         );
-        assert_eq!(onboarding.plan_root, plan);
+        assert_eq!(onboarding.plan_root, canonical_plan);
         assert!(matches!(
             onboarding.root_selection,
-            aplan_app::RootSelection::Configuration { ref file } if file == &outer
+            aplan_app::RootSelection::Configuration { ref file } if file == &canonical_outer
         ));
         assert!(matches!(
             onboarding.configuration,
             aplan_app::ConfigurationSelection::Discover { ref found, .. }
-                if found.as_ref() == Some(&inner)
+                if found.as_ref() == Some(&canonical_inner)
         ));
         assert!(onboarding.commands.is_empty());
         assert_eq!(tree_state(dir.path()), before);
@@ -21266,6 +21269,9 @@ mod tests {
         std::fs::create_dir_all(discovered.path().join("plan/tasks")).expect("plan");
         let discovered_file = discovered.path().join(".aplan.yml");
         std::fs::write(&discovered_file, "root: plan\n").expect("discovered config");
+        let canonical_discovered_file = discovered_file
+            .canonicalize()
+            .expect("canonical discovered config");
         let aplan_tui::Launch::Loaded(discovered_launch) = tui_launch_at(
             discovered.path(),
             None,
@@ -21278,7 +21284,7 @@ mod tests {
         assert!(matches!(
             discovered_launch.resolution.configuration,
             aplan_app::ConfigurationSelection::Discover { ref found, .. }
-                if found.as_ref() == Some(&discovered_file)
+                if found.as_ref() == Some(&canonical_discovered_file)
         ));
         assert_eq!(
             discovered_launch
@@ -21287,7 +21293,7 @@ mod tests {
                 .configuration
                 .path
                 .as_ref(),
-            Some(&discovered_file)
+            Some(&canonical_discovered_file)
         );
     }
 
@@ -21305,7 +21311,10 @@ mod tests {
             } else {
                 std::fs::create_dir(dir.path().join(".git")).expect("git marker");
             }
-            assert_eq!(plan_repository(&nested), dir.path());
+            assert_eq!(
+                plan_repository(&nested),
+                dir.path().canonicalize().expect("canonical repository")
+            );
         }
     }
 
