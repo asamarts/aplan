@@ -1501,7 +1501,9 @@ mod incremental_change_tests {
         );
     }
 
-    #[cfg(unix)]
+    // Darwin refuses this deliberately invalid UTF-8 byte sequence before Git
+    // can report it as a changed worktree path.
+    #[cfg(target_os = "linux")]
     #[test]
     fn non_utf8_changed_path_refuses_selection() {
         use std::os::unix::ffi::OsStringExt as _;
