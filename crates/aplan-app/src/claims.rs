@@ -771,6 +771,7 @@ fn validate_file(path: &Path, metadata: &std::fs::Metadata) -> Result<(), ClaimE
     Ok(())
 }
 
+#[cfg_attr(not(unix), allow(clippy::unnecessary_wraps))] // Keep one fallible identity interface.
 fn refuse_changed_identity(
     path: &Path,
     before: &std::fs::Metadata,

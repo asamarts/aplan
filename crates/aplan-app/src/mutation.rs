@@ -599,6 +599,8 @@ pub fn snapshot_observes_publication(context: &PlanContext, change: &ChangeSet) 
 }
 
 /// The result of attempting to publish one exact [`ChangeSet`].
+// Keep public variant payloads identical across target-specific size thresholds.
+#[cfg_attr(windows, allow(clippy::large_enum_variant))]
 #[derive(Debug)]
 pub enum CommitOutcome {
     /// Every proposed file change was published.
