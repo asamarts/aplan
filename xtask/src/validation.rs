@@ -7,6 +7,7 @@
 
 use std::collections::BTreeSet;
 use std::fmt::Write as _;
+#[cfg(unix)]
 use std::os::unix::fs::PermissionsExt as _;
 use std::path::{Path, PathBuf};
 
@@ -438,7 +439,7 @@ fn validate_inventory(root: &Path, inventory: &Inventory) -> Result<()> {
                 gate.name, gate.command
             )
         })?;
-        if !metadata.is_file() || metadata.permissions().mode() & 0o111 == 0 {
+        if !is_executable_file(&metadata) {
             bail!(
                 "validation gate `{}` command `{}` is not an executable file",
                 gate.name,
@@ -447,6 +448,18 @@ fn validate_inventory(root: &Path, inventory: &Inventory) -> Result<()> {
         }
     }
     Ok(())
+}
+
+#[cfg(unix)]
+fn is_executable_file(metadata: &std::fs::Metadata) -> bool {
+    metadata.is_file() && metadata.permissions().mode() & 0o111 != 0
+}
+
+#[cfg(not(unix))]
+fn is_executable_file(metadata: &std::fs::Metadata) -> bool {
+    // Windows has no POSIX execute bits. The inventory's interpreter owns
+    // executability there, so the portable assertion is that the path is a file.
+    metadata.is_file()
 }
 
 fn validate_inventory_shape(inventory: &Inventory) -> Result<()> {
