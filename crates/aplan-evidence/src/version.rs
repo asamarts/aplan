@@ -216,8 +216,10 @@ fn plan_base(repo: &Repo, repo_root: &Path) -> std::path::PathBuf {
 /// kept outside the repository is a real arrangement, and the window then reads
 /// no statuses rather than the wrong ones.
 fn git_path(base: &Path, path: &Path) -> String {
-    path.strip_prefix(base)
-        .unwrap_or(path)
+    let path = std::fs::canonicalize(path).unwrap_or_else(|_| path.to_path_buf());
+    let base = std::fs::canonicalize(base).unwrap_or_else(|_| base.to_path_buf());
+    path.strip_prefix(&base)
+        .unwrap_or(&path)
         .to_string_lossy()
         .replace('\\', "/")
 }
@@ -1058,6 +1060,7 @@ mod tests {
     /// it the same task.
     #[test]
     fn a_task_that_moved_inside_the_window_is_still_read_at_the_tag() {
+        // Proof for `repository.path_identity_is_portable`.
         let dir = tempfile::Builder::new()
             .tempdir_in(aplan_core::fixture::fixture_root())
             .expect("tempdir");
@@ -1110,6 +1113,7 @@ mod tests {
     /// was not `done` at the tag, keyed by id so a renamed file is one task.
     #[test]
     fn the_window_is_what_went_done_since_the_tag() {
+        // Proof for `repository.path_identity_is_portable`.
         let dir = tempfile::Builder::new()
             .tempdir_in(aplan_core::fixture::fixture_root())
             .expect("tempdir");

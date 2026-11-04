@@ -113,17 +113,18 @@ mod tests {
             .get_args()
             .map(|arg| arg.to_string_lossy().into_owned())
             .collect::<Vec<_>>();
+        let manifest = manifest.to_string_lossy().into_owned();
         assert_eq!(
             actual,
             [
-                "run",
-                "--quiet",
-                "--locked",
-                "--manifest-path",
-                "/workspace/tools/tui-eval/Cargo.toml",
-                "--",
-                "canary",
-                "claude"
+                "run".to_string(),
+                "--quiet".to_string(),
+                "--locked".to_string(),
+                "--manifest-path".to_string(),
+                manifest,
+                "--".to_string(),
+                "canary".to_string(),
+                "claude".to_string()
             ]
         );
     }

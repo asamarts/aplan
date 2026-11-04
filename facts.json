@@ -30,7 +30,23 @@
     },
     {
       "name": "storage.atomic_replacement_is_portable",
-      "what": "guarded mutations and private cache refreshes retry transient Windows sharing denials while retaining the same atomic replacement and stale-input boundaries"
+      "what": "guarded mutations and private cache refreshes use one resolved identity for missing and existing paths and retry transient Windows sharing denials while retaining the same atomic replacement and stale-input boundaries"
+    },
+    {
+      "name": "capture.regular_file_boundary_is_portable",
+      "what": "the capture loader classifies every non-regular inbox entry at the same safe boundary and retains its opened-handle race check on every platform"
+    },
+    {
+      "name": "traces.diff_command_path_is_portable",
+      "what": "trace drift renders repository paths in pasteable Git commands with portable slash separators on every platform"
+    },
+    {
+      "name": "repository.path_identity_is_portable",
+      "what": "history readers compare canonical repository and document identities before deriving slash-separated Git paths on every platform"
+    },
+    {
+      "name": "mcp.context_paths_are_portable",
+      "what": "bounded MCP context provenance renders repository-relative paths with one stable slash-separated JSON spelling on every platform"
     },
     {
       "name": "authoring.rekey_repository_boundary_is_portable",
@@ -1391,7 +1407,7 @@
     "version.require_impact"
   ],
   "counts": {
-    "behaviours": 221,
+    "behaviours": 225,
     "build_capabilities": 1,
     "commands": 48,
     "config_keys": 124,

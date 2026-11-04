@@ -6022,13 +6022,18 @@ mod sarif_tests {
             sarif_uri(std::path::Path::new("aplan/tasks/A-1.md")),
             "aplan/tasks/A-1.md"
         );
-        assert_eq!(
-            sarif_uri(std::path::Path::new("/tmp/plan/tasks/A-1.md")),
-            "file:///tmp/plan/tasks/A-1.md"
+        let absolute = std::env::current_dir()
+            .expect("current directory")
+            .join("plan/tasks/A-1.md");
+        let absolute_uri = sarif_uri(&absolute);
+        assert!(absolute_uri.starts_with("file:///"), "{absolute_uri}");
+        assert!(
+            absolute_uri.ends_with("plan/tasks/A-1.md"),
+            "{absolute_uri}"
         );
         // The original bug: a bare `//tmp/...`, which is a network-path URI
         // reference, not the file location meant.
-        assert!(!sarif_uri(std::path::Path::new("/tmp/a.md")).starts_with("//"));
+        assert!(!absolute_uri.starts_with("//"));
     }
 
     #[test]

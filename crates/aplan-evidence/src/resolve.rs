@@ -7395,7 +7395,10 @@ mod tests {
             &[
                 "sh",
                 "-c",
-                &format!("echo x >> {}; exit 3", counter.display()),
+                &format!(
+                    "echo x >> {}; exit 3",
+                    counter.to_string_lossy().replace('\\', "/")
+                ),
             ],
             None,
         );
@@ -7425,7 +7428,10 @@ mod tests {
             &[
                 "sh",
                 "-c",
-                &format!("echo x >> {}; printf 'gated::one\n'", counter.display()),
+                &format!(
+                    "echo x >> {}; printf 'gated::one\n'",
+                    counter.to_string_lossy().replace('\\', "/")
+                ),
             ],
             None,
         );

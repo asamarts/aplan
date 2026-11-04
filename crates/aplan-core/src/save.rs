@@ -327,15 +327,8 @@ fn replace_all_inner(
 ) -> Result<(), SaveError> {
     // Resolved first, and sorted on the resolved path: two names for one file
     // must take one lock, and two batches must agree on the order.
-    let mut resolved: Vec<(PathBuf, &Replacement)> = batch
-        .iter()
-        .map(|r| {
-            (
-                std::fs::canonicalize(&r.path).unwrap_or_else(|_| r.path.clone()),
-                r,
-            )
-        })
-        .collect();
+    let mut resolved: Vec<(PathBuf, &Replacement)> =
+        batch.iter().map(|r| (lock_path(&r.path), r)).collect();
     resolved.sort_by(|a, b| a.0.cmp(&b.0));
 
     // One path named twice with two different answers is a caller bug, and
@@ -1022,6 +1015,14 @@ fn create_temp(path: &Path) -> Result<(PathBuf, std::fs::File), SaveError> {
 #[cfg(test)]
 mod tests {
 
+    fn is_hidden_transaction_artifact(name: &str) -> bool {
+        name.starts_with('.')
+            && !(cfg!(windows)
+                && Path::new(name)
+                    .extension()
+                    .is_some_and(|extension| extension.eq_ignore_ascii_case("lock")))
+    }
+
     /// A relocation is the filename move and every referencing edit together.
     #[test]
     fn a_relocation_moves_the_source_and_replaces_its_siblings_together() {
@@ -1059,7 +1060,9 @@ mod tests {
             std::fs::read_dir(dir.path())
                 .expect("directory")
                 .filter_map(Result::ok)
-                .filter(|entry| entry.file_name().to_string_lossy().starts_with('.'))
+                .filter(|entry| {
+                    is_hidden_transaction_artifact(&entry.file_name().to_string_lossy())
+                })
                 .count(),
             0,
             "a successful relocation left a hidden staging or backup file"
@@ -1293,7 +1296,9 @@ mod tests {
             std::fs::read_dir(dir.path())
                 .expect("directory")
                 .filter_map(Result::ok)
-                .filter(|entry| entry.file_name().to_string_lossy().starts_with('.'))
+                .filter(|entry| {
+                    is_hidden_transaction_artifact(&entry.file_name().to_string_lossy())
+                })
                 .count(),
             0,
             "a hidden staging or backup file survived rollback"
@@ -1383,7 +1388,9 @@ mod tests {
             std::fs::read_dir(dir.path())
                 .expect("directory")
                 .filter_map(Result::ok)
-                .filter(|entry| entry.file_name().to_string_lossy().starts_with('.'))
+                .filter(|entry| {
+                    is_hidden_transaction_artifact(&entry.file_name().to_string_lossy())
+                })
                 .count(),
             0,
             "a backup survived rollback"
@@ -1413,7 +1420,10 @@ mod tests {
             },
         );
 
-        assert!(matches!(result, Err(SaveError::Conflict { path }) if path == new));
+        assert!(
+            matches!(result, Err(SaveError::Conflict { ref path }) if path == &new),
+            "storage.atomic_replacement_is_portable: {result:?}"
+        );
         assert_eq!(std::fs::read_to_string(old).expect("old"), "id: OLD\n");
         assert!(
             !new.exists(),
@@ -1748,7 +1758,7 @@ mod tests {
             .expect("read dir")
             .flatten()
             .map(|e| e.file_name().to_string_lossy().into_owned())
-            .filter(|n| n != "m.md")
+            .filter(|n| n != "m.md" && !(cfg!(windows) && n == ".m.md.lock"))
             .collect();
         assert!(left.is_empty(), "left behind: {left:?}");
     }
@@ -1765,7 +1775,7 @@ mod tests {
             .expect("read dir")
             .flatten()
             .map(|e| e.file_name().to_string_lossy().into_owned())
-            .filter(|n| n != "m.md")
+            .filter(|n| n != "m.md" && !(cfg!(windows) && n == ".m.md.lock"))
             .collect();
         assert!(left.is_empty(), "left behind: {left:?}");
     }
@@ -1860,6 +1870,7 @@ mod tests {
 
     /// A directory nothing may be created in fails at the lock, which is the
     /// first thing that writes.
+    #[cfg(unix)]
     #[test]
     fn a_directory_that_refuses_new_files_is_reported() {
         let dir = tempfile::Builder::new()
@@ -1922,6 +1933,7 @@ mod tests {
     }
 
     /// A lock a dead writer left behind must not block the next one forever.
+    #[cfg(not(windows))]
     #[test]
     fn a_stale_lock_is_broken_rather_than_waited_on() {
         let dir = tempfile::Builder::new()

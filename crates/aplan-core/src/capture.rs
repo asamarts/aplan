@@ -1045,6 +1045,24 @@ fn capture_entry_identity(entry: &std::fs::DirEntry) -> Result<(PathBuf, String)
 }
 
 fn read_capture(path: &Path) -> Result<Capture, Box<Diagnostic>> {
+    // Windows refuses opening a directory as a file before an opened handle can
+    // be inspected. Classify the path first so every platform reports the same
+    // capture boundary. The handle metadata check below still closes the race
+    // between this observation and the open.
+    let path_metadata = std::fs::symlink_metadata(path).map_err(|error| {
+        capture_load_error(
+            path,
+            format!("cannot open the capture file safely: {error}"),
+            "Make the file readable, or remove it from `.inbox`.",
+        )
+    })?;
+    if !path_metadata.file_type().is_file() {
+        return Err(capture_load_error(
+            path,
+            "the capture path stopped naming a regular file while the inbox was being read",
+            "Retry after the concurrent edit finishes; keep only canonical regular capture files in `.inbox`.",
+        ));
+    }
     let mut options = std::fs::OpenOptions::new();
     options.read(true);
     #[cfg(unix)]
@@ -2577,6 +2595,7 @@ mod tests {
 
     #[test]
     fn loader_reports_encoding_schema_and_hostile_entry_neighbours() {
+        // Proof for `capture.regular_file_boundary_is_portable`.
         let dir = tempfile::Builder::new()
             .tempdir_in(crate::fixture::fixture_root())
             .expect("tempdir");
@@ -2672,7 +2691,7 @@ mod tests {
             let link = inbox.join(format!("{FOURTH}.yml"));
             symlink(&schema_error, &link).expect("symlink fixture");
             let error = read_capture(&link).expect_err("safe open refuses symlink");
-            assert!(error.message.contains("cannot open"));
+            assert!(error.message.contains("stopped naming a regular file"));
 
             #[cfg(target_os = "linux")]
             assert_non_utf8_capture_name_is_refused(&inbox);

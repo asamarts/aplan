@@ -2005,8 +2005,8 @@ fn declared_doc_sources(root: &Path) -> Result<Vec<(String, String)>> {
             let name = path
                 .strip_prefix(base)
                 .unwrap_or(&path)
-                .display()
-                .to_string();
+                .to_string_lossy()
+                .replace('\\', "/");
             let body = std::fs::read_to_string(&path)
                 .with_context(|| format!("reading declared document {}", path.display()))?;
             Ok((name, body))

@@ -259,6 +259,7 @@ dependencies = [
  "aplan-core",
  "aplan-evidence",
  "aplan-interop",
+ "fs2",
  "rmcp",
  "schemars",
  "serde",

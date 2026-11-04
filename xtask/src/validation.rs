@@ -1053,7 +1053,7 @@ mod tests {
 
     #[test]
     fn validation_inventory_rejects_duplicate_and_unknown_entries() {
-        let source = include_str!("../../ci/validation.yml");
+        let source = include_str!("../../ci/validation.yml").replace("\r\n", "\n");
         let mut duplicate = canonical();
         duplicate.gates[1].name = duplicate.gates[0].name.clone();
         assert!(
