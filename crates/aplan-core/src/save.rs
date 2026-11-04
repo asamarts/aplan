@@ -1692,6 +1692,7 @@ mod tests {
 
     /// A rename installs a new file, so the target's mode has to be carried
     /// across or a restricted plan file quietly becomes readable by everyone.
+    #[cfg(unix)]
     #[test]
     fn the_targets_permissions_survive_the_replacement() {
         use std::os::unix::fs::PermissionsExt;
@@ -1710,6 +1711,7 @@ mod tests {
 
     /// A plan file reached through a symlink must be written *through*, not
     /// replaced: renaming over the link would strand the real file.
+    #[cfg(unix)]
     #[test]
     fn a_symlinked_target_is_written_through_rather_than_replaced() {
         let dir = tempfile::Builder::new()

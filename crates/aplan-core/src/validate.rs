@@ -6765,6 +6765,7 @@ mod tests {
     /// The lexical test says this is inside, because lexically it is. A task file
     /// and the link it follows can arrive in the same fork pull request, so the
     /// rule follows the link where the target exists.
+    #[cfg(unix)]
     #[test]
     fn a_link_out_of_the_repository_is_outside_it() {
         let dir = tempfile::Builder::new()
@@ -6775,10 +6776,7 @@ mod tests {
         std::fs::create_dir_all(repo.join("docs")).expect("repo");
         std::fs::create_dir_all(&secret).expect("secret");
         std::fs::write(secret.join("DOC.md"), "# D\n\n## A section\n\nx\n").expect("doc");
-        #[cfg(unix)]
         std::os::unix::fs::symlink(&secret, repo.join("docs/link")).expect("link");
-        #[cfg(not(unix))]
-        return;
 
         let mut o = opts();
         o.traces_root = Some(repo.clone());
