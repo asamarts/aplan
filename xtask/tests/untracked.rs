@@ -59,14 +59,27 @@ fn is_a_checkout(root: &Path) -> bool {
 fn the_generators_note_an_untracked_plan_file() {
     let root = repo_root();
     let checkout = is_a_checkout(&root);
-    if checkout {
-        // Nothing untracked: neither gate says anything about the working tree.
-        let before = xtask(&root, &["gen-roadmap", "--check"]);
+    for (args, verdict) in [
+        (vec!["gen-roadmap", "--check"], "up to date"),
+        (vec!["check-docs"], "agree with the plan"),
+    ] {
+        // Establish that each gate passes before the probe changes the working
+        // tree. Otherwise a stale generated file can be misreported as the
+        // note changing the verdict, which obscures the actual failure.
+        let before = xtask(&root, &args);
         assert!(
-            !before.contains("does not track"),
-            "this working tree already holds untracked plan files, so the test cannot \
-             tell the two states apart:\n{before}"
+            before.contains(verdict),
+            "`{}` did not pass before the untracked-file probe:\n{before}",
+            args.join(" ")
         );
+        if checkout {
+            // Nothing untracked: neither gate says anything about the working tree.
+            assert!(
+                !before.contains("does not track"),
+                "this working tree already holds untracked plan files, so the test cannot \
+                 tell the two states apart:\n{before}"
+            );
+        }
     }
 
     let probe = root.join("aplan/a1-144-probe.md");
