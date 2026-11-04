@@ -51,6 +51,7 @@ const NO_HOSTED_PREPARATION: &[(&str, &str, &str)] = &[
 /// actions are sourced from the checked-out revision and have no independent
 /// ref to pin.
 const PINNED_ACTIONS: &[(&str, &str)] = &[
+    ("actions/attest", "1e69f48acb82d1966a394da916b4c1698aa569d6"),
     (
         "actions/checkout",
         "3d3c42e5aac5ba805825da76410c181273ba90b1",
@@ -162,6 +163,12 @@ const SCRIPT_WARNING_POLICY: &[(&str, WarningPolicy)] = &[
     (
         "toolchain.sh",
         WarningPolicy::NoWorkspaceCompilation("reads and verifies the toolchain contract"),
+    ),
+    (
+        "verify-release-provenance.sh",
+        WarningPolicy::NoWorkspaceCompilation(
+            "verifies the signed release archive identity without compiling",
+        ),
     ),
     ("validate.sh", WarningPolicy::DelegatesWithCargo),
     (
@@ -524,6 +531,7 @@ fn release_artifact_builder_pins_native_inputs_for_every_caller() {
         hosted.contains("for command in docker gh jq; do")
             && hosted.contains("docker info >/dev/null")
             && hosted.contains("docker build --help | grep -q -- '--platform'")
+            && hosted.contains("gh attestation verify --help >/dev/null")
             && !hosted.contains("musl-tools")
             && !hosted.contains("rustup target add x86_64-unknown-linux-musl"),
         "hosted preparation must provide the engine, not a second native artifact toolchain"

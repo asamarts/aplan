@@ -1568,6 +1568,15 @@ rerunnable: an existing crate or asset passes only when its bytes agree, a missi
 filled, and drift is refused rather than overwritten. No long-lived crates.io token is stored in
 the repository.
 
+The archive also carries keyless build provenance (ADR-0066). After construction, the protected
+job uses its short-lived GitHub OIDC identity to create a Sigstore-signed SLSA provenance v1
+statement for the one archive. The bundle from that exact step must verify against the public
+repository, release workflow, source ref, source and signer commit, and a GitHub-hosted runner
+before either publication channel can proceed. Manual staging exercises the same path without
+publishing. The archive is verified again after crates.io publication before its GitHub upload, so
+intervening work cannot substitute different bytes. The checksum remains a convenient digest; the attestation authenticates that digest.
+Releases through v0.5.2 predate this contract and do not acquire provenance retroactively.
+
 | Channel | Current mechanism |
 |---|---|
 | GitHub Releases | guarded static archive after exact-source release validation |

@@ -162,14 +162,16 @@ byte-identical within this declared builder boundary.
 The release workflow keeps full validation, artifact construction, crates.io publication and
 GitHub publication in one job, checkout and exact `github.sha`. A previous workflow result, moving
 ref or abbreviated SHA cannot authorize publication. Manual dispatch on `main` stages validation
-and artifact construction but cannot publish because it has no tag.
+and artifact construction, then creates and verifies keyless build provenance, but cannot publish
+because it has no tag.
 
 The protected `release` environment:
 
 - requires an independent reviewer and prevents self-review
 - admits `v*` tags and manual runs from `main`
 - contains no secrets
-- grants the job `id-token: write` for a short-lived crates.io credential
+- grants the job `id-token: write` for short-lived Sigstore and crates.io credentials
+- grants `attestations: write` only to persist the signed archive provenance
 
 Every package binds its trusted publisher to `asamarts/aplan`, `release.yml` and the `release`
 environment. The repository stores no crates.io token. The Actions allowlist admits GitHub-owned
@@ -180,7 +182,25 @@ registry checksum before skipping it. Existing GitHub assets are downloaded and 
 byte. A missing asset may be filled; different bytes are never replaced.
 
 The GitHub release contains one static `x86_64-unknown-linux-musl` archive and an adjacent SHA-256
-file. Native macOS and Windows CI does not create a distribution promise or additional assets.
+file. The release workflow attests only the archive and verifies the new bundle before any
+publication. It verifies the same bundle and archive again after crates.io publication,
+immediately before the GitHub upload, so intervening work cannot substitute different bytes. The
+bundle remains in GitHub's attestation service rather than becoming a mutable third release asset.
+Native macOS and Windows CI does not create a distribution promise or additional assets.
+
+For an attested `vX.Y.Z` release, download the archive and verify its online provenance with:
+
+```sh
+gh attestation verify aplan-vX.Y.Z-x86_64-unknown-linux-musl.tar.gz \
+  --repo asamarts/aplan \
+  --signer-workflow asamarts/aplan/.github/workflows/release.yml \
+  --source-ref refs/tags/vX.Y.Z \
+  --deny-self-hosted-runners
+```
+
+This authenticates the archive digest and signer identity. Verify the adjacent SHA-256 as the
+independent byte-integrity check. Releases through v0.5.2 predate ADR-0066 and have no attestation;
+do not treat a later workflow invocation as proof of their historical build.
 
 ## Release audit checklist
 
@@ -192,6 +212,8 @@ For a published version, independently verify:
 - all ten crates.io packages are visible, unyanked, checksum-addressed and owned by the maintainer
 - a fresh locked crates.io install reports the released version and expected facts
 - the release archive checksum matches its sidecar and GitHub's asset digest
+- the archive attestation verifies against this repository, `release.yml`, the release tag and a
+  GitHub-hosted runner; releases through v0.5.2 are explicitly exempt as historical artifacts
 - the archive contains one static executable that reports the same version
 - rerunning the release workflow proves existing registry packages and assets without replacing
   bytes
