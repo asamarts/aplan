@@ -1580,6 +1580,7 @@ struct Lifecycle {
 
 #[cfg(unix)]
 impl Lifecycle {
+    #[allow(clippy::unnecessary_wraps)] // Match the fallible Unix lifecycle constructor.
     fn new() -> Result<Self, Error> {
         use signal_hook::consts::signal::{SIGCONT, SIGHUP, SIGINT, SIGQUIT, SIGTERM, SIGTSTP};
 
