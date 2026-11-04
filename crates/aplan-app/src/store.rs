@@ -2126,7 +2126,9 @@ mod tests {
         assert_eq!(titles(&changed), [("A-1", "two")]);
     }
 
-    #[cfg(unix)]
+    // Darwin rejects this deliberately invalid UTF-8 byte sequence at the
+    // filesystem boundary, before the store can observe it.
+    #[cfg(target_os = "linux")]
     #[test]
     fn native_non_utf8_candidate_paths_round_trip_through_the_cache() {
         use std::os::unix::ffi::OsStringExt as _;
