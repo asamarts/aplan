@@ -212,6 +212,8 @@ pub struct LoadedLaunch {
 /// Expected first-use and repair conditions remain inside the terminal instead
 /// of being flattened into an early CLI error. Unexpected host failures still
 /// use the callback's `Err` path.
+// Keep the published variant payloads stable across target-specific size thresholds.
+#[cfg_attr(windows, allow(clippy::large_enum_variant))]
 #[derive(Debug)]
 pub enum Launch {
     Loaded(Box<LoadedLaunch>),
@@ -1580,7 +1582,6 @@ struct Lifecycle {
 
 #[cfg(unix)]
 impl Lifecycle {
-    #[allow(clippy::unnecessary_wraps)] // Match the fallible Unix lifecycle constructor.
     fn new() -> Result<Self, Error> {
         use signal_hook::consts::signal::{SIGCONT, SIGHUP, SIGINT, SIGQUIT, SIGTERM, SIGTSTP};
 
@@ -1650,6 +1651,7 @@ struct Lifecycle;
 
 #[cfg(not(unix))]
 impl Lifecycle {
+    #[allow(clippy::unnecessary_wraps)] // Match the fallible Unix lifecycle constructor.
     fn new() -> Result<Self, Error> {
         Ok(Self)
     }
