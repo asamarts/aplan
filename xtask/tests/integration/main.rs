@@ -17,8 +17,6 @@ mod pre_push_hook;
 mod pushed;
 #[path = "../release_changelog.rs"]
 mod release_changelog;
-#[path = "../runner_job_started.rs"]
-mod runner_job_started;
 #[path = "../untracked.rs"]
 mod untracked;
 #[path = "../validation_profiles.rs"]

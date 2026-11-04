@@ -1,38 +1,21 @@
-//! **A public workflow can name no persistent runner that exists** (`A1-382`).
+//! **Every public workflow job runs on fresh hosted compute** (`A2-013`).
 //!
-//! A pull request supplies the workflow that runs, so a router inside that
-//! workflow is not a security boundary: the author can bypass it and write the
-//! self-hosted labels directly. The boundary chosen in the pre-public repository-boundary decision is outside the
-//! workflow. The persistent runner exists only while the repository is private;
-//! it is deregistered before the repository becomes public, and every committed
-//! job selects a standard hosted runner in that state. The one portability
-//! workflow widens the public standard-hosted answer to macOS and Windows,
-//! behind a pre-allocation public-only guard (ADR-0059).
+//! A pull request supplies the workflow that runs, so repository runner absence
+//! remains the security boundary. The committed source is simpler as well: no
+//! visibility router or provisioning path remains, required checks pin reviewed
+//! GA Linux, macOS and Windows images, and a separate scheduled matrix follows
+//! moving `*-latest` labels (ADR-0065).
 //!
 //! This is an executable census rather than a line scan. Every workflow job is
-//! accounted for, every job has the one visibility expression whose branches
-//! were reviewed, and every job that compiles the repository names the hosted
-//! preparation profile it needs. A new job is a failure until it joins the
-//! table, so the audit cannot quietly drift behind the surface it claims to
-//! cover.
+//! accounted for, every runner selector is reviewed, and every job that compiles
+//! the repository names the hosted preparation profile it needs. A new job is a
+//! failure until it joins the table.
 
 use std::os::unix::fs::PermissionsExt;
 use std::process::Command;
 
-/// One reviewed expression is deliberately repeated in workflow YAML. A YAML
-/// anchor would hide the placement decision from GitHub's workflow reader, and
-/// a router job can be rewritten by the same pull request it is meant to judge.
-const VISIBILITY_RUNNER: &str = "${{ (github.event.repository.private && \
-    fromJSON('[\"self-hosted\",\"linux\",\"aplan\"]')) || fromJSON('[\"ubuntu-latest\"]') }}";
-const PUBLIC_PORTABILITY_RUNNER: &str = "${{ matrix.runner }}";
-const PUBLIC_PORTABILITY_GUARD: &str = "github.event.repository.private == false";
-
-/// The one workflow reachable from a pull request while private must retain an
-/// event allow-list. An exclusion such as `event != pull_request` silently
-/// admits any future trigger somebody adds without reviewing its trust model.
-const ACTION_SELFTEST_GUARD: &str = "github.event_name == 'push' || \
-    github.event_name == 'workflow_dispatch' || (github.event_name == 'pull_request' && \
-    github.event.repository.private == false)";
+const STABLE_LINUX_RUNNER: &str = "ubuntu-24.04";
+const MATRIX_RUNNER: &str = "${{ matrix.runner }}";
 
 /// Hosted preparation profiles, one per job that invokes repository scripts.
 ///
@@ -40,13 +23,13 @@ const ACTION_SELFTEST_GUARD: &str = "github.event_name == 'push' || \
 /// names that passes merely by containing every current member.
 const HOSTED_PREPARATION: &[(&str, &str, &str)] = &[
     ("ci.yml", "development", "\"$APLAN_ORDINARY_PROFILE\""),
+    ("ci.yml", "platform", "platform"),
     ("ci.yml", "full", "coverage"),
     ("evidence-rollout.yml", "produce", "base"),
     ("latest-stable.yml", "latest-stable", "latest-stable"),
     ("release.yml", "release", "release"),
     ("scale.yml", "scale", "base"),
-    ("tui-portability.yml", "linux", "portability"),
-    ("tui-portability.yml", "public-platforms", "portability"),
+    ("tui-portability.yml", "platforms", "portability"),
 ];
 
 /// Jobs that need no toolchain preparation, with the reason held beside the
@@ -55,12 +38,12 @@ const NO_HOSTED_PREPARATION: &[(&str, &str, &str)] = &[
     (
         "action-selftest.yml",
         "selftest",
-        "the action downloads the released static binary and GitHub-hosted runners already provide gh, curl and tar",
+        "the action downloads the released static binary and the hosted Linux image already provides gh, curl and tar",
     ),
     (
         "evidence-rollout.yml",
         "consume",
-        "the consumer executes the same-workflow binary and Python audit harness without compiling; both private and standard hosted images provide Python and Git",
+        "the consumer executes the same-workflow binary and Python audit harness without compiling; the hosted Linux image provides Python and Git",
     ),
 ];
 
@@ -146,6 +129,7 @@ const SCRIPT_WARNING_POLICY: &[(&str, WarningPolicy)] = &[
     ),
     ("latest-stable.sh", WarningPolicy::Cargo),
     ("msrv-build.sh", WarningPolicy::IsolatedMsrv),
+    ("platform.sh", WarningPolicy::Cargo),
     ("preflight.sh", WarningPolicy::DelegatesWithCargo),
     (
         "prepare-hosted.sh",
@@ -797,103 +781,6 @@ fn assert_once(text: &str, needle: &str, owner: &str) {
     );
 }
 
-/// `A1-632`: the image, container and job hook form one resource contract. A
-/// setting in only one layer is a comment, not a bound, so this census requires
-/// each declaration to drive its corresponding runtime verification.
-#[test]
-fn private_runner_resource_limits_and_cleanup_hook_are_persisted_and_verified() {
-    let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
-    let containerfile = std::fs::read_to_string(root.join("ci/Containerfile"))
-        .expect("read private-runner Containerfile");
-    let setup = std::fs::read_to_string(root.join("ci/runner/setup.sh"))
-        .expect("read private-runner setup");
-    let hook = std::fs::read_to_string(root.join("ci/runner/job-started.sh"))
-        .expect("read private-runner job-started hook");
-    let reclaimer = std::fs::read_to_string(root.join("ci/runner/reclaim-coverage.py"))
-        .expect("read private-runner coverage reclaimer");
-    let cargo_config = std::fs::read_to_string(root.join("ci/cargo-ci-config.toml"))
-        .expect("read shared CI Cargo config");
-
-    for setting in [
-        "COPY --chown=runner:runner ci/cargo-ci-config.toml /usr/local/cargo/config.toml",
-        "COPY ci/runner/job-started.sh /home/runner/job-started.sh",
-        "COPY ci/runner/reclaim-coverage.py /home/runner/reclaim-coverage.py",
-    ] {
-        assert!(
-            containerfile.contains(setting),
-            "runner image lost build-cost setting `{setting}`"
-        );
-    }
-    for setting in [
-        "[build]",
-        "incremental = false",
-        "[profile.dev]",
-        "[profile.dev.package.\"*\"]",
-        "debug = false",
-        "[profile.test]",
-    ] {
-        assert!(
-            cargo_config.contains(setting),
-            "shared CI Cargo config lost `{setting}`"
-        );
-    }
-    assert_eq!(
-        cargo_config.matches("debug = \"line-tables-only\"").count(),
-        2,
-        "dev and test profiles must both retain line tables"
-    );
-
-    for setting in [
-        "RUNNER_CPUS=\"${RUNNER_CPUS:-8}\"",
-        "RUNNER_CPU_SHARES=\"${RUNNER_CPU_SHARES:-64}\"",
-        "RUNNER_MEMORY_HIGH_BYTES=\"${RUNNER_MEMORY_HIGH_BYTES:-25769803776}\"",
-        "RUNNER_TARGET_CAP_GIB=\"${RUNNER_TARGET_CAP_GIB:-100}\"",
-        "--cpus \"${RUNNER_CPUS}\"",
-        "--cpu-shares \"${RUNNER_CPU_SHARES}\"",
-        "--cgroup-conf \"memory.high=${RUNNER_MEMORY_HIGH_BYTES}\"",
-        "-e ACTIONS_RUNNER_HOOK_JOB_STARTED=/home/runner/job-started.sh",
-        "verify_equal NanoCpus",
-        "verify_equal CpuShares",
-        "verify_equal memory.high-config",
-        "verify_equal memory.high",
-        "verify_equal cpu.max",
-    ] {
-        assert!(
-            setup.contains(setting),
-            "runner setup lost resource declaration or verification `{setting}`"
-        );
-    }
-    assert_once(&setup, "podman create \\", "runner setup");
-    assert_once(&setup, "podman start \"${CONTAINER_NAME}\"", "runner setup");
-
-    for boundary in [
-        "/usr/bin/python3 \"$HOOK_DIR/reclaim-coverage.py\"",
-        "TARGET_CAP_GIB=\"${TARGET_CAP_GIB:-100}\"",
-    ] {
-        assert!(
-            hook.contains(boundary),
-            "runner cleanup hook lost deletion boundary `{boundary}`"
-        );
-    }
-    for boundary in [
-        "^\\.aplan-coverage-([1-9][0-9]*)-(0|[1-9][0-9]*)$",
-        ".aplan-coverage-owner-v1.json",
-        "candidate.lstat()",
-        "os.O_NOFOLLOW",
-        "process_state(owner, current_boot)",
-        "wanted_group == group",
-        "APLAN_COVERAGE_LEASE=",
-        "shutil.rmtree.avoids_symlink_attacks",
-        "shutil.rmtree(candidate)",
-        "--legacy-quiescent",
-    ] {
-        assert!(
-            reclaimer.contains(boundary),
-            "coverage reclaimer lost ownership or deletion boundary `{boundary}`"
-        );
-    }
-}
-
 fn cargo_fixture(
     directory: &std::path::Path,
     target: &std::path::Path,
@@ -1013,10 +900,9 @@ fn workflows() -> Vec<(String, yaml_compat::Value)> {
     out
 }
 
-/// A1-647: the private runner deliberately puts build output in a persistent
-/// external target directory. The rollout producer must consume Cargo's actual
-/// output location rather than a workspace-relative path that happens to work
-/// on a fresh GitHub-hosted runner.
+/// A1-647: a configured external target directory must be respected. The
+/// rollout producer consumes Cargo's actual output location rather than a
+/// workspace-relative path that happens to work on a fresh hosted runner.
 #[test]
 fn evidence_rollout_producer_honours_cargo_target_dir() {
     let files = workflows();
@@ -1034,7 +920,7 @@ fn evidence_rollout_producer_honours_cargo_target_dir() {
     );
     assert!(
         !command.contains("--binary target/release/aplan"),
-        "a workspace-relative binary path breaks the private runner: {command}"
+        "a workspace-relative binary path breaks an external target directory: {command}"
     );
 }
 
@@ -1228,13 +1114,13 @@ fn validation_event_routes(
         .collect::<std::collections::BTreeSet<_>>();
     assert_eq!(
         job_names,
-        ["development", "full"].into_iter().collect(),
-        "CI must route through exactly the two authoritative validation profiles"
+        ["development", "full", "platform"].into_iter().collect(),
+        "CI must contain the two authoritative Linux profiles and one portable matrix"
     );
     let expected_jobs = [
         (
             "development",
-            "development validation",
+            "Linux development validation",
             DEVELOPMENT_EVENTS,
             "ci/scripts/preflight.sh --profile \"$APLAN_ORDINARY_PROFILE\" --base \"$APLAN_VALIDATION_BASE\" --head \"$APLAN_VALIDATION_HEAD\"",
         ),
@@ -1348,7 +1234,7 @@ fn ordinary_profile_has_one_complete_full_rollback_switch() {
         (
             root.join("ci/scripts/install-nextest.sh"),
             vec!["unknown-mode"],
-            "self-hosted.env",
+            "nextest.env",
         ),
     ] {
         let environment = timing.path().join(file);
@@ -1505,22 +1391,17 @@ fn validation_workflow_routes_every_event_to_one_non_divergent_profile() {
     );
 }
 
-/// `A1-616`: runner placement cannot silently select a different Cargo build
-/// profile. The committed file is copied into the private image and installed
-/// before any hosted repository compilation.
+/// Every authoritative hosted job installs the same reviewed Cargo profile
+/// before any repository compilation.
 #[test]
-fn private_and_hosted_runners_share_one_ci_cargo_profile() {
+fn authoritative_hosted_jobs_share_one_ci_cargo_profile() {
     let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
-    let container =
-        std::fs::read_to_string(root.join("ci/Containerfile")).expect("read private runner image");
     let hosted = std::fs::read_to_string(root.join("ci/scripts/prepare-hosted.sh"))
         .expect("read hosted preparation");
     let installer = std::fs::read_to_string(root.join("ci/scripts/install-cargo-ci-config.sh"))
         .expect("read CI Cargo profile installer");
-    let containerignore = std::fs::read_to_string(root.join(".containerignore"))
-        .expect("read container context policy");
     let profile = std::fs::read_to_string(root.join("ci/cargo-ci-config.toml"))
-        .expect("read shared CI Cargo profile");
+        .expect("read hosted CI Cargo profile");
 
     let repository_legacy_config = root.join(".cargo/config");
     assert!(
@@ -1537,7 +1418,7 @@ fn private_and_hosted_runners_share_one_ci_cargo_profile() {
 
     assert_eq!(
         profile,
-        "# One immutable-checkout build profile for both private and GitHub-hosted CI.\n\
+        "# One immutable-checkout build profile for GitHub-hosted CI.\n\
 # Keep this out of `.cargo/`: local debugging retains the workspace defaults.\n\
 [build]\n\
 incremental = false\n\
@@ -1553,11 +1434,6 @@ debug = \"line-tables-only\"\n",
         "the audited CI profile changed; review its build and disk effects"
     );
 
-    assert_once(
-        &container,
-        "COPY --chown=runner:runner ci/cargo-ci-config.toml /usr/local/cargo/config.toml",
-        "private runner image",
-    );
     assert_once(
         &hosted,
         "\"$REPO_ROOT/ci/scripts/install-cargo-ci-config.sh\"",
@@ -1577,13 +1453,6 @@ debug = \"line-tables-only\"\n",
             "CI Cargo profile installer lost boundary `{boundary}`"
         );
     }
-    assert!(
-        containerignore
-            .lines()
-            .any(|line| line == "!ci/cargo-ci-config.toml"),
-        "the private runner build context omits the shared CI Cargo config"
-    );
-
     for (file, workflow) in workflows() {
         let rendered =
             yaml_compat::to_string(&workflow).expect("render workflow for profile audit");
@@ -1739,6 +1608,20 @@ fn runs_on(job: &yaml_compat::Value) -> String {
     }
 }
 
+fn runner_matrix(job: &yaml_compat::Value, context: &str) -> Vec<(String, String)> {
+    job["strategy"]["matrix"]["include"]
+        .as_sequence()
+        .unwrap_or_else(|| panic!("{context} has no explicit runner matrix"))
+        .iter()
+        .map(|entry| {
+            (
+                entry["name"].as_str().unwrap_or_default().to_owned(),
+                entry["runner"].as_str().unwrap_or_default().to_owned(),
+            )
+        })
+        .collect()
+}
+
 fn job<'a>(
     files: &'a [(String, yaml_compat::Value)],
     file: &str,
@@ -1803,27 +1686,10 @@ fn preparation_order_problem(steps: &[yaml_compat::Value], command: &str) -> Opt
 }
 
 /// The performance harness is executable test code, so its interpreter belongs
-/// to both environment contracts. This reads the declarations that actually
-/// build and prepare those environments rather than maintaining a third list.
+/// to the hosted preparation contract.
 #[test]
 fn every_test_environment_declares_the_performance_harness_runtime() {
     let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
-    let containerfile = std::fs::read_to_string(root.join("ci/Containerfile"))
-        .expect("read the private runner image");
-    let packages = containerfile
-        .split_once("apt-get install -y --no-install-recommends")
-        .expect("private image has one package-install block")
-        .1
-        .split_once("&& rm -rf /var/lib/apt/lists/*")
-        .expect("private image bounds its package-install block")
-        .0;
-    assert!(
-        packages
-            .split_ascii_whitespace()
-            .any(|word| word.trim_end_matches('\\') == "python3"),
-        "ci/Containerfile must install `python3` for the read-performance tests"
-    );
-
     let preparation = std::fs::read_to_string(root.join("ci/scripts/prepare-hosted.sh"))
         .expect("read hosted preparation");
     let commands = preparation
@@ -1842,9 +1708,7 @@ fn every_test_environment_declares_the_performance_harness_runtime() {
     );
 }
 
-/// A1-650: private and hosted execution must consume one artifact identity.
-/// Copying a version or checksum into either environment would let one runner
-/// stay green on a different nextest build.
+/// A1-650: every full-test entry point must consume one artifact identity.
 fn assert_workflows_install_nextest_on_every_runner(files: &[(String, yaml_compat::Value)]) {
     for (file, name) in [
         ("ci.yml", "development"),
@@ -1872,7 +1736,7 @@ fn assert_workflows_install_nextest_on_every_runner(files: &[(String, yaml_compa
         let (install_index, install_step) = install[0];
         assert!(
             install_step.get("if").is_none(),
-            "{file}:{name} must install or verify nextest on both private and hosted runners"
+            "{file}:{name} must install or verify the pinned nextest build"
         );
         let preparation_index = steps
             .iter()
@@ -1944,16 +1808,12 @@ fn cargo_deny_check_handles_executable_paths_with_spaces() {
 }
 
 #[test]
-fn private_and_hosted_test_environments_share_one_pinned_nextest_artifact() {
+fn hosted_test_environments_share_one_pinned_nextest_artifact() {
     let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
     let manifest = std::fs::read_to_string(root.join("ci/nextest.env"))
         .expect("read nextest artifact manifest");
     let installer = std::fs::read_to_string(root.join("ci/scripts/install-nextest.sh"))
         .expect("read nextest installer");
-    let container =
-        std::fs::read_to_string(root.join("ci/Containerfile")).expect("read private runner image");
-    let containerignore = std::fs::read_to_string(root.join(".containerignore"))
-        .expect("read container context policy");
     let validation: yaml_compat::Value = yaml_compat::from_str(
         &std::fs::read_to_string(root.join("ci/validation.yml"))
             .expect("read validation selection inventory"),
@@ -1980,28 +1840,13 @@ fn private_and_hosted_test_environments_share_one_pinned_nextest_artifact() {
             "the installer does not consume {key}"
         );
     }
-    assert!(container.contains("ci/scripts/install-nextest.sh"));
-    assert!(
-        !container.contains("0.9.143"),
-        "the private image copied the version pin"
-    );
-    assert!(
-        !container.contains("66786b9abe23920d022a182d1416b1bbc8130dd4872a9553d76985a1708dcd1e"),
-        "the private image copied an artifact checksum"
-    );
     let hosted = std::fs::read_to_string(root.join("ci/scripts/prepare-hosted.sh"))
         .expect("read hosted preparation");
     assert!(
         !hosted.contains("install-nextest.sh"),
-        "hosted-only preparation must not duplicate the common private/hosted installer step"
+        "hosted preparation must not duplicate the workflow's pinned installer step"
     );
     assert_workflows_install_nextest_on_every_runner(&workflows());
-    for included in ["!ci/nextest.env", "!ci/scripts/install-nextest.sh"] {
-        assert!(
-            containerignore.lines().any(|line| line == included),
-            "the bounded container context omits {included}"
-        );
-    }
     let path_rules = validation["selection"]["paths"]
         .as_sequence()
         .expect("selection.paths is a sequence");
@@ -2036,23 +1881,29 @@ fn a_public_repository_cannot_name_a_persistent_self_hosted_runner() {
             let name = name.as_str().unwrap_or_default();
             seen.push((file.as_str(), name));
             let actual = runs_on(job);
-            let expected = if file == "tui-portability.yml" && name == "public-platforms" {
-                PUBLIC_PORTABILITY_RUNNER
+            let expected = if (file == "ci.yml" && name == "platform")
+                || (file == "tui-portability.yml" && name == "platforms")
+            {
+                MATRIX_RUNNER
             } else {
-                VISIBILITY_RUNNER
+                STABLE_LINUX_RUNNER
             };
             if actual != expected {
                 wrong.push(format!("{file}:{name} uses `{actual}`"));
+            }
+            let rendered = yaml_compat::to_string(job).expect("render workflow job");
+            for forbidden in ["self-hosted", "repository.private", "fromJSON("] {
+                assert!(
+                    !rendered.contains(forbidden),
+                    "{file}:{name} retains obsolete runner routing through `{forbidden}`"
+                );
             }
         }
     }
 
     assert!(
         wrong.is_empty(),
-        "{} workflow job(s) do not use the reviewed private/self-hosted, public/hosted expression \
-         from ADR-0045/ADR-0059. A pull request can replace its workflow and name the old labels directly, \
-         so the external flip gate must also prove the public repository has zero registered \
-         runners; this census proves the committed workflows do not regress by accident:\n  - {}",
+        "{} workflow job(s) do not use the explicit hosted selectors from ADR-0065:\n  - {}",
         wrong.len(),
         wrong.join("\n  - ")
     );
@@ -2082,35 +1933,71 @@ fn a_public_repository_cannot_name_a_persistent_self_hosted_runner() {
         accounted.len(),
         "the hosted-environment census contains a stale or duplicate entry"
     );
+}
 
-    let selftest = job(&files, "action-selftest.yml", "selftest");
-    assert_eq!(
-        selftest.get("if").and_then(yaml_compat::Value::as_str),
-        Some(ACTION_SELFTEST_GUARD),
-        "the action self-test must fail closed to its three reviewed events and refuse a private pull request"
+#[test]
+fn required_platform_checks_compile_lint_test_and_exercise_a_real_terminal() {
+    let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
+    let script = std::fs::read_to_string(root.join("ci/scripts/platform.sh"))
+        .expect("read required platform contract");
+    let commands = [
+        "cargo clippy --workspace --all-targets -- -D warnings",
+        "cargo test --workspace --lib --bins -- --test-threads=1",
+        "cargo test -p aplan --test integration tui_portability::",
+    ];
+    let offsets = commands.map(|command| {
+        assert_eq!(
+            script.lines().filter(|line| *line == command).count(),
+            1,
+            "platform contract must execute `{command}` exactly once"
+        );
+        script.find(command).expect("required platform command")
+    });
+    assert!(
+        offsets.windows(2).all(|pair| pair[0] < pair[1]),
+        "platform commands must compile and lint before executing tests"
     );
 
-    let portability = job(&files, "tui-portability.yml", "public-platforms");
+    let files = workflows();
+    let platform = job(&files, "ci.yml", "platform");
     assert_eq!(
-        portability.get("if").and_then(yaml_compat::Value::as_str),
-        Some(PUBLIC_PORTABILITY_GUARD),
-        "macOS and Windows must be skipped before runner allocation while the repository is private"
+        platform["strategy"]["fail-fast"].as_bool(),
+        Some(false),
+        "one required platform failure must not erase the other platform's verdict"
     );
-    let matrix = portability["strategy"]["matrix"]["include"]
-        .as_sequence()
-        .expect("the public portability job has an explicit matrix")
-        .iter()
-        .map(|entry| {
-            (
-                entry["name"].as_str().unwrap_or_default(),
-                entry["runner"].as_str().unwrap_or_default(),
-            )
-        })
-        .collect::<Vec<_>>();
     assert_eq!(
-        matrix,
-        vec![("macOS", "macos-latest"), ("Windows", "windows-latest")],
-        "the public portability matrix must contain only reviewed standard hosted labels"
+        runner_matrix(platform, "required portability job"),
+        vec![
+            ("macOS".to_owned(), "macos-15".to_owned()),
+            ("Windows".to_owned(), "windows-2025".to_owned()),
+        ],
+        "required platform checks must pin reviewed GA hosted images"
+    );
+    assert_eq!(platform["if"].as_str(), Some(DEVELOPMENT_EVENTS));
+    assert!(platform.get("continue-on-error").is_none());
+    assert!(
+        platform["steps"]
+            .as_sequence()
+            .expect("platform steps")
+            .iter()
+            .any(|step| step["run"].as_str() == Some("ci/scripts/platform.sh")),
+        "required platform job bypasses the executable contract"
+    );
+}
+
+#[test]
+fn scheduled_portability_observes_every_moving_platform_image() {
+    let files = workflows();
+    let moving = job(&files, "tui-portability.yml", "platforms");
+    assert_eq!(moving["strategy"]["fail-fast"].as_bool(), Some(false));
+    assert_eq!(
+        runner_matrix(moving, "scheduled portability job"),
+        vec![
+            ("Linux".to_owned(), "ubuntu-latest".to_owned()),
+            ("macOS".to_owned(), "macos-latest".to_owned()),
+            ("Windows".to_owned(), "windows-latest".to_owned()),
+        ],
+        "the scheduled matrix must observe every moving hosted platform label"
     );
 }
 
@@ -2151,10 +2038,9 @@ fn every_compiling_job_prepares_its_hosted_environment() {
         let Some(preparation) = preparation else {
             panic!("{file}:{name} does not invoke its `{profile}` hosted preparation profile");
         };
-        assert_eq!(
-            preparation.get("if").and_then(yaml_compat::Value::as_str),
-            Some("runner.environment == 'github-hosted'"),
-            "{file}:{name} must not alter the persistent runner while preparing the hosted one"
+        assert!(
+            preparation.get("if").is_none(),
+            "{file}:{name} is always hosted, so preparation cannot be conditionally skipped"
         );
         assert_eq!(
             preparation_order_problem(steps, &command),
@@ -2172,8 +2058,8 @@ fn every_compiling_job_prepares_its_hosted_environment() {
     }
 }
 
-/// The regression shape `A1-403` found: the old census found the guarded step
-/// and passed, although a public runner would execute repository code first.
+/// The regression shape `A1-403` found: a census saw the preparation step and
+/// passed although repository code executed first.
 #[test]
 fn hosted_preparation_must_precede_repository_work() {
     let job: yaml_compat::Value = yaml_compat::from_str(
@@ -2182,7 +2068,6 @@ steps:
   - uses: actions/checkout@v7
   - run: ci/scripts/test.sh
   - name: prepare a GitHub-hosted runner
-    if: runner.environment == 'github-hosted'
     run: ci/scripts/prepare-hosted.sh base
 ",
     )
@@ -2194,12 +2079,10 @@ steps:
     let command = "ci/scripts/prepare-hosted.sh base";
 
     assert!(
-        steps.iter().any(|step| {
-            step.get("run").and_then(yaml_compat::Value::as_str) == Some(command)
-                && step.get("if").and_then(yaml_compat::Value::as_str)
-                    == Some("runner.environment == 'github-hosted'")
-        }),
-        "the old presence-and-guard check must pass this fixture or it does not reproduce the gap"
+        steps
+            .iter()
+            .any(|step| { step.get("run").and_then(yaml_compat::Value::as_str) == Some(command) }),
+        "the old presence check must pass this fixture or it does not reproduce the gap"
     );
     let problem = preparation_order_problem(steps, command)
         .expect("work before preparation must be rejected");

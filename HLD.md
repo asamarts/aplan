@@ -1513,6 +1513,7 @@ Copying `alint`'s tiering, which is unusually good:
 | Property | **`proptest` 1.11.0**, the cycle finder, and `slugify` against `comrak`'s `Anchorizer` |
 | Corpus e2e | **landed** in `aplan-e2e/tests/coverage.rs` as an in-Rust fires/silent table per rule, materialised to real temp trees; migrates to one `#[test]` per scenario YAML later |
 | Coverage-drift audit | **landed**, meta-tests walk `Rule::ALL` / `Format::ALL`; a rule or format without a test fails CI (ROADMAP §5) |
+| Hosted platforms | required `ubuntu-24.04`, `macos-15` and `windows-2025` checks; Linux owns full validation and release, while macOS and Windows compile every target and run the portable unit and PTY contract |
 | Bench | **`criterion` 0.8.2** |
 | Drift gates | `xtask gen-schema --check` and `gen-roadmap --check`; `facts.json` via `tests/facts.rs` |
 | Dogfood | `aplan check` on `aplan/`, *a plan tool whose own plan does not validate has no business shipping* |

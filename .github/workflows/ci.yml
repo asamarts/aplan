@@ -18,24 +18,22 @@ concurrency:
     ${{ (github.event_name == 'pull_request' && format('{0}-development-pr-{1}', github.workflow, github.event.pull_request.number)) || (github.event_name == 'push' && format('{0}-development-ref-{1}', github.workflow, github.ref)) || format('{0}-full-run-{1}', github.workflow, github.run_id) }}
   cancel-in-progress: ${{ github.event_name == 'push' || github.event_name == 'pull_request' }}
 
-# Public jobs use fresh GitHub-hosted VMs. The visibility branch is retained so
-# the separate private maintainer repository can run the same scripts on its
-# persistent runner. Public `asamarts/aplan` has no registered self-hosted runner.
+# Every job uses a fresh GitHub-hosted VM. Required checks pin GA images so an
+# image migration cannot change the merge contract without a reviewed edit.
 env:
   CARGO_TERM_COLOR: always
   CARGO_BUILD_WARNINGS: deny
 
 # Least privilege: the jobs only read the repo and post annotations via workflow
-# commands (no API writes), so the token needs nothing beyond contents: read. On a
-# self-hosted runner the token is exposed to the box, so keep its scope minimal.
+# commands, so the token needs nothing beyond contents: read.
 permissions:
   contents: read
 
 jobs:
   development:
-    name: development validation
+    name: Linux development validation
     if: github.event_name == 'push' || github.event_name == 'pull_request'
-    runs-on: ${{ (github.event.repository.private && fromJSON('["self-hosted","linux","aplan"]')) || fromJSON('["ubuntu-latest"]') }}
+    runs-on: ubuntu-24.04
     # This is the rollback switch. Changing this one value to `full` makes the
     # ordinary job prepare and execute the complete profile without editing its
     # steps or reconstructing any gate.
@@ -49,7 +47,6 @@ jobs:
         with:
           fetch-depth: 0
       - name: prepare a GitHub-hosted runner
-        if: runner.environment == 'github-hosted'
         run: ci/scripts/prepare-hosted.sh "$APLAN_ORDINARY_PROFILE"
       - name: install the pinned test runner
         run: ci/scripts/install-nextest.sh install
@@ -61,17 +58,38 @@ jobs:
           APLAN_VALIDATION_HEAD: ${{ github.sha }}
         run: ci/scripts/preflight.sh --profile "$APLAN_ORDINARY_PROFILE" --base "$APLAN_VALIDATION_BASE" --head "$APLAN_VALIDATION_HEAD"
 
+  platform:
+    name: ${{ matrix.name }} portability
+    if: github.event_name == 'push' || github.event_name == 'pull_request'
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - name: macOS
+            runner: macos-15
+          - name: Windows
+            runner: windows-2025
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - name: prepare a GitHub-hosted runner
+        shell: bash
+        run: ci/scripts/prepare-hosted.sh platform
+      - name: compile, lint, and test the portable contract
+        shell: bash
+        run: ci/scripts/platform.sh
+
   full:
     name: full validation
     if: github.event_name == 'schedule' || github.event_name == 'workflow_dispatch'
-    runs-on: ${{ (github.event.repository.private && fromJSON('["self-hosted","linux","aplan"]')) || fromJSON('["ubuntu-latest"]') }}
+    runs-on: ubuntu-24.04
     timeout-minutes: 60
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           fetch-depth: 0
       - name: prepare a GitHub-hosted runner
-        if: runner.environment == 'github-hosted'
         run: ci/scripts/prepare-hosted.sh coverage
       - name: install the pinned test runner
         run: ci/scripts/install-nextest.sh install

@@ -11,7 +11,7 @@
 
 ## Cross-cutting (in no cut)
 
-12.2d effort, 0.5 weeks (0.1 left), held by tasks in no cut and not counted in the table above.
+14.2d effort, 0.5 weeks (0.2 left), held by tasks in no cut and not counted in the table above.
 
 | task | title | status | blocked_by | evidence |
 | --- | --- | --- | --- | --- |
@@ -27,5 +27,6 @@
 | A2-010 | Restore the hosted coverage floor without lowering it | done | A2-001 | test:tests::version_window_refusals_preserve_ambiguity_and_checkout_cause |
 | A2-011 | Publish the first public release and automate the complete transaction | done | - | test:ci_runner_census::hosted_release_prepares_every_tool_required_by_release_validation, test:release_changelog::release_workflow_cannot_publish_without_same_source_full_validation, test:release_changelog::crates_publication_runs_the_registry_transaction_in_dependency_order, test:release_changelog::github_publication_refuses_drift_and_only_fills_missing_assets |
 | A2-012 | Make release artifacts byte-reproducible across builders | done | - | test:ci_runner_census::release_artifact_builder_pins_native_inputs_for_every_caller |
+| A2-013 | Make public CI cross-platform and retire the machine runner | in_progress | - | - |
 
 > Statuses are as claimed in the plan and gated by `aplan verify` in CI.

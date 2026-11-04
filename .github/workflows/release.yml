@@ -5,9 +5,8 @@ on:
     tags: ["v*"]
   workflow_dispatch:
 
-# Public releases use a standard GitHub-hosted runner; the private maintainer
-# repository retains the self-hosted route. This still publishes one portable
-# Linux x86_64 binary; multi-platform packaging remains a distribution decision,
+# Releases use a pinned GA GitHub-hosted Linux image. This still publishes one
+# portable Linux x86_64 binary; multi-platform packaging remains a distribution decision,
 # not a side effect of changing CI placement (HLD Section 17).
 env:
   CARGO_TERM_COLOR: always
@@ -24,16 +23,15 @@ permissions:
 jobs:
   release:
     name: build + publish
-    # A pull request never publishes, regardless of runner placement.
+    # A pull request never publishes.
     if: github.event_name == 'push' || github.event_name == 'workflow_dispatch'
-    runs-on: ${{ (github.event.repository.private && fromJSON('["self-hosted","linux","aplan"]')) || fromJSON('["ubuntu-latest"]') }}
+    runs-on: ubuntu-24.04
     # crates.io binds its trusted publisher to this environment as well as this
     # repository and workflow. GitHub separately requires an independent
     # approval before the job can enter it.
     environment: release
-    # Full validation currently takes roughly 15 minutes on the private runner;
-    # artifact construction follows it and reports its own duration. Leave a
-    # bounded margin for cold hosted builds without returning to an unbounded job.
+    # Full validation and artifact construction run cold. Leave a bounded
+    # margin without returning to an unbounded publishing job.
     timeout-minutes: 90
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
@@ -45,12 +43,11 @@ jobs:
           fetch-depth: 0
 
       - name: prepare a GitHub-hosted runner
-        if: runner.environment == 'github-hosted'
         run: ci/scripts/prepare-hosted.sh release
 
       # The full profile includes the shared test gate. Verify or install its
-      # exact runner on both private and hosted machines; an image preload is a
-      # speed optimization rather than permission to run an unpinned binary.
+      # exact runner; an image preload is a speed optimization rather than
+      # permission to run an unpinned binary.
       - name: install the pinned test runner
         run: ci/scripts/install-nextest.sh install
       - name: install the pinned supply-chain auditor

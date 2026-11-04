@@ -1,4 +1,4 @@
-# One immutable-checkout build profile for both private and GitHub-hosted CI.
+# One immutable-checkout build profile for GitHub-hosted CI.
 # Keep this out of `.cargo/`: local debugging retains the workspace defaults.
 [build]
 incremental = false

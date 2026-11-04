@@ -180,11 +180,10 @@ fn assert_simulated_bump(fixture: &Path) {
 
 fn assert_every_consumer_derives_the_contract() {
     let consumers = [
-        "ci/Containerfile",
+        "ci/release.Containerfile",
         "ci/scripts/prepare-hosted.sh",
         "ci/scripts/validate.sh",
         "ci/scripts/release.sh",
-        "ci/runner/setup.sh",
         ".github/workflows/ci.yml",
         ".github/workflows/release.yml",
         "crates/aplan/tests/toolchain_contract.rs",
@@ -209,24 +208,19 @@ fn assert_every_consumer_derives_the_contract() {
         "the duplicate-version audit's negative control stopped detecting a second pin"
     );
 
-    let container = read("ci/Containerfile");
-    assert!(container.contains("COPY rust-toolchain.toml"));
-    assert!(container.contains("aplan-toolchain.sh channel"));
-    assert!(!container.contains("ARG RUST_VERSION="));
+    let builder = read("ci/release.Containerfile");
+    assert!(builder.contains("COPY rust-toolchain.toml"));
+    assert!(builder.contains("aplan-toolchain.sh channel"));
+    assert!(!builder.contains("ARG RUST_VERSION="));
     let hosted = read("ci/scripts/prepare-hosted.sh");
     assert!(hosted.contains("toolchain.sh\" channel"), "{hosted}");
     assert!(hosted.contains("toolchain.sh\" components"), "{hosted}");
-    let setup = read("ci/runner/setup.sh");
-    assert!(
-        setup.contains("Containerfile\" \"${REPO_ROOT}\""),
-        "the root contract is outside a ci/-only build context: {setup}"
-    );
     let context = read(".containerignore");
     assert!(context.lines().any(|line| line == "**"));
     for required in [
         "!rust-toolchain.toml",
         "!ci/scripts/toolchain.sh",
-        "!ci/runner/entrypoint.sh",
+        "!ci/release.Containerfile",
     ] {
         assert!(
             context.lines().any(|line| line == required),

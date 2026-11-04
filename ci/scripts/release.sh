@@ -4,8 +4,8 @@ set -euo pipefail
 # Build the release artifact: one statically linked Linux x86_64 binary, plus the
 # checksum a consumer needs to pin it (A1-028).
 #
-# Deliberately not `dist` (HLD section 17). Changing from private self-hosted CI
-# to public hosted CI does not itself decide a multi-platform distribution
+# Deliberately not `dist` (HLD section 17). Moving CI platforms does not itself
+# decide a multi-platform distribution
 # promise. This remains the one portable asset the release design specifies.
 #
 # Usage:

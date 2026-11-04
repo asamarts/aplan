@@ -41,8 +41,8 @@ use std::sync::OnceLock;
 
 /// Send one signal without relying on `PATH` or an external `kill` executable.
 ///
-/// The private runner image provides `kill` as the POSIX shell builtin but may
-/// not provide a standalone binary. Signal and pid are positional parameters,
+/// A minimal POSIX environment may provide `kill` only as a shell builtin.
+/// Signal and pid are positional parameters,
 /// not interpolated shell source, so the helper cannot turn either into code.
 #[cfg(unix)]
 pub fn send_signal(pid: u32, signal: &str) {

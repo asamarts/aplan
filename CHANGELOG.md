@@ -6,6 +6,15 @@ to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+### Changed
+
+- **Required CI now proves Linux, macOS and Windows on fresh GitHub-hosted machines** (`A2-013`,
+  ADR-0065). Pull requests and `main` run stable `ubuntu-24.04`, `macos-15` and `windows-2025`
+  checks. The portable lanes compile and lint every target, run library and binary unit tests, and
+  exercise the real-terminal journey. Full validation and publication remain Linux-only. The
+  obsolete visibility router, persistent runner image and host lifecycle scripts are removed; a
+  separate weekly matrix follows moving platform labels.
+
 ### Fixed
 
 - **Release artifacts now compile in one immutable native toolchain** (`A2-012`). The local and

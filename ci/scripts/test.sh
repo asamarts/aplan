@@ -49,9 +49,9 @@ NEXTEST_LIST="$(mktemp "$INVOCATIONS_DIR/nextest-list.XXXXXXXX.json")"
 CARGO_LIST="$(mktemp "$INVOCATIONS_DIR/cargo-list.XXXXXXXX.jsonl")"
 NEXTEST_GROUPS="$(mktemp "$INVOCATIONS_DIR/nextest-groups.XXXXXXXX.txt")"
 
-# The ordinary read path persists exact parsed-plan snapshots. A persistent
-# self-hosted runner must not let a snapshot from an earlier job decide whether
-# today's full correctness corpus reaches the loader and validator. Give this
+# The ordinary read path persists exact parsed-plan snapshots. No test run may
+# let a snapshot from an earlier invocation decide whether the current full
+# correctness corpus reaches the loader and validator. Give this
 # run an owner directory, but point aplan at an absent child: the first access
 # is necessarily cold, while later accesses can still exercise publication,
 # exact hits and concurrent readers/writers. Never inspect or remove the user's
