@@ -500,6 +500,7 @@ struct CoverageOwnerRecord {
     lease: String,
 }
 
+#[cfg(target_os = "linux")]
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum CoverageProcessState {
     Gone,
@@ -510,7 +511,9 @@ enum CoverageProcessState {
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum CoverageTreeState {
+    #[cfg(target_os = "linux")]
     Gone,
+    #[cfg(target_os = "linux")]
     Live,
     Unverifiable,
 }
@@ -624,6 +627,7 @@ fn current_coverage_process_identity() -> Result<CoverageProcessIdentity> {
 }
 
 #[cfg(not(target_os = "linux"))]
+#[allow(clippy::unnecessary_wraps)] // Keep one fallible ownership interface on every platform.
 fn current_coverage_process_identity() -> Result<CoverageProcessIdentity> {
     // Other platforms still get private allocations and ordinary cleanup. A
     // later process cannot prove a stale tree from portable Rust APIs, so its
@@ -650,11 +654,6 @@ fn coverage_process_state(expected: &CoverageProcessIdentity) -> CoverageProcess
         Ok(Some(_)) => CoverageProcessState::Reused,
         Err(_) => CoverageProcessState::Unverifiable,
     }
-}
-
-#[cfg(not(target_os = "linux"))]
-fn coverage_process_state(_expected: &CoverageProcessIdentity) -> CoverageProcessState {
-    CoverageProcessState::Unverifiable
 }
 
 #[cfg(target_os = "linux")]
@@ -722,11 +721,7 @@ fn coverage_descendants_state(record: &CoverageOwnerRecord) -> CoverageTreeState
     }
 }
 
-#[cfg(not(target_os = "linux"))]
-fn coverage_descendants_state(_record: &CoverageOwnerRecord) -> CoverageTreeState {
-    CoverageTreeState::Unverifiable
-}
-
+#[cfg(target_os = "linux")]
 fn coverage_tree_state(record: &CoverageOwnerRecord) -> CoverageTreeState {
     match coverage_process_state(&record.owner) {
         CoverageProcessState::Matches => return CoverageTreeState::Live,
@@ -745,6 +740,11 @@ fn coverage_tree_state(record: &CoverageOwnerRecord) -> CoverageTreeState {
         }
     }
     coverage_descendants_state(record)
+}
+
+#[cfg(not(target_os = "linux"))]
+fn coverage_tree_state(_record: &CoverageOwnerRecord) -> CoverageTreeState {
+    CoverageTreeState::Unverifiable
 }
 
 fn valid_coverage_lease(lease: &str) -> bool {
@@ -1169,6 +1169,7 @@ fn coverage_process_identity(pid: u32) -> Result<CoverageProcessIdentity> {
 }
 
 #[cfg(not(target_os = "linux"))]
+#[allow(clippy::unnecessary_wraps)] // Keep one fallible ownership interface on every platform.
 fn coverage_process_identity(pid: u32) -> Result<CoverageProcessIdentity> {
     Ok(CoverageProcessIdentity {
         pid,
@@ -1305,7 +1306,7 @@ fn coverage_command() -> Command {
     command
 }
 
-#[cfg(test)]
+#[cfg(all(test, target_os = "linux"))]
 fn run_coverage_command(
     root: &Path,
     artifact_dirs: &[PathBuf],
