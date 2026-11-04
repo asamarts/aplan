@@ -1959,13 +1959,14 @@ pub fn commit_breadth(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use aplan_config::PLACEHOLDER;
     use aplan_config::TestRunner;
-    use aplan_config::{
-        BATCH_MANIFEST_PLACEHOLDER, BATCH_RESULT_PLACEHOLDER, PLACEHOLDER, TEST_BATCH_PROTOCOL,
-    };
+    #[cfg(unix)]
+    use aplan_config::{BATCH_MANIFEST_PLACEHOLDER, BATCH_RESULT_PLACEHOLDER, TEST_BATCH_PROTOCOL};
     use aplan_core::task::{Evidence, EvidenceKind, Status, Task};
     use aplan_core::{Plan, code, load::LoadedTask};
     use git2::{Repository, Signature};
+    #[cfg(unix)]
     use std::collections::BTreeSet;
     use std::path::PathBuf;
 
@@ -8818,6 +8819,7 @@ mod tests {
         }));
     }
 
+    #[cfg(unix)]
     fn assert_bounded_catalogue_result(
         catalogue: &TestCatalogue,
         events: &[CatalogueProgressEvent],
