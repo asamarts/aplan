@@ -2,7 +2,7 @@
   "schema": "aplan/dependency-policy/v1",
   "target": "x86_64-unknown-linux-gnu",
   "budgets": {
-    "lock": 288,
+    "lock": 289,
     "default": 200,
     "headless": 169,
     "tui_increment": 32
@@ -145,6 +145,22 @@
       "target": "all",
       "behavior": "deterministic layered graph coordinates behind the private terminal-cell adapter",
       "task": "A2-002"
+    },
+    {
+      "owner": "aplan-app",
+      "kind": "normal",
+      "dependency": "fs2",
+      "target": "cfg(windows)",
+      "behavior": "crash-released exclusive evidence-cache locks on the workspace MSRV",
+      "task": "A2-013"
+    },
+    {
+      "owner": "aplan-core",
+      "kind": "normal",
+      "dependency": "fs2",
+      "target": "cfg(windows)",
+      "behavior": "crash-released exclusive guarded-publication locks on the workspace MSRV",
+      "task": "A2-013"
     },
     {
       "owner": "aplan",

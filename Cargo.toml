@@ -102,6 +102,10 @@ blake3 = "1"
 signal-hook = "0.3"
 shell-words = "1.1"
 ctrlc = "3.5"
+# Rust's standard-library file locks require Rust 1.89, one release above this
+# workspace's MSRV. Windows uses this small compatibility layer until the MSRV
+# can provide the same crash-safe lock without a dependency.
+fs2 = "0.4.3"
 
 tempfile = "3"
 trycmd = "1"
