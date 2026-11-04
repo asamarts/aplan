@@ -511,7 +511,6 @@ enum CoverageProcessState {
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum CoverageTreeState {
-    #[cfg(target_os = "linux")]
     Gone,
     #[cfg(target_os = "linux")]
     Live,
