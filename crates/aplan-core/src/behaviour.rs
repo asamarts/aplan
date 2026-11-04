@@ -127,6 +127,7 @@ pub const ALL: &[Behaviour] = &[
                retaining the same atomic replacement and stale-input boundaries",
         proof: &[
             "a_relocation_refuses_a_batch_that_also_names_either_identity",
+            "missing_aliases_share_one_transaction_identity",
             "concurrent_claims_and_releases_on_distinct_tasks_all_compose",
             "one_same_size_edit_updates_the_persisted_generation",
             "observation_publication_replaces_an_older_generation",

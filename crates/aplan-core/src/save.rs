@@ -1015,12 +1015,17 @@ fn create_temp(path: &Path) -> Result<(PathBuf, std::fs::File), SaveError> {
 #[cfg(test)]
 mod tests {
 
+    #[cfg(not(windows))]
     fn is_hidden_transaction_artifact(name: &str) -> bool {
         name.starts_with('.')
-            && !(cfg!(windows)
-                && Path::new(name)
-                    .extension()
-                    .is_some_and(|extension| extension.eq_ignore_ascii_case("lock")))
+    }
+
+    #[cfg(windows)]
+    fn is_hidden_transaction_artifact(name: &str) -> bool {
+        name.starts_with('.')
+            && !Path::new(name)
+                .extension()
+                .is_some_and(|extension| extension.eq_ignore_ascii_case("lock"))
     }
 
     /// A relocation is the filename move and every referencing edit together.
@@ -1428,6 +1433,47 @@ mod tests {
         assert!(
             !new.exists(),
             "a conflicted transaction wrote its destination"
+        );
+    }
+
+    /// Missing targets below a symlinked directory still have one transaction
+    /// identity. Resolving only existing paths treats these as distinct until
+    /// both writers contend on the same real lock file.
+    #[cfg(unix)]
+    #[test]
+    fn missing_aliases_share_one_transaction_identity() {
+        use std::os::unix::fs::symlink;
+
+        let dir = tempfile::Builder::new()
+            .tempdir_in(crate::fixture::fixture_root())
+            .expect("tempdir");
+        let real = dir.path().join("real");
+        let alias = dir.path().join("alias");
+        std::fs::create_dir(&real).expect("real directory");
+        symlink(&real, &alias).expect("directory alias");
+
+        let real_target = real.join("new.md");
+        let alias_target = alias.join("new.md");
+        let result = replace_all(&[
+            Replacement {
+                path: alias_target,
+                expected: String::new(),
+                updated: "first\n".into(),
+            },
+            Replacement {
+                path: real_target.clone(),
+                expected: String::new(),
+                updated: "second\n".into(),
+            },
+        ]);
+
+        assert!(
+            matches!(result, Err(SaveError::Conflict { ref path }) if path == &real_target),
+            "storage.atomic_replacement_is_portable: {result:?}"
+        );
+        assert!(
+            !real_target.exists(),
+            "a conflicted alias batch wrote a file"
         );
     }
 

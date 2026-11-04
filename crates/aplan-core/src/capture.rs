@@ -917,6 +917,7 @@ fn inbox_entries(directory: &Path) -> Result<Option<Vec<std::fs::DirEntry>>, Box
             // boundary violation is that the existing parent is not a
             // directory. Preserve the empty-inbox case only when the parent
             // can actually contain the reserved directory.
+            #[cfg(windows)]
             if directory.parent().is_some_and(|parent| {
                 std::fs::metadata(parent).is_ok_and(|metadata| !metadata.is_dir())
             }) {
@@ -1060,6 +1061,13 @@ fn capture_entry_identity(entry: &std::fs::DirEntry) -> Result<(PathBuf, String)
 }
 
 fn read_capture(path: &Path) -> Result<Capture, Box<Diagnostic>> {
+    read_capture_after_observation(path, || {})
+}
+
+fn read_capture_after_observation(
+    path: &Path,
+    after_observation: impl FnOnce(),
+) -> Result<Capture, Box<Diagnostic>> {
     // Windows refuses opening a directory as a file before an opened handle can
     // be inspected. Classify the path first so every platform reports the same
     // capture boundary. The handle metadata check below still closes the race
@@ -1078,6 +1086,7 @@ fn read_capture(path: &Path) -> Result<Capture, Box<Diagnostic>> {
             "Retry after the concurrent edit finishes; keep only canonical regular capture files in `.inbox`.",
         ));
     }
+    after_observation();
     let mut options = std::fs::OpenOptions::new();
     options.read(true);
     #[cfg(unix)]
@@ -2392,6 +2401,13 @@ mod tests {
         );
         assert!(
             invalid_profile(CaptureProfile {
+                body: Some(" \t".into()),
+                ..CaptureProfile::default()
+            })
+            .contains("blank or invisible")
+        );
+        assert!(
+            invalid_profile(CaptureProfile {
                 body: Some("body\u{200b}".into()),
                 ..CaptureProfile::default()
             })
@@ -2707,10 +2723,40 @@ mod tests {
             symlink(&schema_error, &link).expect("symlink fixture");
             let error = read_capture(&link).expect_err("safe open refuses symlink");
             assert!(error.message.contains("stopped naming a regular file"));
+            std::fs::remove_file(&link).expect("remove direct symlink fixture");
+            assert_capture_open_races_are_refused(&inbox, &schema_error);
 
             #[cfg(target_os = "linux")]
             assert_non_utf8_capture_name_is_refused(&inbox);
         }
+    }
+
+    #[cfg(unix)]
+    fn assert_capture_open_races_are_refused(inbox: &Path, schema_error: &Path) {
+        use std::os::unix::fs::symlink;
+
+        let raced_link = inbox.join(format!("{FOURTH}.yml"));
+        std::fs::write(&raced_link, "ordinary file").expect("race link fixture");
+        let error = read_capture_after_observation(&raced_link, || {
+            std::fs::remove_file(&raced_link).expect("remove observed file");
+            symlink(schema_error, &raced_link).expect("replace observed file with symlink");
+        })
+        .expect_err("an opened-handle race still refuses a symlink");
+        assert!(error.message.contains("cannot open"), "{}", error.message);
+        std::fs::remove_file(&raced_link).expect("remove raced symlink");
+
+        let raced_directory = inbox.join(format!("{FOURTH}.yml"));
+        std::fs::write(&raced_directory, "ordinary file").expect("race directory fixture");
+        let error = read_capture_after_observation(&raced_directory, || {
+            std::fs::remove_file(&raced_directory).expect("remove observed file");
+            std::fs::create_dir(&raced_directory).expect("replace observed file with directory");
+        })
+        .expect_err("an opened-handle race still refuses a directory");
+        assert!(
+            error.message.contains("stopped naming a regular file"),
+            "{}",
+            error.message
+        );
     }
 
     // Darwin refuses this byte sequence at the filesystem boundary, before
