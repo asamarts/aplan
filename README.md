@@ -48,17 +48,26 @@ Use the built-in command help and `aplan facts` for the complete current surface
 
 ## GitHub Actions
 
+Grant the workflow read access to both release assets and their provenance:
+
+```yaml
+permissions:
+  contents: read
+  attestations: read
+```
+
 ```yaml
 - uses: actions/checkout@v4
   with:
     fetch-depth: 0
-- uses: asamarts/aplan@v0.5.2
+- uses: asamarts/aplan@v0.6.0
   with:
     command: verify
 ```
 
 Set `deny_warnings: true` in `.aplan.yml` when warnings should fail CI. Pin actions to full commit
-SHAs in production repositories.
+SHAs in production repositories. The Action verifies releases from v0.6.0 onward against the
+publishing repository, `release.yml` and the exact release tag before executing the binary.
 
 ## Other interfaces
 
