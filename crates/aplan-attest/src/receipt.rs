@@ -1125,6 +1125,7 @@ fn sync_directory(path: &Path) -> Result<(), ReceiptError> {
 }
 
 #[cfg(not(unix))]
+#[allow(clippy::unnecessary_wraps)] // Preserve one fallible durability interface on every OS.
 fn sync_directory(_path: &Path) -> Result<(), ReceiptError> {
     Ok(())
 }
