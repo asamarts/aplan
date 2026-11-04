@@ -670,6 +670,8 @@ fn move_to_backup(path: &Path) -> Result<PathBuf, SaveError> {
 fn rename_replacing(from: &Path, to: &Path) -> std::io::Result<()> {
     #[cfg(windows)]
     {
+        const ATTEMPTS: usize = 128;
+
         let parent = to
             .parent()
             .filter(|parent| !parent.as_os_str().is_empty())
@@ -683,7 +685,6 @@ fn rename_replacing(from: &Path, to: &Path) -> std::io::Result<()> {
         drop(staged);
         std::fs::remove_file(from)?;
 
-        const ATTEMPTS: usize = 128;
         for attempt in 0..ATTEMPTS {
             match replacement.persist(to) {
                 Ok(file) => {
