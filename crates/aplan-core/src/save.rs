@@ -888,7 +888,9 @@ impl Lock {
                     Ok(()) => {
                         return Ok(Self { file: Some(file) });
                     }
-                    Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => {
+                    Err(error)
+                        if error.raw_os_error() == fs2::lock_contended_error().raw_os_error() =>
+                    {
                         if std::time::Instant::now() >= deadline {
                             return Err(SaveError::Busy {
                                 path: target.to_path_buf(),
