@@ -1,19 +1,9 @@
-# The private runner and release-builder images consume this small allowlist.
-# Keep the root context bounded so target/, .git/ and the working tree are never
-# uploaded merely to make the reviewed toolchain inputs available.
+# The release builder consumes this small allowlist. Keep the root context
+# bounded so target/, .git/ and the working tree are never uploaded merely to
+# make the reviewed toolchain inputs available.
 **
 !rust-toolchain.toml
 !ci
-!ci/Containerfile
 !ci/release.Containerfile
-!ci/cargo-ci-config.toml
-!ci/nextest.env
-!ci/deny.env
 !ci/scripts
-!ci/scripts/install-cargo-deny.sh
-!ci/scripts/install-nextest.sh
 !ci/scripts/toolchain.sh
-!ci/runner
-!ci/runner/entrypoint.sh
-!ci/runner/job-started.sh
-!ci/runner/reclaim-coverage.py

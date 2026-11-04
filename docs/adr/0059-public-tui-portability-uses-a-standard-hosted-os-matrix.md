@@ -1,7 +1,7 @@
 # ADR-0059: Public TUI portability uses a standard hosted OS matrix
 
 Date: 2026-10-27
-Status: Accepted
+Status: Superseded by ADR-0065
 Tasks: `A1-448`
 Supersedes the pre-public repository-boundary decision's `ubuntu-latest`-only public runner choice for the scheduled and manual TUI
 portability job. Its private-runner and public self-hosted security decisions remain in force.

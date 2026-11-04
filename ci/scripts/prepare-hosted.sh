@@ -6,9 +6,8 @@ if [[ -n "${GITHUB_ENV:-}" && -z "${APLAN_VALIDATION_SETUP_STARTED_EPOCH:-}" ]];
 fi
 
 # Install only what a clean standard GitHub-hosted runner lacks for one of this
-# repository's gates. Workflow steps call this only when
-# `runner.environment == 'github-hosted'`; tools shared by private and hosted
-# paths, such as nextest, are prepared by an unconditional workflow step.
+# repository's gates. Every workflow job is hosted; profiles keep irrelevant
+# Linux tooling out of the portable macOS and Windows contract.
 
 REPO_ROOT="$(cd "$(dirname "$0")/../.." && pwd)"
 requested_profile="${1:-}"
@@ -17,7 +16,7 @@ resolve_profile() {
     case "$1" in
         development) echo test ;;
         full) echo coverage ;;
-        base|test|coverage|msrv|release|latest-stable|portability) echo "$1" ;;
+        base|test|coverage|msrv|release|latest-stable|platform|portability) echo "$1" ;;
         *) return 1 ;;
     esac
 }
@@ -69,11 +68,11 @@ if [[ "$requested_profile" == "--resolve-capabilities" ]]; then
 fi
 
 [[ "$#" -eq 1 ]] || {
-    echo "usage: ci/scripts/prepare-hosted.sh {development|full|base|test|coverage|msrv|release|latest-stable|portability}" >&2
+    echo "usage: ci/scripts/prepare-hosted.sh {development|full|base|test|coverage|msrv|release|latest-stable|platform|portability}" >&2
     exit 2
 }
 profile="$(resolve_profile "$requested_profile")" || {
-    echo "usage: ci/scripts/prepare-hosted.sh {development|full|base|test|coverage|msrv|release|latest-stable|portability}" >&2
+    echo "usage: ci/scripts/prepare-hosted.sh {development|full|base|test|coverage|msrv|release|latest-stable|platform|portability}" >&2
     exit 2
 }
 
@@ -81,7 +80,7 @@ profile="$(resolve_profile "$requested_profile")" || {
 # workspace test suite. Standard hosted images currently provide it, but that
 # is still an input to our gate and must fail here before repository work if a
 # future image removes it.
-if [[ "$profile" != "portability" ]]; then
+if [[ "$profile" != "platform" && "$profile" != "portability" ]]; then
     for command in rustup curl sha256sum tar python3 cmp install; do
         if ! command -v "$command" >/dev/null 2>&1; then
             echo "error: a GitHub-hosted runner is expected to provide '$command'" >&2
@@ -98,10 +97,10 @@ else
     }
 fi
 
-# Ordinary private and hosted jobs must build the same artifact shape, so they
-# install one fail-closed Cargo policy. The portability matrix intentionally
+# Authoritative hosted jobs install one fail-closed Cargo policy. The platform
+# matrices intentionally
 # uses each platform's native linker and keeps only the pinned Rust contract.
-if [[ "$profile" != "portability" ]]; then
+if [[ "$profile" != "platform" && "$profile" != "portability" ]]; then
     "$REPO_ROOT/ci/scripts/install-cargo-ci-config.sh"
 fi
 
@@ -122,12 +121,12 @@ fi
 if profile_needs_coverage "$profile"; then
     rustup component add llvm-tools-preview --toolchain "$toolchain"
 
-    # Derive the pin from the private runner image. A second handwritten
-    # version here would let the two environments measure coverage with
-    # different tools while both workflows remained green.
-    version="$(sed -n 's/^ARG LLVM_COV_VERSION=//p' "$REPO_ROOT/ci/Containerfile")"
-    if [[ -z "$version" ]] || [[ "$(printf '%s\n' "$version" | wc -l)" -ne 1 ]]; then
-        echo "error: ci/Containerfile must declare exactly one LLVM_COV_VERSION" >&2
+    # One manifest owns the reviewed coverage artifact identities.
+    # shellcheck source=../llvm-cov.env
+    source "$REPO_ROOT/ci/llvm-cov.env"
+    version="$LLVM_COV_VERSION"
+    if [[ ! "$version" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
+        echo "error: ci/llvm-cov.env must declare one semantic LLVM_COV_VERSION" >&2
         exit 1
     fi
 
@@ -136,20 +135,19 @@ if profile_needs_coverage "$profile"; then
         case "$(uname -m)" in
             x86_64)
                 arch=x86_64
-                checksum_arg=LLVM_COV_X86_64_SHA256
+                checksum="$LLVM_COV_X86_64_SHA256"
                 ;;
             aarch64|arm64)
                 arch=aarch64
-                checksum_arg=LLVM_COV_AARCH64_SHA256
+                checksum="$LLVM_COV_AARCH64_SHA256"
                 ;;
             *)
                 echo "error: cargo-llvm-cov has no configured archive for $(uname -m)" >&2
                 exit 1
                 ;;
         esac
-        checksum="$(sed -n "s/^ARG ${checksum_arg}=//p" "$REPO_ROOT/ci/Containerfile")"
         if [[ ! "$checksum" =~ ^[0-9a-f]{64}$ ]]; then
-            echo "error: ci/Containerfile must declare one valid ${checksum_arg}" >&2
+            echo "error: ci/llvm-cov.env must declare one valid checksum for ${arch}" >&2
             exit 1
         fi
         work="$(mktemp -d)"

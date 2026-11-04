@@ -12,11 +12,8 @@
 //! this file is the regression half.
 //!
 //! **Why the runners here are `printf` and `sh` rather than the real tools.**
-//! `ci/Containerfile` installs a Rust toolchain, git and a C toolchain, and says
-//! in as many words that it carries no Node, because aplan's own gates are pure
-//! cargo (the pre-public repository-boundary decision). It installs no Python either. Adding two language runtimes
-//! to that image to gate somebody else's runner is a large price for a small
-//! test, and `sh` and `printf` are there already. What can be
+//! aplan's own gates are pure Cargo and should not install two language runtimes
+//! merely to gate somebody else's runner. What can be
 //! made hermetic is the part that is actually this tool's: the *shapes* a runner
 //! answers in, and what aplan does with them. A test that ran real pytest would
 //! prove pytest works, which was never in doubt.

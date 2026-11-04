@@ -1,6 +1,6 @@
 # Development validation without release-loop latency
 
-Status: accepted proposal; implementation is `A1-610` through `A1-619` plus `A1-650`.
+Status: accepted; implementation is `A1-610` through `A1-619`, `A1-650` and `A2-013`.
 
 ## Decision in one paragraph
 
@@ -24,10 +24,10 @@ The repository grew the right gates one incident at a time, but its baseline orc
 shape. Before `A1-613`, `ci/scripts/preflight.sh` invoked all ten gates in sequence and the opt-in
 pre-push hook invoked that script for every non-deletion push. Before `A1-617`,
 `.github/workflows/ci.yml` independently ran the same work as six jobs on every push to `main` and
-every pull request. It now reports one change-aware development status on those events and runs one
-complete job nightly or by explicit dispatch. While the repository is private, one self-hosted
-runner executes those jobs; after publication, a clean hosted runner does. `A1-616` measured and
-rejected dependency, target and archive reuse; the routed workflow does not blur the MSRV,
+every pull request. It now reports one change-aware Linux development status plus required macOS
+and Windows portability statuses on those events, and runs one complete Linux job nightly or by
+explicit dispatch. Every job uses fresh standard GitHub-hosted compute. `A1-616` measured and
+rejected dependency, target and archive reuse; the routed workflows do not blur the MSRV,
 coverage, release or verdict boundaries merely to avoid rebuilding them.
 
 The result is release assurance at task-edit frequency:
@@ -60,9 +60,9 @@ are repaired by `A1-608` and `A1-609`; more importantly, they show why a shorter
 report exact toolchain and environment identity.
 
 The confirming push exposed the same contract gap in a second form: the three tests for the
-committed Python performance harness passed on a development host with `python3`, but the private
-runner image did not declare or install it. `A1-620` makes the runtime an audited input to both
-self-hosted and future hosted test environments. A validation profile is not reproducible if it
+committed Python performance harness passed on a development host with `python3`, but the former
+runner image did not declare or install it. `A1-620` made the runtime an audited input, and hosted
+preparation retains that audit. A validation profile is not reproducible if it
 names only Rust while its tests execute another undeclared runtime.
 
 ## Baseline contract and gaps
@@ -98,7 +98,7 @@ names only Rust while its tests execute another undeclared runtime.
    that a workflow skipped by path or branch filtering leaves its check Pending, blocking a pull
    request that requires it. One stable development job must always report and make selection
    inside the job.
-6. **Rolling `stable` is not reproducible across hosts.** The active private runner lagged the
+6. **Rolling `stable` is not reproducible across hosts.** The then-active private runner lagged the
    development host by one release. Rustup supports a committed toolchain file, but pinning policy
    needs an explicit compatibility decision: `rust-version` is the consumer floor, while the
    development compiler is the lint and build reference.
@@ -339,11 +339,11 @@ full.
 
 ## Caching and build reuse
 
-### Local/self-hosted
+### Local and historical self-hosted measurements
 
-Continue using the host's shared compiler cache/orchestrator for ordinary Cargo work. Do not add
-another repository cache over it. The current persistent self-hosted target already makes compile
-time a minority of the warm loop; optimize executed work first.
+Continue using the development host's shared compiler cache/orchestrator for ordinary Cargo work.
+Do not add another repository cache over it. The former persistent CI target made compile time a
+minority of the warm loop; these measurements remain evidence for optimizing executed work first.
 
 Do not share these as correctness inputs:
 
@@ -354,7 +354,7 @@ Do not share these as correctness inputs:
 
 #### Coverage allocation lifecycle and reuse decision
 
-`A1-633` keeps the isolated correctness boundary and repairs its lifecycle. Every private
+`A1-633` kept the isolated correctness boundary and repaired its persistent-host lifecycle. Every private
 `.aplan-coverage-<pid>-<attempt>` parent carries a bounded versioned owner record: Linux boot and
 process-start identities for the xtask owner and cargo child, the child's process group, and a
 unique lease inherited by descendants. A catchable termination signal stops the cargo process
@@ -374,10 +374,10 @@ wrapper, provider and descendant PIDs plus an explicit exit-status/stderr channe
 failure is distinguished from a process that has not yet received a scheduling opportunity.
 
 An allocation created by a pre-`A1-633` binary has no owner record and therefore cannot satisfy
-that proof. Ordinary sweeps retain it. The private-runner runbook provides a one-time
-`--legacy-quiescent` migration that may remove only exact, real, ownerless allocation directories
-after the runner has been stopped. Keeping quiescence explicit avoids turning an upgrade
-convenience into a live-job deletion heuristic.
+that proof. Ordinary sweeps retain it. The former private-runner runbook provided a one-time
+`--legacy-quiescent` migration that could remove only exact, real, ownerless allocation directories
+after the runner stopped. `A2-013` retired that operational path after hosted migration; the
+recorded algorithm remains evidence for why live cleanup never guessed.
 
 The two adjacent optimization ideas were measured on kbox on 2026-10-22 against the A1-633 source
 tree rooted at `bbdd2ef5`:
@@ -398,9 +398,9 @@ tree rooted at `bbdd2ef5`:
 Reference: cargo-llvm-cov's documented clean and `--no-clean` semantics:
 <https://github.com/taiki-e/cargo-llvm-cov/blob/main/README.md>.
 
-### Public hosted runners
+### GitHub-hosted runners
 
-Fresh jobs lose the private runner's registry and target volumes. `A1-616` measured the alternatives
+Fresh jobs have no persistent registry or target volumes. `A1-616` measured the alternatives
 on standard `ubuntu-latest` runners before admitting any reuse. Runs `39903909478` and
 `39906843788` established the untrimmed baseline; the corrected shared-profile run is
 `39910657606`. These are single-run observations on elastic hosts, not latency budgets. Phase
@@ -479,8 +479,8 @@ Implemented cadence:
 | trigger | required work | purpose |
 |---|---|---|
 | local handoff/pre-push | development | fast feedback before network work |
-| pull request | development, one stable reported status | review feedback and future branch protection |
-| ordinary push to `main` | development | verify landed commit and warm trusted caches |
+| pull request | Linux development plus macOS and Windows portability | required review feedback on all supported hosts |
+| ordinary push to `main` | Linux development plus macOS and Windows portability | verify the landed portable source contract |
 | nightly schedule | full | bounded detection of deferred integration/evidence/coverage failures |
 | manual dispatch | full | diagnosis and pre-integration confidence |
 | version tag or release dispatch | release, which includes full | publication gate on exact SHA |
@@ -490,15 +490,15 @@ the called workflow must use `workflow_call` and callers must still bind the sam
 GitHub documents reusable workflows as whole jobs, not steps; a shell profile remains the common
 local/CI contract.
 
-Retain concurrency cancellation for development runs so obsolete commits do not occupy the single
-private runner. Do not cancel a release after publication has begun, and give full nightly/manual
+Retain concurrency cancellation for development runs so obsolete commits do not consume hosted
+capacity. Do not cancel a release after publication has begun, and give full nightly/manual
 runs their own concurrency group. A new push may cancel an obsolete fast run; it must not erase the
 only scheduled full run without a replacement.
 
-When public-repository branch protection is available, require only the stable development status
-for ordinary merges. Release protection is the release workflow dependency, not a PR status from a
-different SHA. Full can additionally be required at explicit stabilization checkpoints without
-returning to every-task cadence.
+Branch protection requires the stable Linux development, macOS portability and Windows portability
+statuses for ordinary merges. Release protection is the release workflow dependency, not a PR
+status from a different SHA. Full can additionally be required at explicit stabilization
+checkpoints without returning to every-task cadence.
 
 ## Observability, rollout and rollback
 
@@ -517,8 +517,8 @@ aggregation. A passing receipt is refused unless it contains every selected and 
 failed receipt retains the ordered prefix through the failing gate. Existing paths, symlinks,
 control characters, absolute host paths, duplicate fields, invalid identities and records above
 32 KiB are refused. GitHub queue duration remains explicitly unavailable inside the job and is
-joined from API run/job timestamps by the rollout audit. Setup begins in hosted preparation or, on
-the private runner, the unconditional nextest installation. Compile is a labeled aggregate of
+joined from API run/job timestamps by the rollout audit. Setup begins in hosted preparation, with
+the nextest installer retaining a direct-invocation fallback. Compile is a labeled aggregate of
 Clippy, rustdoc and MSRV gate time; test, provider and coverage retain their direct gate durations.
 Unavailable, deferred and not-selected phases are distinct from an observed zero.
 
@@ -646,9 +646,9 @@ shared one digest; every sample started six Git and zero Cargo/rustc processes.
 
 The paired standard `ubuntu-latest` job never started repository code because GitHub rejected
 billed hosted work under the private account's payment/spending state. It is not a timing sample.
-The production workflow deliberately uses the persistent runner while private and changes to
-standard hosted only at the public boundary, while `M-public` waits on this hardening cut. Requiring
-the future environment here would therefore create a lifecycle cycle. `A1-652`, a blocking member
+At that private checkpoint the production workflow deliberately used the persistent runner and was
+scheduled to change to standard hosted only at the public boundary, while `M-public` waited on this
+hardening cut. Requiring the future environment there would have created a lifecycle cycle. `A1-652`, a blocking member
 of `M-public`, repeats the same canonical harness on the actual standard hosted production path and
 records that observation before the public cut closes.
 

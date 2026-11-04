@@ -93,9 +93,9 @@ runs:
       run: |
         set -euo pipefail
 
-        # The published artifact is Linux x86_64 only (one target is what the
-        # self-hosted release runner can build). Say so here rather than failing
-        # later with a confusing "cannot execute binary file".
+        # The published artifact is Linux x86_64 only, which is the distribution
+        # contract rather than a limit inherited from CI. Say so here rather than
+        # failing later with a confusing "cannot execute binary file".
         os="$(uname -s)"; arch="$(uname -m)"
         if [[ "$os" != "Linux" || "$arch" != "x86_64" ]]; then
           echo "::error::aplan's action supports Linux x86_64 only; this runner is ${os}/${arch}." >&2

@@ -228,8 +228,8 @@ def safe_extract(archive_path: Path, destination: Path) -> None:
                         f"{ancestor!r} contains {normalized!r}"
                     )
         # Do not use TarFile.extractall even after the checks above. Its safe
-        # extraction filter is unavailable on the private runner's supported
-        # Python, while its legacy mode would reintroduce host metadata and
+        # extraction filters differ across supported Python releases, while
+        # legacy extraction would reintroduce host metadata and
         # path handling that this bounded format does not need. Materialize
         # only the two admitted member kinds with normalized permissions.
         destination.mkdir(parents=True, exist_ok=True)

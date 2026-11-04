@@ -4,9 +4,6 @@
 *.pdb
 .DS_Store
 
-# Self-hosted runner credentials (copied from ci/env.example and filled in).
-/ci/.env
-
 # Release artifacts built by ci/scripts/release.sh.
 /dist
 

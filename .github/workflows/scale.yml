@@ -24,12 +24,11 @@ permissions:
 jobs:
   scale:
     name: scale and TUI performance
-    runs-on: ${{ (github.event.repository.private && fromJSON('["self-hosted","linux","aplan"]')) || fromJSON('["ubuntu-latest"]') }}
-    timeout-minutes: 30  # bound a hang: one runner, so a stuck job blocks all CI
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       - name: prepare a GitHub-hosted runner
-        if: runner.environment == 'github-hosted'
         run: ci/scripts/prepare-hosted.sh base
       - name: scale and TUI performance
         run: ci/scripts/scale.sh

@@ -338,8 +338,8 @@ the existing coverage contract remains exactly as it is.
 
 - `ci/nextest.env` pins nextest 0.9.143, its upstream commit and every supported archive checksum;
 - the shared installer verifies the archive before extraction and the binary's observed release and
-  commit before repository work; both test and release workflows invoke it on private and hosted
-  runners, so the private image preload is only a latency optimization;
+  commit before repository work; both test and release workflows invoke it on fresh hosted
+  runners, so a preinstalled image copy is only a latency optimization;
 - `.config/nextest.toml` defines the mutex, while the gate audits nextest's resolved membership and
   serial limit rather than trusting TOML text;
 - zero retries and fail-on-flaky behavior are explicit, and the gate exposes no partition route;

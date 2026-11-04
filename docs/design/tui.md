@@ -713,14 +713,15 @@ inherits another column's pass.
 
 | platform | compile and unit coverage | automated real PTY | Unix signals and job control | latest observation |
 |---|---|---|---|---|
-| Linux x86_64 | ordinary workspace suite plus `aplan-tui` library | four portable cases plus the full `tui_journey` corpus | supported and automated | public hosted matrix passed 2026-11-03; complete Unix suite also passed in the local full profile |
-| macOS arm64 | public `macos-latest` portability job | four portable cases, including attended CLI interruption | supported by the Unix implementation; Linux owns the complete signal matrix | public hosted matrix passed 2026-11-03 |
-| Windows x86_64 | public `windows-latest` portability job | three applicable cases through ConPTY | unavailable: Windows has no `SIGTSTP`/`SIGCONT` contract | public hosted matrix passed 2026-11-03; no claim is made for a console-control event the harness cannot generate |
+| Linux x86_64 | required `ubuntu-24.04` workspace validation | four portable cases plus the full `tui_journey` corpus | supported and automated | public hosted matrix passed 2026-11-03; complete Unix suite also passed in the local full profile |
+| macOS arm64 | required `macos-15` all-target compile, lint and unit job | four portable cases, including attended CLI interruption | supported by the Unix implementation; Linux owns the complete signal matrix | public hosted matrix passed 2026-11-03 |
+| Windows x86_64 | required `windows-2025` all-target compile, lint and unit job | three applicable cases through ConPTY | unavailable: Windows has no `SIGTSTP`/`SIGCONT` contract | public hosted matrix passed 2026-11-03; no claim is made for a console-control event the harness cannot generate |
 
-The weekly/manual `TUI portability` workflow is the executable matrix. Public runs use standard
-GitHub-hosted `ubuntu-latest`, `macos-latest` and `windows-latest` systems. ADR-0059 records why this
-is a narrow exception to the otherwise Ubuntu-only public CI decision. The 2026-11-03 qualification
-ran the shared library suite and every platform-applicable real-PTY case on all three systems.
+The required `CI` workflow runs the stable macOS and Windows contract on every pull request and
+`main` push. The weekly/manual `TUI portability` workflow separately uses moving GitHub-hosted
+`ubuntu-latest`, `macos-latest` and `windows-latest` labels. ADR-0065 owns this split. The
+2026-11-03 qualification ran the shared library suite and every platform-applicable real-PTY case
+on all three systems.
 
 The lifecycle cases and their load-bearing proofs are:
 

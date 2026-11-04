@@ -62,7 +62,7 @@ cargo run -q -p xtask -- check-docs
 # **Every document this repository declared**, expanded from `docs.paths` and
 # `docs.membership[].doc`. The old argument list was a second configuration:
 # adding a pilot or another plan-bearing document did not add it to the gate.
-# The no-argument invocation is the adopter surface and the self-hosted proof of
+# The no-argument invocation is the adopter surface and the self-dogfood proof of
 # `A1-203`; explicit paths remain the narrow one-off form.
 echo "==> aplan check-docs (declared references and cut membership)"
 cargo run -q -p aplan -- check-docs

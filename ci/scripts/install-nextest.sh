@@ -1,8 +1,8 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-# On a self-hosted job this is the first setup command. A hosted preparation
-# step writes the same variable earlier, so it includes its work as well.
+# Hosted preparation normally writes the marker first. Keep this fallback so a
+# direct invocation still records when validation setup began.
 if [[ -n "${GITHUB_ENV:-}" && -z "${APLAN_VALIDATION_SETUP_STARTED_EPOCH:-}" ]]; then
     printf 'APLAN_VALIDATION_SETUP_STARTED_EPOCH=%s\n' "$(date +%s)" >> "$GITHUB_ENV"
 fi

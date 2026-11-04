@@ -25,14 +25,13 @@ permissions:
 jobs:
   produce:
     name: direct oracle and receipts
-    runs-on: ${{ (github.event.repository.private && fromJSON('["self-hosted","linux","aplan"]')) || fromJSON('["ubuntu-latest"]') }}
+    runs-on: ubuntu-24.04
     timeout-minutes: 30
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           fetch-depth: 0
       - name: prepare a GitHub-hosted runner
-        if: runner.environment == 'github-hosted'
         run: ci/scripts/prepare-hosted.sh base
       - name: build the audited binary
         run: cargo build --release --locked -p aplan
@@ -57,7 +56,7 @@ jobs:
   consume:
     name: artifact-backed parity and latency
     needs: produce
-    runs-on: ${{ (github.event.repository.private && fromJSON('["self-hosted","linux","aplan"]')) || fromJSON('["ubuntu-latest"]') }}
+    runs-on: ubuntu-24.04
     timeout-minutes: 10
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
