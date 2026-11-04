@@ -8,6 +8,11 @@ Published releases are available on [GitHub](https://github.com/asamarts/aplan/r
 [crates.io](https://crates.io/crates/aplan). Building from source requires Rust 1.88 or newer.
 Release assets and the GitHub Action currently provide a Linux x86_64 binary.
 
+Release archives after v0.5.2 carry keyless build provenance. Verify a downloaded archive with
+`gh attestation verify ARCHIVE --repo asamarts/aplan --signer-workflow
+asamarts/aplan/.github/workflows/release.yml --source-ref refs/tags/vX.Y.Z
+--deny-self-hosted-runners`. v0.5.2 and earlier predate this provenance contract.
+
 ## Start
 
 Install from crates.io:

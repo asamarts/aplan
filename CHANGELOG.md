@@ -6,6 +6,16 @@ to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+### Added
+
+- **Release archives now carry keyless build provenance** (`A2-014`, ADR-0066). The protected
+  release job uses a short-lived GitHub OIDC identity and Sigstore certificate to bind the one
+  archive digest to `asamarts/aplan`, `release.yml`, the exact source and signer commit, the source
+  ref, and a GitHub-hosted runner. It verifies the newly created bundle before crates.io or GitHub
+  publication can begin, then reverifies it after crates.io publication before uploading the asset.
+  Manual staging exercises the same path without publishing, no signing key or mutable bundle asset
+  is stored, and releases through v0.5.2 remain explicitly unattested.
+
 ### Changed
 
 - **Required CI now proves Linux, macOS and Windows on fresh GitHub-hosted machines** (`A2-013`,

@@ -171,6 +171,7 @@ if [[ "$profile" == "release" ]]; then
     done
     docker info >/dev/null
     docker build --help | grep -q -- '--platform'
+    gh attestation verify --help >/dev/null
 fi
 
 echo "hosted runner prepared for ${requested_profile} (${profile})"

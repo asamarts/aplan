@@ -327,6 +327,126 @@ fn step_run(step: &Value) -> Option<&str> {
     step.get("run").and_then(Value::as_str)
 }
 
+const ATTEST_ACTION: &str = "actions/attest@1e69f48acb82d1966a394da916b4c1698aa569d6";
+
+fn release_provenance_problem(document: &Value) -> Option<String> {
+    let Some(permissions) = document.get("permissions").and_then(Value::as_mapping) else {
+        return Some("release workflow permissions are missing".to_string());
+    };
+    for (permission, expected) in [
+        ("contents", "write"),
+        ("id-token", "write"),
+        ("attestations", "write"),
+    ] {
+        if permissions
+            .get(Value::String(permission.to_string()))
+            .and_then(Value::as_str)
+            != Some(expected)
+        {
+            return Some(format!(
+                "release workflow must grant {permission}: {expected}"
+            ));
+        }
+    }
+    if permissions.len() != 3 {
+        return Some("release workflow grants permissions outside its closed set".to_string());
+    }
+
+    let steps = release_steps(document);
+    let build = steps
+        .iter()
+        .position(|step| step_run(step) == Some("ci/scripts/release.sh"));
+    let attest = steps
+        .iter()
+        .position(|step| step.get("uses").and_then(Value::as_str) == Some(ATTEST_ACTION));
+    let verify = steps
+        .iter()
+        .enumerate()
+        .filter_map(|(index, step)| {
+            (step_run(step) == Some("ci/scripts/verify-release-provenance.sh")).then_some(index)
+        })
+        .collect::<Vec<_>>();
+    let crates = steps
+        .iter()
+        .position(|step| step_run(step) == Some("ci/scripts/publish-crates.sh"));
+    let github = steps
+        .iter()
+        .position(|step| step_run(step) == Some("ci/scripts/publish-github-release.sh"));
+    let (Some(build), Some(attest), Some(crates), Some(github)) = (build, attest, crates, github)
+    else {
+        return Some(
+            "release build, attestation, verification, or publication step is missing".to_string(),
+        );
+    };
+    let [verify_before_any_publication, verify_before_assets] = verify.as_slice() else {
+        return Some(
+            "release workflow must contain exactly two provenance verifications".to_string(),
+        );
+    };
+    if !(build < attest
+        && attest < *verify_before_any_publication
+        && *verify_before_any_publication < crates
+        && crates < *verify_before_assets
+        && *verify_before_assets < github)
+    {
+        return Some(
+            "release must build, attest, verify, publish crates, reverify, and publish assets in that order"
+                .to_string(),
+        );
+    }
+
+    let attest_step = &steps[attest];
+    if attest_step.get("id").and_then(Value::as_str) != Some("release_attestation") {
+        return Some("release attestation step has no stable output identity".to_string());
+    }
+    if attest_step
+        .get("with")
+        .and_then(|with| with.get("subject-path"))
+        .and_then(Value::as_str)
+        != Some("dist/*.tar.gz")
+    {
+        return Some("release attestation does not name the one archive subject".to_string());
+    }
+    if attest_step.get("if").is_some() || attest_step.get("continue-on-error").is_some() {
+        return Some("release attestation may not be skipped or ignored".to_string());
+    }
+
+    let verify_step = &steps[*verify_before_any_publication];
+    if verify_step.get("if").is_some() || verify_step.get("continue-on-error").is_some() {
+        return Some("release provenance verification may not be skipped or ignored".to_string());
+    }
+    let reverify_step = &steps[*verify_before_assets];
+    if reverify_step.get("if").and_then(Value::as_str) != Some("github.ref_type == 'tag'")
+        || reverify_step.get("continue-on-error").is_some()
+    {
+        return Some(
+            "release provenance reverification must gate every tag asset publication".to_string(),
+        );
+    }
+    for verify_step in [verify_step, reverify_step] {
+        if verify_step
+            .get("env")
+            .and_then(|env| env.get("APLAN_ATTESTATION_BUNDLE"))
+            .and_then(Value::as_str)
+            != Some("${{ steps.release_attestation.outputs.bundle-path }}")
+        {
+            return Some(
+                "release verification is not bound to the attestation created by this run"
+                    .to_string(),
+            );
+        }
+        if verify_step
+            .get("env")
+            .and_then(|env| env.get("GH_TOKEN"))
+            .and_then(Value::as_str)
+            != Some("${{ github.token }}")
+        {
+            return Some("release verification has no scoped GitHub token".to_string());
+        }
+    }
+    None
+}
+
 fn release_workflow_problem(document: &Value) -> Option<String> {
     let Some(job) = document.get("jobs").and_then(|jobs| jobs.get("release")) else {
         return Some("release job is missing".to_string());
@@ -685,9 +805,70 @@ fn release_workflow_publishes_crates_before_github_assets() {
     let hosted = std::fs::read_to_string(workspace_root().join("ci/scripts/prepare-hosted.sh"))
         .expect("read hosted release preparation");
     assert!(
-        hosted.contains("for command in docker gh jq; do"),
+        hosted.contains("for command in docker gh jq; do")
+            && hosted.contains("gh attestation verify --help >/dev/null"),
         "hosted release setup must fail before validation when publication tools are absent"
     );
+}
+
+#[test]
+fn release_workflow_attests_and_verifies_before_any_publication() {
+    let canonical = release_workflow();
+    assert_eq!(release_provenance_problem(&canonical), None);
+
+    let mut missing_permission = canonical.clone();
+    missing_permission
+        .get_mut("permissions")
+        .and_then(Value::as_mapping_mut)
+        .expect("permissions mapping")
+        .remove(Value::String("attestations".to_string()));
+    assert!(release_provenance_problem(&missing_permission).is_some());
+
+    let mut weak_subject = canonical.clone();
+    let attest = release_steps_mut(&mut weak_subject)
+        .iter_mut()
+        .find(|step| step.get("uses").and_then(Value::as_str) == Some(ATTEST_ACTION))
+        .expect("attestation step");
+    attest["with"]["subject-path"] = Value::String("dist/**".to_string());
+    assert!(release_provenance_problem(&weak_subject).is_some());
+
+    let mut skipped_attestation = canonical.clone();
+    let attest = release_steps_mut(&mut skipped_attestation)
+        .iter_mut()
+        .find(|step| step.get("uses").and_then(Value::as_str) == Some(ATTEST_ACTION))
+        .expect("attestation step");
+    attest["if"] = Value::String("github.ref_type == 'tag'".to_string());
+    assert!(release_provenance_problem(&skipped_attestation).is_some());
+
+    let mut stale_bundle = canonical.clone();
+    let verify = release_steps_mut(&mut stale_bundle)
+        .iter_mut()
+        .find(|step| step_run(step) == Some("ci/scripts/verify-release-provenance.sh"))
+        .expect("verification step");
+    verify["env"]["APLAN_ATTESTATION_BUNDLE"] = Value::String("bundle.jsonl".to_string());
+    assert!(release_provenance_problem(&stale_bundle).is_some());
+
+    let mut verification_after_publication = canonical.clone();
+    let steps = release_steps_mut(&mut verification_after_publication);
+    let verify = steps
+        .iter()
+        .position(|step| step_run(step) == Some("ci/scripts/verify-release-provenance.sh"))
+        .expect("verification step");
+    let crates = steps
+        .iter()
+        .position(|step| step_run(step) == Some("ci/scripts/publish-crates.sh"))
+        .expect("crates publication step");
+    steps.swap(verify, crates);
+    assert!(release_provenance_problem(&verification_after_publication).is_some());
+
+    let mut no_final_verification = canonical.clone();
+    let steps = release_steps_mut(&mut no_final_verification);
+    let final_verify = steps
+        .iter()
+        .rposition(|step| step_run(step) == Some("ci/scripts/verify-release-provenance.sh"))
+        .expect("final verification step");
+    steps.remove(final_verify);
+    assert!(release_provenance_problem(&no_final_verification).is_some());
 }
 
 fn publish_order(script: &str) -> Vec<&str> {
@@ -1086,5 +1267,239 @@ fn github_publication_refuses_drift_and_only_fills_missing_assets() {
     assert_eq!(
         fs::read_to_string(root.join("state/gh.log")).expect("read upload log"),
         "upload\n"
+    );
+}
+
+fn prepare_provenance_fixture(root: &Path) -> (String, String, PathBuf) {
+    fs::create_dir_all(root.join("ci/scripts")).expect("create scripts directory");
+    fs::create_dir_all(root.join("bin")).expect("create command directory");
+    for name in ["verify-release-provenance.sh", "release-source.sh"] {
+        copy_release_script(root, name);
+    }
+    fs::write(
+        root.join("Cargo.toml"),
+        "[workspace]\nresolver = \"3\"\n\n[workspace.package]\nversion = \"0.6.0\"\n",
+    )
+    .expect("write fixture manifest");
+    fs::write(root.join(".gitignore"), "/dist\n/state\n").expect("write fixture ignores");
+    write_executable(
+        &root.join("bin/gh"),
+        r#"#!/usr/bin/env bash
+set -euo pipefail
+root="${RELEASE_FIXTURE_ROOT:?}"
+printf '%s\n' "$*" >> "$root/state/gh.log"
+"#,
+    );
+    let source = commit_fixture(root);
+    fs::create_dir_all(root.join("dist")).expect("create release output");
+    fs::create_dir_all(root.join("state")).expect("create fixture state");
+    let archive = "aplan-v0.6.0-x86_64-unknown-linux-musl.tar.gz";
+    fs::write(root.join("dist").join(archive), "validated archive\n")
+        .expect("write release archive");
+    let checksum = Command::new("sha256sum")
+        .arg(root.join("dist").join(archive))
+        .output()
+        .expect("calculate fixture archive checksum");
+    assert!(checksum.status.success(), "fixture checksum failed");
+    let digest = String::from_utf8(checksum.stdout)
+        .expect("fixture checksum is UTF-8")
+        .split_ascii_whitespace()
+        .next()
+        .expect("fixture checksum has a digest")
+        .to_string();
+    fs::write(
+        root.join("dist").join(format!("{archive}.sha256")),
+        format!("{digest}  {archive}\n"),
+    )
+    .expect("write release checksum");
+    let bundle = root.join("state/attestation.jsonl");
+    fs::write(&bundle, "signed bundle\n").expect("write attestation bundle");
+    (archive.to_string(), source, bundle)
+}
+
+fn run_provenance_verification(
+    root: &Path,
+    source: &str,
+    bundle: &Path,
+    repository: &str,
+    reference: &str,
+) -> std::process::Output {
+    let path = format!(
+        "{}:{}",
+        root.join("bin").display(),
+        std::env::var("PATH").expect("PATH")
+    );
+    Command::new(root.join("ci/scripts/verify-release-provenance.sh"))
+        .current_dir(root)
+        .env("PATH", path)
+        .env("APLAN_RELEASE_SHA", source)
+        .env("APLAN_ATTESTATION_BUNDLE", bundle)
+        .env("GITHUB_REPOSITORY", repository)
+        .env("GITHUB_REF", reference)
+        .env("GH_TOKEN", "fixture-token")
+        .env("RELEASE_FIXTURE_ROOT", root)
+        .output()
+        .expect("run release provenance verifier")
+}
+
+fn assert_provenance_identity(root: &Path, archive: &str, source: &str, bundle: &Path) {
+    let verified =
+        run_provenance_verification(root, source, bundle, "asamarts/aplan", "refs/tags/v0.6.0");
+    assert!(
+        verified.status.success(),
+        "provenance verification failed:\nstdout:\n{}\nstderr:\n{}",
+        String::from_utf8_lossy(&verified.stdout),
+        String::from_utf8_lossy(&verified.stderr)
+    );
+    let invocation = fs::read_to_string(root.join("state/gh.log")).expect("read gh invocation");
+    for required in [
+        format!("attestation verify dist/{archive}"),
+        "--repo asamarts/aplan".to_string(),
+        format!("--bundle {}", bundle.display()),
+        "--predicate-type https://slsa.dev/provenance/v1".to_string(),
+        "--cert-oidc-issuer https://token.actions.githubusercontent.com".to_string(),
+        "--signer-workflow asamarts/aplan/.github/workflows/release.yml".to_string(),
+        format!("--signer-digest {source}"),
+        format!("--source-digest {source}"),
+        "--source-ref refs/tags/v0.6.0".to_string(),
+        "--deny-self-hosted-runners".to_string(),
+    ] {
+        assert!(
+            invocation.contains(&required),
+            "verification omitted `{required}` from `{invocation}`"
+        );
+    }
+
+    let main =
+        run_provenance_verification(root, source, bundle, "asamarts/aplan", "refs/heads/main");
+    assert!(main.status.success(), "main staging ref was refused");
+    let invocation = fs::read_to_string(root.join("state/gh.log")).expect("read gh invocations");
+    assert!(
+        invocation.contains("--source-ref refs/heads/main"),
+        "main staging verification did not bind the main ref"
+    );
+}
+
+fn assert_archive_shape_refusals(root: &Path, archive: &str, source: &str, bundle: &Path) {
+    fs::write(root.join("dist").join(archive), "tampered archive\n")
+        .expect("tamper release archive");
+    let tampered =
+        run_provenance_verification(root, source, bundle, "asamarts/aplan", "refs/tags/v0.6.0");
+    assert!(
+        !tampered.status.success(),
+        "a checksum mismatch was accepted"
+    );
+    assert!(String::from_utf8_lossy(&tampered.stderr).contains("release archive does not match"));
+    fs::write(root.join("dist").join(archive), "validated archive\n")
+        .expect("restore release archive");
+
+    fs::remove_file(root.join("dist").join(archive)).expect("remove sole archive");
+    let absent =
+        run_provenance_verification(root, source, bundle, "asamarts/aplan", "refs/tags/v0.6.0");
+    assert!(!absent.status.success(), "zero archives were accepted");
+    assert!(
+        String::from_utf8_lossy(&absent.stderr).contains("expected one release archive, found 0")
+    );
+
+    fs::write(root.join("dist/first.tar.gz"), "first\n").expect("write first archive");
+    fs::write(root.join("dist/second.tar.gz"), "second\n").expect("write second archive");
+    let many =
+        run_provenance_verification(root, source, bundle, "asamarts/aplan", "refs/tags/v0.6.0");
+    assert!(!many.status.success(), "multiple archives were accepted");
+    assert!(
+        String::from_utf8_lossy(&many.stderr).contains("expected one release archive, found 2")
+    );
+
+    fs::remove_file(root.join("dist/first.tar.gz")).expect("remove first archive");
+    fs::remove_file(root.join("dist/second.tar.gz")).expect("remove second archive");
+    fs::write(root.join("dist").join(archive), "validated archive\n")
+        .expect("restore sole archive");
+}
+
+fn assert_attestation_identity_refusals(root: &Path, source: &str, bundle: &Path) {
+    let foreign =
+        run_provenance_verification(root, source, bundle, "someone/fork", "refs/tags/v0.6.0");
+    assert!(
+        !foreign.status.success(),
+        "a foreign repository identity was accepted"
+    );
+    assert!(
+        String::from_utf8_lossy(&foreign.stderr)
+            .contains("expected GITHUB_REPOSITORY=asamarts/aplan")
+    );
+
+    let foreign_ref = run_provenance_verification(
+        root,
+        source,
+        bundle,
+        "asamarts/aplan",
+        "refs/heads/release-candidate",
+    );
+    assert!(
+        !foreign_ref.status.success(),
+        "an untrusted ref was accepted"
+    );
+    assert!(
+        String::from_utf8_lossy(&foreign_ref.stderr)
+            .contains("release provenance requires main or a v* tag")
+    );
+
+    #[cfg(unix)]
+    {
+        let bundle_link = root.join("state/attestation-link.jsonl");
+        std::os::unix::fs::symlink(bundle, &bundle_link).expect("symlink attestation bundle");
+        let symlinked_bundle = run_provenance_verification(
+            root,
+            source,
+            &bundle_link,
+            "asamarts/aplan",
+            "refs/tags/v0.6.0",
+        );
+        assert!(
+            !symlinked_bundle.status.success(),
+            "a symlinked attestation bundle was accepted"
+        );
+        assert!(
+            String::from_utf8_lossy(&symlinked_bundle.stderr)
+                .contains("attestation bundle is not one regular file")
+        );
+    }
+}
+
+fn assert_missing_checksum_is_refused(root: &Path, archive: &str, source: &str, bundle: &Path) {
+    fs::remove_file(root.join("dist").join(format!("{archive}.sha256")))
+        .expect("remove release checksum");
+    let no_checksum =
+        run_provenance_verification(root, source, bundle, "asamarts/aplan", "refs/tags/v0.6.0");
+    assert!(
+        !no_checksum.status.success(),
+        "a missing checksum was accepted"
+    );
+    assert!(
+        String::from_utf8_lossy(&no_checksum.stderr)
+            .contains("expected one release checksum, found 0")
+    );
+}
+
+#[test]
+fn release_provenance_verifier_binds_one_archive_to_this_run_and_workflow() {
+    let fixture = tempfile::Builder::new()
+        .prefix("release-provenance-")
+        .tempdir_in(aplan_core::fixture::fixture_root())
+        .expect("create release provenance fixture");
+    let root = fixture.path();
+    let (archive, source, bundle) = prepare_provenance_fixture(root);
+
+    assert_provenance_identity(root, &archive, &source, &bundle);
+    assert_archive_shape_refusals(root, &archive, &source, &bundle);
+    assert_attestation_identity_refusals(root, &source, &bundle);
+    assert_missing_checksum_is_refused(root, &archive, &source, &bundle);
+    assert_eq!(
+        fs::read_to_string(root.join("state/gh.log"))
+            .expect("read completed verifier invocations")
+            .lines()
+            .count(),
+        2,
+        "a refused neighbour reached cryptographic verification"
     );
 }

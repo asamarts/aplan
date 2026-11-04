@@ -18,7 +18,8 @@ env:
 
 permissions:
   contents: write # create the release and upload its asset
-  id-token: write # exchange this job's identity for a short-lived crates.io token
+  id-token: write # exchange this job's identity for Sigstore and crates.io credentials
+  attestations: write # persist the archive's signed build-provenance statement
 
 jobs:
   release:
@@ -72,6 +73,24 @@ jobs:
           TAG: ${{ github.ref_type == 'tag' && github.ref_name || '' }}
         run: ci/scripts/release.sh
 
+      # Bind the archive digest to this repository, workflow and exact source
+      # with a short-lived Sigstore certificate. Manual staging exercises the
+      # same path without publishing, so the first tag is not its first test.
+      - name: attest the release archive
+        id: release_attestation
+        uses: actions/attest@1e69f48acb82d1966a394da916b4c1698aa569d6 # v4.2.2
+        with:
+          subject-path: dist/*.tar.gz
+
+      # Verify the bundle just created, not any older attestation for matching
+      # bytes. Repository, workflow, ref, source, signer revision and hosted
+      # runner are all part of the policy and publication cannot bypass it.
+      - name: verify the release provenance
+        env:
+          APLAN_ATTESTATION_BUNDLE: ${{ steps.release_attestation.outputs.bundle-path }}
+          GH_TOKEN: ${{ github.token }}
+        run: ci/scripts/verify-release-provenance.sh
+
       # The first public release bootstraps each new crate with a maintainer
       # token. Every later tag exchanges this exact job identity for one
       # short-lived token scoped by crates.io to the ten configured packages.
@@ -86,6 +105,16 @@ jobs:
           CARGO_REGISTRY_TOKEN: ${{ steps.crates_io_auth.outputs.token }}
           TAG: ${{ github.ref_name }}
         run: ci/scripts/publish-crates.sh
+
+      # The crates.io transaction includes another pinned action and script.
+      # Reverify afterward so the bytes uploaded to GitHub are still the bytes
+      # named by this run's attestation.
+      - name: reverify provenance before asset publication
+        if: github.ref_type == 'tag'
+        env:
+          APLAN_ATTESTATION_BUNDLE: ${{ steps.release_attestation.outputs.bundle-path }}
+          GH_TOKEN: ${{ github.token }}
+        run: ci/scripts/verify-release-provenance.sh
 
       # A release is a claim about a commit, so publish the checksum beside the
       # archive: it is what lets the GitHub Action (A1-003) pin an exact artifact
