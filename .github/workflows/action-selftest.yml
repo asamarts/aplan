@@ -22,15 +22,14 @@ concurrency:
 # today's configuration and the last tag -- which went red on `unknown field
 # effort_days_per_week` the first time the workflow ran in a month, with nothing
 # in `action.yml` wrong. That directory explains itself; the short version is that
-# its plan is written to what `v0.5.2` can parse. The repository's own plan is
-# checked structurally on every push and with full-history evidence resolution
+# its plan is written to what the pinned release can parse. The repository's own
+# plan is checked structurally on every push and with full-history evidence resolution
 # nightly, on dispatch and before release, using the binary built from the
 # commit under test. Those are the stronger checks and the right place for it.
 permissions:
   contents: read
   # v0.6.0 and later are authenticated before the downloaded archive is
-  # extracted. Keep the permission here even while the live fixture exercises
-  # v0.5.2's explicit historical checksum-only path.
+  # extracted, so the live fixture needs read access to the attestation API.
   attestations: read
 
 jobs:
@@ -54,21 +53,21 @@ jobs:
         id: check
         uses: ./
         with:
-          version: v0.5.2
+          version: v0.6.0
           command: check
           working-directory: ci/fixtures/action-selftest
 
       - name: the installed version is the one that was asked for
         run: |
-          test "${{ steps.check.outputs.version }}" = "v0.5.2" \
-            || { echo "installed '${{ steps.check.outputs.version }}', expected v0.5.2" >&2; exit 1; }
+          test "${{ steps.check.outputs.version }}" = "v0.6.0" \
+            || { echo "installed '${{ steps.check.outputs.version }}', expected v0.6.0" >&2; exit 1; }
 
       # A second run exercising the other command and an explicit root, so the
       # inputs are covered rather than assumed.
       - name: verify, with an explicit root
         uses: ./
         with:
-          version: v0.5.2
+          version: v0.6.0
           command: verify
           root: tasks
           format: human

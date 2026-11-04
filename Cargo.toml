@@ -22,7 +22,7 @@ default-members = ["crates/aplan"]
 # must never report the same string as a published release, or a consumer
 # pinning by `--version` pins nothing (`A1-060`). `ci/scripts/release.sh`
 # refuses to tag while `-dev` is set, so releasing is an explicit bump.
-version = "0.6.0"
+version = "0.7.0-dev"
 edition = "2024"
 # Raised from 1.85 to match the locked graph, which needed 1.88 through
 # `darling 0.23` and had done since before anyone noticed: the declaration was
@@ -37,16 +37,16 @@ publish = ["crates-io"]
 authors = ["aplan contributors"]
 
 [workspace.dependencies]
-aplan-core = { path = "crates/aplan-core", version = "0.6.0" }
-aplan-app = { path = "crates/aplan-app", version = "0.6.0" }
-aplan-tui = { path = "crates/aplan-tui", version = "0.6.0" }
-aplan-config = { path = "crates/aplan-config", version = "0.6.0" }
-aplan-output = { path = "crates/aplan-output", version = "0.6.0" }
-aplan-evidence = { path = "crates/aplan-evidence", version = "0.6.0" }
-aplan-attest = { path = "crates/aplan-attest", version = "0.6.0" }
-aplan-interop = { path = "crates/aplan-interop", version = "0.6.0" }
-aplan-mcp = { path = "crates/aplan-mcp", version = "0.6.0" }
-aplan = { path = "crates/aplan", version = "0.6.0" }
+aplan-core = { path = "crates/aplan-core", version = "0.7.0-dev" }
+aplan-app = { path = "crates/aplan-app", version = "0.7.0-dev" }
+aplan-tui = { path = "crates/aplan-tui", version = "0.7.0-dev" }
+aplan-config = { path = "crates/aplan-config", version = "0.7.0-dev" }
+aplan-output = { path = "crates/aplan-output", version = "0.7.0-dev" }
+aplan-evidence = { path = "crates/aplan-evidence", version = "0.7.0-dev" }
+aplan-attest = { path = "crates/aplan-attest", version = "0.7.0-dev" }
+aplan-interop = { path = "crates/aplan-interop", version = "0.7.0-dev" }
+aplan-mcp = { path = "crates/aplan-mcp", version = "0.7.0-dev" }
+aplan = { path = "crates/aplan", version = "0.7.0-dev" }
 
 anyhow = "1"
 thiserror = "2"
