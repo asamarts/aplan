@@ -443,6 +443,20 @@ fn release_artifact_paths_are_host_neutral() {
 /// the same tagged Rust source. The platform digest freezes the upstream image,
 /// the Debian snapshot freezes every added native package, and both local and
 /// hosted callers enter that environment through the same script.
+fn assert_contains_all(subject: &str, required: &[&str], description: &str) {
+    for item in required {
+        assert!(subject.contains(item), "{description} lost {item}");
+    }
+}
+
+fn active_policy_lines(policy: &str) -> Vec<&str> {
+    policy
+        .lines()
+        .map(str::trim)
+        .filter(|line| !line.is_empty() && !line.starts_with('#'))
+        .collect()
+}
+
 #[test]
 fn release_artifact_builder_pins_native_inputs_for_every_caller() {
     let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
@@ -483,43 +497,41 @@ fn release_artifact_builder_pins_native_inputs_for_every_caller() {
         "release builder tag {image} does not name toolchain {channel}"
     );
 
-    for required in [
-        "ARG DEBIAN_SNAPSHOT=20261101T000000Z",
-        "snapshot.debian.org/archive/debian/${DEBIAN_SNAPSHOT}/",
-        "snapshot.debian.org/archive/debian-security/${DEBIAN_SNAPSHOT}/",
-        "git \\",
-        "musl-tools \\",
-        "pkg-config \\",
-        "zlib1g-dev \\",
-        "actual=\"$(rustc --version | awk '{print $2}')\"",
-        "test \"$actual\" = \"$required\"",
-        "rustup component add $components --toolchain \"$required\"",
-        "rustup target add x86_64-unknown-linux-musl --toolchain \"$required\"",
-    ] {
-        assert!(
-            builder.contains(required),
-            "release builder lost {required}"
-        );
-    }
+    assert_contains_all(
+        &builder,
+        &[
+            "ARG DEBIAN_SNAPSHOT=20261101T000000Z",
+            "snapshot.debian.org/archive/debian/${DEBIAN_SNAPSHOT}/",
+            "snapshot.debian.org/archive/debian-security/${DEBIAN_SNAPSHOT}/",
+            "git \\",
+            "musl-tools \\",
+            "pkg-config \\",
+            "zlib1g-dev \\",
+            "actual=\"$(rustc --version | awk '{print $2}')\"",
+            "test \"$actual\" = \"$required\"",
+            "rustup component add $components --toolchain \"$required\"",
+            "rustup target add x86_64-unknown-linux-musl --toolchain \"$required\"",
+        ],
+        "release builder",
+    );
 
-    for required in [
-        "if [[ \"${APLAN_RELEASE_IN_BUILDER:-}\" != 1 ]]",
-        "--file ci/release.Containerfile",
-        "--platform linux/amd64",
-        "--volume \"$REPO_ROOT:/aplan/source:ro\"",
-        "git rev-parse --path-format=absolute --git-common-dir",
-        "git_mount=(--volume \"$git_common:$git_common:ro\")",
-        "user_args=(--userns=keep-id)",
-        "user_args=(--user \"$(id -u):$(id -g)\")",
-        "--env APLAN_RELEASE_IN_BUILDER=1",
-        "--env CARGO_TARGET_DIR=/aplan/build/target",
-        "${APLAN_RELEASE_SCRATCH_ROOT:-${HOME:?}/.tmp}",
-    ] {
-        assert!(
-            release.contains(required),
-            "release entry point lost {required}"
-        );
-    }
+    assert_contains_all(
+        &release,
+        &[
+            "if [[ \"${APLAN_RELEASE_IN_BUILDER:-}\" != 1 ]]",
+            "--file ci/release.Containerfile",
+            "--platform linux/amd64",
+            "--volume \"$REPO_ROOT:/aplan/source:ro\"",
+            "git rev-parse --path-format=absolute --git-common-dir",
+            "git_mount=(--volume \"$git_common:$git_common:ro\")",
+            "user_args=(--userns=keep-id)",
+            "user_args=(--user \"$(id -u):$(id -g)\")",
+            "--env APLAN_RELEASE_IN_BUILDER=1",
+            "--env CARGO_TARGET_DIR=/aplan/build/target",
+            "${APLAN_RELEASE_SCRATCH_ROOT:-${HOME:?}/.tmp}",
+        ],
+        "release entry point",
+    );
     assert!(
         workflow.contains("run: ci/scripts/release.sh"),
         "hosted publication bypasses the shared release entry point"
@@ -543,18 +555,9 @@ fn release_artifact_builder_pins_native_inputs_for_every_caller() {
             "release builder context lost {allowed}"
         );
     }
-    let docker_policy = dockerignore
-        .lines()
-        .map(str::trim)
-        .filter(|line| !line.is_empty() && !line.starts_with('#'))
-        .collect::<Vec<_>>();
-    let podman_policy = containerignore
-        .lines()
-        .map(str::trim)
-        .filter(|line| !line.is_empty() && !line.starts_with('#'))
-        .collect::<Vec<_>>();
     assert_eq!(
-        docker_policy, podman_policy,
+        active_policy_lines(&dockerignore),
+        active_policy_lines(&containerignore),
         "Docker and Podman must build from the same bounded context"
     );
 }
