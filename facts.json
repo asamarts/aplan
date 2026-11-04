@@ -29,6 +29,10 @@
       "what": "concurrent claims or releases for different tasks retry guarded whole-store contention so every nonconflicting update is retained"
     },
     {
+      "name": "storage.atomic_replacement_is_portable",
+      "what": "guarded mutations and private cache refreshes retry transient Windows sharing denials while retaining the same atomic replacement and stale-input boundaries"
+    },
+    {
       "name": "coordination.is_not_a_plan_verdict_mutation",
       "what": "`claim` and `release` mutate only local ephemeral coordination state, so they do not accept plan-verdict overrides or imply that the plan passed a gate"
     },
@@ -1379,7 +1383,7 @@
     "version.require_impact"
   ],
   "counts": {
-    "behaviours": 218,
+    "behaviours": 219,
     "build_capabilities": 1,
     "commands": 48,
     "config_keys": 124,
