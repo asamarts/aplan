@@ -1,8 +1,12 @@
+#![cfg(unix)]
+
 //! The single integration-test harness for this crate (`A1-630`).
 //!
 //! Keep the source modules in `tests/`: task paths and trace references name
 //! those files directly. The integration-target census checks that this list
-//! and the files on disk remain equal.
+//! and the files on disk remain equal. These tests exercise POSIX shells,
+//! signals, permissions and non-UTF-8 paths; the hosted portable contract runs
+//! the cross-platform library and binary tests instead.
 
 #[path = "../common.rs"]
 mod common;
