@@ -28,6 +28,6 @@
 | A2-011 | Publish the first public release and automate the complete transaction | done | - | test:ci_runner_census::hosted_release_prepares_every_tool_required_by_release_validation, test:release_changelog::release_workflow_cannot_publish_without_same_source_full_validation, test:release_changelog::crates_publication_runs_the_registry_transaction_in_dependency_order, test:release_changelog::github_publication_refuses_drift_and_only_fills_missing_assets |
 | A2-012 | Make release artifacts byte-reproducible across builders | done | - | test:ci_runner_census::release_artifact_builder_pins_native_inputs_for_every_caller |
 | A2-013 | Make public CI cross-platform and retire the machine runner | done | - | commit:317ef3b6356b, test:ci_runner_census::required_platform_checks_compile_lint_test_and_exercise_a_real_terminal, test:ci_runner_census::a_public_repository_cannot_name_a_persistent_self_hosted_runner, test:save::tests::missing_aliases_share_one_transaction_identity, test:capture::tests::loader_reports_encoding_schema_and_hostile_entry_neighbours |
-| A2-014 | Bind release archives to keyless build provenance | in_progress | - | - |
+| A2-014 | Bind release archives to keyless build provenance | done | - | commit:b459892cd80e, test:release_changelog::release_workflow_attests_and_verifies_before_any_publication, test:release_changelog::release_provenance_verifier_binds_one_archive_to_this_run_and_workflow |
 
 > Statuses are as claimed in the plan and gated by `aplan verify` in CI.
