@@ -1437,6 +1437,7 @@ struct CacheLock {
 
 impl CacheLock {
     fn acquire(path: &Path) -> Option<Self> {
+        let deadline = std::time::Instant::now() + Duration::from_secs(2);
         for _ in 0..LOCK_ATTEMPTS {
             match private_create_new(path) {
                 Ok(mut file) => {
@@ -1448,9 +1449,16 @@ impl CacheLock {
                 Err(error) if existing_lock_contention(path, &error) => {
                     if stale_regular_file(path) {
                         let _ = fs::remove_file(path);
-                    } else {
-                        std::thread::yield_now();
                     }
+                    if std::time::Instant::now() >= deadline {
+                        return None;
+                    }
+                    // A yield-only retry can exhaust all attempts before
+                    // Windows releases the handle used to inspect or remove a
+                    // stale file. One millisecond is bounded, gives that
+                    // handle a real scheduling opportunity, and still lets a
+                    // stale lock recover immediately on the next attempt.
+                    std::thread::sleep(Duration::from_millis(1));
                 }
                 Err(_) => return None,
             }

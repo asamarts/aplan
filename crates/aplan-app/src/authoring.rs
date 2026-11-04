@@ -1957,6 +1957,20 @@ fn is_within(path: &Path, boundary: &Path) -> bool {
     let resolved = |candidate: &Path| {
         candidate
             .canonicalize()
+            .or_else(|error| {
+                // Windows canonicalization uses an extended-length spelling
+                // (`\\?\`) for an existing path. A selected configuration may
+                // legitimately be missing, but its parent still gives that
+                // non-existent leaf the same canonical spelling as the
+                // repository boundary. Comparing a canonical boundary with an
+                // merely absolute leaf would otherwise call an in-repository
+                // path external before reporting its typed read error.
+                candidate
+                    .parent()
+                    .and_then(|parent| parent.canonicalize().ok())
+                    .and_then(|parent| candidate.file_name().map(|name| parent.join(name)))
+                    .ok_or(error)
+            })
             .or_else(|_| std::path::absolute(candidate))
             .unwrap_or_else(|_| candidate.to_path_buf())
     };
@@ -3543,6 +3557,7 @@ mod tests {
         }
     }
 
+    /// Proof for `authoring.rekey_repository_boundary_is_portable`.
     #[test]
     fn rekey_policy_failures_are_typed_before_publication() {
         let config_text = "policy:\n  - when:\n      cut: [M-v1]\n    evidence:\n      require_min_strength: [test]\n";

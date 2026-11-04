@@ -670,8 +670,6 @@ fn move_to_backup(path: &Path) -> Result<PathBuf, SaveError> {
 fn rename_replacing(from: &Path, to: &Path) -> std::io::Result<()> {
     #[cfg(windows)]
     {
-        const ATTEMPTS: usize = 128;
-
         let parent = to
             .parent()
             .filter(|parent| !parent.as_os_str().is_empty())
@@ -685,7 +683,8 @@ fn rename_replacing(from: &Path, to: &Path) -> std::io::Result<()> {
         drop(staged);
         std::fs::remove_file(from)?;
 
-        for attempt in 0..ATTEMPTS {
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(2);
+        loop {
             match replacement.persist(to) {
                 Ok(file) => {
                     drop(file);
@@ -694,7 +693,7 @@ fn rename_replacing(from: &Path, to: &Path) -> std::io::Result<()> {
                 Err(error)
                     if (error.error.kind() == std::io::ErrorKind::PermissionDenied
                         || matches!(error.error.raw_os_error(), Some(32 | 33)))
-                        && attempt + 1 < ATTEMPTS =>
+                        && std::time::Instant::now() < deadline =>
                 {
                     replacement = error.file;
                     std::thread::sleep(std::time::Duration::from_millis(2));
@@ -702,7 +701,6 @@ fn rename_replacing(from: &Path, to: &Path) -> std::io::Result<()> {
                 Err(error) => return Err(error.error),
             }
         }
-        unreachable!("the bounded Windows rename loop returns")
     }
     #[cfg(not(windows))]
     {
