@@ -2024,6 +2024,11 @@ mod tests {
             .open(&path)
             .expect("open cache");
         oversized.set_len(MAX_BYTES + 1).expect("oversize cache");
+        // Windows cannot replace the destination while this deliberately
+        // long-lived writer still holds it open. The cache reader under test
+        // opens and closes its own handle before publication, so release this
+        // fixture handle before exercising stale-lock recovery as well.
+        drop(oversized);
         assert!(read_observation(root.path(), &options).is_none());
 
         let lock = path.with_extension("lock");
