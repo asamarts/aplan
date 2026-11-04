@@ -349,27 +349,38 @@ mod tests {
         }
 
         // And anything it does return is absolute, which is the invariant
-        // rather than the enumeration above.
+        // rather than the enumeration above. Derive native absolute paths:
+        // `/home/u` is absolute on Unix but drive-relative on Windows.
+        let absolute_root = std::env::current_dir().expect("absolute working directory");
+        let xdg_root = absolute_root.join("xdg");
+        let home_root = absolute_root.join("home");
         for (xdg, home) in [
-            (Some("/x/cfg"), Some("/home/u")),
-            (None, Some("/home/u")),
-            (Some(""), Some("/home/u")),
-            (Some("relative"), Some("/home/u")),
+            (Some(xdg_root.as_os_str()), Some(home_root.as_os_str())),
+            (None, Some(home_root.as_os_str())),
+            (Some(OsStr::new("")), Some(home_root.as_os_str())),
+            (Some(OsStr::new("relative")), Some(home_root.as_os_str())),
         ] {
-            let got = path_from(xdg.map(OsStr::new), home.map(OsStr::new))
-                .expect("an absolute source was given");
+            let got = path_from(xdg, home).expect("an absolute source was given");
             assert!(got.is_absolute(), "{got:?} is not absolute");
-            assert!(got.ends_with("aplan/config.yml"), "{got:?}");
+            assert!(
+                got.ends_with(Path::new(USER_CONFIG_DIR).join(USER_CONFIG_FILE)),
+                "{got:?}"
+            );
         }
 
         // `XDG_CONFIG_HOME` wins when it is usable, and is skipped when not.
         assert_eq!(
-            path_from(Some(OsStr::new("/x/cfg")), Some(OsStr::new("/home/u"))),
-            Some(PathBuf::from("/x/cfg/aplan/config.yml"))
+            path_from(Some(xdg_root.as_os_str()), Some(home_root.as_os_str())),
+            Some(xdg_root.join(USER_CONFIG_DIR).join(USER_CONFIG_FILE))
         );
         assert_eq!(
-            path_from(Some(OsStr::new("relative")), Some(OsStr::new("/home/u"))),
-            Some(PathBuf::from("/home/u/.config/aplan/config.yml")),
+            path_from(Some(OsStr::new("relative")), Some(home_root.as_os_str())),
+            Some(
+                home_root
+                    .join(".config")
+                    .join(USER_CONFIG_DIR)
+                    .join(USER_CONFIG_FILE)
+            ),
             "an unusable XDG value should fall through, not refuse"
         );
     }
