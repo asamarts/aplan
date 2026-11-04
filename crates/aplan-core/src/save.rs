@@ -29,10 +29,11 @@
 //! moment. So the write takes an exclusive lock as well, and the task's stated
 //! preference is overruled by its own acceptance test rather than by argument.
 //!
-//! The lock is a file created with `create_new`, which is atomic, and released
-//! by [`Drop`]. A holder that dies leaves it behind, so a lock older than
-//! [`STALE`] is broken rather than waited on -- a write here takes microseconds,
-//! so a lock that old is not a live writer under any scheduling.
+//! On Unix, the lock is a file created with `create_new`, which is atomic, and
+//! released by [`Drop`]. A holder that dies leaves it behind, so a lock older
+//! than [`STALE`] is broken rather than waited on. Windows instead holds an OS
+//! file lock: it is released automatically if the process exits and avoids the
+//! create/delete races of Windows file sharing.
 //!
 //! The comparison is still there and still earns its place: the lock only spans
 //! this write, while the comparison spans the caller's whole read-compute-write,
@@ -845,7 +846,7 @@ fn stage_for(
     Ok(temp)
 }
 
-/// How long a lock may be held before it is assumed to belong to a dead writer.
+/// How long a Unix lock may be held before it is assumed to belong to a dead writer.
 ///
 /// A write here is a comparison, a small file and a rename: microseconds. Thirty
 /// seconds is not a slow writer under any scheduling, it is a writer that is
@@ -855,10 +856,12 @@ pub const STALE: std::time::Duration = std::time::Duration::from_secs(30);
 /// An exclusive lock on one file, released when dropped.
 struct Lock {
     path: PathBuf,
+    #[cfg(windows)]
+    file: Option<std::fs::File>,
 }
 
 impl Lock {
-    /// Take it, waiting briefly for a live writer and breaking a dead one's.
+    /// Take it, waiting briefly for a live writer and breaking a dead Unix lock.
     fn acquire(target: &Path) -> Result<Self, SaveError> {
         let dir = target.parent().unwrap_or_else(|| Path::new("."));
         let stem = target
@@ -866,74 +869,99 @@ impl Lock {
             .map_or_else(|| "plan".to_string(), |n| n.to_string_lossy().into_owned());
         let path = dir.join(format!(".{stem}.lock"));
 
-        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(2);
-        let mut broke_one = false;
-        loop {
-            match std::fs::OpenOptions::new()
-                .write(true)
-                .create_new(true)
-                .open(&path)
-            {
-                Ok(_) => {
-                    return Ok(Self { path });
-                }
-                Err(error) if existing_lock_contention(&path, &error) => {}
-                Err(source) => {
-                    return Err(SaveError::Io {
+        #[cfg(windows)]
+        {
+            let deadline = std::time::Instant::now() + std::time::Duration::from_secs(2);
+            loop {
+                let file = std::fs::OpenOptions::new()
+                    .read(true)
+                    .write(true)
+                    .create(true)
+                    .open(&path)
+                    .map_err(|source| SaveError::Io {
                         path: target.to_path_buf(),
                         source,
-                    });
+                    })?;
+                match fs2::FileExt::try_lock_exclusive(&file) {
+                    Ok(()) => {
+                        return Ok(Self {
+                            path,
+                            file: Some(file),
+                        });
+                    }
+                    Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => {
+                        if std::time::Instant::now() >= deadline {
+                            return Err(SaveError::Busy {
+                                path: target.to_path_buf(),
+                            });
+                        }
+                        std::thread::sleep(std::time::Duration::from_millis(1));
+                    }
+                    Err(source) => {
+                        return Err(SaveError::Io {
+                            path: target.to_path_buf(),
+                            source,
+                        });
+                    }
                 }
             }
+        }
 
-            // The stale check runs on every attempt rather than only after the
-            // deadline: a lock left by a dead writer should cost the next one no
-            // wait at all. Broken once, so a pathological loop cannot spin here.
-            // Breaking it retries immediately; only a live holder is waited on.
-            if !broke_one && held_longer_than(&path, STALE) {
-                let _ = std::fs::remove_file(&path);
-                broke_one = true;
-            } else if std::time::Instant::now() >= deadline {
-                return Err(SaveError::Busy {
-                    path: target.to_path_buf(),
-                });
-            } else {
-                std::thread::sleep(std::time::Duration::from_millis(1));
+        #[cfg(not(windows))]
+        {
+            let deadline = std::time::Instant::now() + std::time::Duration::from_secs(2);
+            let mut broke_one = false;
+            loop {
+                match std::fs::OpenOptions::new()
+                    .write(true)
+                    .create_new(true)
+                    .open(&path)
+                {
+                    Ok(_) => {
+                        return Ok(Self { path });
+                    }
+                    Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => {}
+                    Err(source) => {
+                        return Err(SaveError::Io {
+                            path: target.to_path_buf(),
+                            source,
+                        });
+                    }
+                }
+
+                // The stale check runs on every attempt rather than only after the
+                // deadline: a lock left by a dead writer should cost the next one no
+                // wait at all. Broken once, so a pathological loop cannot spin here.
+                // Breaking it retries immediately; only a live holder is waited on.
+                if !broke_one && held_longer_than(&path, STALE) {
+                    let _ = std::fs::remove_file(&path);
+                    broke_one = true;
+                } else if std::time::Instant::now() >= deadline {
+                    return Err(SaveError::Busy {
+                        path: target.to_path_buf(),
+                    });
+                } else {
+                    std::thread::sleep(std::time::Duration::from_millis(1));
+                }
             }
         }
     }
 }
 
-fn existing_lock_contention(path: &Path, error: &std::io::Error) -> bool {
-    if error.kind() == std::io::ErrorKind::AlreadyExists {
-        return true;
-    }
-    #[cfg(windows)]
-    {
-        // Windows can report ERROR_ACCESS_DENIED rather than
-        // ERROR_FILE_EXISTS when CREATE_NEW races an existing lock file. Only
-        // classify it as contention after independently observing that exact
-        // lock path; a genuine directory permission failure remains I/O.
-        error.kind() == std::io::ErrorKind::PermissionDenied
-            && std::fs::symlink_metadata(path).is_ok()
-    }
-    #[cfg(not(windows))]
-    {
-        let _ = path;
-        false
-    }
-}
-
 impl Drop for Lock {
     fn drop(&mut self) {
-        // Best effort: a lock left behind is broken by the next writer once it
-        // is `STALE`, which is the case this cannot make worse.
+        // Remove before closing the Windows handle: standard-library files
+        // share deletion, so the path remains unavailable until every handle
+        // closes. On Unix a failed best-effort removal is broken after `STALE`.
         let _ = std::fs::remove_file(&self.path);
+        #[cfg(windows)]
+        drop(self.file.take());
     }
 }
 
 /// Whether `path` was created longer ago than `age`, treating an unreadable
 /// timestamp as "not stale" so a lock is never broken on a guess.
+#[cfg(not(windows))]
 fn held_longer_than(path: &Path, age: std::time::Duration) -> bool {
     std::fs::metadata(path)
         .and_then(|m| m.modified())
@@ -1916,7 +1944,7 @@ mod tests {
             .tempdir_in(crate::fixture::fixture_root())
             .expect("tempdir");
         let p = at(dir.path(), "m.md", "before\n");
-        std::fs::write(dir.path().join(".m.md.lock"), "").expect("fresh lock");
+        let _held = Lock::acquire(&p).expect("hold lock");
 
         let err = replace(&p, "before\n", "after\n").expect_err("must refuse");
         assert!(matches!(err, SaveError::Busy { .. }), "{err:?}");

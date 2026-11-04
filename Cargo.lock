@@ -138,6 +138,7 @@ dependencies = [
  "aplan-interop",
  "aplan-output",
  "blake3",
+ "fs2",
  "git2",
  "globset",
  "graphlay",
@@ -186,6 +187,7 @@ dependencies = [
 name = "aplan-core"
 version = "0.6.0-dev"
 dependencies = [
+ "fs2",
  "globset",
  "ignore",
  "jsonschema",
@@ -873,6 +875,16 @@ checksum = "e246562084dde8ebbcc943b261c406ce4f68e5032ec28029a251a47d6a295500"
 dependencies = [
  "num",
  "num-bigint",
+]
+
+[[package]]
+name = "fs2"
+version = "0.4.3"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "9564fc758e15025b46aa6643b1b77d047d1a56a1aea6e01002ac0c7026876213"
+dependencies = [
+ "libc",
+ "winapi",
 ]
 
 [[package]]

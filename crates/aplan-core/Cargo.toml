@@ -29,6 +29,7 @@ ignore.workspace = true
 libc = "0.2"
 
 [target.'cfg(windows)'.dependencies]
+fs2.workspace = true
 tempfile.workspace = true
 
 [dev-dependencies]

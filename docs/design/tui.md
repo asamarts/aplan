@@ -932,10 +932,13 @@ Every direct `aplan-tui` dependency is mapped exactly. The product crate edges p
 operations and domain/output contracts; Ratatui and the Unicode crates provide terminal layout and
 text boundaries; shell-words and thiserror provide editor parsing and typed errors. Unix-only
 Crossterm, libc and signal-hook edges own terminal input and process lifecycle. The aplan-config and
-tempfile dev edges support isolated fixtures. The three selected supporting admissions outside the
-TUI are also still used: graphlay supplies layered coordinates in `aplan-app`, shell-words and
-tempfile implement CLI capture editing, and termlens drives real-PTY integration tests. No stale,
-missing or target-mismatched admission was found.
+tempfile dev edges support isolated fixtures. The selected supporting admissions outside the TUI
+are also still used: graphlay supplies layered coordinates in `aplan-app`, shell-words and tempfile
+implement CLI capture editing, and termlens drives real-PTY integration tests. The two Windows-only
+fs2 admissions provide OS-managed publication and cache locks while the workspace MSRV remains one
+release below the equivalent standard-library API. They replace the create/delete lock-file race
+without entering the Linux default or headless product graphs. No stale, missing or
+target-mismatched admission was found.
 
 The selected terminal stack remains one Ratatui/Crossterm backend line. Ratatui 0.30.2 resolves
 only `crossterm` and `std`; `ratatui-crossterm` 0.1.2 supplies the Crossterm 0.29 bridge and

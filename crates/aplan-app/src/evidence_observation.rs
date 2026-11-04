@@ -24,6 +24,7 @@ const MAGIC: &str = "aplan-evidence-observation";
 const PROTOCOL: u32 = 1;
 const MAX_BYTES: u64 = 64 * 1024 * 1024;
 const STALE_LOCK_AFTER: Duration = Duration::from_secs(30);
+#[cfg(not(windows))]
 const LOCK_ATTEMPTS: usize = 4_096;
 static TEMP_SEQUENCE: AtomicU64 = AtomicU64::new(0);
 
@@ -1433,64 +1434,82 @@ fn publish_observation(
 #[derive(Debug)]
 struct CacheLock {
     path: PathBuf,
+    #[cfg(windows)]
+    file: Option<fs::File>,
 }
 
 impl CacheLock {
     fn acquire(path: &Path) -> Option<Self> {
-        let deadline = std::time::Instant::now() + Duration::from_secs(2);
-        for _ in 0..LOCK_ATTEMPTS {
-            match private_create_new(path) {
-                Ok(mut file) => {
-                    let _ = writeln!(file, "{}", std::process::id());
-                    return Some(Self {
-                        path: path.to_path_buf(),
-                    });
-                }
-                Err(error) if existing_lock_contention(path, &error) => {
-                    if stale_regular_file(path) {
-                        let _ = fs::remove_file(path);
+        #[cfg(windows)]
+        {
+            let deadline = std::time::Instant::now() + Duration::from_secs(2);
+            loop {
+                let mut file = OpenOptions::new()
+                    .read(true)
+                    .write(true)
+                    .create(true)
+                    .open(path)
+                    .ok()?;
+                match fs2::FileExt::try_lock_exclusive(&file) {
+                    Ok(()) => {
+                        file.set_len(0).ok()?;
+                        writeln!(file, "{}", std::process::id()).ok()?;
+                        return Some(Self {
+                            path: path.to_path_buf(),
+                            file: Some(file),
+                        });
                     }
-                    if std::time::Instant::now() >= deadline {
-                        return None;
+                    Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => {
+                        if std::time::Instant::now() >= deadline {
+                            return None;
+                        }
+                        std::thread::sleep(Duration::from_millis(1));
                     }
-                    // A yield-only retry can exhaust all attempts before
-                    // Windows releases the handle used to inspect or remove a
-                    // stale file. One millisecond is bounded, gives that
-                    // handle a real scheduling opportunity, and still lets a
-                    // stale lock recover immediately on the next attempt.
-                    std::thread::sleep(Duration::from_millis(1));
+                    Err(_) => return None,
                 }
-                Err(_) => return None,
             }
         }
-        None
-    }
-}
 
-fn existing_lock_contention(path: &Path, error: &std::io::Error) -> bool {
-    if error.kind() == std::io::ErrorKind::AlreadyExists {
-        return true;
-    }
-    #[cfg(windows)]
-    {
-        // CREATE_NEW can surface an existing Windows lock as access denied.
-        // An independently observable file distinguishes that contention from
-        // a genuine permission failure on the cache directory.
-        error.kind() == std::io::ErrorKind::PermissionDenied && fs::symlink_metadata(path).is_ok()
-    }
-    #[cfg(not(windows))]
-    {
-        let _ = path;
-        false
+        #[cfg(not(windows))]
+        {
+            let deadline = std::time::Instant::now() + Duration::from_secs(2);
+            for _ in 0..LOCK_ATTEMPTS {
+                match private_create_new(path) {
+                    Ok(mut file) => {
+                        let _ = writeln!(file, "{}", std::process::id());
+                        return Some(Self {
+                            path: path.to_path_buf(),
+                        });
+                    }
+                    Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => {
+                        if stale_regular_file(path) {
+                            let _ = fs::remove_file(path);
+                        }
+                        if std::time::Instant::now() >= deadline {
+                            return None;
+                        }
+                        // A real sleep keeps this bounded retry from exhausting
+                        // all attempts before another Unix process can release
+                        // its lock or before a removed stale entry disappears.
+                        std::thread::sleep(Duration::from_millis(1));
+                    }
+                    Err(_) => return None,
+                }
+            }
+            None
+        }
     }
 }
 
 impl Drop for CacheLock {
     fn drop(&mut self) {
         let _ = fs::remove_file(&self.path);
+        #[cfg(windows)]
+        drop(self.file.take());
     }
 }
 
+#[cfg(not(windows))]
 fn stale_regular_file(path: &Path) -> bool {
     safe_regular_file(path)
         .and_then(|metadata| metadata.modified().ok())
