@@ -879,7 +879,7 @@ impl Lock {
                 Ok(_) => {
                     return Ok(Self { path });
                 }
-                Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => {}
+                Err(error) if existing_lock_contention(&path, &error) => {}
                 Err(source) => {
                     return Err(SaveError::Io {
                         path: target.to_path_buf(),
@@ -903,6 +903,26 @@ impl Lock {
                 std::thread::sleep(std::time::Duration::from_millis(1));
             }
         }
+    }
+}
+
+fn existing_lock_contention(path: &Path, error: &std::io::Error) -> bool {
+    if error.kind() == std::io::ErrorKind::AlreadyExists {
+        return true;
+    }
+    #[cfg(windows)]
+    {
+        // Windows can report ERROR_ACCESS_DENIED rather than
+        // ERROR_FILE_EXISTS when CREATE_NEW races an existing lock file. Only
+        // classify it as contention after independently observing that exact
+        // lock path; a genuine directory permission failure remains I/O.
+        error.kind() == std::io::ErrorKind::PermissionDenied
+            && std::fs::symlink_metadata(path).is_ok()
+    }
+    #[cfg(not(windows))]
+    {
+        let _ = path;
+        false
     }
 }
 

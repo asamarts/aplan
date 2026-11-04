@@ -1445,7 +1445,7 @@ impl CacheLock {
                         path: path.to_path_buf(),
                     });
                 }
-                Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => {
+                Err(error) if existing_lock_contention(path, &error) => {
                     if stale_regular_file(path) {
                         let _ = fs::remove_file(path);
                     } else {
@@ -1456,6 +1456,24 @@ impl CacheLock {
             }
         }
         None
+    }
+}
+
+fn existing_lock_contention(path: &Path, error: &std::io::Error) -> bool {
+    if error.kind() == std::io::ErrorKind::AlreadyExists {
+        return true;
+    }
+    #[cfg(windows)]
+    {
+        // CREATE_NEW can surface an existing Windows lock as access denied.
+        // An independently observable file distinguishes that contention from
+        // a genuine permission failure on the cache directory.
+        error.kind() == std::io::ErrorKind::PermissionDenied && fs::symlink_metadata(path).is_ok()
+    }
+    #[cfg(not(windows))]
+    {
+        let _ = path;
+        false
     }
 }
 
