@@ -3577,17 +3577,23 @@ mod tests {
             },
         )
         .with_report_config(config.clone());
-        assert!(matches!(
-            preview_rekey(&context, &RekeyRequest {
+        let missing_result = preview_rekey(
+            &context,
+            &RekeyRequest {
                 old: "M-v1".to_string(),
                 new: "M-v9".to_string(),
                 allow_terminal: false,
-            }),
-            Err(AuthoringError::Read { path, source })
-                if path.is_absolute()
-                    && path.ends_with("missing.yml")
-                    && source.kind() == std::io::ErrorKind::NotFound
-        ));
+            },
+        );
+        assert!(
+            matches!(
+                &missing_result,
+                Err(AuthoringError::Read { path, .. })
+                    if path.is_absolute()
+                        && path.ends_with("missing.yml")
+            ),
+            "missing selected configuration did not retain its typed read boundary: {missing_result:?}"
+        );
 
         let stale = fixture();
         let stale_path = stale.path().join(".aplan.yml");

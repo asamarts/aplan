@@ -137,7 +137,10 @@ pub const ALL: &[Behaviour] = &[
         name: "evidence.provider_executable_resolution_is_portable",
         what: "provider material identity resolves configured executables with the same native \
                spelling accepted by process launch, including Windows' implicit `.exe` suffix",
-        proof: &["provider_executable_resolution_follows_native_command_lookup"],
+        proof: &[
+            "provider_executable_resolution_follows_native_command_lookup",
+            "material_provider_executable_resolution_follows_native_lookup",
+        ],
     },
     Behaviour {
         name: "coordination.is_not_a_plan_verdict_mutation",

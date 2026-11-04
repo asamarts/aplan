@@ -407,11 +407,24 @@ fn resolve_program(program: &str, working_directory: &Path) -> Option<PathBuf> {
         } else {
             working_directory.join(direct)
         };
-        return path.is_file().then_some(path);
+        return executable_path(&path);
     }
     std::env::split_paths(&std::env::var_os("PATH")?)
-        .map(|directory| directory.join(program))
-        .find(|candidate| candidate.is_file())
+        .find_map(|directory| executable_path(&directory.join(program)))
+}
+
+fn executable_path(path: &Path) -> Option<PathBuf> {
+    if path.is_file() {
+        return Some(path.to_path_buf());
+    }
+    #[cfg(windows)]
+    if path.extension().is_none() {
+        let executable = path.with_extension("exe");
+        if executable.is_file() {
+            return Some(executable);
+        }
+    }
+    None
 }
 
 fn hash_rustup_state(digest: &mut Sha256) -> Result<(), String> {
@@ -557,6 +570,20 @@ mod tests {
             batch: None,
             timeout_seconds: None,
         }
+    }
+
+    /// Proof for `evidence.provider_executable_resolution_is_portable`: the
+    /// execution-material boundary follows the native executable spelling,
+    /// including Windows' implicit `.exe` suffix.
+    #[test]
+    fn material_provider_executable_resolution_follows_native_lookup() {
+        let root = tempfile::Builder::new()
+            .tempdir_in(aplan_core::fixture::fixture_root())
+            .expect("fixture");
+        let git = resolve_program("git", root.path()).expect("Git executable on the test runner");
+        assert!(git.is_file());
+        #[cfg(windows)]
+        assert_eq!(git.extension().and_then(OsStr::to_str), Some("exe"));
     }
 
     #[cfg(unix)]
