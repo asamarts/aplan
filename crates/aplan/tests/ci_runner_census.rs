@@ -506,6 +506,8 @@ fn release_artifact_builder_pins_native_inputs_for_every_caller() {
         "--file ci/release.Containerfile",
         "--platform linux/amd64",
         "--volume \"$REPO_ROOT:/aplan/source:ro\"",
+        "git rev-parse --path-format=absolute --git-common-dir",
+        "git_mount=(--volume \"$git_common:$git_common:ro\")",
         "--env APLAN_RELEASE_IN_BUILDER=1",
         "--env CARGO_TARGET_DIR=/aplan/build/target",
         "${APLAN_RELEASE_SCRATCH_ROOT:-${HOME:?}/.tmp}",

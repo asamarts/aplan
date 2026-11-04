@@ -18,7 +18,8 @@ REPO_ROOT="$(cd "$(dirname "$0")/../.." && pwd)"
 cd "$REPO_ROOT"
 
 run_in_pinned_builder() {
-    local engine image contract scratch_root build_root release_source status
+    local engine image contract scratch_root build_root release_source status git_common
+    local -a git_mount=()
 
     container_engine_usable() {
         command -v "$1" >/dev/null 2>&1 \
@@ -27,6 +28,10 @@ run_in_pinned_builder() {
     }
 
     release_source="$(ci/scripts/release-source.sh "$REPO_ROOT")"
+    git_common="$(git rev-parse --path-format=absolute --git-common-dir)"
+    if [[ "$git_common" != "$REPO_ROOT/.git" ]]; then
+        git_mount=(--volume "$git_common:$git_common:ro")
+    fi
     contract="$(sha256sum \
         ci/release.Containerfile rust-toolchain.toml ci/scripts/toolchain.sh \
         | sha256sum | awk '{print $1}')"
@@ -82,6 +87,7 @@ run_in_pinned_builder() {
         --platform linux/amd64 \
         --user "$(id -u):$(id -g)" \
         --volume "$REPO_ROOT:/aplan/source:ro" \
+        "${git_mount[@]}" \
         --volume "$REPO_ROOT/dist:/aplan/dist:rw" \
         --volume "$build_root:/aplan/build:rw" \
         --env APLAN_RELEASE_IN_BUILDER=1 \
