@@ -31,8 +31,10 @@ COPY ci/scripts/toolchain.sh /tmp/aplan-toolchain.sh
 # never into the caller's host toolchain.
 RUN chmod +x /tmp/aplan-toolchain.sh \
     && required="$(/tmp/aplan-toolchain.sh channel /tmp/aplan-rust-toolchain.toml)" \
+    && components="$(/tmp/aplan-toolchain.sh components /tmp/aplan-rust-toolchain.toml)" \
     && actual="$(rustc --version | awk '{print $2}')" \
     && test "$actual" = "$required" \
+    && rustup component add $components --toolchain "$required" \
     && rustup target add x86_64-unknown-linux-musl --toolchain "$required" \
     && rm /tmp/aplan-rust-toolchain.toml /tmp/aplan-toolchain.sh
 

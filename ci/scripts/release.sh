@@ -19,7 +19,7 @@ cd "$REPO_ROOT"
 
 run_in_pinned_builder() {
     local engine image contract scratch_root build_root release_source status git_common
-    local -a git_mount=()
+    local -a git_mount=() user_args=()
 
     container_engine_usable() {
         command -v "$1" >/dev/null 2>&1 \
@@ -57,6 +57,11 @@ run_in_pinned_builder() {
         echo "ERROR: release artifact construction requires Docker or Podman" >&2
         return 1
     fi
+    if [[ "$engine" == podman ]]; then
+        user_args=(--userns=keep-id)
+    else
+        user_args=(--user "$(id -u):$(id -g)")
+    fi
 
     if [[ -e "$REPO_ROOT/dist" && ( ! -d "$REPO_ROOT/dist" || -L "$REPO_ROOT/dist" ) ]]; then
         echo "ERROR: release output path '$REPO_ROOT/dist' is not a real directory" >&2
@@ -85,7 +90,7 @@ run_in_pinned_builder() {
     set +e
     "$engine" run --rm \
         --platform linux/amd64 \
-        --user "$(id -u):$(id -g)" \
+        "${user_args[@]}" \
         --volume "$REPO_ROOT:/aplan/source:ro" \
         "${git_mount[@]}" \
         --volume "$REPO_ROOT/dist:/aplan/dist:rw" \
