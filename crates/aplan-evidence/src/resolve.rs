@@ -7614,6 +7614,7 @@ mod tests {
     /// findable (`A1-309`).
     #[test]
     fn the_sampler_counts_the_whole_process_group() {
+        let procfs_is_readable = std::fs::read_dir("/proc").is_ok();
         let (ran, cost) = spawn_limited(
             &[
                 "sh".into(),
@@ -7627,14 +7628,19 @@ mod tests {
         )
         .expect("it ran");
         assert!(matches!(ran, Ran::Exited(_)), "the command finished");
-        assert!(
-            cost.measured,
-            "/proc was readable, so something was measured"
+        assert_eq!(
+            cost.measured, procfs_is_readable,
+            "measurement availability follows the native process interface: {cost:?}"
         );
-        assert!(
-            cost.peak_processes > 1,
-            "the group holds more than the command itself: {cost:?}"
-        );
+        if procfs_is_readable {
+            assert!(
+                cost.peak_processes > 1,
+                "the group holds more than the command itself: {cost:?}"
+            );
+        } else {
+            assert_eq!(cost.peak_processes, 0, "absence is not a measurement");
+            assert_eq!(cost.peak_rss_kb, 0, "absence is not a measurement");
+        }
         assert!(
             cost.elapsed >= std::time::Duration::from_millis(500),
             "wall clock is the command's, not zero: {cost:?}"
@@ -8354,6 +8360,7 @@ mod tests {
     /// audit).
     #[test]
     fn a_command_gone_before_the_first_sample_is_still_measured() {
+        let procfs_is_readable = std::fs::read_dir("/proc").is_ok();
         let (_, cost) = spawn_limited(
             &["true".into()],
             Path::new("."),
@@ -8361,9 +8368,9 @@ mod tests {
             std::time::Duration::from_secs(10),
         )
         .expect("it ran");
-        assert!(
-            cost.measured,
-            "`/proc` is readable here, so the platform can be asked: {cost:?}"
+        assert_eq!(
+            cost.measured, procfs_is_readable,
+            "measurement availability follows the native process interface: {cost:?}"
         );
     }
 
