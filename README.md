@@ -69,6 +69,20 @@ Set `deny_warnings: true` in `.aplan.yml` when warnings should fail CI. Pin acti
 SHAs in production repositories. The Action verifies releases from v0.6.0 onward against the
 publishing repository, `release.yml` and the exact release tag before executing the binary.
 
+### Self-hosted runners
+
+On a self-hosted runner, the install step needs the following on the runner before the first run:
+
+- Linux x86_64 (the only platform the release assets provide).
+- The GitHub CLI (`gh`) on `PATH`, version 2.49.0 or newer. The action downloads the release asset
+  with `gh`, and the install verifies the archive's provenance with `gh attestation verify`, which
+  older `gh` releases do not have; an older distro package is not enough. `gh` is preinstalled on
+  GitHub-hosted runners, but not necessarily on a self-hosted one.
+- `curl`, `tar` and `sha256sum` on `PATH`.
+
+Without them the job fails in the install step, before any plan check runs; the step's error message
+names the missing tool.
+
 ## Other interfaces
 
 `aplan tui` opens the terminal interface. `aplan mcp` exposes the same guarded plan operations to
