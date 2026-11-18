@@ -8,7 +8,7 @@
 
 | cut | status | done/total | ready | blocked | effort | weeks | critical path |
 | --- | --- | --- | --- | --- | --- | --- | --- |
-| v0.7 | todo | 8/22 | 13 | 1 | 19.2d | 0.7 (0.4 left) | 3.5d |
+| v0.7 | todo | 9/22 | 12 | 1 | 19.2d | 0.7 (0.4 left) | 3.5d |
 | v0.8 | todo | 0/28 | 0 | 28 | 42.2d | 1.6 (1.6 left) | 4.5d |
 | adoption | todo | 0/78 | 0 | 78 | 101.8d | 3.8 (3.8 left) | 10.0d |
 | backlog | todo | 0/1 | 0 | 1 | 1.0d | <0.1 (<0.1 left) | 1.0d |
@@ -42,7 +42,7 @@
 | A2-167 | Make the README's first-plan commands work as written | done | - | commit:44e3da191c2f, test:greenfield::the_readme_start_commands_run_as_written |
 | A2-168 | Find each task's cut in one pass over the roadmap | done | - | commit:44e3da191c2f, test:export::tests::the_cut_map_matches_its_one_task_at_a_time_definition |
 | A2-169 | Read values tagged outside YAML's core schema as the bridge did | todo | - | - |
-| A2-177 | Close what a second audit found in the v0.7 audit fixes | todo | - | - |
+| A2-177 | Close what a second audit found in the v0.7 audit fixes | done | - | commit:2ded96d439d1, test:dependency_audit::tests::yaml_parser_is_exactly_pinned, test:dependency_audit::tests::the_tui_evaluator_parses_yaml_with_the_product_parser, test:dependency_audit::tests::a_tui_evaluator_lock_that_no_longer_matches_its_manifest_is_refused, test:kep::unusable_input_is_an_error_not_a_silent_empty_import, test:policy::the_exemption_free_epoch_is_only_a2 |
 
 ## v0.8 Correctness and the most reported adoption failures
 
