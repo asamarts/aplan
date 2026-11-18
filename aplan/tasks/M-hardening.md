@@ -15,6 +15,10 @@ blocked_by:
 - A2-145
 - A2-162
 - A2-165
+- A2-170
+- A2-171
+- A2-172
+- A2-173
 tags:
 - milestone
 - hardening
@@ -24,7 +28,10 @@ tags:
 
 Integrity work that is not yet a reported wrong answer: diagnostics and generated guidance that
 can mislead, ratification and precedence edge cases, and the cost of resolving test evidence
-inside the plan gate.
+inside the plan gate. It also holds what an audit of v0.7 found below that bar: MCP replies lost
+when a client closes its input, the TUI ranking its work on keys that change only the selection,
+CI that skips the tests reading a changed plan or README, and the YAML limits not yet proven
+through product reads.
 
 ## Exit criteria
 
