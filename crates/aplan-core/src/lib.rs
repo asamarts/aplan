@@ -87,6 +87,7 @@ pub mod task;
 pub mod vacuity;
 pub mod validate;
 pub mod version;
+pub mod yaml;
 
 pub use anchor::{anchor_fingerprint, fingerprint_holds, heading_anchors, resolvable_anchors};
 pub use capture::{Capture, CapturePolicy, CaptureSchema, CaptureState, Inbox, load_inbox};

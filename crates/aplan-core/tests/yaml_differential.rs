@@ -1,8 +1,8 @@
 //! Test-only differential oracle for the aplan YAML boundary.
 //!
 //! The baseline remains a dev-dependency only. Normal product graphs contain
-//! `ayaml` alone; this test compares the compatibility surface against the
-//! pinned bridge that `A2-009` replaced.
+//! `ayaml` alone; this test compares the readers the product uses,
+//! `aplan_core::yaml`, against the pinned bridge that `A2-009` replaced.
 
 use std::fs;
 use std::path::{Path, PathBuf};
@@ -181,13 +181,13 @@ fn every_task_front_matter_decodes_to_the_same_types_under_both_parsers() {
         tasks.len()
     );
     for (path, front) in &tasks {
-        let ayaml = yaml_compat::compat::from_str::<serde_json::Value>(front)
+        let ayaml = aplan_core::yaml::from_str::<serde_json::Value>(front)
             .unwrap_or_else(|error| panic!("ayaml JSON read of {}: {error}", path.display()));
         let bridge = yaml_serde_baseline::from_str::<serde_json::Value>(front)
             .unwrap_or_else(|error| panic!("bridge JSON read of {}: {error}", path.display()));
         assert_eq!(ayaml, bridge, "JSON values differ for {}", path.display());
 
-        let ayaml = yaml_compat::compat::from_str::<aplan_core::Task>(front)
+        let ayaml = aplan_core::yaml::from_str::<aplan_core::Task>(front)
             .unwrap_or_else(|error| panic!("ayaml typed read of {}: {error}", path.display()));
         let bridge = yaml_serde_baseline::from_str::<aplan_core::Task>(front)
             .unwrap_or_else(|error| panic!("bridge typed read of {}: {error}", path.display()));
@@ -251,6 +251,51 @@ fn hostile_inputs() -> Vec<(&'static str, String)> {
             "%TAG !e! tag:example.com,2000:\n---\na: !e!x 1\n".to_owned(),
         ),
         ("local tag", "a: !custom 1\n".to_owned()),
+        ("verbatim local tag", "a: !<!custom> 1\n".to_owned()),
+        (
+            "declared primary handle",
+            "%TAG ! tag:example.com,2000:\n---\na: !x 1\n".to_owned(),
+        ),
+        ("timestamp tag", "a: !!timestamp 2026-01-01\n".to_owned()),
+        ("binary tag", "a: !!binary aGVsbG8=\n".to_owned()),
+        (
+            "verbatim global tag",
+            "a: !<tag:example.com,2000:x> hello\n".to_owned(),
+        ),
+        ("global tag on a mapping", "a: !!set {x, y}\n".to_owned()),
+        (
+            "global tag on a key",
+            "!!timestamp 2026-01-01: x\n".to_owned(),
+        ),
+        (
+            "task title with a global tag",
+            "id: T-1\ntitle: !!timestamp 2026-01-01\nstatus: todo\nphase: 1\n".to_owned(),
+        ),
+        (
+            "task status with a global tag",
+            "id: T-1\ntitle: t\nstatus: !<tag:example.com,2000:s> todo\nphase: 1\n".to_owned(),
+        ),
+        (
+            "task title with a local tag",
+            "id: T-1\ntitle: !custom t\nstatus: todo\nphase: 1\n".to_owned(),
+        ),
+        (
+            "task estimate with a global tag",
+            "id: T-1\ntitle: t\nstatus: todo\nphase: 1\neffort_days: !<tag:example.com,2000:n> 2\n"
+                .to_owned(),
+        ),
+        (
+            "task estimate with a string tag",
+            "id: T-1\ntitle: t\nstatus: todo\nphase: 1\neffort_days: !!str 2\n".to_owned(),
+        ),
+        (
+            "task phase with a float tag",
+            "id: T-1\ntitle: t\nstatus: todo\nphase: !!float 1\n".to_owned(),
+        ),
+        (
+            "task estimate with a core tag on a quoted scalar",
+            "id: T-1\ntitle: t\nstatus: todo\nphase: 1\neffort_days: !!int \"2\"\n".to_owned(),
+        ),
         ("byte order mark", "\u{feff}a: 1\n".to_owned()),
         ("control character", "a: \"\u{1}\"\n".to_owned()),
         ("integer past u64", "a: 18446744073709551616\n".to_owned()),
@@ -266,9 +311,10 @@ fn hostile_inputs() -> Vec<(&'static str, String)> {
     ]
 }
 
-/// Where the parsers knowingly part, as (input, read, why). None lets the
-/// product accept a value the bridge refused or read it differently: each is a
-/// refusal where the bridge accepted, or a generic value the product never keeps.
+/// Where the parsers knowingly part, as (input, read, why). One lets the product
+/// accept a value the bridge refused, a core tag on a quoted scalar, which YAML
+/// defines; the others are refusals where the bridge accepted, or a generic value
+/// no product read turns into output.
 const KNOWN_DIVERGENCES: &[(&str, &str, &str)] = &[
     (
         "duplicate key",
@@ -288,28 +334,30 @@ const KNOWN_DIVERGENCES: &[(&str, &str, &str)] = &[
          YAML does; the compatibility reader still accepts them as libyaml did",
     ),
     (
-        "declared tag handle",
-        "Value",
-        "ayaml keeps a `%TAG`-declared tag on the value; the bridge dropped it and read the \
-         scalar as a string",
+        "task estimate with a string tag",
+        "Task",
+        "`!!str 2` is the string `2`, as YAML defines it, which a number field refuses; the \
+         bridge's typed read ignored a core tag and parsed the text (A2-169)",
     ),
     (
-        "declared tag handle",
-        "JSON",
-        "so ayaml refuses the tagged value as JSON where the bridge silently changed its type to \
-         a string; local tags such as `!custom` are refused by both",
+        "task phase with a float tag",
+        "Task",
+        "`!!float 1` is the float 1.0, which an integer field refuses; the bridge's typed read \
+         parsed the text as an integer, ignoring the tag (A2-169)",
     ),
     (
-        "declared tag handle",
-        "default-reader JSON",
-        "the same refusal through the default reader",
+        "task estimate with a core tag on a quoted scalar",
+        "Task",
+        "`!!int \"2\"` is the integer 2, as YAML defines it; the bridge resolved the integer and \
+         then refused it for a float field. Refusing it would copy that quirk rather than a rule \
+         (A2-169)",
     ),
     (
         "integer past u64",
         "Value",
         "ayaml's generic value holds a 128-bit integer the bridge refused; read as JSON or as a \
-         task, both still refuse it, and the one product read that keeps a generic value, the KEP \
-         importer's `kep-number`, refuses it itself (A2-166)",
+         task, both still refuse it, and of the product reads that keep a generic value only the \
+         KEP importer's `kep-number` turns one into output, and it refuses it itself (A2-166)",
     ),
 ];
 
@@ -319,7 +367,7 @@ fn hostile_inputs_meet_the_same_outcome_under_both_parsers() {
     let mut details = Vec::new();
     for (name, text) in hostile_inputs() {
         let generic = (
-            outcome(yaml_compat::compat::from_str::<Value>(&text), representable),
+            outcome(aplan_core::yaml::from_str::<Value>(&text), representable),
             outcome(
                 yaml_serde_baseline::from_str::<yaml_serde_baseline::Value>(&text),
                 representable,
@@ -327,7 +375,7 @@ fn hostile_inputs_meet_the_same_outcome_under_both_parsers() {
         );
         let json = (
             outcome(
-                yaml_compat::compat::from_str::<serde_json::Value>(&text),
+                aplan_core::yaml::from_str::<serde_json::Value>(&text),
                 Clone::clone,
             ),
             outcome(
@@ -337,7 +385,7 @@ fn hostile_inputs_meet_the_same_outcome_under_both_parsers() {
         );
         let typed = (
             outcome(
-                yaml_compat::compat::from_str::<aplan_core::Task>(&text),
+                aplan_core::yaml::from_str::<aplan_core::Task>(&text),
                 |task| serde_json::to_value(task).expect("task serializes"),
             ),
             outcome(
@@ -349,7 +397,7 @@ fn hostile_inputs_meet_the_same_outcome_under_both_parsers() {
         // JSON before their schema check), against the same bridge.
         let default_json = (
             outcome(
-                yaml_compat::from_str::<serde_json::Value>(&text),
+                aplan_core::yaml::from_str_strict::<serde_json::Value>(&text),
                 Clone::clone,
             ),
             outcome(

@@ -2463,7 +2463,7 @@ pub fn parse_config_bytes(bytes: &[u8], path: &Path) -> Result<Config, Error> {
 ///
 /// The same parse, unknown-key and semantic errors as [`load_from`].
 pub fn parse_config(text: &str, path: &Path) -> Result<Config, Error> {
-    let config: Config = yaml_compat::compat::from_str(text).map_err(|e| {
+    let config: Config = aplan_core::yaml::from_str(text).map_err(|e| {
         // Ask the schema which keys this build accepts rather than parsing
         // serde's sentence back out: the inventory is derived from the same type
         // the parser uses, so it cannot drift, and it can name *every* offending
@@ -2624,7 +2624,7 @@ pub fn config_search_paths(start: &Path) -> Vec<PathBuf> {
 /// represented without changing anything else in the document.
 pub fn rekey_policy_cuts(file: &str, old: &str, new: &str) -> Result<Option<String>, String> {
     let original: yaml_compat::Value =
-        yaml_compat::compat::from_str(file).map_err(|e| format!("invalid configuration: {e}"))?;
+        aplan_core::yaml::from_str(file).map_err(|e| format!("invalid configuration: {e}"))?;
     let mut expected = original.clone();
     let wanted = replace_policy_values(&mut expected, old, new);
     if wanted == 0 {
@@ -2696,7 +2696,7 @@ pub fn rekey_policy_cuts(file: &str, old: &str, new: &str) -> Result<Option<Stri
             "could identify {wanted} policy cut reference(s) in the parsed configuration but could safely rewrite only {changed}; nothing was written"
         ));
     }
-    let produced: yaml_compat::Value = yaml_compat::compat::from_str(&out)
+    let produced: yaml_compat::Value = aplan_core::yaml::from_str(&out)
         .map_err(|e| format!("the policy rewrite did not parse ({e}); nothing was written"))?;
     if produced != expected {
         return Err(
@@ -2871,7 +2871,7 @@ fn rewrite_scalar_slice(slice: &str, old: &str, new: &str) -> Result<(String, bo
         return Ok((slice.to_string(), false));
     }
     let token = &slice[lead..end];
-    let parsed: String = yaml_compat::compat::from_str(token).map_err(|e| {
+    let parsed: String = aplan_core::yaml::from_str(token).map_err(|e| {
         format!("could not read a `policy[].when.cut` item `{token}` ({e}); nothing was written")
     })?;
     if parsed != old {
@@ -3345,7 +3345,7 @@ pub fn unknown_keys(text: &str) -> Vec<(String, Option<String>)> {
 /// different problem, and it is exactly what the adopter would have met next.
 #[must_use]
 fn scan_unknown(text: &str) -> (Vec<(String, Option<String>)>, Option<String>) {
-    let Ok(mut doc) = yaml_compat::compat::from_str::<yaml_compat::Value>(text) else {
+    let Ok(mut doc) = aplan_core::yaml::from_str::<yaml_compat::Value>(text) else {
         return (Vec::new(), None);
     };
     let accepted = accepted_keys();
@@ -3360,7 +3360,7 @@ fn scan_unknown(text: &str) -> (Vec<(String, Option<String>)>, Option<String>) {
     // misspelled `test.lst` leaves a runner with no `list` and reports a missing
     // field the adopter is about to supply by correcting the spelling.
     let remaining = yaml_compat::to_string(&doc).ok().and_then(|cleaned| {
-        match yaml_compat::compat::from_str::<Config>(&cleaned) {
+        match aplan_core::yaml::from_str::<Config>(&cleaned) {
             Err(e) => Some(strip_position(&e.to_string())),
             // Parsing is only half of loading: the semantic checks are where a
             // runner with no `{test}` placeholder or an unknown `advisory` code

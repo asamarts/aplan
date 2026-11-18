@@ -197,7 +197,7 @@ pub fn load_from(path: &Path) -> Result<UserConfig, Error> {
             });
         }
     };
-    yaml_compat::compat::from_str(&text).map_err(|source| Error::Parse {
+    aplan_core::yaml::from_str(&text).map_err(|source| Error::Parse {
         path: path.to_path_buf(),
         source,
     })

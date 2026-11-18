@@ -171,8 +171,8 @@ pub fn close(
 ) -> Result<String, CloseError> {
     let bom = leading_bom(file);
     let (frontmatter, body) = split_frontmatter(file).ok_or(CloseError::NotATask)?;
-    let task: Task = yaml_compat::compat::from_str(frontmatter)
-        .map_err(|e| CloseError::Frontmatter(e.to_string()))?;
+    let task: Task =
+        crate::yaml::from_str(frontmatter).map_err(|e| CloseError::Frontmatter(e.to_string()))?;
 
     // Both terminal states are refused: `Done` is already closed, and `Dropped`
     // was deliberately abandoned, silently reviving it to `done` would launder a
@@ -289,8 +289,8 @@ pub fn close(
 pub fn set_status(file: &str, to: Status) -> Result<String, CloseError> {
     let bom = leading_bom(file);
     let (frontmatter, body) = split_frontmatter(file).ok_or(CloseError::NotATask)?;
-    let task: Task = yaml_compat::compat::from_str(frontmatter)
-        .map_err(|e| CloseError::Frontmatter(e.to_string()))?;
+    let task: Task =
+        crate::yaml::from_str(frontmatter).map_err(|e| CloseError::Frontmatter(e.to_string()))?;
     if task.status.is_terminal() {
         return Err(if task.status == Status::Done {
             CloseError::AlreadyDone
@@ -332,8 +332,8 @@ pub fn set_owner(file: &str, to: Option<&str>) -> Result<String, CloseError> {
     let (frontmatter, body) = split_frontmatter(file).ok_or(CloseError::NotATask)?;
     // Parsed before anything is rewritten, so a file that does not load is
     // reported as that rather than as a failed rewrite.
-    let task: Task = yaml_compat::compat::from_str(frontmatter)
-        .map_err(|e| CloseError::Frontmatter(e.to_string()))?;
+    let task: Task =
+        crate::yaml::from_str(frontmatter).map_err(|e| CloseError::Frontmatter(e.to_string()))?;
 
     let nl = newline(file, bom);
     let new_frontmatter = set_owner_in(frontmatter, to, task.owner.is_some(), nl)?;
@@ -365,8 +365,8 @@ pub fn set_owner(file: &str, to: Option<&str>) -> Result<String, CloseError> {
 pub fn set_revisit_at(file: &str, to: Option<&str>) -> Result<String, CloseError> {
     let bom = leading_bom(file);
     let (frontmatter, body) = split_frontmatter(file).ok_or(CloseError::NotATask)?;
-    let task: Task = yaml_compat::compat::from_str(frontmatter)
-        .map_err(|e| CloseError::Frontmatter(e.to_string()))?;
+    let task: Task =
+        crate::yaml::from_str(frontmatter).map_err(|e| CloseError::Frontmatter(e.to_string()))?;
     let nl = newline(file, bom);
     let new_frontmatter = set_optional_scalar_in(
         frontmatter,
@@ -456,8 +456,8 @@ fn set_optional_scalar_in(
 pub fn set_id(file: &str, to: &str) -> Result<String, CloseError> {
     let bom = leading_bom(file);
     let (frontmatter, body) = split_frontmatter(file).ok_or(CloseError::NotATask)?;
-    let _: Task = yaml_compat::compat::from_str(frontmatter)
-        .map_err(|e| CloseError::Frontmatter(e.to_string()))?;
+    let _: Task =
+        crate::yaml::from_str(frontmatter).map_err(|e| CloseError::Frontmatter(e.to_string()))?;
     if !has_single_source_local_scalar_line(frontmatter, "id") {
         return Err(CloseError::NoScalar("id"));
     }
@@ -548,7 +548,7 @@ fn has_single_source_local_scalar_line(frontmatter: &str, key: &str) -> bool {
         return false;
     }
 
-    let Ok(document) = yaml_compat::compat::from_str::<yaml_compat::Value>(frontmatter) else {
+    let Ok(document) = crate::yaml::from_str::<yaml_compat::Value>(frontmatter) else {
         return false;
     };
     let Some(mapped) = document
@@ -563,8 +563,7 @@ fn has_single_source_local_scalar_line(frontmatter: &str, key: &str) -> bool {
     let Some(parts) = scalar_line_parts(line, key) else {
         return false;
     };
-    yaml_compat::compat::from_str::<yaml_compat::Value>(parts.value)
-        .is_ok_and(|inline| &inline == mapped)
+    crate::yaml::from_str::<yaml_compat::Value>(parts.value).is_ok_and(|inline| &inline == mapped)
 }
 
 /// Whether `line` is the top-level `key:` line with a value this can sit after.
@@ -629,8 +628,8 @@ pub fn rekey_blocked_by(file: &str, blocked_by: &[String]) -> Result<String, Clo
 pub fn set_phase(file: &str, to: u32) -> Result<String, CloseError> {
     let bom = leading_bom(file);
     let (frontmatter, body) = split_frontmatter(file).ok_or(CloseError::NotATask)?;
-    let _: Task = yaml_compat::compat::from_str(frontmatter)
-        .map_err(|e| CloseError::Frontmatter(e.to_string()))?;
+    let _: Task =
+        crate::yaml::from_str(frontmatter).map_err(|e| CloseError::Frontmatter(e.to_string()))?;
     if !has_single_source_local_scalar_line(frontmatter, "phase") {
         return Err(CloseError::NoScalar("phase"));
     }
@@ -784,7 +783,7 @@ fn scalar_like(original: &str, value: &str) -> String {
 fn flow_scalar_like(original: &str, value: &str) -> String {
     let rendered = scalar_like(original, value);
     let probe = format!("[{rendered}]");
-    if yaml_compat::compat::from_str::<Vec<String>>(&probe).is_ok_and(|values| values == [value]) {
+    if crate::yaml::from_str::<Vec<String>>(&probe).is_ok_and(|values| values == [value]) {
         rendered
     } else {
         serde_json::to_string(value).unwrap_or(rendered)
@@ -852,7 +851,7 @@ fn rewrite_inline_members(
         let lead = piece.len() - piece.trim_start_matches([' ', '\t']).len();
         let end = piece.trim_end_matches([' ', '\t']).len();
         let token = &piece[lead..end];
-        let parsed: String = yaml_compat::compat::from_str(token).ok()?;
+        let parsed: String = crate::yaml::from_str(token).ok()?;
         if parsed != *was {
             return None;
         }
@@ -935,7 +934,7 @@ fn rewrite_block_members(
         let (spacing, value) = after_dash.split_at(spacing_len);
         let end = inline_scalar_end(value)?;
         let token = &value[..end];
-        let parsed: String = yaml_compat::compat::from_str(token).ok()?;
+        let parsed: String = crate::yaml::from_str(token).ok()?;
         let was = before.get(member)?;
         let now = after.get(member)?;
         if parsed != *was {
@@ -1017,7 +1016,7 @@ fn flow_members(inside: &str) -> Option<Vec<FlowMember<'_>>> {
                 leading: &whole[..lead],
                 token,
                 trailing: &whole[tail..],
-                value: yaml_compat::compat::from_str(token).ok()?,
+                value: crate::yaml::from_str(token).ok()?,
             })
         })
         .collect()
@@ -1185,7 +1184,7 @@ fn block_member(line_index: usize, line: &str) -> Option<BlockMember<'_>> {
         prefix: &content[..prefix_len],
         token,
         eol,
-        value: yaml_compat::compat::from_str(token).ok()?,
+        value: crate::yaml::from_str(token).ok()?,
     })
 }
 
@@ -1477,8 +1476,8 @@ fn set_id_list(
 ) -> Result<String, CloseError> {
     let bom = leading_bom(file);
     let (frontmatter, body) = split_frontmatter(file).ok_or(CloseError::NotATask)?;
-    let original: Task = yaml_compat::compat::from_str(frontmatter)
-        .map_err(|e| CloseError::Frontmatter(e.to_string()))?;
+    let original: Task =
+        crate::yaml::from_str(frontmatter).map_err(|e| CloseError::Frontmatter(e.to_string()))?;
     let before = read_back(&original).clone();
 
     let nl = newline(file, bom);
@@ -1588,8 +1587,8 @@ fn set_id_list(
 pub fn restamp(file: &str, fingerprints: &BTreeMap<String, String>) -> Result<String, CloseError> {
     let bom = leading_bom(file);
     let (frontmatter, body) = split_frontmatter(file).ok_or(CloseError::NotATask)?;
-    let task: Task = yaml_compat::compat::from_str(frontmatter)
-        .map_err(|e| CloseError::Frontmatter(e.to_string()))?;
+    let task: Task =
+        crate::yaml::from_str(frontmatter).map_err(|e| CloseError::Frontmatter(e.to_string()))?;
     if task.status != Status::Done {
         return Err(CloseError::NotDone(task.status));
     }
@@ -1636,8 +1635,8 @@ pub fn set_evidence_fingerprints(
 ) -> Result<String, CloseError> {
     let bom = leading_bom(file);
     let (frontmatter, body) = split_frontmatter(file).ok_or(CloseError::NotATask)?;
-    let task: Task = yaml_compat::compat::from_str(frontmatter)
-        .map_err(|e| CloseError::Frontmatter(e.to_string()))?;
+    let task: Task =
+        crate::yaml::from_str(frontmatter).map_err(|e| CloseError::Frontmatter(e.to_string()))?;
     if task.status != Status::Done {
         return Err(CloseError::NotDone(task.status));
     }
@@ -1675,8 +1674,8 @@ pub fn set_evidence_fingerprints(
 pub fn add_evidence(file: &str, add: &Evidence) -> Result<String, CloseError> {
     let bom = leading_bom(file);
     let (frontmatter, body) = split_frontmatter(file).ok_or(CloseError::NotATask)?;
-    let task: Task = yaml_compat::compat::from_str(frontmatter)
-        .map_err(|e| CloseError::Frontmatter(e.to_string()))?;
+    let task: Task =
+        crate::yaml::from_str(frontmatter).map_err(|e| CloseError::Frontmatter(e.to_string()))?;
     if task.status != Status::Done {
         return Err(CloseError::NotDone(task.status));
     }
@@ -1765,8 +1764,8 @@ fn names_same(a: &Evidence, b: &Evidence) -> bool {
 pub fn remove_evidence(file: &str, drop: &Evidence) -> Result<String, CloseError> {
     let bom = leading_bom(file);
     let (frontmatter, body) = split_frontmatter(file).ok_or(CloseError::NotATask)?;
-    let task: Task = yaml_compat::compat::from_str(frontmatter)
-        .map_err(|e| CloseError::Frontmatter(e.to_string()))?;
+    let task: Task =
+        crate::yaml::from_str(frontmatter).map_err(|e| CloseError::Frontmatter(e.to_string()))?;
     if task.status != Status::Done {
         return Err(CloseError::NotDone(task.status));
     }
@@ -1813,8 +1812,8 @@ pub fn remove_evidence(file: &str, drop: &Evidence) -> Result<String, CloseError
 pub fn replace_evidence(file: &str, from: &Evidence, to: &Evidence) -> Result<String, CloseError> {
     let bom = leading_bom(file);
     let (frontmatter, body) = split_frontmatter(file).ok_or(CloseError::NotATask)?;
-    let task: Task = yaml_compat::compat::from_str(frontmatter)
-        .map_err(|e| CloseError::Frontmatter(e.to_string()))?;
+    let task: Task =
+        crate::yaml::from_str(frontmatter).map_err(|e| CloseError::Frontmatter(e.to_string()))?;
     // Scoped to a closed task, because that is the case with no other route: a
     // live task's evidence can still be given by `close`.
     if task.status != Status::Done {
@@ -1899,7 +1898,7 @@ fn newline(file: &str, bom: &str) -> &'static str {
 /// Parse frontmatter back to a `Task`, refusing to return anything that would not
 /// load.
 fn reparse(frontmatter: &str) -> Result<Task, CloseError> {
-    yaml_compat::compat::from_str(frontmatter).map_err(|e| CloseError::Produced(e.to_string()))
+    crate::yaml::from_str(frontmatter).map_err(|e| CloseError::Produced(e.to_string()))
 }
 
 /// Whether the frontmatter declares `key` as a top-level key (with or without a
@@ -1918,7 +1917,7 @@ fn has_top_level_key(frontmatter: &str, key: &str) -> bool {
 /// such as `"trace_fingerprints":` from being mistaken for an absent field and
 /// receiving a duplicate unquoted key.
 fn top_level_mapping_has_key(frontmatter: &str, key: &str) -> bool {
-    yaml_compat::compat::from_str::<yaml_compat::Value>(frontmatter).is_ok_and(|value| {
+    crate::yaml::from_str::<yaml_compat::Value>(frontmatter).is_ok_and(|value| {
         value.as_mapping().is_some_and(|mapping| {
             mapping.contains_key(yaml_compat::Value::String(key.to_string()))
         })
@@ -2515,11 +2514,10 @@ fn ordinary_string_mapping_member_source(
         // `inline_scalar_end` has already parsed these exact slices as
         // strings; keep the values rather than maintaining impossible retry
         // branches after successful validation.
-        let Ok(member_key) = yaml_compat::compat::from_str::<String>(key_source) else {
+        let Ok(member_key) = crate::yaml::from_str::<String>(key_source) else {
             continue;
         };
-        let Ok(member_value) = yaml_compat::compat::from_str::<String>(&value_source[..value_end])
-        else {
+        let Ok(member_value) = crate::yaml::from_str::<String>(&value_source[..value_end]) else {
             continue;
         };
         parsed.push(OrdinaryStringMappingMember {
@@ -2740,7 +2738,7 @@ fn inline_scalar_end(value: &str) -> Option<usize> {
     if end == 0 {
         return None;
     }
-    yaml_compat::compat::from_str::<String>(&value[..end])
+    crate::yaml::from_str::<String>(&value[..end])
         .ok()
         .map(|_| end)
 }

@@ -62,7 +62,7 @@ pub fn format_for(rel: &str) -> Option<Format> {
 pub fn parse(text: &str, format: Format) -> Option<serde_json::Value> {
     match format {
         Format::Json => serde_json::from_str(text).ok(),
-        Format::Yaml => yaml_compat::compat::from_str(text).ok(),
+        Format::Yaml => crate::yaml::from_str(text).ok(),
     }
 }
 
