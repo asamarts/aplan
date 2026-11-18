@@ -8,7 +8,7 @@
 
 | cut | status | done/total | ready | blocked | effort | weeks | critical path |
 | --- | --- | --- | --- | --- | --- | --- | --- |
-| v0.7 | todo | 0/16 | 15 | 1 | 14.8d | 0.5 (0.5 left) | 3.5d |
+| v0.7 | todo | 1/16 | 14 | 1 | 14.8d | 0.5 (0.5 left) | 3.5d |
 | v0.8 | todo | 0/27 | 0 | 27 | 41.8d | 1.5 (1.5 left) | 4.5d |
 | adoption | todo | 0/76 | 0 | 76 | 99.8d | 3.7 (3.7 left) | 10.0d |
 | backlog | todo | 0/1 | 0 | 1 | 1.0d | <0.1 (<0.1 left) | 1.0d |
@@ -25,7 +25,7 @@
 | A2-016 | Clear the supply-chain advisories against the locked dependency graph | todo | - | - |
 | A2-017 | Keep the workspace clean under Rust 1.100 without moving the pinned toolchain | todo | - | - |
 | A2-018 | Diagnose the large-fixture TUI latency regression on the current hosted image | todo | - | - |
-| A2-019 | Migrate the open pre-public backlog and every open issue into the public plan | todo | - | - |
+| A2-019 | Migrate the open pre-public backlog and every open issue into the public plan | done | - | commit:4420b69c4fe9 |
 | A2-020 | Publish v0.7.0 | todo | A2-009, A2-016, A2-017, A2-018, A2-019, A2-021, A2-022, A2-023, A2-024, A2-025, A2-026, A2-027, A2-028, A2-079, A2-137 | - |
 | A2-021 | Report APLAN045 when traces_root is relative or left at its default | todo | - | - |
 | A2-022 | Report a refused inbox promotion with the capture's real state | todo | - | - |
