@@ -20,7 +20,7 @@ tagged: !subject text
 merged:
   <<: *base
 ";
-    let value: Value = yaml_compat::from_str(input).expect("compatibility document parses");
+    let value: Value = yaml_compat::compat::from_str(input).expect("compatibility document parses");
     let root = value.as_mapping().expect("root mapping");
     assert_eq!(root[&key("copy")], root[&key("base")]);
 
@@ -39,19 +39,19 @@ merged:
 
 #[test]
 fn duplicate_keys_and_trailing_documents_are_rejected_with_locations() {
-    let duplicate = yaml_compat::from_str::<Value>("item: one\nitem: two\n")
+    let duplicate = yaml_compat::compat::from_str::<Value>("item: one\nitem: two\n")
         .expect_err("a generic mapping must not silently replace a duplicate key");
     let location = duplicate.location().expect("duplicate has a location");
     assert_eq!((location.line(), location.column()), (1, 1));
 
-    let trailing = yaml_compat::from_str::<Value>("---\none\n---\ntwo\n")
+    let trailing = yaml_compat::compat::from_str::<Value>("---\none\n---\ntwo\n")
         .expect_err("the convenience API accepts exactly one document");
     assert!(trailing.to_string().contains("more than one document"));
 }
 
 #[test]
 fn ambiguous_scalars_keep_yaml_1_2_compatible_types() {
-    let value: Value = yaml_compat::from_str(
+    let value: Value = yaml_compat::compat::from_str(
         "yes_word: yes\ndate_like: 2026-10-29\nleading_zero: 0123\nhex: 0x1f\nnull_value: ~\n",
     )
     .expect("scalar fixture parses");
@@ -76,7 +76,7 @@ fn depth_and_alias_stress_shapes_finish_without_losing_values() {
     for _ in 0..128 {
         nested = format!("[{nested}]");
     }
-    let value: Value = yaml_compat::from_str(&nested).expect("supported depth parses");
+    let value: Value = yaml_compat::compat::from_str(&nested).expect("supported depth parses");
     let mut cursor = &value;
     for _ in 0..128 {
         cursor = &cursor.as_sequence().expect("sequence level")[0];
@@ -88,7 +88,7 @@ fn depth_and_alias_stress_shapes_finish_without_losing_values() {
         aliases.push_str("  - *base\n");
     }
     let value: Value =
-        yaml_compat::from_str(&aliases).expect("bounded alias stress fixture parses");
+        yaml_compat::compat::from_str(&aliases).expect("bounded alias stress fixture parses");
     let items = value["items"].as_sequence().expect("items sequence");
     assert_eq!(items.len(), 1_000);
     assert!(items.iter().all(|item| item["value"] == "payload"));
@@ -106,7 +106,38 @@ fn mapping_serialization_is_stable_and_round_trips() {
     assert_eq!(first, second);
     assert!(first.find("second:").unwrap() < first.find("first:").unwrap());
     assert_eq!(
-        yaml_compat::from_str::<Value>(&first).expect("round trip"),
+        yaml_compat::compat::from_str::<Value>(&first).expect("round trip"),
         value
     );
+}
+
+/// An empty, comment-only or explicitly ended document is an absent value: a
+/// generic read gives null, and a typed read gives an empty collection or a
+/// struct's defaults, which is how an empty `.aplan.yml` loads. An explicit `~`
+/// is a present null, so a collection or struct target refuses it. Both rules
+/// match the bridge the parser replaced.
+#[test]
+fn empty_documents_read_as_absent_values_and_an_explicit_null_does_not() {
+    #[derive(Debug, Default, PartialEq, serde::Deserialize)]
+    #[serde(default)]
+    struct Defaults {
+        name: String,
+        items: Vec<String>,
+    }
+
+    for text in ["", "# only a comment\n", "---\n", "---\n...\n"] {
+        let value: Value = yaml_compat::compat::from_str(text).expect("empty document reads");
+        assert_eq!(value, Value::Null, "{text:?}");
+        let items: Vec<String> = yaml_compat::compat::from_str(text).expect("empty sequence");
+        assert!(items.is_empty(), "{text:?}");
+        let defaults: Defaults = yaml_compat::compat::from_str(text).expect("struct defaults");
+        assert_eq!(defaults, Defaults::default(), "{text:?}");
+    }
+
+    let value: Value = yaml_compat::compat::from_str("~\n").expect("explicit null reads");
+    assert_eq!(value, Value::Null);
+    assert!(yaml_compat::compat::from_str::<Vec<String>>("~\n").is_err());
+    assert!(yaml_compat::compat::from_str::<Defaults>("~\n").is_err());
+    let absent: Option<Defaults> = yaml_compat::compat::from_str("~\n").expect("optional null");
+    assert_eq!(absent, None);
 }

@@ -302,7 +302,7 @@ fn the_release_checkout_carries_the_history_the_version_gate_reads() {
 fn release_workflow() -> Value {
     let text = std::fs::read_to_string(workspace_root().join(".github/workflows/release.yml"))
         .expect("read release workflow");
-    yaml_compat::from_str(&text).expect("release workflow is YAML")
+    yaml_compat::compat::from_str(&text).expect("release workflow is YAML")
 }
 
 fn release_steps(document: &Value) -> &[Value] {

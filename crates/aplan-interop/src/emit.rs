@@ -328,6 +328,14 @@ mod tests {
     }
 
     #[test]
+    fn the_product_writer_refuses_output_past_the_default_ceiling() {
+        let mut task = task("BIG-1");
+        task.title = "x".repeat(65 * 1024 * 1024);
+        let error = task_file(&task, "").expect_err("the output ceiling is enforced");
+        assert!(error.to_string().contains("output bytes"), "{error}");
+    }
+
+    #[test]
     fn the_file_is_fenced_frontmatter_then_body() {
         let out = task_file(&task("KEP-1"), "## Why\n\nBecause.").unwrap();
         assert!(out.starts_with("---\n"), "{out}");

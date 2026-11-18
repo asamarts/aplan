@@ -345,7 +345,7 @@ fn close_replaces_a_live_fingerprint_block_end_to_end() {
     assert!(written.ends_with("\nbody sentinel\n"), "{written}");
 
     let (frontmatter, _) = aplan_core::load::split_frontmatter(&written).expect("frontmatter");
-    let task: aplan_core::Task = yaml_compat::from_str(frontmatter).expect("task parses");
+    let task: aplan_core::Task = yaml_compat::compat::from_str(frontmatter).expect("task parses");
     assert_eq!(task.status, aplan_core::Status::Done);
     assert_eq!(
         task.evidence
@@ -703,7 +703,7 @@ fn close_restamp_refreshes_evidence_fingerprints_end_to_end() {
     assert!(ok, "close failed: {stdout}{stderr}");
     let closed = std::fs::read_to_string(&task_path).expect("closed task");
     let (frontmatter, _) = aplan_core::load::split_frontmatter(&closed).expect("frontmatter");
-    let before: aplan_core::Task = yaml_compat::from_str(frontmatter).expect("task");
+    let before: aplan_core::Task = yaml_compat::compat::from_str(frontmatter).expect("task");
     let before = before
         .evidence_fingerprints
         .get("file:DOC.md")
@@ -736,7 +736,7 @@ fn close_restamp_refreshes_evidence_fingerprints_end_to_end() {
     );
     let restamped = std::fs::read_to_string(&task_path).expect("restamped task");
     let (frontmatter, _) = aplan_core::load::split_frontmatter(&restamped).expect("frontmatter");
-    let after: aplan_core::Task = yaml_compat::from_str(frontmatter).expect("task");
+    let after: aplan_core::Task = yaml_compat::compat::from_str(frontmatter).expect("task");
     assert_ne!(
         after.evidence_fingerprints.get("file:DOC.md"),
         Some(&before),

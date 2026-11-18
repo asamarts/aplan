@@ -2210,13 +2210,47 @@ mod tests {
             .collect::<Vec<_>>()
             .join("\n");
         assert_eq!(inbox.diagnostics.len(), 4, "{messages}");
-        assert!(messages.contains("duplicate field"), "{messages}");
+        assert!(messages.contains("duplicate mapping key"), "{messages}");
         assert!(messages.contains("lower-case `.yml` suffix"), "{messages}");
         assert!(
             messages.contains("does not agree with filename"),
             "{messages}"
         );
         assert!(messages.contains("not a regular file"), "{messages}");
+        assert!(inbox.captures.is_empty());
+    }
+
+    /// The schema bounds `promotion_defaults.phase` only as a non-negative integer:
+    /// its `uint32` format is an annotation the validator does not assert. The
+    /// typed read after validation is what refuses a phase past `u32::MAX`, so it
+    /// is a real guard and not unreachable defence.
+    #[test]
+    fn loader_refuses_a_capture_the_schema_admits_but_the_types_cannot_hold() {
+        let dir = tempfile::Builder::new()
+            .tempdir_in(crate::fixture::fixture_root())
+            .expect("tempdir");
+        let inbox_dir = dir.path().join(INBOX_DIR);
+        std::fs::create_dir(&inbox_dir).expect("inbox");
+        std::fs::write(
+            inbox_dir.join(format!("{FIRST}.yml")),
+            format!(
+                "schema: {CAPTURE_SCHEMA}\nid: {FIRST}\ntitle: one\nkind: task\nstate: open\ncaptured_at: '2025-12-31T23:59:59Z'\norigin: cli\npromotion_defaults:\n  phase: 4294967296\n"
+            ),
+        )
+        .expect("phase past u32");
+
+        let inbox = load_inbox(dir.path(), &CapturePolicy::default(), &FixedClock(NOW));
+        let messages = inbox
+            .diagnostics
+            .iter()
+            .map(|diagnostic| diagnostic.message.as_str())
+            .collect::<Vec<_>>()
+            .join("\n");
+        assert_eq!(inbox.diagnostics.len(), 1, "{messages}");
+        assert!(
+            messages.contains("capture types could not be read after schema validation"),
+            "{messages}"
+        );
         assert!(inbox.captures.is_empty());
     }
 

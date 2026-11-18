@@ -2463,7 +2463,7 @@ pub fn parse_config_bytes(bytes: &[u8], path: &Path) -> Result<Config, Error> {
 ///
 /// The same parse, unknown-key and semantic errors as [`load_from`].
 pub fn parse_config(text: &str, path: &Path) -> Result<Config, Error> {
-    let config: Config = yaml_compat::from_str(text).map_err(|e| {
+    let config: Config = yaml_compat::compat::from_str(text).map_err(|e| {
         // Ask the schema which keys this build accepts rather than parsing
         // serde's sentence back out: the inventory is derived from the same type
         // the parser uses, so it cannot drift, and it can name *every* offending
@@ -2624,7 +2624,7 @@ pub fn config_search_paths(start: &Path) -> Vec<PathBuf> {
 /// represented without changing anything else in the document.
 pub fn rekey_policy_cuts(file: &str, old: &str, new: &str) -> Result<Option<String>, String> {
     let original: yaml_compat::Value =
-        yaml_compat::from_str(file).map_err(|e| format!("invalid configuration: {e}"))?;
+        yaml_compat::compat::from_str(file).map_err(|e| format!("invalid configuration: {e}"))?;
     let mut expected = original.clone();
     let wanted = replace_policy_values(&mut expected, old, new);
     if wanted == 0 {
@@ -2696,7 +2696,7 @@ pub fn rekey_policy_cuts(file: &str, old: &str, new: &str) -> Result<Option<Stri
             "could identify {wanted} policy cut reference(s) in the parsed configuration but could safely rewrite only {changed}; nothing was written"
         ));
     }
-    let produced: yaml_compat::Value = yaml_compat::from_str(&out)
+    let produced: yaml_compat::Value = yaml_compat::compat::from_str(&out)
         .map_err(|e| format!("the policy rewrite did not parse ({e}); nothing was written"))?;
     if produced != expected {
         return Err(
@@ -2871,7 +2871,7 @@ fn rewrite_scalar_slice(slice: &str, old: &str, new: &str) -> Result<(String, bo
         return Ok((slice.to_string(), false));
     }
     let token = &slice[lead..end];
-    let parsed: String = yaml_compat::from_str(token).map_err(|e| {
+    let parsed: String = yaml_compat::compat::from_str(token).map_err(|e| {
         format!("could not read a `policy[].when.cut` item `{token}` ({e}); nothing was written")
     })?;
     if parsed != old {
@@ -3345,7 +3345,7 @@ pub fn unknown_keys(text: &str) -> Vec<(String, Option<String>)> {
 /// different problem, and it is exactly what the adopter would have met next.
 #[must_use]
 fn scan_unknown(text: &str) -> (Vec<(String, Option<String>)>, Option<String>) {
-    let Ok(mut doc) = yaml_compat::from_str::<yaml_compat::Value>(text) else {
+    let Ok(mut doc) = yaml_compat::compat::from_str::<yaml_compat::Value>(text) else {
         return (Vec::new(), None);
     };
     let accepted = accepted_keys();
@@ -3360,7 +3360,7 @@ fn scan_unknown(text: &str) -> (Vec<(String, Option<String>)>, Option<String>) {
     // misspelled `test.lst` leaves a runner with no `list` and reports a missing
     // field the adopter is about to supply by correcting the spelling.
     let remaining = yaml_compat::to_string(&doc).ok().and_then(|cleaned| {
-        match yaml_compat::from_str::<Config>(&cleaned) {
+        match yaml_compat::compat::from_str::<Config>(&cleaned) {
             Err(e) => Some(strip_position(&e.to_string())),
             // Parsing is only half of loading: the semantic checks are where a
             // runner with no `{test}` placeholder or an unknown `advisory` code
@@ -3821,7 +3821,7 @@ mod tests {
         assert_eq!(scalar_like("'old'", "M'new"), "'M''new'");
         let multiline = scalar_like("old", "M-new\nline");
         assert_eq!(
-            yaml_compat::from_str::<String>(&multiline).expect("valid YAML scalar"),
+            yaml_compat::compat::from_str::<String>(&multiline).expect("valid YAML scalar"),
             "M-new\nline"
         );
     }
@@ -3998,7 +3998,7 @@ mod tests {
 
     #[test]
     fn batch_rejects_unknown_fields_instead_of_guessing_a_protocol() {
-        let error = yaml_compat::from_str::<TestBatch>(
+        let error = yaml_compat::compat::from_str::<TestBatch>(
             "protocol: 1\nrun: [adapter, '{manifest}', '{result}']\ncomplete: true\n",
         )
         .expect_err("an unknown protocol field must be refused")
@@ -4430,7 +4430,7 @@ stale_after_days: 30
         // The claim `config_keys` makes to a consumer is "this build accepts
         // these". `deny_unknown_fields` means an advertised key the parser does
         // not know fails here rather than in their image build.
-        let c: Config = yaml_compat::from_str(EVERY_ACCEPTED_KEY)
+        let c: Config = yaml_compat::compat::from_str(EVERY_ACCEPTED_KEY)
             .expect("a document of every advertised key must parse");
         assert!(c.test.expect("a runner").validate().is_ok());
 
@@ -4512,12 +4512,49 @@ stale_after_days: 30
             examples.len()
         );
         for example in &examples {
-            let parsed = yaml_compat::from_str::<Config>(example);
+            let parsed = yaml_compat::compat::from_str::<Config>(example);
             assert!(
                 parsed.is_ok(),
                 "the scaffold shows an example this build refuses:\n{example}\n{:?}",
                 parsed.err()
             );
+        }
+    }
+
+    /// The typed half of the parser differential (`A2-009`): every configuration
+    /// document this crate owns, from the one naming every accepted key to each
+    /// scaffold example and this repository's own `.aplan.yml`, decodes to the
+    /// same `Config` under `ayaml` and the bridge it replaced. `aplan-core`
+    /// compares the generic values.
+    #[test]
+    fn every_owned_configuration_decodes_the_same_under_the_retired_bridge() {
+        let repository = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../.aplan.yml");
+        let mut documents = vec![
+            (
+                "every accepted key".to_owned(),
+                EVERY_ACCEPTED_KEY.to_owned(),
+            ),
+            (
+                ".aplan.yml".to_owned(),
+                std::fs::read_to_string(&repository).expect("the repository configuration"),
+            ),
+        ];
+        documents.extend(
+            scaffold_examples(SCAFFOLD)
+                .into_iter()
+                .enumerate()
+                .map(|(index, example)| (format!("scaffold example {index}"), example)),
+        );
+        let json = |config: Config| serde_json::to_value(config).expect("a config serializes");
+        for (name, text) in &documents {
+            // `ok()` rather than a match on the errors: a branch that only a
+            // failure takes would count against this crate's coverage floor.
+            // The tests that read each of these documents on its own say why one
+            // is refused.
+            let ayaml = yaml_compat::compat::from_str::<Config>(text).ok().map(json);
+            let bridge = yaml_serde_baseline::from_str::<Config>(text).ok().map(json);
+            assert!(ayaml.is_some(), "ayaml refused {name}");
+            assert_eq!(ayaml, bridge, "{name} decodes differently");
         }
     }
 
@@ -4612,7 +4649,7 @@ stale_after_days: 30
     fn a_key_facts_does_not_advertise_is_refused() {
         // The other half of the promise: the list is exhaustive, so a key absent
         // from it must not quietly work.
-        let err = yaml_compat::from_str::<Config>("requre_effort: true\n")
+        let err = yaml_compat::compat::from_str::<Config>("requre_effort: true\n")
             .expect_err("an unknown key must be refused");
         assert!(err.to_string().contains("requre_effort"), "{err}");
         assert!(
@@ -4632,7 +4669,7 @@ stale_after_days: 30
             "test:\n  covers_by_test:\n    - tests: ['  ']\n      paths: ['**']\n  \
              list: [cargo, test]\n  run: [cargo, test, '{test}']\n",
         ] {
-            let c: Config = yaml_compat::from_str(yaml).expect("it parses");
+            let c: Config = yaml_compat::compat::from_str(yaml).expect("it parses");
             let err = c.test.expect("a runner").validate().unwrap_err();
             assert!(err.to_string().contains("covers_by_test"), "{err}");
         }
@@ -4640,7 +4677,7 @@ stale_after_days: 30
 
     #[test]
     fn incremental_input_dependencies_are_distinct_validated_config() {
-        let valid: Config = yaml_compat::from_str(
+        let valid: Config = yaml_compat::compat::from_str(
             "test:\n  list: [cargo, test, '--', --list]\n  run: [cargo, test, '{test}']\n  inputs_by_test:\n    - tests: ['unit::*']\n      paths: ['src/**', 'fixtures/unit/**']\n",
         )
         .expect("valid input dependencies");
@@ -4661,7 +4698,7 @@ stale_after_days: 30
             "test:\n  list: [cargo, test]\n  run: [cargo, test, '{test}']\n  inputs_by_test:\n    - tests: ['unit::[']\n      paths: ['src/**']\n",
             "test:\n  list: [cargo, test]\n  run: [cargo, test, '{test}']\n  inputs_by_test:\n    - tests: ['unit::*']\n      paths: ['../src/**']\n",
         ] {
-            let config: Config = yaml_compat::from_str(source).expect("shape parses");
+            let config: Config = yaml_compat::compat::from_str(source).expect("shape parses");
             let error = config.test.expect("runner").all()[0]
                 .validate()
                 .expect_err("invalid dependency declaration");
@@ -4723,33 +4760,37 @@ stale_after_days: 30
     fn grouping_by_an_undeclared_family_is_an_error() {
         // Grouping by a vocabulary nothing validates would render a heading a
         // typo invented, which is the defect `APLAN026` exists to prevent.
-        let c: Config = yaml_compat::from_str("roadmap:\n  group_by: epic\n").expect("parses");
+        let c: Config =
+            yaml_compat::compat::from_str("roadmap:\n  group_by: epic\n").expect("parses");
         let err = c.validate_roadmap().unwrap_err();
         assert!(err.to_string().contains("tag_families"), "{err}");
         let err = c.validate_grouping().unwrap_err();
         assert!(err.to_string().contains("roadmap.group_by"), "{err}");
 
-        let ok: Config =
-            yaml_compat::from_str("tag_families:\n  epic: [epic-a]\nroadmap:\n  group_by: epic\n")
-                .expect("parses");
+        let ok: Config = yaml_compat::compat::from_str(
+            "tag_families:\n  epic: [epic-a]\nroadmap:\n  group_by: epic\n",
+        )
+        .expect("parses");
         assert!(ok.validate_roadmap().is_ok());
 
-        let absent: Config = yaml_compat::from_str("root: aplan\n").expect("parses");
+        let absent: Config = yaml_compat::compat::from_str("root: aplan\n").expect("parses");
         assert!(absent.validate_roadmap().is_ok());
         assert!(absent.validate_grouping().is_ok());
     }
 
     #[test]
     fn summary_grouping_names_a_declared_family_or_is_refused() {
-        let c: Config = yaml_compat::from_str("summary:\n  group_by: epic\n").expect("parses");
+        let c: Config =
+            yaml_compat::compat::from_str("summary:\n  group_by: epic\n").expect("parses");
         let err = c.validate_grouping().unwrap_err();
         assert!(err.to_string().contains("summary.group_by"), "{err}");
         assert!(err.to_string().contains("tag_families"), "{err}");
         assert!(!err.to_string().contains("test runner"), "{err}");
 
-        let ok: Config =
-            yaml_compat::from_str("tag_families:\n  epic: [epic-a]\nsummary:\n  group_by: epic\n")
-                .expect("parses");
+        let ok: Config = yaml_compat::compat::from_str(
+            "tag_families:\n  epic: [epic-a]\nsummary:\n  group_by: epic\n",
+        )
+        .expect("parses");
         assert!(ok.validate_grouping().is_ok());
     }
 
@@ -4763,7 +4804,7 @@ stale_after_days: 30
                 "`epic-a` twice",
             ),
         ] {
-            let c: Config = yaml_compat::from_str(yaml).expect("it parses");
+            let c: Config = yaml_compat::compat::from_str(yaml).expect("it parses");
             let err = c.validate_tag_families().unwrap_err();
             assert!(err.to_string().contains("epic"), "{err}");
             assert!(err.to_string().contains(named), "{err}");
@@ -4776,7 +4817,7 @@ stale_after_days: 30
         }
 
         let blank: Config =
-            yaml_compat::from_str("tag_families:\n  '  ': [epic-a]\n").expect("it parses");
+            yaml_compat::compat::from_str("tag_families:\n  '  ': [epic-a]\n").expect("it parses");
         let err = blank.validate_tag_families().unwrap_err();
         assert!(err.to_string().contains("blank name"), "{err}");
         assert!(!err.to_string().contains("test runner"), "{err}");
@@ -4784,7 +4825,7 @@ stale_after_days: 30
 
     #[test]
     fn declaring_no_tag_families_is_valid_and_the_default() {
-        let c: Config = yaml_compat::from_str("require_effort: true\n").expect("parses");
+        let c: Config = yaml_compat::compat::from_str("require_effort: true\n").expect("parses");
         assert!(c.tag_families.is_none());
         assert!(c.validate_tag_families().is_ok());
     }
@@ -4797,7 +4838,7 @@ stale_after_days: 30
             ("owners: [\"\\u200b\"]\n", "blank owner"),
             ("owners: [ada, ada]\n", "lists `ada` twice"),
         ] {
-            let config: Config = yaml_compat::from_str(yaml).expect("configuration parses");
+            let config: Config = yaml_compat::compat::from_str(yaml).expect("configuration parses");
             let error = config
                 .validate_owners()
                 .expect_err("an unusable vocabulary must be refused")
@@ -4805,12 +4846,12 @@ stale_after_days: 30
             assert!(error.contains(wanted), "expected {wanted:?} in {error:?}");
         }
 
-        let absent: Config = yaml_compat::from_str("{}").expect("configuration parses");
+        let absent: Config = yaml_compat::compat::from_str("{}").expect("configuration parses");
         absent
             .validate_owners()
             .expect("an absent vocabulary preserves free-text owners");
         let declared: Config =
-            yaml_compat::from_str("owners: [ada, grace]\n").expect("configuration parses");
+            yaml_compat::compat::from_str("owners: [ada, grace]\n").expect("configuration parses");
         declared
             .validate_owners()
             .expect("distinct substantive owners form a vocabulary");
@@ -4819,7 +4860,7 @@ stale_after_days: 30
     #[test]
     fn owner_scopes_use_the_declared_vocabulary_when_one_exists() {
         let yaml = "owners: [kaminsod]\npolicy:\n  - when:\n      owner: [kaminsdo]\n    evidence:\n      require_min_strength: [test]\n";
-        let typo: Config = yaml_compat::from_str(yaml).expect("configuration parses");
+        let typo: Config = yaml_compat::compat::from_str(yaml).expect("configuration parses");
         let error = typo
             .validate_owners()
             .expect_err("a policy scope no legal task can match must be refused")
@@ -4831,7 +4872,7 @@ stale_after_days: 30
             .to_string();
         assert!(loaded.contains("invalid `owners`"), "{loaded}");
 
-        let exact: Config = yaml_compat::from_str(
+        let exact: Config = yaml_compat::compat::from_str(
             "owners: [kaminsod]\npolicy:\n  - when:\n      owner: [kaminsod]\n    evidence:\n      require_min_strength: [test]\n",
         )
         .expect("configuration parses");
@@ -4839,7 +4880,7 @@ stale_after_days: 30
             .validate_owners()
             .expect("a declared owner remains a usable policy selector");
 
-        let open: Config = yaml_compat::from_str(
+        let open: Config = yaml_compat::compat::from_str(
             "policy:\n  - when:\n      owner: [anyone]\n    evidence:\n      require_min_strength: [test]\n",
         )
         .expect("configuration parses");
@@ -4855,7 +4896,7 @@ stale_after_days: 30
             "test:\n  covers: []\n  list: [cargo, test]\n  run: [cargo, test, '{test}']\n",
             "test:\n  covers: ['  ']\n  list: [cargo, test]\n  run: [cargo, test, '{test}']\n",
         ] {
-            let c: Config = yaml_compat::from_str(yaml).expect("it parses");
+            let c: Config = yaml_compat::compat::from_str(yaml).expect("it parses");
             let err = c.test.expect("a runner").validate().unwrap_err();
             assert!(err.to_string().contains("covers"), "{err}");
         }
@@ -4865,7 +4906,7 @@ stale_after_days: 30
     fn a_runner_can_declare_covers_without_a_dir() {
         // The shape `A1-065` exists for: locality declared by a runner that
         // still runs at the repository root.
-        let c: Config = yaml_compat::from_str(
+        let c: Config = yaml_compat::compat::from_str(
             "test:\n  - name: server\n    covers: [server/**]\n    list: [cargo, test]\n\
              \n    run: [cargo, test, '{test}']\n",
         )
@@ -4889,7 +4930,7 @@ test:
   list: [cargo, test, --, --list]
   run: [cargo, test, --exact, '{test}']
 ";
-        let cfg: Config = yaml_compat::from_str(yml).unwrap();
+        let cfg: Config = yaml_compat::compat::from_str(yml).unwrap();
         assert_eq!(cfg.require_effort, Some(false));
         assert_eq!(cfg.traces_root.as_deref(), Some("docs"));
         let runners = cfg.test.expect("runner present");
@@ -4935,7 +4976,7 @@ test:
 
     #[test]
     fn an_empty_config_is_all_defaults() {
-        let cfg: Config = yaml_compat::from_str("{}").unwrap();
+        let cfg: Config = yaml_compat::compat::from_str("{}").unwrap();
         assert_eq!(cfg.require_effort, None);
         assert!(cfg.traces_root.is_none());
         assert!(cfg.test.is_none());
@@ -4944,13 +4985,13 @@ test:
 
     #[test]
     fn detect_drift_parses() {
-        let cfg: Config = yaml_compat::from_str("detect_drift: true\n").unwrap();
+        let cfg: Config = yaml_compat::compat::from_str("detect_drift: true\n").unwrap();
         assert_eq!(cfg.detect_drift, Some(true));
     }
 
     #[test]
     fn root_key_parses() {
-        let cfg: Config = yaml_compat::from_str("root: myplan\n").unwrap();
+        let cfg: Config = yaml_compat::compat::from_str("root: myplan\n").unwrap();
         assert_eq!(cfg.root.as_deref(), Some("myplan"));
     }
 
@@ -4958,7 +4999,7 @@ test:
     fn the_evidence_strength_block_parses_typed_kinds() {
         let yml =
             "evidence:\n  require_min_strength: [commit, test, file]\n  exempt_tags: [phone]\n";
-        let cfg: Config = yaml_compat::from_str(yml).unwrap();
+        let cfg: Config = yaml_compat::compat::from_str(yml).unwrap();
         let ev = cfg.evidence.expect("evidence block");
         assert_eq!(
             ev.require_min_strength.unwrap(),
@@ -4967,7 +5008,7 @@ test:
         assert_eq!(ev.exempt_tags.unwrap(), vec!["phone".to_string()]);
         // An unknown evidence kind is a typed parse error, not silently accepted.
         assert!(
-            yaml_compat::from_str::<Config>("evidence:\n  require_min_strength: [bogus]\n")
+            yaml_compat::compat::from_str::<Config>("evidence:\n  require_min_strength: [bogus]\n")
                 .is_err()
         );
     }
@@ -4975,7 +5016,7 @@ test:
     #[test]
     fn an_unknown_key_is_rejected_not_ignored() {
         // The ethos: a config key the tool does not understand is drift.
-        let err = yaml_compat::from_str::<Config>("polciy: strict\n").unwrap_err();
+        let err = yaml_compat::compat::from_str::<Config>("polciy: strict\n").unwrap_err();
         assert!(err.to_string().contains("polciy") || err.to_string().contains("unknown"));
     }
 
@@ -5292,7 +5333,7 @@ test:
     fn a_single_runner_mapping_still_parses_exactly_as_written() {
         // Every existing adopter has this form. A change that made them all edit
         // their config to keep working would be a poor trade.
-        let c: Config = yaml_compat::from_str(
+        let c: Config = yaml_compat::compat::from_str(
             "test:\n  list: [cargo, test, --, --list]\n  run: [cargo, test, --, --exact, '{test}']\n",
         )
         .expect("the single-runner form must keep parsing");
@@ -5310,7 +5351,7 @@ test:
 
     #[test]
     fn a_sequence_of_runners_parses_with_name_and_dir() {
-        let c: Config = yaml_compat::from_str(
+        let c: Config = yaml_compat::compat::from_str(
             "test:\n  - name: libs\n    list: [cargo, test]\n    run: [cargo, test, '{test}']\n\
              \n  - name: web\n    dir: web\n    list: [pnpm, test]\n    run: [pnpm, test, '{test}']\n",
         )
@@ -5330,7 +5371,7 @@ test:
 
     #[test]
     fn scheduled_runners_are_explicit_weighted_and_exclusive() {
-        let c: Config = yaml_compat::from_str(
+        let c: Config = yaml_compat::compat::from_str(
             "test:\n  schedule:\n    capacity: 4\n  runners:\n    - name: rust\n      weight: 3\n      exclusive: [compiler, database]\n      list: [cargo, test]\n      run: [cargo, test, '{test}']\n    - name: docs\n      list: [mdtest, --list]\n      run: [mdtest, '{test}']\n",
         )
         .expect("the scheduled form parses");
@@ -5404,7 +5445,7 @@ test:
     #[test]
     fn every_runner_in_a_sequence_is_validated_not_just_the_first() {
         // The trust boundary is per runner: one unsafe template is enough.
-        let c: Config = yaml_compat::from_str(
+        let c: Config = yaml_compat::compat::from_str(
             "test:\n  - list: ['true']\n    run: [cargo, '{test}']\n\
              \n  - list: ['true']\n    run: ['{test}']\n",
         )
@@ -5420,7 +5461,7 @@ test:
     fn an_empty_runner_list_is_a_config_error_not_a_silent_no_op() {
         // `test: []` parses, and would then reject every `test` citation with a
         // message implying a runner exists.
-        let c: Config = yaml_compat::from_str("test: []\n").expect("parses");
+        let c: Config = yaml_compat::compat::from_str("test: []\n").expect("parses");
         let err = c.test.unwrap().validate().unwrap_err();
         assert!(err.to_string().contains("empty list"), "{err}");
     }
@@ -5433,7 +5474,7 @@ test:
             "test:\n  list: ['true']\n  run: ['true', '{test}']\n  typo: x\n",
             "test:\n  - list: ['true']\n    run: ['true', '{test}']\n    typo: x\n",
         ] {
-            let err = yaml_compat::from_str::<Config>(yaml)
+            let err = yaml_compat::compat::from_str::<Config>(yaml)
                 .unwrap_err()
                 .to_string();
             assert!(err.contains("unknown field `typo`"), "{err}");
@@ -5452,7 +5493,7 @@ test:
     /// have repeated it.
     #[test]
     fn the_current_version_is_a_declared_command_with_the_usual_limits() {
-        let c: Config = yaml_compat::from_str(
+        let c: Config = yaml_compat::compat::from_str(
             "version:\n  current:\n    command: [ci/version.sh]\n    timeout_seconds: 5\n    \
              max_memory: 256M\n    max_processes: 8\n    max_output: 1M\n    wrap: [nice, '--']\n  \
              release_tag: 'release-*'\n",
@@ -5469,7 +5510,7 @@ test:
         v.validate().expect("it is usable");
         // And the default, which is what every plan measured so far tags with.
         let bare: Config =
-            yaml_compat::from_str("version:\n  require_impact: true\n").expect("it parses");
+            yaml_compat::compat::from_str("version:\n  require_impact: true\n").expect("it parses");
         assert_eq!(
             bare.version.as_ref().expect("the block").release_tag(),
             DEFAULT_RELEASE_TAG
@@ -5482,7 +5523,7 @@ test:
     /// compiling or comparing equal before execution can drift.
     #[test]
     fn test_url_and_version_expose_one_command_policy_contract() {
-        let c: Config = yaml_compat::from_str(
+        let c: Config = yaml_compat::compat::from_str(
             r"test:
   list: [tests, list]
   run: [tests, run, '{test}']
@@ -5562,7 +5603,7 @@ version:
             ),
         ];
         for (yaml, wanted) in cases {
-            let c: Config = yaml_compat::from_str(yaml).expect("it parses");
+            let c: Config = yaml_compat::compat::from_str(yaml).expect("it parses");
             let err = c
                 .version
                 .as_ref()
@@ -5583,7 +5624,8 @@ version:
     /// silently widened the window to the whole of history.
     #[test]
     fn an_empty_release_tag_is_refused_without_a_command_too() {
-        let c: Config = yaml_compat::from_str("version:\n  release_tag: ''\n").expect("parses");
+        let c: Config =
+            yaml_compat::compat::from_str("version:\n  release_tag: ''\n").expect("parses");
         c.version
             .as_ref()
             .expect("the block")
@@ -5597,14 +5639,15 @@ version:
     fn the_version_floors_fill_in_only_what_the_adopter_left_out() {
         use aplan_core::task::VersionImpact as V;
 
-        let off: Config = yaml_compat::from_str("").expect("empty loads");
+        let off: Config = yaml_compat::compat::from_str("").expect("empty loads");
         assert!(off.version.is_none(), "silence asks for nothing");
 
         // Declared, but with `require_impact` left out: a `version` block that
         // only sets floors has not turned the rule on, and reading `levels` as
         // consent would enable a gate nobody asked for.
         let floors_only: Config =
-            yaml_compat::from_str("version:\n  levels:\n    cut: none\n").expect("it parses");
+            yaml_compat::compat::from_str("version:\n  levels:\n    cut: none\n")
+                .expect("it parses");
         let p = floors_only.version.as_ref().expect("the block is there");
         assert!(!p.requires_impact());
         assert_eq!(
@@ -5618,7 +5661,7 @@ version:
         );
 
         let on: Config =
-            yaml_compat::from_str("version:\n  require_impact: true\n").expect("it parses");
+            yaml_compat::compat::from_str("version:\n  require_impact: true\n").expect("it parses");
         let p = on.version.as_ref().expect("the block is there");
         assert!(p.requires_impact());
         assert_eq!(
@@ -5629,7 +5672,7 @@ version:
 
         // Every level overridden, including one raised: the map is the adopter's
         // in both directions.
-        let all: Config = yaml_compat::from_str(
+        let all: Config = yaml_compat::compat::from_str(
             "version:\n  require_impact: true\n  levels:\n    task: none\n    cut: fix\n    \
              release: breaking\n",
         )
@@ -5656,7 +5699,7 @@ mod throughput_tests {
     fn an_unusable_throughput_is_refused_and_says_what_one_looks_like() {
         for bad in ["0", "-5", "0.0"] {
             let text = format!("effort_days_per_week: {bad}\n");
-            let c: Config = yaml_compat::from_str(&text).expect("it is a number");
+            let c: Config = yaml_compat::compat::from_str(&text).expect("it is a number");
             let err = c.validate_throughput().expect_err("must be refused");
             let msg = err.to_string();
             assert!(
@@ -5669,13 +5712,13 @@ mod throughput_tests {
     /// The shapes that are fine: absent, and any positive number.
     #[test]
     fn a_positive_throughput_and_no_throughput_both_load() {
-        let none: Config = yaml_compat::from_str("").expect("empty loads");
+        let none: Config = yaml_compat::compat::from_str("").expect("empty loads");
         assert_eq!(none.effort_days_per_week, None);
         none.validate_throughput()
             .expect("silence is not a mistake");
 
         let declared: Config =
-            yaml_compat::from_str("effort_days_per_week: 7.5\n").expect("it parses");
+            yaml_compat::compat::from_str("effort_days_per_week: 7.5\n").expect("it parses");
         assert_eq!(declared.effort_days_per_week, Some(7.5));
         declared
             .validate_throughput()
@@ -5698,7 +5741,7 @@ mod docs_tests {
             ("docs:\n  paths: [\"\\u200b\"]\n", "blank pattern"),
             ("docs:\n  paths: ['docs/[']\n", "not a usable glob"),
         ] {
-            let config: Config = yaml_compat::from_str(yaml).expect("the shape parses");
+            let config: Config = yaml_compat::compat::from_str(yaml).expect("the shape parses");
             let message = config
                 .validate_docs()
                 .expect_err("a vacuous declaration must be refused")
@@ -5748,7 +5791,7 @@ mod docs_tests {
                 "every line begins with",
             ),
         ] {
-            let c: Config = yaml_compat::from_str(yaml).expect("it parses");
+            let c: Config = yaml_compat::compat::from_str(yaml).expect("it parses");
             let msg = c.validate_docs().expect_err("must be refused").to_string();
             assert!(
                 msg.contains("`docs.membership` in `.aplan.yml`") && msg.contains(wanted),
@@ -5760,7 +5803,7 @@ mod docs_tests {
     /// The shapes that are fine: absent, and each of the two declarations.
     #[test]
     fn the_membership_declarations_that_work_all_load() {
-        let none: Config = yaml_compat::from_str("").expect("empty loads");
+        let none: Config = yaml_compat::compat::from_str("").expect("empty loads");
         assert!(none.docs.is_none());
         none.validate_docs().expect("silence is not a mistake");
 
@@ -5770,7 +5813,7 @@ mod docs_tests {
             // `docs` with no `membership` is a section that asks for nothing.
             "docs: {}\n",
         ] {
-            let c: Config = yaml_compat::from_str(yaml).expect("it parses");
+            let c: Config = yaml_compat::compat::from_str(yaml).expect("it parses");
             c.validate_docs().expect("a usable declaration");
         }
     }
@@ -5797,7 +5840,7 @@ docs:
     - doc: PLAN.md
       declared_by: table
 ";
-        let config: Config = yaml_compat::from_str(yaml).expect("config");
+        let config: Config = yaml_compat::compat::from_str(yaml).expect("config");
         config.validate_docs().expect("valid declarations");
         let documents = config
             .docs
@@ -5842,7 +5885,7 @@ docs:
                 "`docs.membership`",
             ),
         ] {
-            let config: Config = yaml_compat::from_str(yaml).expect("config");
+            let config: Config = yaml_compat::compat::from_str(yaml).expect("config");
             config.validate_docs().expect("syntactically valid");
             let message = config
                 .docs
@@ -5944,5 +5987,72 @@ mod published_schema_tests {
                 count(value, &child, out);
             }
         }
+    }
+    #[test]
+    fn yaml_boundary_refuses_high_native_ceilings() {
+        use std::fmt::Write as _;
+        let path = std::path::Path::new(".aplan.yml");
+
+        let mut anchors = String::new();
+        for i in 0..=100_000 {
+            writeln!(anchors, "k{i}: &a{i} 1").expect("anchors");
+        }
+        let error = parse_config(&anchors, path).expect_err("the anchor ceiling is enforced");
+        assert!(error.to_string().contains("anchors"), "{error}");
+
+        let mut derefs = String::from("base: &a 1\nrefs: [");
+        for i in 0..=100_000 {
+            if i > 0 {
+                derefs.push_str(", ");
+            }
+            derefs.push_str("*a");
+        }
+        derefs.push_str("]\n");
+        let error = parse_config(&derefs, path).expect_err("the alias ceiling is enforced");
+        assert!(error.to_string().contains("alias dereferences"), "{error}");
+
+        // The event ceiling is reached before collection entries when each item
+        // costs a scalar token plus a flow-entry token.
+        let mut events = String::from("items: [");
+        for i in 0..=500_000 {
+            if i > 0 {
+                events.push(',');
+            }
+            events.push('x');
+        }
+        events.push_str("]\n");
+        let error = parse_config(&events, path).expect_err("the event ceiling is enforced");
+        assert!(error.to_string().contains("events"), "{error}");
+        assert!(
+            !error.to_string().contains("collection entries"),
+            "the event ceiling must be the first refused limit: {error}"
+        );
+    }
+
+    #[test]
+    fn yaml_boundary_refuses_multi_document_and_alias_bombs() {
+        use std::fmt::Write as _;
+        let path = std::path::Path::new(".aplan.yml");
+        let error = parse_config("---\nroot: aplan\n---\nroot: other\n", path)
+            .expect_err("configuration is exactly one document");
+        assert!(
+            error.to_string().contains("more than one document"),
+            "{error}"
+        );
+
+        let mut bomb = String::from("a0: &a0 [x, x, x, x, x, x, x, x, x]\n");
+        for i in 1..9 {
+            let previous = format!("*a{}", i - 1);
+            let row = std::iter::repeat_n(previous.as_str(), 9)
+                .collect::<Vec<_>>()
+                .join(", ");
+            writeln!(bomb, "a{i}: &a{i} [{row}]").expect("write");
+        }
+        let error = parse_config(&bomb, path).expect_err("alias bombs are refused");
+        assert!(error.to_string().contains("alias"), "{error}");
+
+        let oversized = format!("root: {}\n", "x".repeat(32 * 1024 * 1024));
+        let error = parse_config(&oversized, path).expect_err("input bytes are bounded");
+        assert!(error.to_string().contains("input bytes"), "{error}");
     }
 }

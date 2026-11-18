@@ -925,7 +925,7 @@ pub fn plan_removal(
     // needed, and this one did.
     aplan_core::load::frontmatter_is_loadable(rewritten_fm)
         .map_err(|_| CutError::Unsupported { path: path.clone() })?;
-    let parsed: crate::cut::TaskProbe = yaml_compat::from_str(rewritten_fm)
+    let parsed: crate::cut::TaskProbe = yaml_compat::compat::from_str(rewritten_fm)
         .map_err(|_| CutError::Unsupported { path: path.clone() })?;
     // **Exactly what was intended, not merely "the removed ones are gone"**
     // (`A1-363`). An empty list satisfied the weaker assertion, which is the one
@@ -1096,7 +1096,8 @@ fn self_check(updated: &str, added: &[String], path: &Path) -> Result<(), CutErr
     // the removal -- but "the rewrite is still something aplan can read" is the
     // claim this function makes, and only the schema settles it.
     aplan_core::load::frontmatter_is_loadable(frontmatter).map_err(fail)?;
-    let parsed: Task = yaml_compat::from_str(frontmatter).map_err(|e| fail(e.to_string()))?;
+    let parsed: Task =
+        yaml_compat::compat::from_str(frontmatter).map_err(|e| fail(e.to_string()))?;
 
     if let Some(missing) = added.iter().find(|id| !parsed.blocked_by.contains(id)) {
         return Err(fail(format!(
@@ -1364,7 +1365,7 @@ mod tests {
             });
             let (fm, _) = aplan_core::load::split_frontmatter(&out).expect("frontmatter");
             let parsed: super::TaskProbe =
-                yaml_compat::from_str(fm).unwrap_or_else(|e| panic!("{what}: {e}\n{out}"));
+                yaml_compat::compat::from_str(fm).unwrap_or_else(|e| panic!("{what}: {e}\n{out}"));
             assert_eq!(
                 parsed.blocked_by,
                 vec!["W-001".to_string()],
@@ -1388,7 +1389,7 @@ mod tests {
             "a top-level one is created: {out}"
         );
         let (fm, _) = aplan_core::load::split_frontmatter(&out).expect("frontmatter");
-        let parsed: super::TaskProbe = yaml_compat::from_str(fm).expect("parses");
+        let parsed: super::TaskProbe = yaml_compat::compat::from_str(fm).expect("parses");
         assert_eq!(parsed.blocked_by, vec!["W-001".to_string()], "{out}");
     }
 

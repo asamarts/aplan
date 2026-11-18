@@ -1,17 +1,20 @@
 # YAML parser migration
 
-Status: the bridge is shipped; `A2-009` owns a new public qualification and the safe Rust cutover.
+Status: cut over. Since `A2-009` the product parses YAML with the safe Rust `ayaml` 0.1.3 behind
+`yaml_compat`; the `yaml_serde` bridge survives only as a test oracle. Earlier sections call the
+parser `d0026`, the name it was evaluated under before it was published as `ayaml`.
 
 ## Decision
 
-aplan now has one YAML ownership boundary: the root manifest's logical `yaml_compat` dependency. The immediate backend is exact
-`yaml_serde` 0.10.7 over `libyaml-rs` 0.3.0. This removes the archived `serde_yaml_ng` /
+aplan has one YAML ownership boundary: the root manifest's logical `yaml_compat` dependency. Its
+backend is exact `ayaml` 0.1.3 with the `libyaml-compat` feature (see "Cutover to ayaml 0.1.3"
+below). Before that cutover it was exact `yaml_serde` 0.10.7 over `libyaml-rs` 0.3.0. This removes the archived `serde_yaml_ng` /
 `unsafe-libyaml` stack and `RUSTSEC-2024-0449` waiver while preserving the mature `serde_yaml`
 value and error contract.
 
-This is deliberately a bridge. `libyaml-rs` is maintained by the YAML organization, but it is
-still libyaml translated from C to unsafe Rust. `A2-009` owns the public safe Rust cutover to
-`d0026`. No caller names the selected backend;
+That was deliberately a bridge. `libyaml-rs` is maintained by the YAML organization, but it is
+still libyaml translated from C to unsafe Rust. `A2-009` owned the public safe Rust cutover to
+`d0026`, published as `ayaml`. No caller names the selected backend;
 changing it again is one root dependency change whose compiler errors enumerate the compatibility
 work, rather than another backend-name sweep. The private `aplan-core` contract module pins the
 behavior without adding a public facade or reversing the workspace's dependency-sink architecture.
@@ -119,9 +122,125 @@ only from a licensed immutable release whose compatibility revision passes the c
 inventory; it must then run the differential, hostile-input, performance, binary and release gates
 below.
 
+## Cutover to ayaml 0.1.3
+
+`ayaml` was published on crates.io under `MIT OR Apache-2.0` with `rust-version = "1.88"`, which
+met readiness gate 1. Version 0.1.2 added compatibility entry points that take caller limits and
+bounds `%TAG` expansion. 0.1.3 reads a local tag after a flow `?` the way libyaml does in
+compatibility mode. `A2-009` consumes 0.1.3 directly, through the same `yaml_compat` name:
+
+- **Callers.** Most callers read through `yaml_compat::compat::from_str`, which follows libyaml's
+  resolution: task front matter, configuration, imports and cuts, the release and CI audits, and
+  the TUI evaluation harness. The readers of formats aplan defines itself (captures, blueprints, dependency
+  manifests) and a few tests use `ayaml`'s default reader. Native limits are built from `ayaml`'s
+  own options rather than a wrapper.
+- **Oracle.** `aplan-core` and `aplan-config` keep `yaml_serde` 0.10.7 as a dev-dependency named
+  `yaml_serde_baseline`, used only by the differential tests. The dependency audit pins `ayaml`
+  to `=0.1.3` and refuses any product graph that resolves `yaml_serde`, `libyaml-rs` or the
+  parsers retired before them.
+- **Generic differential.** Every YAML file in the repository and every task's front matter, 201
+  documents when this ran, parse to the same normalized value under both parsers, through
+  `ayaml`'s compatibility reader and its default reader alike. `ayaml`'s emission reparses under
+  the bridge to the same value, and no document is accepted by one and refused by the other.
+- **Typed differential.** Every task's front matter decodes to the same `serde_json::Value` and
+  the same typed `Task` under both parsers, the two reads the loader makes. Every configuration
+  document `aplan-config` owns (the one naming every accepted key, each scaffold example and this
+  repository's `.aplan.yml`) decodes to the same `Config`.
+- **Hostile input.** 24 hostile or degenerate documents are read by both parsers four ways: as a
+  generic value, as JSON and as a task through the compatibility reader, and as JSON through the
+  default reader. They cover empty and comment-only documents, duplicate keys, extra documents,
+  broken flow collections, tabs, undefined and self-referencing aliases, tags, a byte order mark,
+  a control character, out-of-range integers, non-string keys, merge keys, redefined anchors, a
+  64 KiB scalar, 10,000 levels of nesting and an alias bomb. 89 of the 96 outcomes agree. The
+  test pins the other seven exactly, so a new divergence fails it, and none lets aplan accept a
+  value the bridge refused or read one differently:
+  - The default reader refuses a duplicate key, at the top level or nested, where the bridge's
+    JSON read kept the last value. It also refuses a flow collection whose continuation line is
+    not indented, which YAML forbids and libyaml allowed; the compatibility reader still accepts
+    it. Captures, blueprints and dependency manifests are read this stricter way.
+  - `ayaml` keeps a `%TAG`-declared tag on a generic value where the bridge dropped it and read
+    the scalar as a string. Read as JSON through either reader, `ayaml` therefore refuses such a
+    document, where the bridge silently changed the value's type; in practice that reaches only a
+    capture file, since a task's front matter cannot hold a directive. A local tag such as
+    `!custom` is refused by both, and typed reads, which configuration uses, ignore the tag under
+    both parsers.
+  - `ayaml`'s generic value holds an integer past the 64-bit range, which the bridge refused.
+    Read as JSON or as a task, both refuse it.
+- **Contract and limits.** The contract tests pin aliases, anchors, tags, literal merge keys,
+  duplicate keys and extra documents with their locations, scalar typing, invalid UTF-8, depth
+  and alias stress, mapping serialization, and empty documents. An empty document reads as an
+  empty collection or a struct's defaults; an explicit `~` is refused for both. The limit tests
+  set each of `ayaml`'s native ceilings and prove its boundary and first refused neighbour, and
+  the product task loader still refuses nesting and an alias bomb past the defaults.
+- **Errors.** Parser errors keep their line but may name a different column and cause. Two
+  messages in the rule catalogue changed; for a flow sequence whose continuation is not
+  indented, the bridge reported column 6 and "did not find expected ',' or ']'", and `ayaml`
+  reports column 1 and "flow collection entries must be indented". The catalogue and the
+  command-output tests were regenerated rather than asserted away.
+- **Capture guard.** A capture's duplicate key used to pass the schema check, because the bridge's
+  JSON read kept the last value, and was refused only by the typed read after it. The default
+  reader now refuses it at the JSON read. The typed read is still the only guard for a value the schema admits and the types
+  cannot hold, such as a `promotion_defaults.phase` past `u32::MAX`, and a test now covers that.
+- **Package budgets.** The lock gains `ayaml` and keeps the oracle: 291 packages. Both product
+  graphs replace `yaml_serde` and `libyaml-rs` with `ayaml`, and the headless graph also loses
+  `ryu`, which only the bridge used there. Default goes from 201 to 200 packages and headless from
+  171 to 169.
+- **Binary size.** Stripped release binaries, built the same way from the same revision with
+  Rust 1.99.1, grow by about 588 KB with `ayaml`: default 21,799,912 to 22,388,096 bytes (+2.7%),
+  headless 19,400,736 to 19,989,704 bytes (+3.0%). The default-over-headless increment that the
+  dependency policy budgets stays at 2,398,392 bytes (12.0%), inside its 2,500,000-byte and 15%
+  limits.
+- **Speed.** On the quiet benchmark host, through its one-slot queue, both revisions were built
+  there with Rust 1.97.0 and timed with hyperfine (5 warm-up runs, 40 timed). Two corpora were
+  used: this plan (171 tasks) and the larger pre-public ledger (758 tasks). `--cache off` forces
+  a full parse; `--cache auto` measures the warm path a repeated read takes.
+
+  | Read | Plan | Bridge | `ayaml` | Change |
+  |---|---|---|---|---|
+  | `check`, cold | 171 tasks | 33.9 ms | 32.7 ms | -3.4% |
+  | `check`, cold | 758 tasks | 170.6 ms | 165.1 ms | -3.2% |
+  | `ready`, cold | 171 tasks | 26.6 ms | 25.8 ms | -2.9% |
+  | `ready`, cold | 758 tasks | 135.4 ms | 131.6 ms | -2.8% |
+  | `ready`, warm | 171 tasks | 12.4 ms | 12.5 ms | +1.2% |
+  | `ready`, warm | 758 tasks | 46.7 ms | 47.2 ms | +1.0% |
+
+  Cold reads retire 4.5 to 6.6% fewer instructions. Warm reads retire the same number, because
+  the cache answers them without parsing, so their 1% is noise. Peak resident memory rises by
+  about 0.4 MiB. Both binaries print byte-identical output with the same exit status for every
+  row. Each corpus was the plan directory alone, so `check` reports the documents its tasks
+  trace as missing and exits 1 under both parsers alike. The qualification limits were a
+  regression of at most 10% and warm reads under 100 ms; both hold.
+
 ## d0026 readiness gates
 
-`A2-009` may replace the bridge only when all of these are true:
+`A2-009` could replace the bridge only when all of these were true. How the cutover met each:
+
+- **1.** `ayaml` 0.1.3 is published on crates.io with the grant, Rust 1.88 support and a lockfile
+  checksum. Its changelog records Trusted Publishing with a build provenance attestation for every
+  release from 0.1.2 on.
+- **2.** Callers name only `yaml_compat`. The spike's compile gaps are closed in `ayaml`'s API, and
+  each product failure recorded above is now covered. The contract tests pin kept custom tags,
+  empty documents as defaults, scalar typing and duplicate-key locations. The task emitter's
+  byte-level tests pin enums written as plain scalars (`status: todo`). The complete
+  workspace suite passes.
+- **3.** The generic, typed and hostile-input differentials above, with every tag and
+  representation difference pinned with a reason. Generated documents and mutation round trips
+  are pinned byte for byte by the command-output corpus the bridge build produced, which passes
+  unchanged apart from the two parser messages above.
+- **4.** Every ceiling has an explicit default, and aplan overrides none, so every product read
+  applies them. Each boundary and its first refused neighbour is proven against `yaml_compat`
+  with explicit values. Only depth and the alias bomb also run through a product entry point,
+  the task loader, because reaching the others there needs inputs of up to 32 MiB or a million
+  events.
+- **5.** The complete local profile passes on the change. `A2-009` closes only after the hosted
+  complete profile passes on `main`, and the dependency audit refuses a product graph holding
+  either bridge crate.
+- **6.** The product-level gates hold, as measured above. aplan emits only its own records (task
+  front matter, evidence, captures and configuration), each a few levels deep, so the 2.40 times
+  depth-128 emission ratio reaches no product path.
+- **7.** One change removes the bridge from the product graphs, and the oracle is test-only.
+
+The gates as they were set:
 
 1. **Immutable consumption.** A published crate or immutable vendored source has an explicit
    `MIT OR Apache-2.0` grant, provenance, checksum and Rust 1.88 support. A sibling path or moving
@@ -153,10 +272,11 @@ below.
 
 ## Bridge removal and rollback
 
-Both bridge layers are exact: `yaml_serde` is pinned to 0.10.7 and a private resolver-only
-`yaml_engine_pin` holds `libyaml-rs` at 0.3.0. The executable dependency audit rejects either
-requirement becoming compatible/floating, so a lock refresh cannot silently change plan semantics.
-Rollback before the safe cutover is one root dependency revision; callers
-do not move. The d0026 cutover keeps a short-lived test oracle and a last-known-good bridge commit,
+Before the cutover both bridge layers were exact: `yaml_serde` was pinned to 0.10.7 and a private
+resolver-only `yaml_engine_pin` held `libyaml-rs` at 0.3.0. After it, the executable dependency
+audit pins `ayaml` to `=0.1.3` and rejects a compatible or floating requirement, so a lock refresh
+still cannot silently change plan semantics. Rolling back is reverting the `A2-009` change: the
+bridge comes back as one root dependency revision, and the callers that moved to
+`yaml_compat::compat` move back with it. The d0026 cutover keeps a short-lived test oracle and a last-known-good bridge commit,
 but release binaries contain one parser. A semantic, resource or performance gate failure rolls
 back the adapter change rather than weakening the gate.

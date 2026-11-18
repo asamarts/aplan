@@ -648,7 +648,7 @@ fn warning_policy_census_sees_multiline_commands_assignments_and_nested_override
         .is_empty()
     );
 
-    let workflow: yaml_compat::Value = yaml_compat::from_str(
+    let workflow: yaml_compat::Value = yaml_compat::compat::from_str(
         "env:\n  CARGO_BUILD_WARNINGS: deny\njobs:\n  test:\n    env:\n      CARGO_BUILD_WARNINGS: allow\n",
     )
     .expect("parse nested warning-policy fixture");
@@ -899,7 +899,7 @@ fn workflows() -> Vec<(String, yaml_compat::Value)> {
         let path = entry.path();
         if path.extension().is_some_and(|x| x == "yml" || x == "yaml") {
             let text = std::fs::read_to_string(&path).expect("read a workflow");
-            let doc: yaml_compat::Value = yaml_compat::from_str(&text)
+            let doc: yaml_compat::Value = yaml_compat::compat::from_str(&text)
                 .unwrap_or_else(|e| panic!("{} does not parse: {e}", path.display()));
             out.push((
                 path.file_name()
@@ -1828,7 +1828,7 @@ fn hosted_test_environments_share_one_pinned_nextest_artifact() {
         .expect("read nextest artifact manifest");
     let installer = std::fs::read_to_string(root.join("ci/scripts/install-nextest.sh"))
         .expect("read nextest installer");
-    let validation: yaml_compat::Value = yaml_compat::from_str(
+    let validation: yaml_compat::Value = yaml_compat::compat::from_str(
         &std::fs::read_to_string(root.join("ci/validation.yml"))
             .expect("read validation selection inventory"),
     )
@@ -2076,7 +2076,7 @@ fn every_compiling_job_prepares_its_hosted_environment() {
 /// passed although repository code executed first.
 #[test]
 fn hosted_preparation_must_precede_repository_work() {
-    let job: yaml_compat::Value = yaml_compat::from_str(
+    let job: yaml_compat::Value = yaml_compat::compat::from_str(
         r"
 steps:
   - uses: actions/checkout@v7

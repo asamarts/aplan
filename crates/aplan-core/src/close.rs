@@ -171,8 +171,8 @@ pub fn close(
 ) -> Result<String, CloseError> {
     let bom = leading_bom(file);
     let (frontmatter, body) = split_frontmatter(file).ok_or(CloseError::NotATask)?;
-    let task: Task =
-        yaml_compat::from_str(frontmatter).map_err(|e| CloseError::Frontmatter(e.to_string()))?;
+    let task: Task = yaml_compat::compat::from_str(frontmatter)
+        .map_err(|e| CloseError::Frontmatter(e.to_string()))?;
 
     // Both terminal states are refused: `Done` is already closed, and `Dropped`
     // was deliberately abandoned, silently reviving it to `done` would launder a
@@ -289,8 +289,8 @@ pub fn close(
 pub fn set_status(file: &str, to: Status) -> Result<String, CloseError> {
     let bom = leading_bom(file);
     let (frontmatter, body) = split_frontmatter(file).ok_or(CloseError::NotATask)?;
-    let task: Task =
-        yaml_compat::from_str(frontmatter).map_err(|e| CloseError::Frontmatter(e.to_string()))?;
+    let task: Task = yaml_compat::compat::from_str(frontmatter)
+        .map_err(|e| CloseError::Frontmatter(e.to_string()))?;
     if task.status.is_terminal() {
         return Err(if task.status == Status::Done {
             CloseError::AlreadyDone
@@ -332,8 +332,8 @@ pub fn set_owner(file: &str, to: Option<&str>) -> Result<String, CloseError> {
     let (frontmatter, body) = split_frontmatter(file).ok_or(CloseError::NotATask)?;
     // Parsed before anything is rewritten, so a file that does not load is
     // reported as that rather than as a failed rewrite.
-    let task: Task =
-        yaml_compat::from_str(frontmatter).map_err(|e| CloseError::Frontmatter(e.to_string()))?;
+    let task: Task = yaml_compat::compat::from_str(frontmatter)
+        .map_err(|e| CloseError::Frontmatter(e.to_string()))?;
 
     let nl = newline(file, bom);
     let new_frontmatter = set_owner_in(frontmatter, to, task.owner.is_some(), nl)?;
@@ -365,8 +365,8 @@ pub fn set_owner(file: &str, to: Option<&str>) -> Result<String, CloseError> {
 pub fn set_revisit_at(file: &str, to: Option<&str>) -> Result<String, CloseError> {
     let bom = leading_bom(file);
     let (frontmatter, body) = split_frontmatter(file).ok_or(CloseError::NotATask)?;
-    let task: Task =
-        yaml_compat::from_str(frontmatter).map_err(|e| CloseError::Frontmatter(e.to_string()))?;
+    let task: Task = yaml_compat::compat::from_str(frontmatter)
+        .map_err(|e| CloseError::Frontmatter(e.to_string()))?;
     let nl = newline(file, bom);
     let new_frontmatter = set_optional_scalar_in(
         frontmatter,
@@ -456,8 +456,8 @@ fn set_optional_scalar_in(
 pub fn set_id(file: &str, to: &str) -> Result<String, CloseError> {
     let bom = leading_bom(file);
     let (frontmatter, body) = split_frontmatter(file).ok_or(CloseError::NotATask)?;
-    let _: Task =
-        yaml_compat::from_str(frontmatter).map_err(|e| CloseError::Frontmatter(e.to_string()))?;
+    let _: Task = yaml_compat::compat::from_str(frontmatter)
+        .map_err(|e| CloseError::Frontmatter(e.to_string()))?;
     if !has_single_source_local_scalar_line(frontmatter, "id") {
         return Err(CloseError::NoScalar("id"));
     }
@@ -548,7 +548,7 @@ fn has_single_source_local_scalar_line(frontmatter: &str, key: &str) -> bool {
         return false;
     }
 
-    let Ok(document) = yaml_compat::from_str::<yaml_compat::Value>(frontmatter) else {
+    let Ok(document) = yaml_compat::compat::from_str::<yaml_compat::Value>(frontmatter) else {
         return false;
     };
     let Some(mapped) = document
@@ -563,7 +563,8 @@ fn has_single_source_local_scalar_line(frontmatter: &str, key: &str) -> bool {
     let Some(parts) = scalar_line_parts(line, key) else {
         return false;
     };
-    yaml_compat::from_str::<yaml_compat::Value>(parts.value).is_ok_and(|inline| &inline == mapped)
+    yaml_compat::compat::from_str::<yaml_compat::Value>(parts.value)
+        .is_ok_and(|inline| &inline == mapped)
 }
 
 /// Whether `line` is the top-level `key:` line with a value this can sit after.
@@ -628,8 +629,8 @@ pub fn rekey_blocked_by(file: &str, blocked_by: &[String]) -> Result<String, Clo
 pub fn set_phase(file: &str, to: u32) -> Result<String, CloseError> {
     let bom = leading_bom(file);
     let (frontmatter, body) = split_frontmatter(file).ok_or(CloseError::NotATask)?;
-    let _: Task =
-        yaml_compat::from_str(frontmatter).map_err(|e| CloseError::Frontmatter(e.to_string()))?;
+    let _: Task = yaml_compat::compat::from_str(frontmatter)
+        .map_err(|e| CloseError::Frontmatter(e.to_string()))?;
     if !has_single_source_local_scalar_line(frontmatter, "phase") {
         return Err(CloseError::NoScalar("phase"));
     }
@@ -783,7 +784,7 @@ fn scalar_like(original: &str, value: &str) -> String {
 fn flow_scalar_like(original: &str, value: &str) -> String {
     let rendered = scalar_like(original, value);
     let probe = format!("[{rendered}]");
-    if yaml_compat::from_str::<Vec<String>>(&probe).is_ok_and(|values| values == [value]) {
+    if yaml_compat::compat::from_str::<Vec<String>>(&probe).is_ok_and(|values| values == [value]) {
         rendered
     } else {
         serde_json::to_string(value).unwrap_or(rendered)
@@ -851,7 +852,7 @@ fn rewrite_inline_members(
         let lead = piece.len() - piece.trim_start_matches([' ', '\t']).len();
         let end = piece.trim_end_matches([' ', '\t']).len();
         let token = &piece[lead..end];
-        let parsed: String = yaml_compat::from_str(token).ok()?;
+        let parsed: String = yaml_compat::compat::from_str(token).ok()?;
         if parsed != *was {
             return None;
         }
@@ -934,7 +935,7 @@ fn rewrite_block_members(
         let (spacing, value) = after_dash.split_at(spacing_len);
         let end = inline_scalar_end(value)?;
         let token = &value[..end];
-        let parsed: String = yaml_compat::from_str(token).ok()?;
+        let parsed: String = yaml_compat::compat::from_str(token).ok()?;
         let was = before.get(member)?;
         let now = after.get(member)?;
         if parsed != *was {
@@ -1016,7 +1017,7 @@ fn flow_members(inside: &str) -> Option<Vec<FlowMember<'_>>> {
                 leading: &whole[..lead],
                 token,
                 trailing: &whole[tail..],
-                value: yaml_compat::from_str(token).ok()?,
+                value: yaml_compat::compat::from_str(token).ok()?,
             })
         })
         .collect()
@@ -1184,7 +1185,7 @@ fn block_member(line_index: usize, line: &str) -> Option<BlockMember<'_>> {
         prefix: &content[..prefix_len],
         token,
         eol,
-        value: yaml_compat::from_str(token).ok()?,
+        value: yaml_compat::compat::from_str(token).ok()?,
     })
 }
 
@@ -1476,8 +1477,8 @@ fn set_id_list(
 ) -> Result<String, CloseError> {
     let bom = leading_bom(file);
     let (frontmatter, body) = split_frontmatter(file).ok_or(CloseError::NotATask)?;
-    let original: Task =
-        yaml_compat::from_str(frontmatter).map_err(|e| CloseError::Frontmatter(e.to_string()))?;
+    let original: Task = yaml_compat::compat::from_str(frontmatter)
+        .map_err(|e| CloseError::Frontmatter(e.to_string()))?;
     let before = read_back(&original).clone();
 
     let nl = newline(file, bom);
@@ -1587,8 +1588,8 @@ fn set_id_list(
 pub fn restamp(file: &str, fingerprints: &BTreeMap<String, String>) -> Result<String, CloseError> {
     let bom = leading_bom(file);
     let (frontmatter, body) = split_frontmatter(file).ok_or(CloseError::NotATask)?;
-    let task: Task =
-        yaml_compat::from_str(frontmatter).map_err(|e| CloseError::Frontmatter(e.to_string()))?;
+    let task: Task = yaml_compat::compat::from_str(frontmatter)
+        .map_err(|e| CloseError::Frontmatter(e.to_string()))?;
     if task.status != Status::Done {
         return Err(CloseError::NotDone(task.status));
     }
@@ -1635,8 +1636,8 @@ pub fn set_evidence_fingerprints(
 ) -> Result<String, CloseError> {
     let bom = leading_bom(file);
     let (frontmatter, body) = split_frontmatter(file).ok_or(CloseError::NotATask)?;
-    let task: Task =
-        yaml_compat::from_str(frontmatter).map_err(|e| CloseError::Frontmatter(e.to_string()))?;
+    let task: Task = yaml_compat::compat::from_str(frontmatter)
+        .map_err(|e| CloseError::Frontmatter(e.to_string()))?;
     if task.status != Status::Done {
         return Err(CloseError::NotDone(task.status));
     }
@@ -1674,8 +1675,8 @@ pub fn set_evidence_fingerprints(
 pub fn add_evidence(file: &str, add: &Evidence) -> Result<String, CloseError> {
     let bom = leading_bom(file);
     let (frontmatter, body) = split_frontmatter(file).ok_or(CloseError::NotATask)?;
-    let task: Task =
-        yaml_compat::from_str(frontmatter).map_err(|e| CloseError::Frontmatter(e.to_string()))?;
+    let task: Task = yaml_compat::compat::from_str(frontmatter)
+        .map_err(|e| CloseError::Frontmatter(e.to_string()))?;
     if task.status != Status::Done {
         return Err(CloseError::NotDone(task.status));
     }
@@ -1764,8 +1765,8 @@ fn names_same(a: &Evidence, b: &Evidence) -> bool {
 pub fn remove_evidence(file: &str, drop: &Evidence) -> Result<String, CloseError> {
     let bom = leading_bom(file);
     let (frontmatter, body) = split_frontmatter(file).ok_or(CloseError::NotATask)?;
-    let task: Task =
-        yaml_compat::from_str(frontmatter).map_err(|e| CloseError::Frontmatter(e.to_string()))?;
+    let task: Task = yaml_compat::compat::from_str(frontmatter)
+        .map_err(|e| CloseError::Frontmatter(e.to_string()))?;
     if task.status != Status::Done {
         return Err(CloseError::NotDone(task.status));
     }
@@ -1812,8 +1813,8 @@ pub fn remove_evidence(file: &str, drop: &Evidence) -> Result<String, CloseError
 pub fn replace_evidence(file: &str, from: &Evidence, to: &Evidence) -> Result<String, CloseError> {
     let bom = leading_bom(file);
     let (frontmatter, body) = split_frontmatter(file).ok_or(CloseError::NotATask)?;
-    let task: Task =
-        yaml_compat::from_str(frontmatter).map_err(|e| CloseError::Frontmatter(e.to_string()))?;
+    let task: Task = yaml_compat::compat::from_str(frontmatter)
+        .map_err(|e| CloseError::Frontmatter(e.to_string()))?;
     // Scoped to a closed task, because that is the case with no other route: a
     // live task's evidence can still be given by `close`.
     if task.status != Status::Done {
@@ -1898,7 +1899,7 @@ fn newline(file: &str, bom: &str) -> &'static str {
 /// Parse frontmatter back to a `Task`, refusing to return anything that would not
 /// load.
 fn reparse(frontmatter: &str) -> Result<Task, CloseError> {
-    yaml_compat::from_str(frontmatter).map_err(|e| CloseError::Produced(e.to_string()))
+    yaml_compat::compat::from_str(frontmatter).map_err(|e| CloseError::Produced(e.to_string()))
 }
 
 /// Whether the frontmatter declares `key` as a top-level key (with or without a
@@ -1917,7 +1918,7 @@ fn has_top_level_key(frontmatter: &str, key: &str) -> bool {
 /// such as `"trace_fingerprints":` from being mistaken for an absent field and
 /// receiving a duplicate unquoted key.
 fn top_level_mapping_has_key(frontmatter: &str, key: &str) -> bool {
-    yaml_compat::from_str::<yaml_compat::Value>(frontmatter).is_ok_and(|value| {
+    yaml_compat::compat::from_str::<yaml_compat::Value>(frontmatter).is_ok_and(|value| {
         value.as_mapping().is_some_and(|mapping| {
             mapping.contains_key(yaml_compat::Value::String(key.to_string()))
         })
@@ -2514,10 +2515,11 @@ fn ordinary_string_mapping_member_source(
         // `inline_scalar_end` has already parsed these exact slices as
         // strings; keep the values rather than maintaining impossible retry
         // branches after successful validation.
-        let Ok(member_key) = yaml_compat::from_str::<String>(key_source) else {
+        let Ok(member_key) = yaml_compat::compat::from_str::<String>(key_source) else {
             continue;
         };
-        let Ok(member_value) = yaml_compat::from_str::<String>(&value_source[..value_end]) else {
+        let Ok(member_value) = yaml_compat::compat::from_str::<String>(&value_source[..value_end])
+        else {
             continue;
         };
         parsed.push(OrdinaryStringMappingMember {
@@ -2738,7 +2740,7 @@ fn inline_scalar_end(value: &str) -> Option<usize> {
     if end == 0 {
         return None;
     }
-    yaml_compat::from_str::<String>(&value[..end])
+    yaml_compat::compat::from_str::<String>(&value[..end])
         .ok()
         .map(|_| end)
 }
@@ -2803,7 +2805,7 @@ mod tests {
         };
         let tags_of = |written: &str| -> Vec<String> {
             let task: Task =
-                yaml_compat::from_str(split_frontmatter(written).expect("frontmatter").0)
+                yaml_compat::compat::from_str(split_frontmatter(written).expect("frontmatter").0)
                     .expect("parses");
             task.tags
         };
@@ -2946,11 +2948,10 @@ mod tests {
                         .unwrap_or_else(|e| {
                             panic!("{value:?} (byte {byte:#04x}) could not be written: {e}")
                         });
-                    let back: Task =
-                        yaml_compat::from_str(split_frontmatter(&written).expect("frontmatter").0)
-                            .unwrap_or_else(|e| {
-                                panic!("{value:?} produced frontmatter that fails: {e}")
-                            });
+                    let back: Task = yaml_compat::compat::from_str(
+                        split_frontmatter(&written).expect("frontmatter").0,
+                    )
+                    .unwrap_or_else(|e| panic!("{value:?} produced frontmatter that fails: {e}"));
                     assert_eq!(
                         back.tags,
                         vec!["cli".to_string(), value.clone()],
@@ -2990,7 +2991,7 @@ mod tests {
             let written = set_tags(file, &["cli".into(), value.clone()])
                 .unwrap_or_else(|e| panic!("{value:?} could not be written: {e}"));
             let back: Task =
-                yaml_compat::from_str(split_frontmatter(&written).expect("frontmatter").0)
+                yaml_compat::compat::from_str(split_frontmatter(&written).expect("frontmatter").0)
                     .unwrap_or_else(|e| panic!("{value:?} produced frontmatter that fails: {e}"));
             assert_eq!(
                 back.tags,
@@ -3079,7 +3080,7 @@ mod tests {
         ];
         for source in structural {
             let (frontmatter, _) = split_frontmatter(&source).expect("frontmatter");
-            let before: Task = yaml_compat::from_str(frontmatter)
+            let before: Task = yaml_compat::compat::from_str(frontmatter)
                 .unwrap_or_else(|error| panic!("structural fixture must load: {error}\n{source}"));
             let error = set_evidence_fingerprints(&source, &fresh)
                 .expect_err("structural source must be refused before replacement");
@@ -3091,7 +3092,8 @@ mod tests {
                 "wrong refusal for {source}: {error}"
             );
             assert!(error.to_string().contains("simplify that field by hand"));
-            let after: Task = yaml_compat::from_str(frontmatter).expect("unchanged source loads");
+            let after: Task =
+                yaml_compat::compat::from_str(frontmatter).expect("unchanged source loads");
             assert_eq!(after, before, "a refusal changed the parsed task");
         }
     }
@@ -3919,7 +3921,7 @@ Because.
         assert!(out.contains("\n## Why\n\nBecause.\n"));
         // And it still loads as a `done` task with that evidence.
         let (fm, _) = split_frontmatter(&out).unwrap();
-        let task: Task = yaml_compat::from_str(fm).unwrap();
+        let task: Task = yaml_compat::compat::from_str(fm).unwrap();
         assert_eq!(task.status, Status::Done);
         assert_eq!(task.evidence, vec![commit("abc1234")]);
     }
@@ -3958,7 +3960,7 @@ Because.
         // A ref with a leading `@` or a colon must not corrupt the YAML.
         let out = close_ev(TASK, &[commit("path: with colon")]).unwrap();
         let (fm, _) = split_frontmatter(&out).unwrap();
-        let task: Task = yaml_compat::from_str(fm).unwrap();
+        let task: Task = yaml_compat::compat::from_str(fm).unwrap();
         assert_eq!(task.evidence[0].reference, "path: with colon");
     }
 
@@ -4038,7 +4040,7 @@ Because.
         assert!(out.contains("status: done\r\n"));
         assert!(out.contains("evidence:\r\n  - kind: commit\r\n    ref: abc1234\r\n"));
         let (fm, _) = split_frontmatter(&out).unwrap();
-        let task: Task = yaml_compat::from_str(fm).unwrap();
+        let task: Task = yaml_compat::compat::from_str(fm).unwrap();
         assert_eq!(task.status, Status::Done);
         assert_eq!(task.evidence, vec![commit("abc1234")]);
     }
@@ -4051,7 +4053,7 @@ Because.
         assert!(!out["\u{feff}".len()..].contains('\u{feff}'), "BOM doubled");
         let (fm, _) = split_frontmatter(&out).unwrap();
         assert_eq!(
-            yaml_compat::from_str::<Task>(fm).unwrap().status,
+            yaml_compat::compat::from_str::<Task>(fm).unwrap().status,
             Status::Done
         );
     }
@@ -4089,7 +4091,7 @@ Because.
         .unwrap();
         assert!(out.contains("trace_fingerprints:"), "{out}");
         let (fm, _) = split_frontmatter(&out).unwrap();
-        let task: Task = yaml_compat::from_str(fm).unwrap();
+        let task: Task = yaml_compat::compat::from_str(fm).unwrap();
         assert_eq!(
             task.trace_fingerprints.get("HLD.md#x").map(String::as_str),
             Some("deadbeef")
@@ -4140,7 +4142,7 @@ Keep this body byte-for-byte.
             "the body changed: {out}"
         );
         let (frontmatter, _) = split_frontmatter(&out).unwrap();
-        let task: Task = yaml_compat::from_str(frontmatter).unwrap();
+        let task: Task = yaml_compat::compat::from_str(frontmatter).unwrap();
         assert_eq!(task.status, Status::Done);
         assert_eq!(task.evidence, evidence);
         assert_eq!(task.trace_fingerprints, fresh);
@@ -4151,7 +4153,7 @@ Keep this body byte-for-byte.
         let cleared = close(live, &evidence, &BTreeMap::new(), None).expect("close without stamps");
         assert!(!cleared.contains("trace_fingerprints:"), "{cleared}");
         let (frontmatter, _) = split_frontmatter(&cleared).unwrap();
-        let task: Task = yaml_compat::from_str(frontmatter).unwrap();
+        let task: Task = yaml_compat::compat::from_str(frontmatter).unwrap();
         assert!(task.trace_fingerprints.is_empty());
         assert_eq!(task.evidence, evidence);
     }
@@ -4173,7 +4175,7 @@ paths: [HLD.md]
 
 body sentinel
 ";
-        let before: Task = yaml_compat::from_str(split_frontmatter(live).unwrap().0)
+        let before: Task = yaml_compat::compat::from_str(split_frontmatter(live).unwrap().0)
             .expect("the shared mapping is accepted YAML");
         let error = close(
             live,
@@ -4190,7 +4192,8 @@ body sentinel
             "{error}"
         );
         assert!(!matches!(&error, CloseError::Produced(_)), "{error}");
-        let unchanged: Task = yaml_compat::from_str(split_frontmatter(live).unwrap().0).unwrap();
+        let unchanged: Task =
+            yaml_compat::compat::from_str(split_frontmatter(live).unwrap().0).unwrap();
         assert_eq!(unchanged, before);
 
         let done = live.replace("status: in_progress", "status: done");
@@ -4244,7 +4247,7 @@ body sentinel
         );
         assert!(out.ends_with("\nbody sentinel\n"), "{out}");
         let (frontmatter, _) = split_frontmatter(&out).unwrap();
-        let task: Task = yaml_compat::from_str(frontmatter).unwrap();
+        let task: Task = yaml_compat::compat::from_str(frontmatter).unwrap();
         assert_eq!(task.status, Status::Done);
         assert_eq!(task.evidence, evidence);
         assert_eq!(task.trace_fingerprints, fresh);
@@ -4259,7 +4262,7 @@ body sentinel
             "the trivia or following field moved: {cleared}"
         );
         let (frontmatter, _) = split_frontmatter(&cleared).unwrap();
-        let task: Task = yaml_compat::from_str(frontmatter).unwrap();
+        let task: Task = yaml_compat::compat::from_str(frontmatter).unwrap();
         assert!(task.trace_fingerprints.is_empty());
         assert_eq!(task.evidence, evidence);
 
@@ -4276,7 +4279,7 @@ body sentinel
         assert!(!decorated.contains("stale-first"), "{decorated}");
         assert!(!decorated.contains("stale-second"), "{decorated}");
         let (frontmatter, _) = split_frontmatter(&decorated).unwrap();
-        let task: Task = yaml_compat::from_str(frontmatter).unwrap();
+        let task: Task = yaml_compat::compat::from_str(frontmatter).unwrap();
         assert_eq!(task.trace_fingerprints, fresh);
         assert_eq!(task.evidence, evidence);
     }
@@ -4306,7 +4309,7 @@ body
         let replaced = set_blocked_by(dependencies, &["D".to_string()])
             .expect("dependency replacement crosses YAML trivia");
         let (frontmatter, _) = split_frontmatter(&replaced).unwrap();
-        let task: Task = yaml_compat::from_str(frontmatter).unwrap();
+        let task: Task = yaml_compat::compat::from_str(frontmatter).unwrap();
         assert_eq!(task.blocked_by, ["D"]);
         assert_eq!(task.tags, ["cli"]);
         assert!(!replaced.contains("  - B"), "{replaced}");
@@ -4340,7 +4343,7 @@ body
         let replaced =
             add_evidence(proof, &added).expect("evidence replacement crosses YAML trivia");
         let (frontmatter, _) = split_frontmatter(&replaced).unwrap();
-        let task: Task = yaml_compat::from_str(frontmatter).unwrap();
+        let task: Task = yaml_compat::compat::from_str(frontmatter).unwrap();
         assert_eq!(
             task.evidence,
             [
@@ -4375,7 +4378,7 @@ body
         )
         .unwrap();
         let (fm, _) = split_frontmatter(&out).unwrap();
-        let task: Task = yaml_compat::from_str(fm).unwrap();
+        let task: Task = yaml_compat::compat::from_str(fm).unwrap();
         assert_eq!(task.version.as_deref(), Some("2.0.0"));
         assert_eq!(task.status, Status::Done);
 
@@ -4475,7 +4478,7 @@ body
         .unwrap();
         let fresh = restamp(&done, &fps(&[("HLD.md#x", "ffff")])).unwrap();
         let (fm, _) = split_frontmatter(&fresh).unwrap();
-        let task: Task = yaml_compat::from_str(fm).unwrap();
+        let task: Task = yaml_compat::compat::from_str(fm).unwrap();
         assert_eq!(
             task.trace_fingerprints.get("HLD.md#x").map(String::as_str),
             Some("ffff")
@@ -4530,7 +4533,7 @@ body
         // And the result loads, which is the guard that caught the original
         // defect this form has to keep clearing.
         let (fm, _) = split_frontmatter(&out).expect("frontmatter");
-        let _: Task = yaml_compat::from_str(fm).expect("loads");
+        let _: Task = yaml_compat::compat::from_str(fm).expect("loads");
     }
 
     /// The inline form is recognised at the top level and nowhere else
@@ -4595,7 +4598,7 @@ body
             "{out}"
         );
         let (fm, _) = split_frontmatter(&out).expect("frontmatter");
-        let task: Task = yaml_compat::from_str(fm).expect("loads");
+        let task: Task = yaml_compat::compat::from_str(fm).expect("loads");
         assert_eq!(task.blocked_by, vec!["X".to_string()]);
     }
 
@@ -4610,7 +4613,7 @@ body
             "{out}"
         );
         let (fm, _) = split_frontmatter(&out).expect("frontmatter");
-        let task: Task = yaml_compat::from_str(fm).expect("loads");
+        let task: Task = yaml_compat::compat::from_str(fm).expect("loads");
         assert_eq!(task.blocked_by, vec!["X".to_string(), "C".to_string()]);
     }
 
@@ -4625,7 +4628,9 @@ body
         assert!(out.ends_with("---\r\n\r\nBody.\r\n"), "{out:?}");
         let (frontmatter, _) = split_frontmatter(&out).expect("frontmatter");
         assert_eq!(
-            yaml_compat::from_str::<Task>(frontmatter).expect("task").id,
+            yaml_compat::compat::from_str::<Task>(frontmatter)
+                .expect("task")
+                .id,
             "T new"
         );
 
@@ -4633,7 +4638,9 @@ body
         let single = set_id(&single, "T 'new").expect("single-quoted source");
         let (frontmatter, _) = split_frontmatter(&single).expect("frontmatter");
         assert_eq!(
-            yaml_compat::from_str::<Task>(frontmatter).expect("task").id,
+            yaml_compat::compat::from_str::<Task>(frontmatter)
+                .expect("task")
+                .id,
             "T 'new"
         );
 
@@ -4641,7 +4648,9 @@ body
         let escaped = set_id(&escaped, "T new").expect("escaped double-quoted source");
         let (frontmatter, _) = split_frontmatter(&escaped).expect("frontmatter");
         assert_eq!(
-            yaml_compat::from_str::<Task>(frontmatter).expect("task").id,
+            yaml_compat::compat::from_str::<Task>(frontmatter)
+                .expect("task")
+                .id,
             "T new"
         );
 
@@ -4658,7 +4667,7 @@ body
             "---\nid: T-\n  old\ntitle: T\nphase: 1\nstatus: todo\neffort_days: 1\n---\n\nBody.\n";
         let (frontmatter, _) = split_frontmatter(id).expect("frontmatter");
         assert_eq!(
-            yaml_compat::from_str::<Task>(frontmatter)
+            yaml_compat::compat::from_str::<Task>(frontmatter)
                 .expect("valid multiline id")
                 .id,
             "T- old"
@@ -4682,7 +4691,7 @@ body
         ] {
             let (frontmatter, _) = split_frontmatter(owner).expect("frontmatter");
             assert_eq!(
-                yaml_compat::from_str::<Task>(frontmatter)
+                yaml_compat::compat::from_str::<Task>(frontmatter)
                     .expect("valid multiline owner")
                     .owner
                     .as_deref(),
@@ -4707,7 +4716,7 @@ body
         ] {
             let (frontmatter, _) = split_frontmatter(revisit).expect("frontmatter");
             assert_eq!(
-                yaml_compat::from_str::<Task>(frontmatter)
+                yaml_compat::compat::from_str::<Task>(frontmatter)
                     .expect("valid multiline revisit instant source")
                     .revisit_at
                     .as_deref(),
@@ -5002,7 +5011,7 @@ body
         // for itself and this pins from outside.
         for text in [&one, &two, &back, &none] {
             let (fm, _) = split_frontmatter(text).expect("frontmatter");
-            let _: Task = yaml_compat::from_str(fm).expect("loads");
+            let _: Task = yaml_compat::compat::from_str(fm).expect("loads");
         }
     }
 
@@ -5028,7 +5037,7 @@ body
             let out = set_blocked_by(file, &[awkward.to_string()])
                 .unwrap_or_else(|e| panic!("`{awkward}` was refused: {e}"));
             let (fm, _) = split_frontmatter(&out).expect("frontmatter");
-            let task: Task = yaml_compat::from_str(fm).expect("loads");
+            let task: Task = yaml_compat::compat::from_str(fm).expect("loads");
             assert_eq!(
                 task.blocked_by,
                 vec![awkward.to_string()],
@@ -5045,7 +5054,7 @@ body
                       blocked_by: [B, C]\n---\n\nbody\n";
         let out = set_blocked_by(inline, &["B".to_string()]).expect("edits it");
         let (fm, _) = split_frontmatter(&out).expect("frontmatter");
-        let task: Task = yaml_compat::from_str(fm).expect("loads");
+        let task: Task = yaml_compat::compat::from_str(fm).expect("loads");
         assert_eq!(task.blocked_by, vec!["B".to_string()], "{out}");
     }
 
@@ -5068,7 +5077,7 @@ body
         let out = set_blocked_by(imported, &["M-A".to_string(), "PHASE-00".to_string()])
             .expect("rewrites");
         let (fm, _) = split_frontmatter(&out).expect("frontmatter");
-        let task: Task = yaml_compat::from_str(fm).expect("the result loads");
+        let task: Task = yaml_compat::compat::from_str(fm).expect("the result loads");
         assert_eq!(
             task.blocked_by,
             vec!["M-A".to_string(), "PHASE-00".to_string()]
@@ -5090,7 +5099,7 @@ body
                         blocked_by:\n- M-A\n- M-C\ntags:\n- x\n---\n\nbody\n";
         let out = set_blocked_by(imported, &[]).expect("rewrites");
         let (fm, _) = split_frontmatter(&out).expect("frontmatter");
-        let task: Task = yaml_compat::from_str(fm).expect("the result loads");
+        let task: Task = yaml_compat::compat::from_str(fm).expect("the result loads");
         assert!(task.blocked_by.is_empty(), "{out}");
         assert_eq!(task.tags, vec!["x".to_string()], "{out}");
     }
@@ -5132,7 +5141,7 @@ body
         // And it still loads, which is the whole point of removing the line
         // rather than emptying it.
         let (fm, _) = split_frontmatter(&cleared).expect("frontmatter");
-        let task: Task = yaml_compat::from_str(fm).expect("a cleared task still loads");
+        let task: Task = yaml_compat::compat::from_str(fm).expect("a cleared task still loads");
         assert_eq!(task.owner, None);
         assert_eq!(task.status, Status::Todo, "something else moved");
     }
@@ -5167,7 +5176,7 @@ body
             let out =
                 set_owner(file, Some(name)).unwrap_or_else(|e| panic!("`{name}` was refused: {e}"));
             let (fm, _) = split_frontmatter(&out).expect("frontmatter");
-            let task: Task = yaml_compat::from_str(fm)
+            let task: Task = yaml_compat::compat::from_str(fm)
                 .unwrap_or_else(|e| panic!("`{name}` produced unloadable frontmatter: {e}\n{out}"));
             assert_eq!(
                 task.owner.as_deref(),
@@ -5295,7 +5304,7 @@ body
         let bare = "---\nid: A1-001\ntitle: t\nphase: 1\nstatus: todo\nowner:\n---\n\nbody\n";
         let assigned = set_owner(bare, Some("ada")).expect("assign over a null owner");
         let (fm, _) = split_frontmatter(&assigned).expect("frontmatter");
-        let task: Task = yaml_compat::from_str(fm).expect("loads");
+        let task: Task = yaml_compat::compat::from_str(fm).expect("loads");
         assert_eq!(task.owner.as_deref(), Some("ada"), "{assigned}");
         assert_eq!(
             assigned.matches("owner").count(),
