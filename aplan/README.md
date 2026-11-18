@@ -8,7 +8,7 @@ internal evaluation records remain in the private maintainer repository.
 here before implementation, with self-contained reasoning that does not require access to the
 private history.
 
-On 2026-11-17 the open pre-public backlog and every open issue moved here (`A2-019`), so this plan
+On 2026-11-18 the open pre-public backlog and every open issue moved here (`A2-019`), so this plan
 is the only place product work is tracked. `ROADMAP.md` explains the cut order.
 
 ```sh

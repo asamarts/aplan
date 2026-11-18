@@ -8,11 +8,11 @@
 
 | cut | status | done/total | ready | blocked | effort | weeks | critical path |
 | --- | --- | --- | --- | --- | --- | --- | --- |
-| v0.7 | todo | 4/21 | 16 | 1 | 17.8d | 0.7 (0.4 left) | 3.5d |
-| v0.8 | todo | 0/27 | 0 | 27 | 41.8d | 1.5 (1.5 left) | 4.5d |
+| v0.7 | todo | 8/21 | 12 | 1 | 18.8d | 0.7 (0.4 left) | 3.5d |
+| v0.8 | todo | 0/28 | 0 | 28 | 42.2d | 1.6 (1.6 left) | 4.5d |
 | adoption | todo | 0/76 | 0 | 76 | 99.8d | 3.7 (3.7 left) | 10.0d |
 | backlog | todo | 0/1 | 0 | 1 | 1.0d | <0.1 (<0.1 left) | 1.0d |
-| hardening | todo | 0/14 | 0 | 14 | 13.2d | 0.5 (0.5 left) | 3.0d |
+| hardening | todo | 0/13 | 0 | 13 | 12.8d | 0.5 (0.5 left) | 3.0d |
 | qualification | todo | 0/1 | 0 | 1 | 8.0d | 0.3 (0.3 left) | 8.0d |
 | tui-quality | todo | 0/2 | 0 | 2 | 4.0d | 0.1 (0.1 left) | 4.0d |
 | workflow | todo | 0/17 | 0 | 17 | 50.0d | 1.9 (1.9 left) | 17.5d |
@@ -22,12 +22,12 @@
 | task | title | status | blocked_by | evidence |
 | --- | --- | --- | --- | --- |
 | A2-009 | Qualify and replace the YAML bridge with a safe Rust backend | done | A2-002 | commit:f315e6641f1a, test:yaml_differential::every_aplan_yaml_document_matches_the_pinned_bridge, test:yaml_differential::every_task_front_matter_decodes_to_the_same_types_under_both_parsers, test:yaml_differential::hostile_inputs_meet_the_same_outcome_under_both_parsers, test:yaml_contract::empty_documents_read_as_absent_values_and_an_explicit_null_does_not, test:tests::every_owned_configuration_decodes_the_same_under_the_retired_bridge, test:dependency_audit::tests::yaml_parser_is_exactly_pinned, test:dependency_audit::tests::product_graph_policy_rejects_each_budget_and_shape_escape |
-| A2-016 | Clear the supply-chain advisories against the locked dependency graph | todo | - | - |
+| A2-016 | Clear the supply-chain advisories against the locked dependency graph | done | - | commit:cc6d669cd006, test:mcp::the_server_initializes_and_lists_exactly_its_tools, test:dependency_audit::tests::committed_dependency_policy_matches_cargo_metadata, commit:44e3da191c2f |
 | A2-017 | Keep the workspace clean under Rust 1.100 without moving the pinned toolchain | done | - | commit:cc6d669cd006, commit:c09603f6606a |
 | A2-018 | Diagnose the large-fixture TUI latency regression on the current hosted image | done | - | commit:73eeb5472dac, test:graph::ranking::the_preference_pass_matches_its_one_task_at_a_time_definition |
-| A2-019 | Migrate the open pre-public backlog and every open issue into the public plan | done | - | commit:4420b69c4fe9 |
+| A2-019 | Migrate the open pre-public backlog and every open issue into the public plan | done | - | commit:4420b69c4fe9, commit:02d6c3c9c1ed |
 | A2-020 | Publish v0.7.0 | todo | A2-009, A2-016, A2-017, A2-018, A2-019, A2-021, A2-022, A2-023, A2-024, A2-025, A2-026, A2-027, A2-028, A2-079, A2-137, A2-164 | - |
-| A2-021 | Report APLAN045 when traces_root is relative or left at its default | todo | - | - |
+| A2-021 | Report APLAN045 when traces_root has a dot component or is left at its default | todo | - | - |
 | A2-022 | Report a refused inbox promotion with the capture's real state | todo | - | - |
 | A2-023 | List same-second captures newest first, as the inbox documents | todo | - | - |
 | A2-024 | Warn when a policy selector names a cut or tag that cannot match | todo | - | - |
@@ -38,9 +38,9 @@
 | A2-079 | critical-path says "of it" about a chain that is not part of what it printed | todo | - | - |
 | A2-137 | Generated agent guidance drops id families once their tasks are done | todo | - | - |
 | A2-164 | Stop the TUI render gate failing on the slower hosted runners | todo | - | - |
-| A2-166 | Close the gaps an audit found in the safe YAML parser cutover | todo | - | - |
-| A2-167 | Make the README's first-plan commands work as written | todo | - | - |
-| A2-168 | Find each task's cut in one pass over the roadmap | todo | - | - |
+| A2-166 | Close the gaps an audit found in the safe YAML parser cutover | done | - | commit:44e3da191c2f, test:dependency_audit::tests::the_tui_evaluator_parses_yaml_with_the_product_parser, test:kep::unusable_input_is_an_error_not_a_silent_empty_import, test:yaml_limits::tag_expansion_boundary, test:yaml_limits::product_task_loader_refuses_depth_past_the_default |
+| A2-167 | Make the README's first-plan commands work as written | done | - | commit:44e3da191c2f, test:greenfield::the_readme_start_commands_run_as_written |
+| A2-168 | Find each task's cut in one pass over the roadmap | done | - | commit:44e3da191c2f, test:export::tests::the_cut_map_matches_its_one_task_at_a_time_definition |
 | A2-169 | Read values tagged outside YAML's core schema as the bridge did | todo | - | - |
 
 ## v0.8 Correctness and the most reported adoption failures
@@ -54,6 +54,7 @@
 | A2-053 | Clear APLAN045 only on an edit that shows somebody reviewed the task | todo | A2-052 | - |
 | A2-054 | Keep an evidence observation proven current from reading stale on the next read | todo | - | - |
 | A2-055 | Stop aplan_add reporting a concurrent change against an unchanged plan | todo | - | - |
+| A2-056 | Decide whether a live task's exact path that matches nothing is reported | todo | - | - |
 | A2-062 | A trace fingerprint says nothing about the build that computed it | todo | - | - |
 | A2-081 | A stale installed binary cannot read a newer plan, and the adopter must notice | todo | - | - |
 | A2-085 | A YAML front-matter delimiter mints a heading anchor the rendered document does not have | todo | - | - |
@@ -62,7 +63,7 @@
 | A2-096 | The agent format appends prose after JSON and is not parseable | todo | - | - |
 | A2-097 | A plan with several id families cannot declare which one a cut mints | todo | - | - |
 | A2-099 | A live catch-all paths claim fails only after the work is finished | todo | - | - |
-| A2-101 | File renames silently strand paths on live tasks | todo | - | - |
+| A2-101 | File renames silently strand paths on live tasks | todo | A2-056 | - |
 | A2-106 | Duplicate evidence citations are accepted and stored silently | todo | - | - |
 | A2-122 | Stop build-only AGENTS.md provenance drift from blocking a correct contract | todo | A2-081 | - |
 | A2-140 | Let generated agent contracts name a repository launcher | todo | - | - |
@@ -82,14 +83,14 @@
 | A2-029 | Warn at start when verify will report APLAN053 | todo | - | - |
 | A2-030 | Note at start when the task still waits on unfinished blockers | todo | - | - |
 | A2-031 | Mark started tasks in ready, and give its JSON a status field | todo | - | - |
-| A2-032 | Add ready --unowned to leave out tasks that need a named owner | todo | - | - |
+| A2-032 | Add ready --unowned to leave out tasks that need a named owner | todo | A2-030, A2-031 | - |
 | A2-033 | Name the path and trace flags the same way on every authoring command | todo | - | - |
 | A2-035 | Explain verify's evidence summary line | todo | - | - |
-| A2-036 | Add a command that edits a release's contains list | todo | - | - |
+| A2-036 | Add a command that edits a release's contains list | todo | A2-025, A2-026, A2-033, A2-034, A2-035 | - |
 | A2-037 | Report every missing test-runner field at once with its full key path | todo | - | - |
-| A2-038 | Name the key and expected shape in test-runner type errors | todo | - | - |
-| A2-039 | Show a minimal valid test runner in the quickstart | todo | - | - |
-| A2-040 | Add a batch form to capture | todo | - | - |
+| A2-038 | Describe the expected shape in test-runner type errors and name a listed runner's own key | todo | - | - |
+| A2-039 | Show a minimal valid test runner in the quickstart | todo | A2-037, A2-038 | - |
+| A2-040 | Add a batch form to capture | todo | A2-041 | - |
 | A2-041 | Make capture's default human output short | todo | - | - |
 | A2-042 | Decide how note evidence is recorded through the CLI | todo | - | - |
 | A2-043 | Record note evidence through close and amend | todo | A2-042 | - |
@@ -166,7 +167,6 @@
 
 | task | title | status | blocked_by | evidence |
 | --- | --- | --- | --- | --- |
-| A2-056 | Decide whether a live task's exact path that matches nothing is reported | todo | - | - |
 | A2-069 | A doc comment separated from what it documents, and nothing notices | todo | - | - |
 | A2-087 | An exempt tag no task carries is silent, where a declared tag family is not | todo | - | - |
 | A2-127 | Correct the APLAN013 exact-test diagnostic grammar | todo | - | - |
@@ -207,7 +207,7 @@
 | A2-114 | Build a safe Markdown semantic document and terminal renderer | todo | A2-113 | - |
 | A2-115 | Pretty-render CLI Markdown surfaces without changing artifacts | todo | A2-114 | - |
 | A2-116 | Expose the capture workflow through MCP and agent guidance | todo | A2-118, A2-122 | - |
-| A2-117 | Audit and release the workflow ergonomics cut | todo | A2-112, A2-115, A2-116, A2-119, A2-120 | - |
+| A2-117 | Audit and release the workflow ergonomics cut | todo | A2-112, A2-115, A2-116, A2-119, A2-120, M-tui-quality | - |
 | A2-118 | Add versioned structured MCP outputs and bounded resources | todo | - | - |
 | A2-119 | Expose completed-task history through bounded MCP resources | todo | A2-111, A2-118 | - |
 | A2-120 | Render task Markdown in the TUI inspector | todo | A2-114 | - |
