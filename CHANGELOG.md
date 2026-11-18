@@ -37,15 +37,16 @@ to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   which on a plan with 10,000 ready tasks moved about 2 GB of memory per ranking even when no task
   declared a preference. The TUI ranks again on every key that moves the selection or rebuilds its
   task list, so each such key took 70-110 ms on most hosted machines and about 545 ms on those
-  whose memory copy was slowest, and it ranked several times per load and refresh. `aplan ready`,
-  `aplan tree`, `aplan show`, `aplan tasks`, `aplan summary` and the MCP `ready` and `show` tools
-  paid it on every call. The pass now keeps a heap of free positions and gives exactly the same
+  whose memory copy was slowest, and it ranked several times per load and refresh. Every command
+  that ranks ready work or builds task rows paid it on each call, among them `aplan ready`, `aplan
+  tree`, `aplan show`, `aplan tasks`, `aplan summary`, any command given `--select`, and the MCP
+  `ready` and `show` tools. The pass now keeps a heap of free positions and gives exactly the same
   order.
 - **Finding each task's cut no longer walks the whole roadmap once per task** (`A2-168`). Every
-  task row looked up its cut by scanning each cut's members in turn, so `aplan show`, `aplan
-  graph`, the MCP `show` tool and each TUI load or refresh paid the number of tasks times the size
-  of the roadmap. The rows now read one map built in a single pass over the cuts, and every task
-  reports the same cut as before.
+  task row looked up its cut by scanning each cut's members in turn, so `aplan tasks`, `aplan
+  show`, any command given `--select`, the MCP `show` tool and each TUI load or refresh paid the
+  number of tasks times the size of the roadmap. The rows now read one map built in a single pass
+  over the cuts, and every task reports the same cut as before.
 - **The README's first-plan commands work as written** (`A2-167`). `aplan init` writes only
   `.aplan.yml`, so the `aplan add` after it refused with "plan root `aplan` is not a directory";
   the recipe now creates `aplan/tasks` first, and a test runs it line by line.
@@ -56,13 +57,14 @@ to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   requirement rises to `rmcp >= 3.9.0` (locked at 3.10.0) for RUSTSEC-2026-0457, -0461 and -0462.
   Those advisories are in rmcp features aplan never enables (the OAuth client and the Streamable
   HTTP server and client; the server uses only the stdio transport), so no release compiled the
-  affected code, but the lock no longer names an affected version. `rustix` moves to 1.1.6 (RUSTSEC-2026-0486) and `libz-sys`, reached through `git2`, to 1.1.33,
-  whose bundled zlib fixes a heap overflow (RUSTSEC-2026-0544). The unmaintained-crate notices for
-  `chrono` (through `rmcp`, directly and through the `schemars` feature it enables) and the
-  test-only `humantime` (through `trycmd`) have no fixed release and are recorded as reasoned
-  `deny.toml` exceptions with the condition that ends each. rmcp 3.10's stdio transport enables
-  tokio's `net` feature, which brings in `socket2`, and `mio` where a graph did not already hold
-  it, raising the measured package budgets by one (lock and default) and two (headless).
+  affected code, but the lock no longer names an affected version. `rustix` moves to 1.1.6
+  (RUSTSEC-2026-0486) and `libz-sys`, reached through `git2`, to 1.1.33, whose bundled zlib fixes a
+  heap overflow (RUSTSEC-2026-0544). The unmaintained-crate notices for `chrono` (through `rmcp`,
+  directly and through the `schemars` feature it enables) and the test-only `humantime` (through
+  `trycmd`) have no fixed release and are recorded as reasoned `deny.toml` exceptions with the
+  condition that ends each. rmcp 3.10's stdio transport enables tokio's `net` feature, which brings
+  in `socket2`, and `mio` where a graph did not already hold it, raising the measured package
+  budgets by one (lock and default) and two (headless).
 
 ## [0.6.0] - 2026-11-04
 
