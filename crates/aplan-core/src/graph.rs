@@ -4,7 +4,8 @@
 //! what can I work on now (`ready`), and why can't I work on this (`why`).
 //! Both are cheap; the expensive-to-get-wrong one is proving acyclicity.
 
-use std::collections::{BTreeMap, BTreeSet, VecDeque};
+use std::cmp::Reverse;
+use std::collections::{BTreeMap, BTreeSet, BinaryHeap, VecDeque};
 
 use crate::task::{Status, Task};
 
@@ -698,25 +699,70 @@ impl<'a> Graph<'a> {
     /// A cycle cannot be ordered. `APLAN033` reports it, and the tasks in it keep
     /// their derived order here rather than being dropped from the answer: a
     /// defect in the plan must not make work disappear from "what next".
+    ///
+    /// Each step places the first task in derived order whose offered
+    /// preferences are all placed, or, when a cycle leaves none, the first task
+    /// still waiting. Kept as a heap of free positions and a count of each
+    /// task's unplaced preferences, so a plan of `n` ready tasks and `e`
+    /// preferences costs `O((n + e) log n)`. Draining a vector from its front
+    /// did the same in `O(n^2)` element moves: about 2 GB of `memmove` per
+    /// call on 10,000 ready tasks, paid on every TUI keypress (`A2-018`).
     fn honour_preferences(ranked: &mut Vec<(&Task, Rank)>) {
-        let offered: BTreeSet<&str> = ranked.iter().map(|(t, _)| t.id.as_str()).collect();
-        let mut waiting: Vec<(&Task, Rank)> = std::mem::take(ranked);
-        let mut placed: BTreeSet<String> = BTreeSet::new();
-        while !waiting.is_empty() {
+        let position: BTreeMap<&str, usize> = ranked
+            .iter()
+            .enumerate()
+            .map(|(index, (task, _))| (task.id.as_str(), index))
+            .collect();
+        // For each task, how many distinct offered tasks it still waits to
+        // follow; for each task, who waits to follow it.
+        let mut unplaced = vec![0_usize; ranked.len()];
+        let mut followers: Vec<Vec<usize>> = vec![Vec::new(); ranked.len()];
+        for (index, (task, _)) in ranked.iter().enumerate() {
+            let named: BTreeSet<usize> = task
+                .prefer_after
+                .iter()
+                .filter_map(|preferred| position.get(preferred.as_str()).copied())
+                .collect();
+            unplaced[index] = named.len();
+            for preferred in named {
+                followers[preferred].push(index);
+            }
+        }
+        let mut free: BinaryHeap<Reverse<usize>> = unplaced
+            .iter()
+            .enumerate()
+            .filter(|(_, count)| **count == 0)
+            .map(|(index, _)| Reverse(index))
+            .collect();
+        // A position joins `free` once, when its last preference is placed
+        // while it still waits, and leaves only by being placed; the cycle
+        // fallback runs only when `free` is empty. So `free` holds exactly the
+        // waiting positions whose preferences are all placed.
+        let mut waiting: BTreeSet<usize> = (0..ranked.len()).collect();
+        let mut order = Vec::with_capacity(ranked.len());
+        while let Some(&first_waiting) = waiting.first() {
             // The first task in derived order whose preferences are all placed.
-            let next = waiting.iter().position(|(t, _)| {
-                t.prefer_after
-                    .iter()
-                    .all(|p| !offered.contains(p.as_str()) || placed.contains(p))
-            });
             // None means every remaining task waits on another remaining one: a
             // cycle. Take the first in derived order and carry on, so the answer
             // stays total.
-            let index = next.unwrap_or(0);
-            let (task, rank) = waiting.remove(index);
-            placed.insert(task.id.clone());
-            ranked.push((task, rank));
+            let next = free.pop().map_or(first_waiting, |Reverse(index)| index);
+            let was_waiting = waiting.remove(&next);
+            debug_assert!(was_waiting, "position {next} was placed twice");
+            order.push(next);
+            for &follower in &followers[next] {
+                unplaced[follower] -= 1;
+                if unplaced[follower] == 0 && waiting.contains(&follower) {
+                    free.push(Reverse(follower));
+                }
+            }
         }
+        let mut slots: Vec<Option<(&Task, Rank)>> =
+            std::mem::take(ranked).into_iter().map(Some).collect();
+        ranked.extend(
+            order
+                .into_iter()
+                .map(|index| slots[index].take().expect("each position is placed once")),
+        );
     }
 
     /// How many unfinished tasks would become ready if `id` were done.
@@ -3012,6 +3058,81 @@ mod ranking {
             .collect();
         // Effort still ranks BIG first; the preference only orders S after T.
         assert_eq!(order, vec!["BIG", "T", "S"]);
+    }
+
+    /// The preference pass as `A1-150` first wrote it: place the first task in
+    /// derived order whose offered preferences are all placed, one removal from
+    /// the front at a time. Quadratic, so kept only as the definition the
+    /// heap-based pass must reproduce (`A2-018`).
+    fn honour_preferences_one_at_a_time(ranked: &mut Vec<(&Task, Rank)>) {
+        let offered: BTreeSet<&str> = ranked.iter().map(|(t, _)| t.id.as_str()).collect();
+        let mut waiting: Vec<(&Task, Rank)> = std::mem::take(ranked);
+        let mut placed: BTreeSet<String> = BTreeSet::new();
+        while !waiting.is_empty() {
+            let next = waiting.iter().position(|(t, _)| {
+                t.prefer_after
+                    .iter()
+                    .all(|p| !offered.contains(p.as_str()) || placed.contains(p))
+            });
+            let (task, rank) = waiting.remove(next.unwrap_or(0));
+            placed.insert(task.id.clone());
+            ranked.push((task, rank));
+        }
+    }
+
+    /// The heap-based pass places tasks in exactly the order of the definition,
+    /// over offers that mix chains, self-preferences, duplicate and unoffered
+    /// names, and cycles of every length (`A2-018`).
+    #[test]
+    fn the_preference_pass_matches_its_one_task_at_a_time_definition() {
+        let mut seed: u64 = 0x2018;
+        let mut next = move |bound: usize| {
+            seed = seed
+                .wrapping_mul(6_364_136_223_846_793_005)
+                .wrapping_add(1_442_695_040_888_963_407);
+            usize::try_from(seed >> 33).expect("31 bits fit") % bound
+        };
+        let rank = Rank {
+            releases: 0,
+            downstream_depth: 0,
+            critical: false,
+            effort_days: 0.0,
+        };
+        let mut cycles = 0;
+        for case in 0..2_000 {
+            let pool = 1 + next(40);
+            let mut tasks: Vec<Task> = (0..pool)
+                .map(|index| w(&format!("T{index}"), &[], Some(1.0)))
+                .collect();
+            for task in &mut tasks {
+                for _ in 0..next(4) {
+                    // Names past the pool are tasks that are not offered.
+                    task.prefer_after.push(format!("T{}", next(pool + 5)));
+                }
+            }
+            // Offer a shuffled subset: the derived order is arbitrary here.
+            let mut offer: Vec<&Task> = tasks.iter().filter(|_| next(5) != 0).collect();
+            for index in (1..offer.len()).rev() {
+                offer.swap(index, next(index + 1));
+            }
+            let mut expected: Vec<(&Task, Rank)> = offer.iter().map(|t| (*t, rank)).collect();
+            let mut actual = expected.clone();
+            honour_preferences_one_at_a_time(&mut expected);
+            Graph::honour_preferences(&mut actual);
+            let ids = |list: &[(&Task, Rank)]| -> Vec<String> {
+                list.iter().map(|(t, _)| t.id.clone()).collect()
+            };
+            assert_eq!(ids(&actual), ids(&expected), "case {case}");
+            let offered: BTreeSet<&str> = offer.iter().map(|t| t.id.as_str()).collect();
+            cycles += usize::from(offer.iter().any(|t| {
+                t.prefer_after
+                    .iter()
+                    .any(|p| p == &t.id && offered.contains(p.as_str()))
+            }));
+        }
+        // The generator must actually reach the cycle fallback, or the
+        // comparison proves less than it claims.
+        assert!(cycles > 100, "only {cycles} cases held a self-preference");
     }
 
     /// A work task: a title equal to its id, and an effort unless `None`.

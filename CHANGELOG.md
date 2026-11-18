@@ -23,6 +23,16 @@ to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   test-only `trycmd` dependency is declared once through the workspace, and the packages drop
   `homepage`, which only repeated `repository`; crates.io still links the repository.
 
+### Fixed
+
+- **Ranking ready work no longer costs quadratic time in the number of ready tasks** (`A2-018`).
+  The pass that honours `prefer_after` placed each task by removing it from the front of a list,
+  which on a plan with 10,000 ready tasks moved about 2 GB of memory per ranking even when no task
+  declared a preference. The TUI ranks again on every key that rebuilds its task list, so each such
+  key took 70-110 ms on most hosted machines and about 545 ms on slower ones; `aplan ready`,
+  `aplan tree` and the MCP `ready` tool paid it once per call. The pass now keeps a heap of free
+  positions and gives exactly the same order.
+
 ### Security
 
 - **The locked dependency graph clears every current RustSec advisory** (`A2-016`). The MCP SDK
