@@ -238,7 +238,7 @@ impl ProposalSource for Kep {
         }
 
         let doc: KepYaml =
-            yaml_compat::compat::from_str(contents).map_err(|e| ImportError::Malformed {
+            aplan_core::yaml::from_str(contents).map_err(|e| ImportError::Malformed {
                 source_name: source_name.to_string(),
                 message: e.to_string(),
             })?;

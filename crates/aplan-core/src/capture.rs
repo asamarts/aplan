@@ -1138,7 +1138,7 @@ fn read_capture_after_observation(
             "Rewrite the file as UTF-8 YAML, or remove it from `.inbox`.",
         )
     })?;
-    let value: serde_json::Value = yaml_compat::from_str(source).map_err(|error| {
+    let value: serde_json::Value = crate::yaml::from_str_strict(source).map_err(|error| {
         capture_load_error(
             path,
             format!("invalid capture YAML: {error}"),
@@ -1149,7 +1149,7 @@ fn read_capture_after_observation(
     if let Some(error) = validator.iter_errors(&value).next() {
         return Err(Box::new(schema_diagnostic(path, &error)));
     }
-    yaml_compat::from_str(source).map_err(|error| {
+    crate::yaml::from_str_strict(source).map_err(|error| {
         capture_load_error(
             path,
             format!("capture types could not be read after schema validation: {error}"),
@@ -2655,6 +2655,40 @@ mod tests {
                 .list(&control_search, &FixedClock(NOW))
                 .expect_err("control search")
                 .contains("unsupported control")
+        );
+    }
+
+    /// v0.6.0 read a value beneath a tag outside YAML's core schema as the scalar it tags; a
+    /// capture that tags its title still lists, and a local tag still refuses (A2-169).
+    #[test]
+    fn a_capture_reads_past_a_global_tag_and_refuses_a_local_one() {
+        let dir = tempfile::Builder::new()
+            .tempdir_in(crate::fixture::fixture_root())
+            .expect("tempdir");
+        let inbox = dir.path().join(INBOX_DIR);
+        std::fs::create_dir(&inbox).expect("inbox");
+        let write = |id: &str, title: &str| {
+            let path = inbox.join(format!("{id}.yml"));
+            std::fs::write(
+                &path,
+                format!(
+                    "schema: {CAPTURE_SCHEMA}\nid: {id}\ntitle: {title}\nkind: task\nstate: open\ncaptured_at: '2025-12-31T23:59:59Z'\norigin: cli\n"
+                ),
+            )
+            .expect("capture fixture");
+            path
+        };
+
+        let global = read_capture(&write(FIRST, "!!timestamp 2024-01-15")).expect("reads");
+        assert_eq!(global.title, "2024-01-15");
+
+        let error = read_capture(&write(SECOND, "!draft notes")).expect_err("a local tag");
+        assert!(
+            error
+                .message
+                .contains("the local tag `!draft` cannot be read here"),
+            "{}",
+            error.message
         );
     }
 

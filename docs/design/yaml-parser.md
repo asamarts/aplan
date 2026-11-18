@@ -148,34 +148,54 @@ compatibility mode. `A2-009` consumes 0.1.3 directly, through the same `yaml_com
   the same typed `Task` under both parsers, the two reads the loader makes. Every configuration
   document `aplan-config` owns (the one naming every accepted key, each scaffold example and this
   repository's `.aplan.yml`) decodes to the same `Config`.
-- **Hostile input.** 24 hostile or degenerate documents are read by both parsers four ways: as a
-  generic value, as JSON and as a task through the compatibility reader, and as JSON through the
-  default reader. They cover empty and comment-only documents, duplicate keys, extra documents,
-  broken flow collections, tabs, undefined and self-referencing aliases, tags, a byte order mark,
-  a control character, out-of-range integers, non-string keys, merge keys, redefined anchors, a
-  64 KiB scalar, 10,000 levels of nesting and an alias bomb. 89 of the 96 outcomes agree. The
-  test pins the other seven exactly, so a new divergence fails it. None lets aplan accept a value
-  the bridge refused or read one differently, but the tags below make it refuse values the bridge
-  read:
-  - The default reader refuses a duplicate key, at the top level or nested, where the bridge's
-    JSON read kept the last value. It also refuses a flow collection whose continuation line is
-    not indented, which YAML forbids and libyaml allowed; the compatibility reader still accepts
-    it. Captures, blueprints and dependency manifests are read this stricter way.
-  - `ayaml` keeps a tag outside YAML's core schema on a generic value, where the bridge dropped
-    it and read the scalar as a plain string. That covers a `%TAG` handle and also tags that need
-    no directive: `!!timestamp`, `!!binary` and a verbatim tag naming another vocabulary, such as
-    `!<tag:example.com,2000:x>`. Core tags (`!!str`, `!!int`, `!!float`, `!!bool`, and their
-    verbatim forms) resolve the same under both parsers. Every product read
-    that goes through a generic or JSON value therefore refuses such a document where the bridge
-    read the string: the loader's front matter read, the fields the KEP importer does not model,
-    and the capture reader. It reaches task files as well as captures, since those tags need no
-    directive, and since the front matter ends only at a line that is exactly `---`, so a
-    `--- # note` line keeps a directive inside it. A local tag such as `!custom` is refused by
-    both, and typed string fields, such as a KEP's `title`, ignore the tag under both parsers. The test pins only the `%TAG` case; `A2-169`
-    owns restoring the bridge's reading and pinning the rest.
-  - `ayaml`'s generic value holds an integer past the 64-bit range, which the bridge refused.
-    Read as JSON or as a task, both refuse it, and the KEP importer, the one product read that
-    keeps a generic value, refuses it itself (`A2-166`).
+- **Hostile input.** 38 hostile or degenerate documents are read by both parsers four ways, through
+  the readers the product uses (`aplan_core::yaml`): as a generic value, as JSON and as a task
+  through the compatibility reader, and as JSON through the default reader. They cover empty and
+  comment-only documents, duplicate keys, extra documents, broken flow collections, tabs, undefined
+  and self-referencing aliases, global and local tags on scalars, collections and keys, a byte
+  order mark, a control character, out-of-range integers, non-string keys, merge keys, redefined
+  anchors, a 64 KiB scalar, 10,000 levels of nesting, an alias bomb, and task front matter whose
+  fields carry tags. 145 of the 152 outcomes agree. The test pins the other seven exactly, so a new
+  divergence fails it:
+  - The default reader refuses a duplicate key, at the top level or nested, where the bridge's JSON
+    read kept the last value. It also refuses a flow collection whose continuation line is not
+    indented, which YAML forbids and libyaml allowed; the compatibility reader still accepts it.
+    Captures, blueprints and dependency manifests are read this stricter way.
+  - - A core tag now means what YAML says it means on every field. On a quoted scalar it is the one
+    value aplan now reads that the bridge refused: a task's `effort_days: !!int "2"` reads as 2,
+    where the bridge's typed read refused the integer it had resolved. And a core tag that
+    contradicts a field's type is refused, where the bridge's typed read ignored the tag and parsed
+    the text: `effort_days: !!str 2` and `phase: !!float 1` in a task, or
+    `stale_after_days: !!str 30` in `.aplan.yml`. Copying either would copy a quirk of the bridge
+    rather than a rule (`A2-169`). A task meets its schema before its typed read, which refused the
+    string in v0.6.0 too.
+  - `ayaml`'s generic value holds an integer past the 64-bit range, which the bridge refused. Read
+    as JSON or as a task, both refuse it. Of the product reads that keep a generic value, only the
+    KEP importer turns one into output, as a task id, and it refuses such a number itself
+    (`A2-166`); the configuration and `close` keep generic values only to read them on into typed
+    fields or to compare them.
+- **Tags.** `ayaml` keeps a tag outside YAML's core schema on the node it reads, and hands that
+  node to a target as an enum, which a JSON value, a buffered `#[serde(flatten)]` field or a typed
+  number refuses. The bridge dropped every global tag: a target that read any value got a scalar
+  beneath one as its text, and a typed target got the type it asked for. Since `A2-169` every
+  product read goes through `aplan_core::yaml`, which does the same for a global tag
+  (`!!timestamp`, `!!binary`, a verbatim tag naming another vocabulary such as
+  `!<tag:example.com,2000:x>`, or a handle a `%TAG` directive maps to one). Its tests read every
+  request a target can make beneath three such tags against the bridge, and an untagged document
+  against `ayaml`, errors included. Two readings are not restored, both of documents no aplan
+  format has a use for, and the tests pin them: beneath a tag in YAML's own namespace that is not a
+  core one, such as `!!timestamp`, `ayaml` keeps a scalar as a string and refuses a mapping for a
+  struct, so a number, a boolean or a struct written there is refused where the bridge parsed the
+  text; and beneath any other global tag `ayaml` reads `~` as null for a unit target, which the
+  bridge refused. A task's numbers are checked against its schema first, which refused such a value
+  as a string in v0.6.0 too. A local tag such as `!custom` is refused by both on a target that
+  cannot keep it, and the product's error names the tag and its field; a generic value keeps it,
+  and an enum still selects a variant by it. A core tag on a plain scalar reads the same under both
+  parsers where the target takes any value or the type the tag names; where they part is pinned
+  above. `ayaml` 0.1.3 offers a seed entry point only on its compatibility reader, so the formats
+  read by the default reader are handled in two steps: a document that carries a tag is first
+  parsed by the default reader, so its refusals still apply, and then read under the rule through
+  the compatibility reader.
 - **Contract and limits.** The contract tests pin aliases, anchors, tags, literal merge keys,
   duplicate keys and extra documents with their locations, scalar typing, invalid UTF-8, depth
   and alias stress, mapping serialization, and empty documents. An empty document reads as an
@@ -190,8 +210,9 @@ compatibility mode. `A2-009` consumes 0.1.3 directly, through the same `yaml_com
   command-output tests were regenerated rather than asserted away.
 - **Capture guard.** A capture's duplicate key used to pass the schema check, because the bridge's
   JSON read kept the last value, and was refused only by the typed read after it. The default
-  reader now refuses it at the JSON read. The typed read is still the only guard for a value the schema admits and the types
-  cannot hold, such as a `promotion_defaults.phase` past `u32::MAX`, and a test now covers that.
+  reader now refuses it at the JSON read. The typed read is still the only guard for a value the
+  schema admits and the types cannot hold, such as a `promotion_defaults.phase` past `u32::MAX`,
+  and a test now covers that.
 - **Package budgets.** The lock gains `ayaml` and keeps the oracle: 291 packages. Both product
   graphs replace `yaml_serde` and `libyaml-rs` with `ayaml`, and the headless graph also loses
   `ryu`, which only the bridge used there. Default goes from 201 to 200 packages and headless from

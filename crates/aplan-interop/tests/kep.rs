@@ -295,6 +295,33 @@ fn a_quoted_kep_number_is_accepted() {
     assert_eq!(out.tasks[0].id, "KEP-0042");
 }
 
+/// v0.6.0 read a value beneath a tag outside YAML's core schema as the scalar it tags, and an
+/// adopter's `kep.yaml` that tags a date still imports the same way (A2-169).
+#[test]
+fn a_global_tag_is_read_past_as_v0_6_0_read_it() {
+    let out = parse(
+        "title: T\nkep-number: !!timestamp 2024-01-15\nstatus: provisional\n\
+         creation-date: !!timestamp 2024-01-15\n",
+        &Options::default(),
+    );
+    assert_eq!(out.tasks[0].id, "KEP-2024-01-15");
+    assert_eq!(out.tasks[0].title, "T");
+
+    let local = Kep
+        .parse(
+            "kep.yaml",
+            "title: T\nkep-number: 1\nstatus: provisional\ncreation-date: !date 2024-01-15\n",
+            &Options::default(),
+        )
+        .expect_err("a local tag still refuses");
+    assert!(
+        local
+            .to_string()
+            .contains("the local tag `!date` cannot be read here"),
+        "the refusal names the tag rather than serde's enum: {local}"
+    );
+}
+
 #[test]
 fn a_phase_override_reaches_the_task() {
     let options = Options {

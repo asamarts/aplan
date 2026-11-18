@@ -358,7 +358,7 @@ pub fn read(path: &std::path::Path) -> Result<Blueprint, BlueprintError> {
 /// [`BlueprintError::Parse`] when `text` does not match the V1 types, or
 /// [`BlueprintError::Empty`] when it names no tasks.
 pub fn parse(path: &std::path::Path, text: &str) -> Result<Blueprint, BlueprintError> {
-    let blueprint: Blueprint = yaml_compat::from_str(text).map_err(|error| {
+    let blueprint: Blueprint = aplan_core::yaml::from_str_strict(text).map_err(|error| {
         let said = describe_parse_error(&error.to_string());
         BlueprintError::Parse {
             path: path.to_path_buf(),

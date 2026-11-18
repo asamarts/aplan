@@ -253,8 +253,7 @@ fn key(d: &Diagnostic) -> String {
 pub fn task_of(content: &str) -> Result<Task, String> {
     let (frontmatter, _) = crate::load::split_frontmatter(content)
         .ok_or_else(|| "the rewritten file has no frontmatter".to_string())?;
-    yaml_compat::compat::from_str(frontmatter)
-        .map_err(|e| format!("the rewritten frontmatter: {e}"))
+    crate::yaml::from_str(frontmatter).map_err(|e| format!("the rewritten frontmatter: {e}"))
 }
 
 /// A copy of this plan with one task's content replaced.

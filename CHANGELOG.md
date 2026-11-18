@@ -8,22 +8,27 @@ to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Changed
 
-- **YAML is parsed by the safe Rust `ayaml` 0.1.3** (`A2-009`, `A2-166`). The C-derived
+- **YAML is parsed by the safe Rust `ayaml` 0.1.3** (`A2-009`, `A2-166`, `A2-169`). The C-derived
   `yaml_serde` / `libyaml-rs` bridge leaves the dependency graphs of the product and of the TUI
   evaluator, and stays only as a test oracle. Every YAML file and task front matter in this
-  repository parses to the same value under both parsers. Plans, configuration and imports are
-  read as before, with `ayaml`'s native limits on input size, depth, aliases and expansion, with
-  one known exception: a value carrying a tag outside YAML's core schema (`!!timestamp`,
-  `!!binary`, a verbatim tag such as `!<tag:example.com,2000:x>`, or a `%TAG` handle) was read as
-  a plain string and is now refused, so a task, capture or KEP file that uses one no longer loads.
-  Core tags such as `!!str` and `!!int` read as before. `A2-169` owns restoring the old reading
-  before v0.7.0. Captures, blueprints and dependency manifests, the formats aplan
-  defines itself, now refuse a flow collection whose continuation line is not indented, which they
-  used to accept. A duplicate key in them, always refused by their typed read, is now refused
-  earlier and with a different message. `add --from` manifests keep the compatible reader. Files
-  aplan writes quote the strings that need it with double quotes where the bridge used single
-  quotes; both read back as the same value. Some parser errors name a different cause or column;
-  their line is unchanged in every message the rule catalogue shows.
+  repository parses to the same value under both parsers. Plans, configuration and imports are read
+  as before, with `ayaml`'s native limits on input size, depth, aliases and expansion. A tag
+  outside YAML's core schema (`!!timestamp`, `!!binary`, a verbatim tag such as
+  `!<tag:example.com,2000:x>`, or a handle a `%TAG` directive maps to one) is dropped and the value
+  beneath it read as the bridge read it: as its text where any value is accepted, and as the type a
+  field asks for. A number, boolean or nested record written beneath `!!timestamp` or `!!binary` is
+  still refused, where the bridge parsed it. A local tag such as `!custom` is refused where it was
+  refused before, and the error now names it. A core tag now means what YAML says on every field:
+  on a quoted scalar, such as `effort_days: !!int "2"` or `owner: !!null ""`, it reads as the tag
+  says, where the bridge refused it; and one that contradicts the field, such as
+  `stale_after_days: !!str 30` in `.aplan.yml`, is refused, where the bridge ignored the tag.
+  Captures, blueprints and dependency manifests, the formats aplan defines itself, now refuse a
+  flow collection whose continuation line is not indented, which they used to accept. A duplicate
+  key in them, always refused by their typed read, is now refused earlier and with a different
+  message. `add --from` manifests keep the compatible reader. Files aplan writes quote the strings
+  that need it with double quotes where the bridge used single quotes; both read back as the same
+  value. Some parser errors name a different cause or column; their line is unchanged in every
+  message the rule catalogue shows.
 
 - **The source builds without warnings under Rust 1.100 while the pin stays at 1.99.1**
   (`A2-017`). One plan-walk predicate is rewritten to satisfy the new `needless_bool` lint, the
@@ -38,15 +43,15 @@ to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   declared a preference. The TUI ranks again on every key that moves the selection or rebuilds its
   task list, so each such key took 70-110 ms on most hosted machines and about 545 ms on those
   whose memory copy was slowest, and it ranked several times per load and refresh. Every command
-  that ranks ready work or builds task rows paid it on each call, among them `aplan ready`, `aplan
-  tree`, `aplan show`, `aplan tasks`, `aplan summary`, any command given `--select`, and the MCP
-  `ready` and `show` tools. The pass now keeps a heap of free positions and gives exactly the same
-  order.
+  that ranks ready work or builds task rows paid it on each call, among them `aplan ready`,
+  `aplan tree`, `aplan show`, `aplan tasks`, `aplan summary`, any command given `--select`, and the
+  MCP `ready` and `show` tools. The pass now keeps a heap of free positions and gives exactly the
+  same order.
 - **Finding each task's cut no longer walks the whole roadmap once per task** (`A2-168`). Every
-  task row looked up its cut by scanning each cut's members in turn, so `aplan tasks`, `aplan
-  show`, any command given `--select`, the MCP `show` tool and each TUI load or refresh paid the
-  number of tasks times the size of the roadmap. The rows now read one map built in a single pass
-  over the cuts, and every task reports the same cut as before.
+  task row looked up its cut by scanning each cut's members in turn, so `aplan tasks`,
+  `aplan show`, any command given `--select`, the MCP `show` tool and each TUI load or refresh paid
+  the number of tasks times the size of the roadmap. The rows now read one map built in a single
+  pass over the cuts, and every task reports the same cut as before.
 - **The README's first-plan commands work as written** (`A2-167`). `aplan init` writes only
   `.aplan.yml`, so the `aplan add` after it refused with "plan root `aplan` is not a directory";
   the recipe now creates `aplan/tasks` first, and a test runs it line by line.

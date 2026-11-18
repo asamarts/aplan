@@ -76,10 +76,11 @@ pub fn read(path: &std::path::Path) -> Result<(String, Vec<Entry>), Error> {
 }
 
 pub fn parse(path: &std::path::Path, text: &str) -> Result<Vec<Entry>, Error> {
-    let entries: Vec<Entry> = yaml_compat::from_str(text).map_err(|error| Error::Parse {
-        path: path.to_path_buf(),
-        said: error.to_string(),
-    })?;
+    let entries: Vec<Entry> =
+        aplan_core::yaml::from_str_strict(text).map_err(|error| Error::Parse {
+            path: path.to_path_buf(),
+            said: error.to_string(),
+        })?;
     if entries.is_empty() {
         return Err(Error::Empty {
             path: path.to_path_buf(),
