@@ -43,9 +43,10 @@ they report.
 
 Sequenced after `M-v0.8`. Integrity work that is not yet a reported wrong answer: diagnostics and
 generated guidance that can mislead, ratification and precedence edge cases, and the cost of
-resolving test evidence inside the plan gate.
+resolving test evidence inside the plan gate. It also makes the TUI end by its signal, not with an
+error, when its terminal hangs up.
 
-**Tasks:** `A2-056`, `A2-069`, `A2-087`, `A2-127`, `A2-131`, `A2-133`, `A2-141`, `A2-145`, `A2-162`
+**Tasks:** `A2-056`, `A2-069`, `A2-087`, `A2-127`, `A2-131`, `A2-133`, `A2-141`, `A2-145`, `A2-162`, `A2-165`
 
 ### adoption, Adoption and ergonomics
 

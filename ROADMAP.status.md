@@ -12,7 +12,7 @@
 | v0.8 | todo | 0/27 | 0 | 27 | 41.8d | 1.5 (1.5 left) | 4.5d |
 | adoption | todo | 0/76 | 0 | 76 | 99.8d | 3.7 (3.7 left) | 10.0d |
 | backlog | todo | 0/1 | 0 | 1 | 1.0d | <0.1 (<0.1 left) | 1.0d |
-| hardening | todo | 0/9 | 0 | 9 | 9.8d | 0.4 (0.4 left) | 3.0d |
+| hardening | todo | 0/10 | 0 | 10 | 10.2d | 0.4 (0.4 left) | 3.0d |
 | qualification | todo | 0/1 | 0 | 1 | 8.0d | 0.3 (0.3 left) | 8.0d |
 | tui-quality | todo | 0/2 | 0 | 2 | 4.0d | 0.1 (0.1 left) | 4.0d |
 | workflow | todo | 0/17 | 0 | 17 | 50.0d | 1.9 (1.9 left) | 17.5d |
@@ -171,6 +171,7 @@
 | A2-141 | Reject ratification preference inversions | todo | - | - |
 | A2-145 | Keep test-evidence resolution from rebuilding the product in the plan gate | todo | - | - |
 | A2-162 | Check the runner's gh version before the Action verifies provenance | todo | - | - |
+| A2-165 | End the TUI by its own signal when its terminal hangs up | todo | - | - |
 
 ## qualification Product qualification
 
