@@ -282,11 +282,23 @@ fn msrv_latest_stable_and_release_keep_distinct_authorities() {
     let latest_workflow = read(".github/workflows/latest-stable.yml");
     for expected in [
         "rustup toolchain install stable",
+        "rustup toolchain install \"$pinned\"",
         "export RUSTUP_TOOLCHAIN=stable",
         "this is not a full or release receipt",
     ] {
         assert!(latest_script.contains(expected), "missing {expected}");
     }
+    // The tests' child processes resolve the pinned compiler, so it must be
+    // installed before them; left to them, their parallel installs race (A2-017).
+    let position = |needle: &str| {
+        latest_script
+            .find(needle)
+            .unwrap_or_else(|| panic!("missing {needle}"))
+    };
+    assert!(
+        position("rustup toolchain install \"$pinned\"") < position("cargo test --workspace"),
+        "the pinned toolchain must be installed before the workspace tests run"
+    );
     assert!(latest_workflow.contains("schedule:"));
     assert!(latest_workflow.contains("workflow_dispatch:"));
     assert!(latest_workflow.contains("run: ci/scripts/latest-stable.sh"));

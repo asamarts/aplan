@@ -20,6 +20,15 @@ rustup toolchain install stable \
     --profile minimal \
     --component "$components" \
     --no-self-update
+# The workspace tests run validation profiles in parallel child processes that
+# drop the stable override below and resolve the exact pinned compiler from
+# rust-toolchain.toml. Install it once, before any test starts: otherwise each
+# child's rustup auto-install races the others on the same download file and
+# fails (A2-017; seen on 2026-11-10 and 2026-11-18).
+rustup toolchain install "$pinned" \
+    --profile minimal \
+    --component "$components" \
+    --no-self-update
 
 latest_details="$(rustup run stable rustc --version --verbose)"
 latest="$(sed -n 's/^release: //p' <<<"$latest_details")"
