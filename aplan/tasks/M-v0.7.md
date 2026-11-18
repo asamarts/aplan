@@ -25,6 +25,7 @@ blocked_by:
 - A2-167
 - A2-168
 - A2-169
+- A2-177
 tags:
 - milestone
 - v0.7
@@ -38,9 +39,9 @@ hosted TUI latency regression, stops the render gate failing on slower hosted ru
 the C-derived YAML bridge with the safe Rust parser, and fixes the reported findings where a
 gate passed, or a report said something false, for reasons the user could not see. It also
 closes what an audit of the increment found: the parser switch's gaps, the files it refuses that
-v0.6.0 read, a README recipe that failed as written, and a per-task walk of the roadmap. It
-moves every open issue and the open pre-public backlog into this plan, and ends with the v0.7.0
-release.
+v0.6.0 read, a README recipe that failed as written, a per-task walk of the roadmap, and what a
+second audit found in those fixes (`A2-177`). It moves every open issue and the open pre-public
+backlog into this plan, and ends with the v0.7.0 release.
 
 ## Exit criteria
 
