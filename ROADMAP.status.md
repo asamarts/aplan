@@ -26,7 +26,7 @@
 | A2-017 | Keep the workspace clean under Rust 1.100 without moving the pinned toolchain | done | - | commit:cc6d669cd006, commit:c09603f6606a |
 | A2-018 | Diagnose the large-fixture TUI latency regression on the current hosted image | done | - | commit:73eeb5472dac, test:graph::ranking::the_preference_pass_matches_its_one_task_at_a_time_definition |
 | A2-019 | Migrate the open pre-public backlog and every open issue into the public plan | done | - | commit:4420b69c4fe9, commit:02d6c3c9c1ed |
-| A2-020 | Publish v0.7.0 | todo | A2-009, A2-016, A2-017, A2-018, A2-019, A2-021, A2-022, A2-023, A2-024, A2-025, A2-026, A2-027, A2-028, A2-079, A2-137, A2-164 | - |
+| A2-020 | Publish v0.7.0 | todo | A2-009, A2-016, A2-017, A2-018, A2-019, A2-021, A2-022, A2-023, A2-024, A2-025, A2-026, A2-027, A2-028, A2-079, A2-137, A2-164, A2-166, A2-167, A2-168, A2-169 | - |
 | A2-021 | Report APLAN045 when traces_root has a dot component or is left at its default | todo | - | - |
 | A2-022 | Report a refused inbox promotion with the capture's real state | todo | - | - |
 | A2-023 | List same-second captures newest first, as the inbox documents | todo | - | - |
