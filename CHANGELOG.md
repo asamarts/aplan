@@ -8,15 +8,22 @@ to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Changed
 
-- **YAML is parsed by the safe Rust `ayaml` 0.1.3** (`A2-009`). The C-derived `yaml_serde` /
-  `libyaml-rs` bridge leaves the product's dependency graph and stays only as a test oracle. Every
-  YAML file and task front matter in this repository parses to the same value under both parsers.
-  Plans, configuration and imports are read as before, with `ayaml`'s native limits on input size,
-  depth, aliases and expansion. Captures, blueprints and dependency manifests, the formats aplan
-  defines itself, are read more strictly: a duplicate key, or a flow collection whose continuation
-  line is not indented, is now refused where it used to be accepted. So is a capture whose values
-  carry a `%TAG`-declared tag, which used to be read as strings. Some parser errors name a
-  different cause or column; their line is unchanged in every message the rule catalogue shows.
+- **YAML is parsed by the safe Rust `ayaml` 0.1.3** (`A2-009`, `A2-166`). The C-derived
+  `yaml_serde` / `libyaml-rs` bridge leaves the dependency graphs of the product and of the TUI
+  evaluator, and stays only as a test oracle. Every YAML file and task front matter in this
+  repository parses to the same value under both parsers. Plans, configuration and imports are
+  read as before, with `ayaml`'s native limits on input size, depth, aliases and expansion, with
+  one known exception: a value carrying a tag outside YAML's core schema (`!!timestamp`,
+  `!!binary`, a verbatim tag such as `!<tag:example.com,2000:x>`, or a `%TAG` handle) was read as
+  a plain string and is now refused, so a task, capture or KEP file that uses one no longer loads.
+  Core tags such as `!!str` and `!!int` read as before. `A2-169` owns restoring the old reading
+  before v0.7.0. Captures, blueprints and dependency manifests, the formats aplan
+  defines itself, now refuse a flow collection whose continuation line is not indented, which they
+  used to accept. A duplicate key in them, always refused by their typed read, is now refused
+  earlier and with a different message. `add --from` manifests keep the compatible reader. Files
+  aplan writes quote the strings that need it with double quotes where the bridge used single
+  quotes; both read back as the same value. Some parser errors name a different cause or column;
+  their line is unchanged in every message the rule catalogue shows.
 
 - **The source builds without warnings under Rust 1.100 while the pin stays at 1.99.1**
   (`A2-017`). One plan-walk predicate is rewritten to satisfy the new `needless_bool` lint, the
@@ -28,22 +35,34 @@ to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 - **Ranking ready work no longer costs quadratic time in the number of ready tasks** (`A2-018`).
   The pass that honours `prefer_after` placed each task by removing it from the front of a list,
   which on a plan with 10,000 ready tasks moved about 2 GB of memory per ranking even when no task
-  declared a preference. The TUI ranks again on every key that rebuilds its task list, so each such
-  key took 70-110 ms on most hosted machines and about 545 ms on slower ones; `aplan ready`,
-  `aplan tree` and the MCP `ready` tool paid it once per call. The pass now keeps a heap of free
-  positions and gives exactly the same order.
+  declared a preference. The TUI ranks again on every key that moves the selection or rebuilds its
+  task list, so each such key took 70-110 ms on most hosted machines and about 545 ms on those
+  whose memory copy was slowest, and it ranked several times per load and refresh. `aplan ready`,
+  `aplan tree`, `aplan show`, `aplan tasks`, `aplan summary` and the MCP `ready` and `show` tools
+  paid it on every call. The pass now keeps a heap of free positions and gives exactly the same
+  order.
+- **Finding each task's cut no longer walks the whole roadmap once per task** (`A2-168`). Every
+  task row looked up its cut by scanning each cut's members in turn, so `aplan show`, `aplan
+  graph`, the MCP `show` tool and each TUI load or refresh paid the number of tasks times the size
+  of the roadmap. The rows now read one map built in a single pass over the cuts, and every task
+  reports the same cut as before.
+- **The README's first-plan commands work as written** (`A2-167`). `aplan init` writes only
+  `.aplan.yml`, so the `aplan add` after it refused with "plan root `aplan` is not a directory";
+  the recipe now creates `aplan/tasks` first, and a test runs it line by line.
 
 ### Security
 
 - **The locked dependency graph clears every current RustSec advisory** (`A2-016`). The MCP SDK
-  requirement rises to `rmcp >= 3.9.0` (locked at 3.10.0) for RUSTSEC-2026-0457, -0461 and -0462;
-  the server uses only the stdio transport, but the vulnerable HTTP transport code no longer ships.
-  `rustix` moves to 1.1.6 (RUSTSEC-2026-0486) and `libz-sys`, reached through `git2`, to 1.1.33,
+  requirement rises to `rmcp >= 3.9.0` (locked at 3.10.0) for RUSTSEC-2026-0457, -0461 and -0462.
+  Those advisories are in rmcp features aplan never enables (the OAuth client and the Streamable
+  HTTP server and client; the server uses only the stdio transport), so no release compiled the
+  affected code, but the lock no longer names an affected version. `rustix` moves to 1.1.6 (RUSTSEC-2026-0486) and `libz-sys`, reached through `git2`, to 1.1.33,
   whose bundled zlib fixes a heap overflow (RUSTSEC-2026-0544). The unmaintained-crate notices for
-  `chrono` (through `rmcp`) and the test-only `humantime` (through `trycmd`) have no fixed release
-  and are recorded as reasoned `deny.toml` exceptions with the condition that ends each. rmcp's new
-  `socket2` dependency raises the measured package budgets by one (lock and default) and two
-  (headless).
+  `chrono` (through `rmcp`, directly and through the `schemars` feature it enables) and the
+  test-only `humantime` (through `trycmd`) have no fixed release and are recorded as reasoned
+  `deny.toml` exceptions with the condition that ends each. rmcp 3.10's stdio transport enables
+  tokio's `net` feature, which brings in `socket2`, and `mio` where a graph did not already hold
+  it, raising the measured package budgets by one (lock and default) and two (headless).
 
 ## [0.6.0] - 2026-11-04
 

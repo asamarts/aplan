@@ -696,9 +696,11 @@ impl<'a> Graph<'a> {
     /// or not in this list -- are inert. The field says "offer me after that
     /// one", and a task nobody is being offered cannot be followed.
     ///
-    /// A cycle cannot be ordered. `APLAN033` reports it, and the tasks in it keep
-    /// their derived order here rather than being dropped from the answer: a
-    /// defect in the plan must not make work disappear from "what next".
+    /// A cycle cannot be ordered. `APLAN033` reports it, and when it leaves no
+    /// task free the first task still waiting is placed whatever it prefers,
+    /// rather than anything being dropped from the answer: a defect in the plan
+    /// must not make work disappear from "what next". That task need not be on
+    /// the cycle itself, so a task waiting on a cycle member can come before it.
     ///
     /// Each step places the first task in derived order whose offered
     /// preferences are all placed, or, when a cycle leaves none, the first task
@@ -707,12 +709,21 @@ impl<'a> Graph<'a> {
     /// preferences costs `O((n + e) log n)`. Draining a vector from its front
     /// did the same in `O(n^2)` element moves: about 2 GB of `memmove` per
     /// call on 10,000 ready tasks, paid on every TUI keypress (`A2-018`).
+    ///
+    /// Each id appears at most once, as `ready_ranked` builds the list from the
+    /// graph's id index; with a repeated id the positions found by name would
+    /// differ from the tasks the definition treats as placed.
     fn honour_preferences(ranked: &mut Vec<(&Task, Rank)>) {
         let position: BTreeMap<&str, usize> = ranked
             .iter()
             .enumerate()
             .map(|(index, (task, _))| (task.id.as_str(), index))
             .collect();
+        debug_assert_eq!(
+            position.len(),
+            ranked.len(),
+            "a ranking names each task once"
+        );
         // For each task, how many distinct offered tasks it still waits to
         // follow; for each task, who waits to follow it.
         let mut unplaced = vec![0_usize; ranked.len()];
@@ -3081,8 +3092,8 @@ mod ranking {
     }
 
     /// The heap-based pass places tasks in exactly the order of the definition,
-    /// over offers that mix chains, self-preferences, duplicate and unoffered
-    /// names, and cycles of every length (`A2-018`).
+    /// over offers of up to forty tasks that mix chains, self-preferences,
+    /// duplicate and unoffered names, and cycles (`A2-018`).
     #[test]
     fn the_preference_pass_matches_its_one_task_at_a_time_definition() {
         let mut seed: u64 = 0x2018;
@@ -3098,7 +3109,7 @@ mod ranking {
             critical: false,
             effort_days: 0.0,
         };
-        let mut cycles = 0;
+        let mut self_preferring = 0;
         for case in 0..2_000 {
             let pool = 1 + next(40);
             let mut tasks: Vec<Task> = (0..pool)
@@ -3124,7 +3135,7 @@ mod ranking {
             };
             assert_eq!(ids(&actual), ids(&expected), "case {case}");
             let offered: BTreeSet<&str> = offer.iter().map(|t| t.id.as_str()).collect();
-            cycles += usize::from(offer.iter().any(|t| {
+            self_preferring += usize::from(offer.iter().any(|t| {
                 t.prefer_after
                     .iter()
                     .any(|p| p == &t.id && offered.contains(p.as_str()))
@@ -3132,7 +3143,10 @@ mod ranking {
         }
         // The generator must actually reach the cycle fallback, or the
         // comparison proves less than it claims.
-        assert!(cycles > 100, "only {cycles} cases held a self-preference");
+        assert!(
+            self_preferring > 100,
+            "only {self_preferring} cases held a self-preference"
+        );
     }
 
     /// A work task: a title equal to its id, and an effort unless `None`.

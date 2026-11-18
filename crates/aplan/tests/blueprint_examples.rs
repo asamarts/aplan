@@ -283,10 +283,10 @@ fn pilot_and_rule_examples_are_representative_not_canonical() {
     if !private_epoch {
         assert!(
             !plan.tasks.is_empty()
-                && plan
-                    .tasks
-                    .iter()
-                    .all(|loaded| loaded.task.id.starts_with("A2-") || loaded.task.is_milestone()),
+                && plan.tasks.iter().all(|loaded| {
+                    loaded.task.id.starts_with("A2-")
+                        || (loaded.task.id.starts_with("M-") && loaded.task.is_milestone())
+                }),
             "the historical examples may be absent only in the explicit A2 public-plan epoch \
              (A2 tasks and the cut milestones that order them)"
         );

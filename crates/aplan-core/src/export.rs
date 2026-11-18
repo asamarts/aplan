@@ -258,11 +258,16 @@ impl Graph<'_> {
             .map(|(i, t)| (t.id.as_str(), i + 1))
             .collect();
 
+        let owners = cut_owners(&roadmap);
         let tasks = self
             .by_id
             .values()
             .map(|t| {
-                let (cut, milestone) = cut_of(&roadmap, &t.id);
+                let (cut, milestone) = owners
+                    .get(t.id.as_str())
+                    .map_or((None, None), |&(label, milestone)| {
+                        (Some(label.to_string()), Some(milestone.to_string()))
+                    });
                 TaskRow {
                     id: t.id.clone(),
                     title: t.title.clone(),
@@ -303,7 +308,14 @@ impl Graph<'_> {
     }
 }
 
-/// The cut a task belongs to, as `(label, milestone id)`.
+/// The cut each task belongs to, as `(label, milestone id)`, keyed by task id.
+///
+/// **The first cut in roadmap order that names a task owns it**, as its
+/// milestone or a member, so a task in several cuts reports the same cut on
+/// every read. One pass over the cuts builds the whole map: asking each task
+/// in turn walked every cut's members per task, which on a plan of `N` tasks
+/// was `N` times the size of the roadmap (`A2-168`). [`cut_of`] keeps the
+/// one-task definition the tests hold this to.
 ///
 /// **A release is never the answer.** ADR-0022 says a task stays in exactly one
 /// cut "because a release claims none of them", and a release nonetheless
@@ -318,6 +330,22 @@ impl Graph<'_> {
 /// cut rather than the one that lists it. ADR-0042's own stated test is that a
 /// task belongs to exactly one cut at any depth, and it failed on the first
 /// four-level plan built against it. `borrows` is what says which rows lend.
+fn cut_owners(roadmap: &Roadmap) -> std::collections::HashMap<&str, (&str, &str)> {
+    let mut owners = std::collections::HashMap::new();
+    for cut in roadmap.cuts.iter().filter(|c| !c.borrows) {
+        let owner = (cut.version.as_str(), cut.milestone_id.as_str());
+        let named = std::iter::once(cut.milestone_id.as_str())
+            .chain(cut.members.iter().map(|member| member.id.as_str()));
+        for id in named {
+            owners.entry(id).or_insert(owner);
+        }
+    }
+    owners
+}
+
+/// The cut one task belongs to, by the walk [`cut_owners`] replaced: the first
+/// non-borrowing cut in roadmap order whose milestone or members name it.
+#[cfg(test)]
 fn cut_of(roadmap: &Roadmap, id: &str) -> (Option<String>, Option<String>) {
     for cut in roadmap.cuts.iter().filter(|c| !c.borrows) {
         if cut.milestone_id == id {
@@ -502,6 +530,68 @@ mod tests {
             Some("s0"),
             "roadmap order, not file order"
         );
+    }
+
+    /// **The one-pass cut map answers exactly as the per-task walk did**
+    /// (`A2-168`): on a plan with a release that borrows its cuts' members, a
+    /// container that carries a nested cut's work, a task two cuts list, a
+    /// milestone listed by another cut, and a task no cut names.
+    #[test]
+    fn the_cut_map_matches_its_one_task_at_a_time_definition() {
+        let mut inner = task("M-inner", 1, Status::Todo, None, &["milestone", "inner"]);
+        inner.blocked_by = vec!["A3".into()];
+        let mut outer = task("M-outer", 1, Status::Todo, None, &["milestone", "outer"]);
+        outer.blocked_by = vec!["A4".into()];
+        outer.contains = vec!["M-inner".into()];
+        let mut s0 = task("M-s0", 0, Status::Todo, None, &["milestone", "s0"]);
+        s0.blocked_by = vec!["A1".into(), "A2".into()];
+        let mut s1 = task("M-s1", 1, Status::Todo, None, &["milestone", "s1"]);
+        s1.blocked_by = vec!["A2".into(), "M-s0".into()];
+        let mut release = task(
+            "M-v01",
+            1,
+            Status::Todo,
+            None,
+            &["milestone", "release", "v0.1"],
+        );
+        release.blocked_by = vec!["M-s0".into(), "M-s1".into(), "M-outer".into()];
+        let tasks = [
+            task("A1", 0, Status::Todo, Some(1.0), &[]),
+            task("A2", 0, Status::Done, Some(1.0), &[]),
+            task("A3", 1, Status::Todo, Some(1.0), &[]),
+            task("A4", 1, Status::Todo, Some(1.0), &[]),
+            task("A5", 1, Status::Todo, Some(1.0), &[]),
+            release,
+            s1,
+            outer,
+            inner,
+            s0,
+        ];
+        let graph = Graph::new(tasks.iter());
+        let roadmap = graph.roadmap();
+        let rows = graph.task_rows();
+        assert_eq!(rows.tasks.len(), tasks.len());
+        for row in &rows.tasks {
+            assert_eq!(
+                (row.cut.clone(), row.milestone.clone()),
+                cut_of(&roadmap, &row.id),
+                "{}",
+                row.id
+            );
+        }
+        let cut = |id: &str| {
+            rows.tasks
+                .iter()
+                .find(|row| row.id == id)
+                .and_then(|row| row.cut.clone())
+        };
+        assert_eq!(
+            cut("A3").as_deref(),
+            Some("inner"),
+            "the nested cut, not the container"
+        );
+        assert_eq!(cut("A5"), None, "a task no cut names has none");
+        assert_ne!(cut("A1").as_deref(), Some("v0.1"), "never the release");
     }
 
     #[test]

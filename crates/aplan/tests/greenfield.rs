@@ -42,6 +42,109 @@ fn fenced_under(doc: &str, heading: &str, kind: &str) -> String {
     section[start..start + close].to_string()
 }
 
+/// The bodies of every fenced block of `kind` under a `## ` heading, in order.
+fn fenced_blocks_under(doc: &str, heading: &str, kind: &str) -> Vec<String> {
+    let after = doc
+        .split_once(&format!("\n## {heading}\n"))
+        .unwrap_or_else(|| panic!("the document has a `## {heading}` section"))
+        .1;
+    let mut section = &after[..after.find("\n## ").unwrap_or(after.len())];
+    let open = format!("```{kind}\n");
+    let mut blocks = Vec::new();
+    while let Some(start) = section.find(&open) {
+        let body = &section[start + open.len()..];
+        let close = body.find("```").expect("an unclosed fence");
+        blocks.push(body[..close].to_string());
+        section = &body[close + 3..];
+    }
+    blocks
+}
+
+/// Split one documented shell line into words, honouring double quotes, which
+/// is all the README's commands use.
+fn shell_words(line: &str) -> Vec<String> {
+    let mut words = Vec::new();
+    let mut word = String::new();
+    let mut quoted = false;
+    let mut started = false;
+    for ch in line.chars() {
+        match ch {
+            '"' => {
+                quoted = !quoted;
+                started = true;
+            }
+            c if c.is_whitespace() && !quoted => {
+                if started {
+                    words.push(std::mem::take(&mut word));
+                    started = false;
+                }
+            }
+            c => {
+                word.push(c);
+                started = true;
+            }
+        }
+    }
+    assert!(!quoted, "an unclosed quote in `{line}`");
+    if started {
+        words.push(word);
+    }
+    words
+}
+
+/// **The README's first-plan commands are run as written** (`A2-167`).
+///
+/// They were only handed to the argument parser, which accepted an `add` that
+/// then refused the plan root `init` never creates, so the first thing an
+/// adopter typed after `init` failed. Each line runs in order in an empty
+/// directory: an `aplan` line through the binary, `mkdir -p` as a directory, and
+/// anything else fails here until this test is taught to run it.
+#[test]
+fn the_readme_start_commands_run_as_written() {
+    let dir = tempfile::Builder::new()
+        .tempdir_in(aplan_core::fixture::fixture_root())
+        .expect("tempdir");
+    let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
+    let readme = std::fs::read_to_string(root.join("README.md")).expect("README.md");
+    let block = fenced_blocks_under(&readme, "Start", "sh")
+        .into_iter()
+        .find(|block| block.contains("aplan init"))
+        .expect("the README's `## Start` section shows `aplan init` in a ```sh block");
+    let mut ran = 0;
+    for line in block
+        .lines()
+        .map(str::trim)
+        .filter(|line| !line.is_empty() && !line.starts_with('#'))
+    {
+        let words = shell_words(line);
+        match words
+            .iter()
+            .map(String::as_str)
+            .collect::<Vec<_>>()
+            .as_slice()
+        {
+            ["aplan", args @ ..] => {
+                let (out, code) = aplan(dir.path(), args);
+                assert_eq!(code, 0, "README step `{line}` failed: {out}");
+            }
+            ["mkdir", "-p", paths @ ..] if !paths.is_empty() => {
+                for path in paths {
+                    std::fs::create_dir_all(dir.path().join(path)).expect("mkdir -p");
+                }
+            }
+            _ => panic!("README step `{line}` is not one this test knows how to run"),
+        }
+        ran += 1;
+    }
+    assert!(
+        ran >= 3,
+        "the README's first-plan block ran only {ran} step(s)"
+    );
+    let (out, code) = aplan(dir.path(), &["check"]);
+    assert_eq!(code, 0, "the README's first plan does not check: {out}");
+    assert!(out.contains("ok: 1 tasks, 0 warning(s)"), "{out}");
+}
+
 fn greenfield(dir: &Path) {
     std::fs::create_dir_all(dir.join("aplan")).expect("mkdir");
     std::fs::write(dir.join(".aplan.yml"), STRICT).expect("config");

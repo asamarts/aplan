@@ -123,9 +123,13 @@ fn workspace_metadata(root: &Path) -> Result<serde_json::Value> {
     metadata(root, &["--locked"])
 }
 
-/// YAML parsers the product has retired. `yaml_serde` stays only as
-/// `aplan-core`'s differential test oracle, so the lock may hold it, but no
-/// product graph may resolve it or the C-derived parsers before it (A2-009).
+/// The exact requirement every `yaml_compat` declaration must carry (A2-009).
+const SAFE_PARSER_REQUIREMENT: &str = "=0.1.3";
+
+/// YAML parsers the product has retired. `yaml_serde` stays only as the
+/// differential test oracle of `aplan-core` and `aplan-config`, so the lock may
+/// hold it, but no product graph may resolve it or the C-derived parsers before
+/// it (A2-009).
 const RETIRED_YAML_PACKAGES: &[&str] = &[
     "yaml_serde",
     "libyaml-rs",
@@ -156,8 +160,62 @@ fn audit_yaml_bridge(metadata: &serde_json::Value) -> Result<()> {
     let found = dependency["req"]
         .as_str()
         .context("ayaml dependency omitted its version requirement")?;
-    if found != "=0.1.3" {
-        bail!("safe parser `yaml_compat` must stay pinned to `=0.1.3`, found `{found}`");
+    if found != SAFE_PARSER_REQUIREMENT {
+        bail!(
+            "safe parser `yaml_compat` must stay pinned to `{SAFE_PARSER_REQUIREMENT}`, found `{found}`"
+        );
+    }
+    Ok(())
+}
+
+/// The TUI evaluator's own workspace manifest, beside the product's.
+const TUI_EVALUATOR_MANIFEST: &str = "tools/tui-eval/Cargo.toml";
+
+/// The TUI evaluator (`cargo xtask tui-eval`) is a separate workspace with its
+/// own lock, so the workspace audit never sees it, and no CI job builds it. It
+/// parses YAML through the same `yaml_compat` boundary as the product, so it
+/// must name the same pinned parser, resolve no retired one, and keep a lock
+/// that matches its manifest: the parser switch once changed its code but not
+/// its manifest, which left it unbuildable (A2-166).
+fn audit_tui_evaluator(root: &Path) -> Result<()> {
+    let manifest = root.join(TUI_EVALUATOR_MANIFEST);
+    let manifest = manifest
+        .to_str()
+        .context("the TUI evaluator's manifest path is not UTF-8")?;
+    let metadata = metadata(root, &["--locked", "--manifest-path", manifest])
+        .context("the TUI evaluator's lock must resolve its manifest unchanged")?;
+    audit_tui_evaluator_metadata(&metadata)
+}
+
+fn audit_tui_evaluator_metadata(metadata: &serde_json::Value) -> Result<()> {
+    let packages = metadata["packages"]
+        .as_array()
+        .context("TUI evaluator Cargo metadata omitted its packages")?;
+    let evaluator = packages
+        .iter()
+        .find(|package| package["name"] == "aplan-tui-eval")
+        .context("the TUI evaluator workspace contains no aplan-tui-eval package")?;
+    let dependency = evaluator["dependencies"]
+        .as_array()
+        .context("aplan-tui-eval metadata omitted dependencies")?
+        .iter()
+        .find(|dependency| dependency["rename"] == "yaml_compat")
+        .context("the TUI evaluator must declare its YAML parser as `yaml_compat`")?;
+    let name = dependency["name"].as_str().unwrap_or_default();
+    let requirement = dependency["req"].as_str().unwrap_or_default();
+    if name != "ayaml" || requirement != SAFE_PARSER_REQUIREMENT {
+        bail!(
+            "the TUI evaluator's `yaml_compat` must be `ayaml` pinned to `{SAFE_PARSER_REQUIREMENT}`, \
+             as the product's is; found `{name}` `{requirement}`"
+        );
+    }
+    for package in packages {
+        let name = package["name"].as_str().unwrap_or_default();
+        if RETIRED_YAML_PACKAGES.contains(&name) {
+            bail!(
+                "retired YAML package `{name}` is in the TUI evaluator's lock; it parses YAML with `ayaml` alone"
+            );
+        }
     }
     Ok(())
 }
@@ -410,6 +468,7 @@ pub fn gate(root: &Path) -> Result<()> {
     }
     let workspace = workspace_metadata(root)?;
     audit_yaml_bridge(&workspace)?;
+    audit_tui_evaluator(root)?;
     audit_admissions(root, &workspace, &policy)?;
     audit_binary_budget(root, &policy.binary_budget)?;
     let lock_count = workspace["packages"]
@@ -492,7 +551,7 @@ mod tests {
     fn yaml_parser_is_exactly_pinned() {
         let root = crate::workspace_root().expect("workspace root");
         let metadata = workspace_metadata(&root).expect("workspace metadata");
-        audit_yaml_bridge(&metadata).expect("both YAML bridge layers are exact");
+        audit_yaml_bridge(&metadata).expect("the safe parser is exactly pinned");
 
         let rename = "yaml_compat";
         let bad_requirement = "^0.1.0";
@@ -512,6 +571,56 @@ mod tests {
             dependency["req"] = serde_json::Value::String(bad_requirement.to_owned());
             let error = audit_yaml_bridge(&changed).expect_err("a floating layer must fail");
             assert!(error.to_string().contains(rename), "{error:#}");
+        }
+    }
+
+    #[test]
+    fn the_tui_evaluator_parses_yaml_with_the_product_parser() {
+        fn yaml_dependency(metadata: &mut serde_json::Value) -> &mut serde_json::Value {
+            metadata["packages"]
+                .as_array_mut()
+                .expect("packages")
+                .iter_mut()
+                .find(|package| package["name"] == "aplan-tui-eval")
+                .expect("aplan-tui-eval")["dependencies"]
+                .as_array_mut()
+                .expect("dependencies")
+                .iter_mut()
+                .find(|dependency| dependency["rename"] == "yaml_compat")
+                .expect("yaml_compat dependency")
+        }
+
+        let root = crate::workspace_root().expect("workspace root");
+        audit_tui_evaluator(&root).expect("the evaluator's lock and parser match the product's");
+
+        let manifest = root.join(TUI_EVALUATOR_MANIFEST);
+        let metadata = metadata(
+            &root,
+            &[
+                "--locked",
+                "--manifest-path",
+                manifest.to_str().expect("UTF-8 manifest path"),
+            ],
+        )
+        .expect("evaluator metadata");
+        for (name, requirement) in [("yaml_serde", "=0.10.7"), ("ayaml", "^0.1.0")] {
+            let mut changed = metadata.clone();
+            let dependency = yaml_dependency(&mut changed);
+            dependency["name"] = serde_json::Value::String(name.to_owned());
+            dependency["req"] = serde_json::Value::String(requirement.to_owned());
+            let error = audit_tui_evaluator_metadata(&changed)
+                .expect_err("a substituted or floating parser must fail");
+            assert!(error.to_string().contains("yaml_compat"), "{error:#}");
+        }
+        for retired in RETIRED_YAML_PACKAGES {
+            let mut changed = metadata.clone();
+            changed["packages"]
+                .as_array_mut()
+                .expect("packages")
+                .push(serde_json::json!({ "name": retired, "version": "1.0.0" }));
+            let error = audit_tui_evaluator_metadata(&changed)
+                .expect_err("a retired parser in the evaluator's lock must fail");
+            assert!(error.to_string().contains(retired), "{error:#}");
         }
     }
 

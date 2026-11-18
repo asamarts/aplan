@@ -308,7 +308,8 @@ const KNOWN_DIVERGENCES: &[(&str, &str, &str)] = &[
         "integer past u64",
         "Value",
         "ayaml's generic value holds a 128-bit integer the bridge refused; read as JSON or as a \
-         task, both still refuse it",
+         task, both still refuse it, and the one product read that keeps a generic value, the KEP \
+         importer's `kep-number`, refuses it itself (A2-166)",
     ),
 ];
 

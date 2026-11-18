@@ -921,9 +921,9 @@ new explicit `id` and `phase` fields for an ordinary `aplan_add`, require
 
 **If your downstream packaging policy carries a `RUSTSEC-2024-0449` exception solely for aplan,
 stop after upgrading to this build** (`A1-702`). aplan no longer resolves `serde_yaml_ng` or the
-archived `unsafe-libyaml` package. Keep auditing the replacement graph: the maintained
-`yaml_serde`/`libyaml-rs` bridge still contains translated unsafe code, and `A1-703` owns replacing
-that bridge with the qualified safe-Rust parser rather than treating maintenance as memory safety.
+archived `unsafe-libyaml` package. A build from `main` after `v0.6.0` goes further: it parses YAML
+with the safe Rust `ayaml` and no longer resolves the `yaml_serde`/`libyaml-rs` bridge or its
+translated unsafe code (`A2-009`).
 
 **If you open `.aplan.yml`, change into each runner directory and replay `test.list` to discover
 an evidence name, stop** (`A1-478`). Run `aplan test list [query]`; it uses the exact trusted

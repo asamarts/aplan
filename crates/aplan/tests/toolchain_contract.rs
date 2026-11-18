@@ -278,11 +278,20 @@ fn msrv_latest_stable_and_release_keep_distinct_authorities() {
         "the release negative control no longer detects a pin bypass"
     );
 
-    let latest_script = read("ci/scripts/latest-stable.sh");
+    // Line endings normalised, so a CRLF checkout matches the multi-line command below.
+    let latest_script = read("ci/scripts/latest-stable.sh").replace("\r\n", "\n");
     let latest_workflow = read(".github/workflows/latest-stable.yml");
+    // The whole command rather than its first words, so an install that drops
+    // the pinned components, and leaves the children to fetch them, fails too.
+    let pinned_install = concat!(
+        "rustup toolchain install \"$pinned\" \\\n",
+        "    --profile minimal \\\n",
+        "    --component \"$components\" \\\n",
+        "    --no-self-update\n",
+    );
     for expected in [
         "rustup toolchain install stable",
-        "rustup toolchain install \"$pinned\"",
+        pinned_install,
         "export RUSTUP_TOOLCHAIN=stable",
         "this is not a full or release receipt",
     ] {
@@ -296,7 +305,7 @@ fn msrv_latest_stable_and_release_keep_distinct_authorities() {
             .unwrap_or_else(|| panic!("missing {needle}"))
     };
     assert!(
-        position("rustup toolchain install \"$pinned\"") < position("cargo test --workspace"),
+        position(pinned_install) < position("cargo test --workspace"),
         "the pinned toolchain must be installed before the workspace tests run"
     );
     assert!(latest_workflow.contains("schedule:"));
