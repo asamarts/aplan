@@ -74,9 +74,15 @@ fn is_absent(v: &yaml_compat::Value) -> bool {
 
 /// Render `kep-number` as it appears in an id, accepting the number the
 /// template uses and the string some repositories quote it as.
+///
+/// An integer wider than 64 bits is refused, as the YAML bridge refused it:
+/// `ayaml` keeps it exactly, but no KEP is numbered past `u64`, and the parser
+/// switch must not turn a file aplan refused into an id (A2-166).
 fn kep_number(v: &yaml_compat::Value) -> Option<String> {
     match v {
-        yaml_compat::Value::Number(n) => Some(n.to_string()),
+        yaml_compat::Value::Number(n) if n.is_u64() || n.is_i64() || n.is_f64() => {
+            Some(n.to_string())
+        }
         yaml_compat::Value::String(s) if !s.trim().is_empty() => Some(s.trim().to_string()),
         _ => None,
     }

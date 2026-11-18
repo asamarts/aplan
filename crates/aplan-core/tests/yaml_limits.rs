@@ -43,6 +43,40 @@ fn depth_boundary() {
     assert!(error.to_string().contains("collection depth"));
 }
 
+/// The `%TAG` expansion ceiling, the bound 0.1.2 added: the cost the parser
+/// observes for one handle use is accepted as a limit, and one byte less is
+/// refused with the structured tag-expansion kind (A2-166).
+#[test]
+fn tag_expansion_boundary() {
+    let text = "%TAG !e! tag:example.com,2000:app/\n--- !e!widget value\n";
+    let probe = limits! { max_tag_expansion_bytes: 0 };
+    let refused = yaml_compat::parse_value_with_limits(text, &probe).unwrap_err();
+    let exceeded = refused.limit().expect("a structured limit");
+    assert_eq!(
+        exceeded.kind(),
+        yaml_compat::LimitKind::TagExpansion,
+        "{refused}"
+    );
+    let cost = usize::try_from(exceeded.observed()).expect("cost fits");
+    assert!(
+        cost >= "tag:example.com,2000:app/".len(),
+        "cost {cost} counts the prefix"
+    );
+
+    let accepted = limits! { max_tag_expansion_bytes: cost };
+    assert!(yaml_compat::parse_value_with_limits(text, &accepted).is_ok());
+    let below = limits! { max_tag_expansion_bytes: cost - 1 };
+    let error = yaml_compat::parse_value_with_limits(text, &below).unwrap_err();
+    let exceeded = error.limit().expect("a structured limit");
+    assert_eq!(
+        exceeded.kind(),
+        yaml_compat::LimitKind::TagExpansion,
+        "{error}"
+    );
+    assert_eq!(exceeded.observed(), cost as u64, "{error}");
+    assert!(error.to_string().contains("tag expansion"), "{error}");
+}
+
 #[test]
 fn document_count_boundary() {
     let limits = limits! { max_documents: 1 };
@@ -171,6 +205,9 @@ fn product_task_loader_refuses_depth_past_the_default() {
             nest(depth)
         )
     };
+    // The front matter's mapping is one level, so a title nested 127 deep is
+    // the 128-level default boundary and 128 deep is its first refused
+    // neighbour.
     let plan = load_task(&task(127));
     assert!(
         !plan
@@ -180,7 +217,7 @@ fn product_task_loader_refuses_depth_past_the_default() {
         "the default depth boundary must reach the schema, not the parser: {:?}",
         plan.load_diagnostics
     );
-    let plan = load_task(&task(129));
+    let plan = load_task(&task(128));
     assert_eq!(plan.tasks.len(), 0);
     assert!(
         plan.load_diagnostics

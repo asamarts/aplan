@@ -21,10 +21,12 @@ Install from crates.io:
 cargo install --locked aplan
 ```
 
-Then initialize a repository and add work:
+Then initialize a repository and add work. `aplan init` writes only `.aplan.yml`, so create the
+plan directory before the first `add`:
 
 ```sh
 aplan init
+mkdir -p aplan/tasks
 aplan add "Define the release gate" --id P1-001 --effort 1 --tag cross-cutting
 aplan check
 ```

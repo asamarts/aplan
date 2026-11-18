@@ -375,6 +375,8 @@ fn is_explicit_exemption_free_epoch(tasks: &[String]) -> bool {
             .all(|name| name.starts_with("A2-") || name.starts_with("M-"))
 }
 
+/// Named before the epoch admitted its `M-` cut milestones; the name stays
+/// because closed tasks cite it as evidence.
 #[test]
 fn the_exemption_free_epoch_is_only_a2() {
     assert!(is_explicit_exemption_free_epoch(&[

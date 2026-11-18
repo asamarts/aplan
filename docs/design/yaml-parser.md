@@ -132,8 +132,10 @@ compatibility mode. `A2-009` consumes 0.1.3 directly, through the same `yaml_com
 - **Callers.** Most callers read through `yaml_compat::compat::from_str`, which follows libyaml's
   resolution: task front matter, configuration, imports and cuts, the release and CI audits, and
   the TUI evaluation harness. The readers of formats aplan defines itself (captures, blueprints, dependency
-  manifests) and a few tests use `ayaml`'s default reader. Native limits are built from `ayaml`'s
-  own options rather than a wrapper.
+  manifests) and a few tests use `ayaml`'s default reader. `add --from` manifests are read with the
+  compatibility reader, although a blueprint that embeds the same entries uses the default one;
+  `A2-166` records the split rather than changing what either accepts. Native limits are built
+  from `ayaml`'s own options rather than a wrapper.
 - **Oracle.** `aplan-core` and `aplan-config` keep `yaml_serde` 0.10.7 as a dev-dependency named
   `yaml_serde_baseline`, used only by the differential tests. The dependency audit pins `ayaml`
   to `=0.1.3` and refuses any product graph that resolves `yaml_serde`, `libyaml-rs` or the
@@ -152,26 +154,35 @@ compatibility mode. `A2-009` consumes 0.1.3 directly, through the same `yaml_com
   broken flow collections, tabs, undefined and self-referencing aliases, tags, a byte order mark,
   a control character, out-of-range integers, non-string keys, merge keys, redefined anchors, a
   64 KiB scalar, 10,000 levels of nesting and an alias bomb. 89 of the 96 outcomes agree. The
-  test pins the other seven exactly, so a new divergence fails it, and none lets aplan accept a
-  value the bridge refused or read one differently:
+  test pins the other seven exactly, so a new divergence fails it. None lets aplan accept a value
+  the bridge refused or read one differently, but the tags below make it refuse values the bridge
+  read:
   - The default reader refuses a duplicate key, at the top level or nested, where the bridge's
     JSON read kept the last value. It also refuses a flow collection whose continuation line is
     not indented, which YAML forbids and libyaml allowed; the compatibility reader still accepts
     it. Captures, blueprints and dependency manifests are read this stricter way.
-  - `ayaml` keeps a `%TAG`-declared tag on a generic value where the bridge dropped it and read
-    the scalar as a string. Read as JSON through either reader, `ayaml` therefore refuses such a
-    document, where the bridge silently changed the value's type; in practice that reaches only a
-    capture file, since a task's front matter cannot hold a directive. A local tag such as
-    `!custom` is refused by both, and typed reads, which configuration uses, ignore the tag under
-    both parsers.
+  - `ayaml` keeps a tag outside YAML's core schema on a generic value, where the bridge dropped
+    it and read the scalar as a plain string. That covers a `%TAG` handle and also tags that need
+    no directive: `!!timestamp`, `!!binary` and a verbatim tag naming another vocabulary, such as
+    `!<tag:example.com,2000:x>`. Core tags (`!!str`, `!!int`, `!!float`, `!!bool`, and their
+    verbatim forms) resolve the same under both parsers. Every product read
+    that goes through a generic or JSON value therefore refuses such a document where the bridge
+    read the string: the loader's front matter read, the fields the KEP importer does not model,
+    and the capture reader. It reaches task files as well as captures, since those tags need no
+    directive, and since the front matter ends only at a line that is exactly `---`, so a
+    `--- # note` line keeps a directive inside it. A local tag such as `!custom` is refused by
+    both, and typed string fields, such as a KEP's `title`, ignore the tag under both parsers. The test pins only the `%TAG` case; `A2-169`
+    owns restoring the bridge's reading and pinning the rest.
   - `ayaml`'s generic value holds an integer past the 64-bit range, which the bridge refused.
-    Read as JSON or as a task, both refuse it.
+    Read as JSON or as a task, both refuse it, and the KEP importer, the one product read that
+    keeps a generic value, refuses it itself (`A2-166`).
 - **Contract and limits.** The contract tests pin aliases, anchors, tags, literal merge keys,
   duplicate keys and extra documents with their locations, scalar typing, invalid UTF-8, depth
   and alias stress, mapping serialization, and empty documents. An empty document reads as an
   empty collection or a struct's defaults; an explicit `~` is refused for both. The limit tests
-  set each of `ayaml`'s native ceilings and prove its boundary and first refused neighbour, and
-  the product task loader still refuses nesting and an alias bomb past the defaults.
+  set each of `ayaml`'s native ceilings, the tag-expansion one since `A2-166`, and prove its
+  boundary and first refused neighbour, and the product task loader still refuses nesting and an
+  alias bomb past the defaults.
 - **Errors.** Parser errors keep their line but may name a different column and cause. Two
   messages in the rule catalogue changed; for a flow sequence whose continuation is not
   indented, the bridge reported column 6 and "did not find expected ',' or ']'", and `ayaml`
@@ -224,17 +235,24 @@ compatibility mode. `A2-009` consumes 0.1.3 directly, through the same `yaml_com
   byte-level tests pin enums written as plain scalars (`status: todo`). The complete
   workspace suite passes.
 - **3.** The generic, typed and hostile-input differentials above, with every tag and
-  representation difference pinned with a reason. Generated documents and mutation round trips
-  are pinned byte for byte by the command-output corpus the bridge build produced, which passes
-  unchanged apart from the two parser messages above.
-- **4.** Every ceiling has an explicit default, and aplan overrides none, so every product read
-  applies them. Each boundary and its first refused neighbour is proven against `yaml_compat`
-  with explicit values. Only depth and the alias bomb also run through a product entry point,
-  the task loader, because reaching the others there needs inputs of up to 32 MiB or a million
-  events.
+  representation difference pinned with a reason, except the tags that need no directive
+  (`A2-169`). The command-output corpus the bridge build produced passes unchanged apart from the
+  two parser messages above, but it prints no front matter, so it does not pin emitted files byte
+  for byte. `ayaml` quotes the strings that need it with double quotes where the bridge used
+  single quotes (41 of 68 awkward strings in one sweep), and each reads back as the same value.
+- **4.** Partly met. Every ceiling has an explicit default, and aplan overrides none, so every
+  product read applies them. Each boundary and its first refused neighbour is proven against
+  `yaml_compat` with explicit values, which proves `ayaml`'s mechanism rather than aplan's reads.
+  Through a product entry point, the task loader proves the depth boundary and its first refused
+  neighbour and refuses an alias bomb, and `parse_config` and the task emitter refuse input past
+  the defaults for anchors, alias dereferences, events, documents, input bytes and output bytes
+  without proving the accepted boundary. Scalar bytes, collection entries and tag expansion never
+  reach a product read in a test. `A2-173` owns the rest.
 - **5.** The complete local profile passes on the change. `A2-009` closes only after the hosted
   complete profile passes on `main`, and the dependency audit refuses a product graph holding
-  either bridge crate.
+  either bridge crate. The TUI evaluator, a separate workspace that no gate built, was missed: its
+  manifest still named the bridge under `yaml_compat`, so it did not build until `A2-166` moved it
+  to `ayaml` and made the dependency audit check its lock and parser.
 - **6.** The product-level gates hold, as measured above. aplan emits only its own records (task
   front matter, evidence, captures and configuration), each a few levels deep, so the 2.40 times
   depth-128 emission ratio reaches no product path.

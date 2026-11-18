@@ -976,10 +976,10 @@ policy and documentation rather than the shipped `aplan` product source, so the 
 the exact product measured. The policy records only measurements that participate in that verdict;
 two unused historical foundation fields were removed rather than retained as inert evidence.
 
-The maintained YAML bridge has no current advisory, but its engine is still C source translated to
-unsafe Rust. That is independently changeable hardening work, not an exception to hide inside this
-admission review. `A2-009` now owns a public cutover once an immutable, licensed safe Rust backend
-passes the compatibility, hostile-input, performance and complete product gates in
+The maintained YAML bridge then had no current advisory, but its engine was C source translated to
+unsafe Rust. That was independently changeable hardening work, not an exception to hide inside this
+admission review. `A2-009` later replaced the bridge with the safe Rust `ayaml` 0.1.3, after it
+passed the compatibility, hostile-input, performance and complete product gates recorded in
 `docs/design/yaml-parser.md`.
 
 ### Mutations

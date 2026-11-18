@@ -326,6 +326,17 @@ fn unusable_input_is_an_error_not_a_silent_empty_import() {
         Kep.parse("kep.yaml", "\t not: [valid: yaml\n", &o).is_err(),
         "malformed yaml"
     );
+    // The YAML bridge refused an integer past u64; the safe parser keeps it,
+    // and it must not become an id the bridge never produced (A2-166).
+    assert!(
+        Kep.parse(
+            "kep.yaml",
+            "title: T\nkep-number: 18446744073709551616\nstatus: provisional\n",
+            &o
+        )
+        .is_err(),
+        "a kep-number wider than 64 bits"
+    );
 }
 
 #[test]
