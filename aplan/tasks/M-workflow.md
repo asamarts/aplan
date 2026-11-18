@@ -31,7 +31,8 @@ tags:
 
 Everyday workflow surfaces: trustworthy completion history, readable terminal Markdown, the
 capture workflow over MCP, versioned structured MCP outputs, and bounded read latency across
-every read surface, ending in an audit of the whole cut.
+every read surface, ending in an audit of the whole cut. That audit (`A2-117`) waits on the TUI
+release-quality cut (`M-tui-quality`), as `A2-089` requires.
 
 ## Exit criteria
 

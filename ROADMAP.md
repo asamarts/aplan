@@ -5,7 +5,7 @@ evidence ledger. The live plan under `aplan/` is the source of truth, and this p
 order. `ROADMAP.status.md` is the generated view of where each cut stands, and `aplan ready` lists
 what can be started now.
 
-On 2026-11-17 every open issue and every open item of the pre-public backlog moved into this plan,
+On 2026-11-18 every open issue and every open item of the pre-public backlog moved into this plan,
 each rewritten so that its reason stands on public material alone (`A2-019`). The cuts below are
 sequenced by their milestones' `blocked_by` edges, so `ready` lists work in priority order. To pull
 a task forward, move it into an earlier cut with `aplan mv` rather than starting it out of order.
@@ -40,7 +40,7 @@ generated agent contracts that refuse a correct plan, claims that outlive the wo
 passes before a commit and fails after it, and evidence or MCP refusals that contradict the state
 they report.
 
-**Tasks:** `A2-034`, `A2-050`, `A2-051`, `A2-052`, `A2-053`, `A2-054`, `A2-055`, `A2-062`, `A2-081`, `A2-085`, `A2-091`, `A2-095`, `A2-096`, `A2-097`, `A2-099`, `A2-101`, `A2-106`, `A2-122`, `A2-140`, `A2-142`, `A2-147`, `A2-152`, `A2-153`, `A2-156`, `A2-157`, `A2-160`, `A2-161`
+**Tasks:** `A2-034`, `A2-050`, `A2-051`, `A2-052`, `A2-053`, `A2-054`, `A2-055`, `A2-056`, `A2-062`, `A2-081`, `A2-085`, `A2-091`, `A2-095`, `A2-096`, `A2-097`, `A2-099`, `A2-101`, `A2-106`, `A2-122`, `A2-140`, `A2-142`, `A2-147`, `A2-152`, `A2-153`, `A2-156`, `A2-157`, `A2-160`, `A2-161`
 
 ### hardening, Integrity and hardening
 
@@ -52,7 +52,7 @@ when a client closes its input (`A2-170`), TUI ranking on keys that change only 
 (`A2-171`), CI that skips the tests reading a changed plan or README (`A2-172`), and YAML limits
 not yet proven through product reads (`A2-173`).
 
-**Tasks:** `A2-056`, `A2-069`, `A2-087`, `A2-127`, `A2-131`, `A2-133`, `A2-141`, `A2-145`, `A2-162`, `A2-165`, `A2-170`, `A2-171`, `A2-172`, `A2-173`
+**Tasks:** `A2-069`, `A2-087`, `A2-127`, `A2-131`, `A2-133`, `A2-141`, `A2-145`, `A2-162`, `A2-165`, `A2-170`, `A2-171`, `A2-172`, `A2-173`
 
 ### adoption, Adoption and ergonomics
 
@@ -68,7 +68,8 @@ updated, before its implementation task can start.
 
 Sequenced after `M-v0.8`. Everyday workflow surfaces: trustworthy completion history, readable
 terminal Markdown, the capture workflow over MCP, versioned structured MCP outputs, and bounded
-read latency across every read surface, ending in an audit of the whole cut.
+read latency across every read surface, ending in an audit of the whole cut. That audit
+(`A2-117`) waits on the TUI release-quality cut, as `A2-089` requires.
 
 **Tasks:** `A2-108`, `A2-109`, `A2-110`, `A2-111`, `A2-112`, `A2-113`, `A2-114`, `A2-115`, `A2-116`, `A2-117`, `A2-118`, `A2-119`, `A2-120`, `A2-134`, `A2-135`, `A2-136`, `A2-139`
 

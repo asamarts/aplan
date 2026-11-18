@@ -51,11 +51,6 @@ effort_days_per_week: 27
 # hardcoded CI and Rust lists did not. Task files and test fixtures are inputs,
 # not narrative documentation. `ROADMAP.md` also appears through
 # `membership.doc` below; overlapping declarations resolve to one document.
-#
-# The membership declaration (`A1-165`) also says that the `**Tasks:**` line
-# under each `### v0.N` heading and the cut's milestone are two copies of one
-# fact. `M-v0.1` has no cut section here and is silent, which is the behaviour
-# a milestone that shipped before the document grew sections needs.
 docs:
   paths:
     - aplan/README.md

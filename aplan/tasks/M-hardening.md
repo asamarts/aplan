@@ -5,7 +5,6 @@ phase: 2
 status: todo
 blocked_by:
 - M-v0.8
-- A2-056
 - A2-069
 - A2-087
 - A2-127
