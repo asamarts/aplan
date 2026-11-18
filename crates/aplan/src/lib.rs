@@ -18904,8 +18904,9 @@ mod tests {
 
     #[test]
     fn layered_level_validation_and_identity_distinguish_tasks_from_milestones() {
-        let task =
-            |source: &str| yaml_compat::from_str::<aplan_core::Task>(source).expect("task fixture");
+        let task = |source: &str| {
+            yaml_compat::compat::from_str::<aplan_core::Task>(source).expect("task fixture")
+        };
         let tasks = [
             task("id: T-1\ntitle: task\nphase: 1\nstatus: todo"),
             task("id: M-1\ntitle: milestone\nphase: 1\nstatus: todo\ntags: [milestone]"),
@@ -20492,8 +20493,9 @@ mod tests {
     /// none of their member tasks belongs in `ready` (`A1-495`).
     #[test]
     fn an_empty_ready_list_names_every_closeable_cut() {
-        let task =
-            |source: &str| yaml_compat::from_str::<aplan_core::Task>(source).expect("task fixture");
+        let task = |source: &str| {
+            yaml_compat::compat::from_str::<aplan_core::Task>(source).expect("task fixture")
+        };
         let tasks = [
             task("id: A\ntitle: member A\nphase: 0\nstatus: done"),
             task("id: B\ntitle: member B\nphase: 0\nstatus: done"),

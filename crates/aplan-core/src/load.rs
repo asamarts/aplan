@@ -479,7 +479,7 @@ pub fn id_and_status(source: &str) -> Option<(String, crate::task::Status)> {
     // Unknown keys are ignored on purpose, which is the opposite of the loader's
     // contract and right here: this reads a file written by an older build, and
     // a field that build had is not this one's business to refuse.
-    let front: Front = yaml_compat::from_str(frontmatter).ok()?;
+    let front: Front = yaml_compat::compat::from_str(frontmatter).ok()?;
     Some((front.id, front.status))
 }
 
@@ -596,7 +596,7 @@ fn source_literal(
         if rest.is_empty() {
             continue;
         }
-        let Ok(parsed) = yaml_compat::from_str::<serde_json::Value>(rest) else {
+        let Ok(parsed) = yaml_compat::compat::from_str::<serde_json::Value>(rest) else {
             continue;
         };
         if &parsed != instance {
@@ -739,7 +739,7 @@ fn load_one_source(
     };
 
     // YAML -> JSON so we can schema-check before typed deserialisation.
-    let value: serde_json::Value = match yaml_compat::from_str(frontmatter) {
+    let value: serde_json::Value = match yaml_compat::compat::from_str(frontmatter) {
         Ok(v) => v,
         Err(e) => {
             let (message, instruction) = yaml_error_message(&e, frontmatter);
@@ -785,7 +785,7 @@ fn load_one_source(
     // the `serde_json::Value` step silently keeps the last of any duplicate keys,
     // so `id: A` twice would pass unnoticed. Serde rejects a duplicate field, the
     // way `.aplan.yml` loading already does.
-    match yaml_compat::from_str::<Task>(frontmatter) {
+    match yaml_compat::compat::from_str::<Task>(frontmatter) {
         Ok(task) => {
             check_finite_effort(&task, path)?;
             Ok(LoadedTask {
@@ -887,7 +887,8 @@ pub fn frontmatter_is_loadable(frontmatter: &str) -> Result<(), String> {
             |d| d.message.clone(),
         )
     })?;
-    let value: serde_json::Value = yaml_compat::from_str(frontmatter).map_err(|e| e.to_string())?;
+    let value: serde_json::Value =
+        yaml_compat::compat::from_str(frontmatter).map_err(|e| e.to_string())?;
     match validator.iter_errors(&value).next() {
         // With the instance path, because the caller is a writer refusing its
         // own output and "null is not of type array" alone does not say which
@@ -1618,7 +1619,7 @@ mod tests {
         // and then says what it does. The raw serde message reports a column
         // inside the value and never mentions quoting, which is the whole fix.
         let frontmatter = "id: RD0-08\ntitle: ci/scripts/plan.sh: check, verify\n";
-        let err = yaml_compat::from_str::<serde_json::Value>(frontmatter)
+        let err = yaml_compat::compat::from_str::<serde_json::Value>(frontmatter)
             .expect_err("an unquoted colon must not parse");
         let (message, instruction) = yaml_error_message(&err, frontmatter);
         assert!(message.contains("`title`"), "{message}");
@@ -1630,7 +1631,7 @@ mod tests {
     fn an_unrelated_yaml_error_keeps_its_own_message() {
         // The special case must not swallow every other syntax error.
         let frontmatter = "id: [unclosed\n";
-        let err = yaml_compat::from_str::<serde_json::Value>(frontmatter)
+        let err = yaml_compat::compat::from_str::<serde_json::Value>(frontmatter)
             .expect_err("unclosed bracket must not parse");
         let (message, _) = yaml_error_message(&err, frontmatter);
         assert!(!message.contains("quoted"), "{message}");
@@ -1672,7 +1673,7 @@ mod tests {
         let frontmatter =
             "id: M-a\ntitle: a cut\nphase: 1\nstatus: todo\ntags:\n  - milestone\nblocked_by:";
 
-        let typed: Result<crate::task::Task, _> = yaml_compat::from_str(frontmatter);
+        let typed: Result<crate::task::Task, _> = yaml_compat::compat::from_str(frontmatter);
         assert!(
             typed.is_ok(),
             "serde is supposed to be the weaker of the two here: {typed:?}"

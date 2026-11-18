@@ -18,7 +18,7 @@ yet; adding a scenario for one is how a wording joins this file.
 
 frontmatter parses and satisfies the schema
 
-- **says:** invalid YAML frontmatter: did not find expected ',' or ']' at line 2 column 6, while parsing a flow sequence at line 1 column 5
+- **says:** invalid YAML frontmatter: flow collection entries must be indented at line 2 column 1, in the flow sequence opened at line 1 column 5
   - **fix:** Fix the YAML syntax in the frontmatter.
 - **says:** invalid YAML frontmatter: mapping values are not allowed in this context at line 2 column 15: the value of `title` contains `: `, which starts a nested mapping unless the value is quoted
   - **fix:** Quote the value: `title: 'text with: a colon'`.
@@ -484,6 +484,6 @@ a task's owner belongs to the declared owner vocabulary
 
 every inbox entry is one canonical, valid and cross-record-consistent V1 capture
 
-- **says:** invalid capture YAML: did not find expected ',' or ']' at line 3 column 1, while parsing a flow sequence at line 2 column 5
+- **says:** invalid capture YAML: unterminated flow sequence at line 3 column 1, opened at line 2 column 5
   - **fix:** Repair the YAML so it is one `aplan/capture/v1` mapping.
 

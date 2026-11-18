@@ -10,3 +10,8 @@ mod prompts;
 mod switches;
 #[path = "../yaml_contract.rs"]
 mod yaml_contract;
+
+#[path = "../yaml_differential.rs"]
+mod yaml_differential;
+#[path = "../yaml_limits.rs"]
+mod yaml_limits;

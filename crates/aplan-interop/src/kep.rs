@@ -227,10 +227,11 @@ impl ProposalSource for Kep {
             });
         }
 
-        let doc: KepYaml = yaml_compat::from_str(contents).map_err(|e| ImportError::Malformed {
-            source_name: source_name.to_string(),
-            message: e.to_string(),
-        })?;
+        let doc: KepYaml =
+            yaml_compat::compat::from_str(contents).map_err(|e| ImportError::Malformed {
+                source_name: source_name.to_string(),
+                message: e.to_string(),
+            })?;
 
         let malformed = |message: &str| ImportError::Malformed {
             source_name: source_name.to_string(),

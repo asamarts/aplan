@@ -327,7 +327,7 @@ fn human_output_cannot_be_steered_by_a_replacement_id() {
     let updated =
         std::fs::read_to_string(dir.path().join("aplan/tasks/custom.md")).expect("updated");
     assert_eq!(
-        yaml_compat::from_str::<aplan_core::Task>(
+        yaml_compat::compat::from_str::<aplan_core::Task>(
             updated
                 .strip_prefix("---\n")
                 .and_then(|text| text.split_once("---\n").map(|(frontmatter, _)| frontmatter))

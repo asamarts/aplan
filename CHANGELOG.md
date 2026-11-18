@@ -8,6 +8,16 @@ to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Changed
 
+- **YAML is parsed by the safe Rust `ayaml` 0.1.3** (`A2-009`). The C-derived `yaml_serde` /
+  `libyaml-rs` bridge leaves the product's dependency graph and stays only as a test oracle. Every
+  YAML file and task front matter in this repository parses to the same value under both parsers.
+  Plans, configuration and imports are read as before, with `ayaml`'s native limits on input size,
+  depth, aliases and expansion. Captures, blueprints and dependency manifests, the formats aplan
+  defines itself, are read more strictly: a duplicate key, or a flow collection whose continuation
+  line is not indented, is now refused where it used to be accepted. So is a capture whose values
+  carry a `%TAG`-declared tag, which used to be read as strings. Some parser errors name a
+  different cause or column; their line is unchanged in every message the rule catalogue shows.
+
 - **The source builds without warnings under Rust 1.100 while the pin stays at 1.99.1**
   (`A2-017`). One plan-walk predicate is rewritten to satisfy the new `needless_bool` lint, the
   test-only `trycmd` dependency is declared once through the workspace, and the packages drop

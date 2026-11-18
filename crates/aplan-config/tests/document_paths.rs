@@ -9,7 +9,7 @@ use std::path::{Path, PathBuf};
 use aplan_config::Config;
 
 fn config(yaml: &str) -> Config {
-    let config: Config = yaml_compat::from_str(yaml).expect("configuration parses");
+    let config: Config = yaml_compat::compat::from_str(yaml).expect("configuration parses");
     config.validate_docs().expect("declaration is valid");
     config
 }
@@ -119,7 +119,7 @@ fn absolute_literals_and_unvalidated_globs_take_their_distinct_paths() {
     assert_eq!(documents, [document]);
 
     let unchecked: Config =
-        yaml_compat::from_str("docs:\n  paths: ['[']\n").expect("configuration parses");
+        yaml_compat::compat::from_str("docs:\n  paths: ['[']\n").expect("configuration parses");
     let error = unchecked
         .docs
         .expect("docs")

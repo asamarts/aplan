@@ -511,7 +511,7 @@ fn configured_identity(adapter: Adapter) -> Result<Identity> {
             let path = omp_home()?.join("config.yml");
             if path.is_file() {
                 let value: yaml_compat::Value =
-                    yaml_compat::from_str(&fs::read_to_string(&path).with_context(|| {
+                    yaml_compat::compat::from_str(&fs::read_to_string(&path).with_context(|| {
                         format!("reading OMP configuration at {}", path.display())
                     })?)
                     .context("parsing OMP configuration")?;

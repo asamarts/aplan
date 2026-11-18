@@ -214,10 +214,11 @@ pub fn read(path: &std::path::Path) -> Result<Vec<Entry>, ManifestError> {
 /// [`ManifestError::Parse`] when `text` is not a list of entries, or
 /// [`ManifestError::Empty`] when the list contains no tasks.
 pub fn parse(path: &std::path::Path, text: &str) -> Result<Vec<Entry>, ManifestError> {
-    let entries: Vec<Entry> = yaml_compat::from_str(text).map_err(|e| ManifestError::Parse {
-        path: path.to_path_buf(),
-        said: e.to_string(),
-    })?;
+    let entries: Vec<Entry> =
+        yaml_compat::compat::from_str(text).map_err(|e| ManifestError::Parse {
+            path: path.to_path_buf(),
+            said: e.to_string(),
+        })?;
     if entries.is_empty() {
         return Err(ManifestError::Empty {
             path: path.to_path_buf(),

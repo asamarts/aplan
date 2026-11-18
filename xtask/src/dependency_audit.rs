@@ -123,10 +123,20 @@ fn workspace_metadata(root: &Path) -> Result<serde_json::Value> {
     metadata(root, &["--locked"])
 }
 
-/// The temporary YAML bridge has two independently versioned layers. Pinning
-/// only the public wrapper still lets a lock refresh select a newer compatible
-/// engine, which would make the executable compatibility evidence describe a
-/// different parser than the committed policy reviewed by A2-002.
+/// YAML parsers the product has retired. `yaml_serde` stays only as
+/// `aplan-core`'s differential test oracle, so the lock may hold it, but no
+/// product graph may resolve it or the C-derived parsers before it (A2-009).
+const RETIRED_YAML_PACKAGES: &[&str] = &[
+    "yaml_serde",
+    "libyaml-rs",
+    "serde_yaml",
+    "serde_yaml_ng",
+    "unsafe-libyaml",
+];
+
+/// The cutover consumes one exact safe-Rust parser (A2-009). Pin the parser
+/// crate so a lock refresh cannot substitute a different implementation or
+/// version.
 fn audit_yaml_bridge(metadata: &serde_json::Value) -> Result<()> {
     let packages = metadata["packages"]
         .as_array()
@@ -139,24 +149,15 @@ fn audit_yaml_bridge(metadata: &serde_json::Value) -> Result<()> {
         .as_array()
         .context("aplan-core metadata omitted dependencies")?;
 
-    for (package, rename, requirement) in [
-        ("yaml_serde", "yaml_compat", "=0.10.7"),
-        ("libyaml-rs", "yaml_engine_pin", "=0.3.0"),
-    ] {
-        let dependency = dependencies
-            .iter()
-            .find(|dependency| dependency["name"] == package && dependency["rename"] == rename)
-            .with_context(|| {
-                format!("aplan-core must declare YAML bridge layer `{package}` as `{rename}`")
-            })?;
-        let found = dependency["req"]
-            .as_str()
-            .context("YAML bridge dependency omitted its version requirement")?;
-        if found != requirement {
-            bail!(
-                "YAML bridge layer `{rename}` must stay pinned to `{requirement}`, found `{found}`"
-            );
-        }
+    let dependency = dependencies
+        .iter()
+        .find(|dependency| dependency["name"] == "ayaml" && dependency["rename"] == "yaml_compat")
+        .context("aplan-core must declare safe parser `ayaml` as `yaml_compat`")?;
+    let found = dependency["req"]
+        .as_str()
+        .context("ayaml dependency omitted its version requirement")?;
+    if found != "=0.1.3" {
+        bail!("safe parser `yaml_compat` must stay pinned to `=0.1.3`, found `{found}`");
     }
     Ok(())
 }
@@ -356,6 +357,13 @@ fn audit_graphs(
             );
         }
     }
+    for package in RETIRED_YAML_PACKAGES {
+        if default.contains(package) || headless.contains(package) {
+            bail!(
+                "retired YAML package `{package}` entered the product graph; the product parses YAML with `ayaml` alone"
+            );
+        }
+    }
     Ok(())
 }
 
@@ -481,12 +489,13 @@ mod tests {
     }
 
     #[test]
-    fn yaml_bridge_wrapper_and_engine_are_exactly_pinned() {
+    fn yaml_parser_is_exactly_pinned() {
         let root = crate::workspace_root().expect("workspace root");
         let metadata = workspace_metadata(&root).expect("workspace metadata");
         audit_yaml_bridge(&metadata).expect("both YAML bridge layers are exact");
 
-        for (rename, bad_requirement) in [("yaml_compat", "^0.10.7"), ("yaml_engine_pin", "^0.3.0")]
+        let rename = "yaml_compat";
+        let bad_requirement = "^0.1.0";
         {
             let mut changed = metadata.clone();
             let dependency = changed["packages"]
@@ -575,6 +584,24 @@ mod tests {
         )
         .expect_err("rejected progress stack must stay absent");
         assert!(error.to_string().contains("external progress package"));
+
+        for retired in RETIRED_YAML_PACKAGES {
+            let error = audit_graphs(
+                &policy,
+                3,
+                &graph(&[
+                    ("aplan", "1.0.0"),
+                    ("terminal", "2.0.0"),
+                    (retired, "1.0.0"),
+                ]),
+                &headless,
+            )
+            .expect_err("a retired YAML parser must stay out of the default graph");
+            assert!(error.to_string().contains(retired), "{error}");
+            let error = audit_graphs(&policy, 3, &default, &graph(&[(retired, "1.0.0")]))
+                .expect_err("a retired YAML parser must stay out of the headless graph");
+            assert!(error.to_string().contains(retired), "{error}");
+        }
     }
 
     #[test]

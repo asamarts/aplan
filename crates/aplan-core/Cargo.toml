@@ -15,9 +15,7 @@ authors.workspace = true
 serde.workspace = true
 serde_json.workspace = true
 yaml_compat.workspace = true
-# Resolver constraint only; callers use `yaml_compat`, while the dependency
-# audit proves that both the wrapper and its engine stay exact.
-yaml_engine_pin.workspace = true
+# Callers use `yaml_compat`; the dependency audit keeps the parser exact.
 schemars.workspace = true
 jsonschema.workspace = true
 thiserror.workspace = true
@@ -40,3 +38,7 @@ workspace = true
 [[test]]
 name = "integration"
 path = "tests/integration/main.rs"
+
+[dev-dependencies.yaml_serde_baseline]
+package = "yaml_serde"
+version = "=0.10.7"

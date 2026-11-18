@@ -424,7 +424,7 @@ pub(super) fn load_inventory(root: &Path) -> Result<Inventory> {
     let text = std::fs::read_to_string(root.join(MANIFEST))
         .with_context(|| format!("reading {MANIFEST}"))?;
     let inventory: Inventory =
-        yaml_compat::from_str(&text).with_context(|| format!("parsing {MANIFEST}"))?;
+        yaml_compat::compat::from_str(&text).with_context(|| format!("parsing {MANIFEST}"))?;
     validate_inventory(root, &inventory)?;
     Ok(inventory)
 }
@@ -754,7 +754,7 @@ fn audit_repository_wiring(root: &Path, inventory: &Inventory) -> Result<()> {
 
 fn audit_workflow_text(workflow: &str, inventory: &Inventory) -> Result<()> {
     let document: yaml_compat::Value =
-        yaml_compat::from_str(workflow).with_context(|| format!("parsing {WORKFLOW}"))?;
+        yaml_compat::compat::from_str(workflow).with_context(|| format!("parsing {WORKFLOW}"))?;
     let root = document
         .as_mapping()
         .with_context(|| format!("{WORKFLOW} must contain a YAML mapping"))?;
@@ -977,7 +977,7 @@ mod tests {
     use super::*;
 
     fn canonical() -> Inventory {
-        yaml_compat::from_str(include_str!("../../ci/validation.yml"))
+        yaml_compat::compat::from_str(include_str!("../../ci/validation.yml"))
             .expect("canonical validation inventory parses")
     }
 
@@ -1068,7 +1068,7 @@ mod tests {
             "profiles:\n  development:\n    assurance: selected\n",
             1,
         );
-        let error = yaml_compat::from_str::<Inventory>(&duplicate_profile)
+        let error = yaml_compat::compat::from_str::<Inventory>(&duplicate_profile)
             .unwrap_err()
             .to_string();
         assert!(error.contains("duplicate field `development`"), "{error}");
@@ -1078,7 +1078,7 @@ mod tests {
             "  preview:\n    assurance: selected\n  full:\n",
             1,
         );
-        let error = yaml_compat::from_str::<Inventory>(&unknown_profile)
+        let error = yaml_compat::compat::from_str::<Inventory>(&unknown_profile)
             .unwrap_err()
             .to_string();
         assert!(error.contains("unknown field `preview`"), "{error}");
@@ -1088,7 +1088,7 @@ mod tests {
             "    assurance: selected\n    mystery: true",
             1,
         );
-        let error = yaml_compat::from_str::<Inventory>(&unknown)
+        let error = yaml_compat::compat::from_str::<Inventory>(&unknown)
             .unwrap_err()
             .to_string();
         assert!(error.contains("unknown field `mystery`"), "{error}");

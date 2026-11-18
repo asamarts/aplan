@@ -1805,8 +1805,8 @@ fn style_exemptions(root: &std::path::Path) -> Result<Vec<String>> {
     let Ok(text) = std::fs::read_to_string(&path) else {
         return Ok(Vec::new());
     };
-    let value: yaml_compat::Value =
-        yaml_compat::from_str(&text).with_context(|| format!("parsing {}", path.display()))?;
+    let value: yaml_compat::Value = yaml_compat::compat::from_str(&text)
+        .with_context(|| format!("parsing {}", path.display()))?;
     let Some(list) = value.get("exempt").and_then(|e| e.as_sequence()) else {
         return Ok(Vec::new());
     };

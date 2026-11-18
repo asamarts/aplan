@@ -2,18 +2,18 @@
   "schema": "aplan/dependency-policy/v1",
   "target": "x86_64-unknown-linux-gnu",
   "budgets": {
-    "lock": 290,
-    "default": 201,
-    "headless": 171,
+    "lock": 291,
+    "default": 200,
+    "headless": 169,
     "tui_increment": 32
   },
   "binary_budget": {
-    "owner": "A2-002",
-    "measured_default_bytes": 21684712,
-    "measured_headless_bytes": 19286904,
+    "owner": "A2-009",
+    "measured_default_bytes": 22388096,
+    "measured_headless_bytes": 19989704,
     "maximum_increment_bytes": 2500000,
     "maximum_increment_basis_points": 1500,
-    "measurement": "GNU strip 2.47 --strip-all after separate mbx build --locked --release -p aplan --target x86_64-unknown-linux-gnu runs, default and --no-default-features, from public control revision 51a5c95 with Rust 1.99.1"
+    "measurement": "GNU strip 2.47 --strip-all after separate mbx build --locked --release -p aplan --target x86_64-unknown-linux-gnu runs, default and --no-default-features, of the A2-009 ayaml change on public revision a538ad4 with Rust 1.99.1; the same build of a538ad4 with the yaml_serde bridge measured 21799912 and 19400736 bytes"
   },
   "terminal_stack": {
     "crossterm": "0.29.0",

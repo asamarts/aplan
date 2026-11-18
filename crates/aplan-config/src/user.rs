@@ -170,6 +170,7 @@ pub fn path_from(xdg: Option<&std::ffi::OsStr>, home: Option<&std::ffi::OsStr>) 
 /// When the file exists and cannot be read or parsed. **Not** when it is
 /// absent: no file is the ordinary case and means "nothing to say", where an
 /// unreadable one is a setting somebody believes is in effect.
+#[allow(clippy::result_large_err)] // The public Error contract is intentionally unboxed.
 pub fn load() -> Result<UserConfig, Error> {
     match path() {
         Some(p) => load_from(&p),
@@ -182,6 +183,7 @@ pub fn load() -> Result<UserConfig, Error> {
 /// # Errors
 ///
 /// As [`load`].
+#[allow(clippy::result_large_err)] // The public Error contract is intentionally unboxed.
 pub fn load_from(path: &Path) -> Result<UserConfig, Error> {
     let text = match std::fs::read_to_string(path) {
         Ok(text) => text,
@@ -195,7 +197,7 @@ pub fn load_from(path: &Path) -> Result<UserConfig, Error> {
             });
         }
     };
-    yaml_compat::from_str(&text).map_err(|source| Error::Parse {
+    yaml_compat::compat::from_str(&text).map_err(|source| Error::Parse {
         path: path.to_path_buf(),
         source,
     })
