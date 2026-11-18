@@ -1,0 +1,32 @@
+---
+id: M-hardening
+title: Integrity and hardening
+phase: 2
+status: todo
+blocked_by:
+- M-v0.8
+- A2-056
+- A2-069
+- A2-087
+- A2-127
+- A2-131
+- A2-133
+- A2-141
+- A2-145
+- A2-162
+tags:
+- milestone
+- hardening
+---
+
+## Why
+
+Integrity work that is not yet a reported wrong answer: diagnostics and generated guidance that
+can mislead, ratification and precedence edge cases, and the cost of resolving test evidence
+inside the plan gate.
+
+## Exit criteria
+
+- [ ] every member is done or explicitly dropped with its reason
+
+Sequenced after `M-v0.8` on purpose, so `aplan ready` lists the work in priority order. Move a task into an earlier cut with `aplan mv` to pull it forward.

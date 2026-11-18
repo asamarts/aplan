@@ -59,6 +59,14 @@ effort_days_per_week: 27
 docs:
   paths:
     - aplan/README.md
+    - ROADMAP.md
+  # The roadmap's `### <cut>` sections declare each cut's members on a `**Tasks:**`
+  # line, and `check-docs` holds that copy to the milestones (`A2-019`), so the
+  # narrative cannot drift from the plan it describes.
+  membership:
+    - doc: ROADMAP.md
+      declared_by: line
+      marker: "**Tasks:**"
 deny_warnings: true
 # Stamp traced sections at close, warn when a closed task's section drifts (APLAN018).
 detect_drift: true

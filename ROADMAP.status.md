@@ -8,10 +8,207 @@
 
 | cut | status | done/total | ready | blocked | effort | weeks | critical path |
 | --- | --- | --- | --- | --- | --- | --- | --- |
+| v0.7 | todo | 0/16 | 15 | 1 | 14.8d | 0.5 (0.5 left) | 3.5d |
+| v0.8 | todo | 0/27 | 0 | 27 | 41.8d | 1.5 (1.5 left) | 4.5d |
+| adoption | todo | 0/76 | 0 | 76 | 99.8d | 3.7 (3.7 left) | 10.0d |
+| backlog | todo | 0/1 | 0 | 1 | 1.0d | <0.1 (<0.1 left) | 1.0d |
+| hardening | todo | 0/9 | 0 | 9 | 9.8d | 0.4 (0.4 left) | 3.0d |
+| qualification | todo | 0/1 | 0 | 1 | 8.0d | 0.3 (0.3 left) | 8.0d |
+| tui-quality | todo | 0/2 | 0 | 2 | 4.0d | 0.1 (0.1 left) | 4.0d |
+| workflow | todo | 0/17 | 0 | 17 | 50.0d | 1.9 (1.9 left) | 17.5d |
+
+## v0.7 Security, safe parsing and gates that tell the truth
+
+| task | title | status | blocked_by | evidence |
+| --- | --- | --- | --- | --- |
+| A2-009 | Qualify and replace the YAML bridge with a safe Rust backend | todo | A2-002 | - |
+| A2-016 | Clear the supply-chain advisories against the locked dependency graph | todo | - | - |
+| A2-017 | Keep the workspace clean under Rust 1.100 without moving the pinned toolchain | todo | - | - |
+| A2-018 | Diagnose the large-fixture TUI latency regression on the current hosted image | todo | - | - |
+| A2-019 | Migrate the open pre-public backlog and every open issue into the public plan | todo | - | - |
+| A2-020 | Publish v0.7.0 | todo | A2-009, A2-016, A2-017, A2-018, A2-019, A2-021, A2-022, A2-023, A2-024, A2-025, A2-026, A2-027, A2-028, A2-079, A2-137 | - |
+| A2-021 | Report APLAN045 when traces_root is relative or left at its default | todo | - | - |
+| A2-022 | Report a refused inbox promotion with the capture's real state | todo | - | - |
+| A2-023 | List same-second captures newest first, as the inbox documents | todo | - | - |
+| A2-024 | Warn when a policy selector names a cut or tag that cannot match | todo | - | - |
+| A2-025 | Warn when a policy requires an evidence kind nothing can resolve | todo | - | - |
+| A2-026 | Let check-docs see task and milestone ids that carry no number | todo | - | - |
+| A2-027 | Retry the Action's release download on a transient failure | todo | - | - |
+| A2-028 | Document the Action's self-hosted runner prerequisites | todo | - | - |
+| A2-079 | critical-path says "of it" about a chain that is not part of what it printed | todo | - | - |
+| A2-137 | Generated agent guidance drops id families once their tasks are done | todo | - | - |
+
+## v0.8 Correctness and the most reported adoption failures
+
+| task | title | status | blocked_by | evidence |
+| --- | --- | --- | --- | --- |
+| A2-034 | Report a task whose body is still the add placeholder | todo | - | - |
+| A2-050 | Decide how a trace reports retargeting to a different element kind | todo | - | - |
+| A2-051 | Report a trace that silently retargets from a heading to a table row | todo | A2-050 | - |
+| A2-052 | Decide what counts as review that clears APLAN045 | todo | - | - |
+| A2-053 | Clear APLAN045 only on an edit that shows somebody reviewed the task | todo | A2-052 | - |
+| A2-054 | Keep an evidence observation proven current from reading stale on the next read | todo | - | - |
+| A2-055 | Stop aplan_add reporting a concurrent change against an unchanged plan | todo | - | - |
+| A2-062 | A trace fingerprint says nothing about the build that computed it | todo | - | - |
+| A2-081 | A stale installed binary cannot read a newer plan, and the adopter must notice | todo | - | - |
+| A2-085 | A YAML front-matter delimiter mints a heading anchor the rendered document does not have | todo | - | - |
+| A2-091 | APLAN019 lets a live path entry hide every dead sibling | todo | - | - |
+| A2-095 | Report rendering treats transient WouldBlock as a plan failure | todo | - | - |
+| A2-096 | The agent format appends prose after JSON and is not parseable | todo | - | - |
+| A2-097 | A plan with several id families cannot declare which one a cut mints | todo | - | - |
+| A2-099 | A live catch-all paths claim fails only after the work is finished | todo | - | - |
+| A2-101 | File renames silently strand paths on live tasks | todo | - | - |
+| A2-106 | Duplicate evidence citations are accepted and stored silently | todo | - | - |
+| A2-122 | Stop build-only AGENTS.md provenance drift from blocking a correct contract | todo | A2-081 | - |
+| A2-140 | Let generated agent contracts name a repository launcher | todo | - | - |
+| A2-142 | Claim usage errors can publish claim state | todo | - | - |
+| A2-147 | Close a live task that already carries partial evidence without a hand edit | todo | - | - |
+| A2-152 | Reconcile task closure with ephemeral claim lifecycle | todo | - | - |
+| A2-153 | Pre-commit verification cannot see trace and file-evidence drift the commit will expose | todo | - | - |
+| A2-156 | Validate every plan state introduced by a commit range | todo | - | - |
+| A2-157 | Make add path-list syntax unambiguous and reject separator-shaped paths | todo | - | - |
+| A2-160 | `start` on parked work keeps its `revisit_at`, which `check` then reports as APLAN042 | todo | - | - |
+| A2-161 | A withdrawn delivery has no named route: a hand reopen of a done task passes, and supersede and amend describe other cases | todo | - | - |
+
+## adoption Adoption and ergonomics
+
+| task | title | status | blocked_by | evidence |
+| --- | --- | --- | --- | --- |
+| A2-029 | Warn at start when verify will report APLAN053 | todo | - | - |
+| A2-030 | Note at start when the task still waits on unfinished blockers | todo | - | - |
+| A2-031 | Mark started tasks in ready, and give its JSON a status field | todo | - | - |
+| A2-032 | Add ready --unowned to leave out tasks that need a named owner | todo | - | - |
+| A2-033 | Name the path and trace flags the same way on every authoring command | todo | - | - |
+| A2-035 | Explain verify's evidence summary line | todo | - | - |
+| A2-036 | Add a command that edits a release's contains list | todo | - | - |
+| A2-037 | Report every missing test-runner field at once with its full key path | todo | - | - |
+| A2-038 | Name the key and expected shape in test-runner type errors | todo | - | - |
+| A2-039 | Show a minimal valid test runner in the quickstart | todo | - | - |
+| A2-040 | Add a batch form to capture | todo | - | - |
+| A2-041 | Make capture's default human output short | todo | - | - |
+| A2-042 | Decide how note evidence is recorded through the CLI | todo | - | - |
+| A2-043 | Record note evidence through close and amend | todo | A2-042 | - |
+| A2-044 | Decide how parked work counts in effort rollups | todo | - | - |
+| A2-045 | Report parked effort separately from remaining work | todo | A2-044 | - |
+| A2-046 | Decide whether close --restamp accepts several ids | todo | - | - |
+| A2-047 | Restamp several tasks in one guarded write | todo | A2-046 | - |
+| A2-048 | Decide whether roadmap orders cuts by their sequencing edges | todo | - | - |
+| A2-049 | Order roadmap cuts by sequencing edges | todo | A2-048 | - |
+| A2-057 | Render a bounded next-work graph without inventing priorities | todo | - | - |
+| A2-058 | aplan declares no tag family for its own plan, and its tag list shows why that matters | todo | - | - |
+| A2-059 | The near match tries three ways to help and none of them compose | todo | - | - |
+| A2-060 | The fast hermetic half has no local gate, in this repository or an adopter's | todo | - | - |
+| A2-061 | tree defaults to live-only, and --all restores the satisfied ancestry | todo | - | - |
+| A2-063 | Decide whether plans retain measured task time | todo | - | - |
+| A2-064 | Name bulk task-body support as a capability | todo | - | - |
+| A2-065 | Heading slugification for `traces` anchors is undocumented, and an em dash is the case that bites | todo | - | - |
+| A2-066 | `critical-path` reports nothing when a plan carries no effort, and the chain is a graph property | todo | - | - |
+| A2-067 | A repository that already has a plan linter has no migration story | todo | - | - |
+| A2-068 | `export-agents-md --check` says it fails when the file disagrees, and it means inside the markers | todo | - | - |
+| A2-070 | Generated output claims an adopter already runs aplan in CI | todo | - | - |
+| A2-071 | Nothing in the adoption path says a one-command test suite cannot reach the ladder's top rung | todo | - | - |
+| A2-072 | A release tagged with its version renders as the word "release" | todo | - | - |
+| A2-073 | A task this tool wrote cannot be fed back into `add --from` | todo | - | - |
+| A2-074 | facts --require offers no correction for a near-miss capability, where config loading does | todo | - | - |
+| A2-075 | export-agents-md writes fixed heading levels into a document whose structure it cannot see | todo | - | - |
+| A2-076 | prefer_after naming a cut is accepted and does nothing, so a discretionary order over a whole cut is unsayable | todo | - | - |
+| A2-077 | A new plan's default task directory depends on an empty directory that Git cannot preserve | todo | - | - |
+| A2-080 | A parked task's revisit instant passes in silence, because due is wired nowhere | todo | - | - |
+| A2-082 | No way to ask a document which traces anchors it offers | todo | - | - |
+| A2-083 | export-agents-md --check reads as a mode and is an option with a required value | todo | - | - |
+| A2-084 | The generated agent contract omits revisit_at, so an authoring agent never parks a task with one | todo | - | - |
+| A2-086 | require_min_strength is a set of accepted kinds, and its name says floor | todo | - | - |
+| A2-090 | A task body can assert another task's status, and nothing resolves it | todo | - | - |
+| A2-092 | Expose the exact paths matcher instead of making adopters reimplement it | todo | - | - |
+| A2-093 | Promote an existing task to a cut as one checked mutation | todo | - | - |
+| A2-094 | Explain that nesting a cut sequences every member | todo | - | - |
+| A2-098 | A cut member cannot be moved to cross-cutting through aplan | todo | - | - |
+| A2-100 | A refused add batch identifies only an id it never wrote | todo | - | - |
+| A2-102 | Report whether a cut's members cover a requested repository surface | todo | - | - |
+| A2-103 | A whole cut cannot depend on one task without copying the edge to every member | todo | - | - |
+| A2-104 | Decide how a delivered arc proves work spread across history and renames | todo | - | - |
+| A2-105 | Document the local encoding for a blocker in another repository | todo | A2-123 | - |
+| A2-107 | Gate help advertises selector behavior that the gate deliberately refuses | todo | - | - |
+| A2-123 | Decide whether verified external conditions may gate local readiness | todo | - | - |
+| A2-124 | Stage unreleased binaries from an immutable source tree | todo | - | - |
+| A2-125 | Measure live-task path activity without guessing completion | todo | A2-092 | - |
+| A2-126 | Nested-command usage errors do not list the available commands | todo | - | - |
+| A2-128 | Summarize high-volume human diagnostics by rule and severity | todo | - | - |
+| A2-129 | Qualify test-runner feature-set guidance when listings overlap | todo | - | - |
+| A2-130 | Let tag families constrain each member's plan-wide usage | todo | - | - |
+| A2-132 | Support atomic mixed plan-transition batches | todo | - | - |
+| A2-138 | Make close repair sequencing discoverable at the conflicting command | todo | - | - |
+| A2-143 | Make semantic recovery win over lexical subcommand suggestions | todo | - | - |
+| A2-144 | Apply multiple evidence repairs in one atomic amendment | todo | - | - |
+| A2-146 | Distinguish duplicate cut declarations from membership in different cuts | todo | - | - |
+| A2-148 | Define a first-class decomposition relation for multi-increment work | todo | - | - |
+| A2-149 | Enforce a repository-declared maximum task effort and require decomposition | todo | A2-148 | - |
+| A2-150 | Add an atomic split workflow for oversized tasks | todo | A2-148, A2-149 | - |
+| A2-151 | Give ready work a bounded explicit way to be promoted next | todo | - | - |
+| A2-154 | A trace cannot select a heading's own body without all of its subsections | todo | - | - |
+| A2-155 | Edit existing task fields through one guarded single and batch authoring surface | todo | - | - |
+| A2-158 | tasks and show: name the cut a task belongs to, and print a quarter-day effort as written | todo | - | - |
+| A2-159 | test list: the summary says "2 unique matchs" | todo | - | - |
+| A2-163 | Let check-docs accept another plan's ids when a document names that plan | todo | - | - |
+
+## backlog Considered and deferred
+
+| task | title | status | blocked_by | evidence |
+| --- | --- | --- | --- | --- |
+| A2-078 | The roadmap renders one table per cut, so sections do not share a column width | todo | - | - |
+
+## hardening Integrity and hardening
+
+| task | title | status | blocked_by | evidence |
+| --- | --- | --- | --- | --- |
+| A2-056 | Decide whether a live task's exact path that matches nothing is reported | todo | - | - |
+| A2-069 | A doc comment separated from what it documents, and nothing notices | todo | - | - |
+| A2-087 | An exempt tag no task carries is silent, where a declared tag family is not | todo | - | - |
+| A2-127 | Correct the APLAN013 exact-test diagnostic grammar | todo | - | - |
+| A2-131 | State equal-specificity policy precedence in generated agent guidance | todo | - | - |
+| A2-133 | Complete typed ratification relationships in task detail | todo | - | - |
+| A2-141 | Reject ratification preference inversions | todo | - | - |
+| A2-145 | Keep test-evidence resolution from rebuilding the product in the plan gate | todo | - | - |
+| A2-162 | Check the runner's gh version before the Action verifies provenance | todo | - | - |
+
+## qualification Product qualification
+
+| task | title | status | blocked_by | evidence |
+| --- | --- | --- | --- | --- |
+| A2-121 | Run repeated cross-provider product evaluations on the public baseline | todo | A2-089, A2-117 | - |
+
+## tui-quality TUI release quality
+
+| task | title | status | blocked_by | evidence |
+| --- | --- | --- | --- | --- |
+| A2-088 | Evaluate first-use and expert TUI workflows and dispose every finding | todo | - | - |
+| A2-089 | Run the adversarial TUI product release audit | todo | A2-088 | - |
+
+## workflow Workflow ergonomics
+
+| task | title | status | blocked_by | evidence |
+| --- | --- | --- | --- | --- |
+| A2-108 | Decide completion-time and historical-provenance semantics | todo | - | - |
+| A2-109 | Record an atomic close timestamp on done tasks | todo | A2-108 | - |
+| A2-110 | Derive labelled legacy completion times in one Git history pass | todo | A2-109 | - |
+| A2-111 | Add completed-task history to the engine and CLI | todo | A2-110 | - |
+| A2-112 | Add completion history and recent work to the TUI | todo | A2-111 | - |
+| A2-113 | Measure and select the terminal Markdown dependency boundary | todo | - | - |
+| A2-114 | Build a safe Markdown semantic document and terminal renderer | todo | A2-113 | - |
+| A2-115 | Pretty-render CLI Markdown surfaces without changing artifacts | todo | A2-114 | - |
+| A2-116 | Expose the capture workflow through MCP and agent guidance | todo | A2-118, A2-122 | - |
+| A2-117 | Audit and release the workflow ergonomics cut | todo | A2-112, A2-115, A2-116, A2-119, A2-120 | - |
+| A2-118 | Add versioned structured MCP outputs and bounded resources | todo | - | - |
+| A2-119 | Expose completed-task history through bounded MCP resources | todo | A2-111, A2-118 | - |
+| A2-120 | Render task Markdown in the TUI inspector | todo | A2-114 | - |
+| A2-134 | Audit every read-only surface against the explicit latency and work budgets | todo | A2-135, A2-136 | - |
+| A2-135 | Derive vacuity from one exhaustive validation pass | todo | - | - |
+| A2-136 | Stream output-dominated read results with bounded memory and prompt first bytes | todo | - | - |
+| A2-139 | Bound why output through deep ordinary dependency chains | todo | - | - |
 
 ## Cross-cutting (in no cut)
 
-17.2d effort, 0.6 weeks (0.1 left), held by tasks in no cut and not counted in the table above.
+14.2d effort, 0.5 weeks (0.0 left), held by tasks in no cut and not counted in the table above.
 
 | task | title | status | blocked_by | evidence |
 | --- | --- | --- | --- | --- |
@@ -23,7 +220,6 @@
 | A2-006 | Record the public hosted selector performance boundary | done | A2-001 | test:validation_selection::tests::performance_harness_binds_one_clean_source_and_process_census |
 | A2-007 | Reconcile public guidance and replace the exhaustive README | done | A2-006 | test:ci_runner_census::portability_toolchain_reader_accepts_the_macos_system_bash_surface, test:greenfield::the_documented_recipe_reaches_a_valid_plan_under_the_strict_policy, test:publication_boundary::every_reachable_public_object_passes_the_privacy_boundary, test:tui_portability::shared_real_pty_lifecycle_handles_focus_resize_and_tiny_terminals |
 | A2-008 | Validate an initial public branch push without a base commit | done | A2-001 | test:pre_push_hook::development_preflight_widens_an_initial_push_to_the_complete_profile |
-| A2-009 | Qualify and replace the YAML bridge with a safe Rust backend | blocked | A2-002 | - |
 | A2-010 | Restore the hosted coverage floor without lowering it | done | A2-001 | test:tests::version_window_refusals_preserve_ambiguity_and_checkout_cause |
 | A2-011 | Publish the first public release and automate the complete transaction | done | - | test:ci_runner_census::hosted_release_prepares_every_tool_required_by_release_validation, test:release_changelog::release_workflow_cannot_publish_without_same_source_full_validation, test:release_changelog::crates_publication_runs_the_registry_transaction_in_dependency_order, test:release_changelog::github_publication_refuses_drift_and_only_fills_missing_assets |
 | A2-012 | Make release artifacts byte-reproducible across builders | done | - | test:ci_runner_census::release_artifact_builder_pins_native_inputs_for_every_caller |
