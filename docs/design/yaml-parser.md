@@ -224,7 +224,8 @@ compatibility mode. `A2-009` consumes 0.1.3 directly, through the same `yaml_com
 
 ## d0026 readiness gates
 
-`A2-009` could replace the bridge only when all of these were true. How the cutover met each:
+These were the gates `A2-009` set for replacing the bridge, and how the cutover met each, in full or
+in part:
 
 - **1.** `ayaml` 0.1.3 is published on crates.io with the grant, Rust 1.88 support and a lockfile
   checksum. Its changelog records Trusted Publishing with a build provenance attestation for every

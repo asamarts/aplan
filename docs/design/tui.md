@@ -978,9 +978,9 @@ two unused historical foundation fields were removed rather than retained as ine
 
 The maintained YAML bridge then had no current advisory, but its engine was C source translated to
 unsafe Rust. That was independently changeable hardening work, not an exception to hide inside this
-admission review. `A2-009` later replaced the bridge with the safe Rust `ayaml` 0.1.3, after it
-passed the compatibility, hostile-input, performance and complete product gates recorded in
-`docs/design/yaml-parser.md`.
+admission review. `A2-009` later replaced the bridge with the safe Rust `ayaml` 0.1.3. Of the readiness gates
+recorded in `docs/design/yaml-parser.md`, the compatibility, hostile-input and product gates were
+met only in part at the switch; `A2-166`, `A2-169` and `A2-173` own what they missed.
 
 ### Mutations
 

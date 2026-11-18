@@ -126,6 +126,37 @@ fn workspace_metadata(root: &Path) -> Result<serde_json::Value> {
 /// The exact requirement every `yaml_compat` declaration must carry (A2-009).
 const SAFE_PARSER_REQUIREMENT: &str = "=0.1.3";
 
+/// The version and source that requirement must resolve to. The requirement
+/// alone does not prove which code is built: a `[patch]` or `[replace]` entry
+/// keeps the declared requirement and swaps the resolved package (A2-166).
+const SAFE_PARSER_VERSION: &str = "0.1.3";
+const CRATES_IO_SOURCE: &str = "registry+https://github.com/rust-lang/crates.io-index";
+
+/// Every resolved `ayaml` package in `metadata` is the released 0.1.3 from
+/// crates.io, and there is at least one.
+fn audit_resolved_parser(metadata: &serde_json::Value, graph: &str) -> Result<()> {
+    let packages = metadata["packages"]
+        .as_array()
+        .with_context(|| format!("{graph} Cargo metadata omitted its packages"))?;
+    let mut resolved = 0;
+    for package in packages.iter().filter(|package| package["name"] == "ayaml") {
+        let version = package["version"].as_str().unwrap_or_default();
+        let source = package["source"].as_str().unwrap_or("a local path");
+        if version != SAFE_PARSER_VERSION || source != CRATES_IO_SOURCE {
+            bail!(
+                "{graph} resolves `ayaml` {version} from {source}; it must be the released \
+                 {SAFE_PARSER_VERSION} from crates.io, so a `[patch]` or `[replace]` cannot \
+                 substitute the parser"
+            );
+        }
+        resolved += 1;
+    }
+    if resolved == 0 {
+        bail!("{graph} resolves no `ayaml` package");
+    }
+    Ok(())
+}
+
 /// YAML parsers the product has retired. `yaml_serde` stays only as the
 /// differential test oracle of `aplan-core` and `aplan-config`, so the lock may
 /// hold it, but no product graph may resolve it or the C-derived parsers before
@@ -165,7 +196,7 @@ fn audit_yaml_bridge(metadata: &serde_json::Value) -> Result<()> {
             "safe parser `yaml_compat` must stay pinned to `{SAFE_PARSER_REQUIREMENT}`, found `{found}`"
         );
     }
-    Ok(())
+    audit_resolved_parser(metadata, "the workspace")
 }
 
 /// The TUI evaluator's own workspace manifest, beside the product's.
@@ -178,13 +209,21 @@ const TUI_EVALUATOR_MANIFEST: &str = "tools/tui-eval/Cargo.toml";
 /// that matches its manifest: the parser switch once changed its code but not
 /// its manifest, which left it unbuildable (A2-166).
 fn audit_tui_evaluator(root: &Path) -> Result<()> {
-    let manifest = root.join(TUI_EVALUATOR_MANIFEST);
+    audit_tui_evaluator_manifest(root, &root.join(TUI_EVALUATOR_MANIFEST))
+}
+
+fn audit_tui_evaluator_manifest(root: &Path, manifest: &Path) -> Result<()> {
+    audit_tui_evaluator_metadata(&tui_evaluator_metadata(root, manifest)?)
+}
+
+/// `--locked`, so a manifest change the lock does not record fails here rather
+/// than being written into the lock and passing.
+fn tui_evaluator_metadata(root: &Path, manifest: &Path) -> Result<serde_json::Value> {
     let manifest = manifest
         .to_str()
         .context("the TUI evaluator's manifest path is not UTF-8")?;
-    let metadata = metadata(root, &["--locked", "--manifest-path", manifest])
-        .context("the TUI evaluator's lock must resolve its manifest unchanged")?;
-    audit_tui_evaluator_metadata(&metadata)
+    metadata(root, &["--locked", "--manifest-path", manifest])
+        .context("the TUI evaluator's lock must resolve its manifest unchanged")
 }
 
 fn audit_tui_evaluator_metadata(metadata: &serde_json::Value) -> Result<()> {
@@ -217,7 +256,7 @@ fn audit_tui_evaluator_metadata(metadata: &serde_json::Value) -> Result<()> {
             );
         }
     }
-    Ok(())
+    audit_resolved_parser(metadata, "the TUI evaluator")
 }
 
 fn product_graph_with_environment(
@@ -547,6 +586,35 @@ mod tests {
         assert_eq!(plain.identities(), forced.identities());
     }
 
+    /// `metadata` with its resolved `ayaml` package changed by `change`.
+    fn with_resolved_parser(
+        metadata: &serde_json::Value,
+        change: impl Fn(&mut serde_json::Value),
+    ) -> serde_json::Value {
+        let mut changed = metadata.clone();
+        let parser = changed["packages"]
+            .as_array_mut()
+            .expect("packages")
+            .iter_mut()
+            .find(|package| package["name"] == "ayaml")
+            .expect("resolved ayaml package");
+        change(parser);
+        changed
+    }
+
+    /// A `[patch]` to a local copy, or a different release, under an unchanged
+    /// requirement.
+    fn substituted_parsers(metadata: &serde_json::Value) -> [serde_json::Value; 2] {
+        [
+            with_resolved_parser(metadata, |parser| {
+                parser["source"] = serde_json::Value::Null;
+            }),
+            with_resolved_parser(metadata, |parser| {
+                parser["version"] = "0.1.4".into();
+            }),
+        ]
+    }
+
     #[test]
     fn yaml_parser_is_exactly_pinned() {
         let root = crate::workspace_root().expect("workspace root");
@@ -572,6 +640,10 @@ mod tests {
             let error = audit_yaml_bridge(&changed).expect_err("a floating layer must fail");
             assert!(error.to_string().contains(rename), "{error:#}");
         }
+        for changed in substituted_parsers(&metadata) {
+            let error = audit_yaml_bridge(&changed).expect_err("a substituted parser must fail");
+            assert!(error.to_string().contains("crates.io"), "{error:#}");
+        }
     }
 
     #[test]
@@ -593,16 +665,13 @@ mod tests {
         let root = crate::workspace_root().expect("workspace root");
         audit_tui_evaluator(&root).expect("the evaluator's lock and parser match the product's");
 
-        let manifest = root.join(TUI_EVALUATOR_MANIFEST);
-        let metadata = metadata(
-            &root,
-            &[
-                "--locked",
-                "--manifest-path",
-                manifest.to_str().expect("UTF-8 manifest path"),
-            ],
-        )
-        .expect("evaluator metadata");
+        let metadata = tui_evaluator_metadata(&root, &root.join(TUI_EVALUATOR_MANIFEST))
+            .expect("evaluator metadata");
+        for changed in substituted_parsers(&metadata) {
+            let error = audit_tui_evaluator_metadata(&changed)
+                .expect_err("a parser substituted under the same requirement must fail");
+            assert!(error.to_string().contains("crates.io"), "{error:#}");
+        }
         for (name, requirement) in [("yaml_serde", "=0.10.7"), ("ayaml", "^0.1.0")] {
             let mut changed = metadata.clone();
             let dependency = yaml_dependency(&mut changed);
@@ -622,6 +691,66 @@ mod tests {
                 .expect_err("a retired parser in the evaluator's lock must fail");
             assert!(error.to_string().contains(retired), "{error:#}");
         }
+    }
+
+    #[test]
+    fn a_tui_evaluator_lock_that_no_longer_matches_its_manifest_is_refused() {
+        let root = crate::workspace_root().expect("workspace root");
+        let scratch = tempfile::Builder::new()
+            .prefix("dependency-audit-lock-")
+            .tempdir_in(aplan_core::fixture::fixture_root())
+            .expect("scratch workspace");
+        let dir = scratch.path();
+        // A path dependency, so resolving it needs no registry.
+        for (path, text) in [
+            (
+                "Cargo.toml",
+                "[package]\nname = \"aplan-tui-eval\"\nversion = \"0.0.0\"\nedition = \"2021\"\n\n\
+                 [dependencies]\nadded = { path = \"added\" }\n\n[workspace]\n",
+            ),
+            ("src/lib.rs", ""),
+            (
+                "added/Cargo.toml",
+                "[package]\nname = \"added\"\nversion = \"0.0.0\"\nedition = \"2021\"\n",
+            ),
+            ("added/src/lib.rs", ""),
+        ] {
+            let path = dir.join(path);
+            std::fs::create_dir_all(path.parent().expect("parent")).expect("scratch directory");
+            std::fs::write(&path, text).expect("scratch file");
+        }
+        let lock = |packages: &str| {
+            std::fs::write(
+                dir.join("Cargo.lock"),
+                format!(
+                    "# This file is automatically @generated by Cargo.\nversion = 4\n{packages}"
+                ),
+            )
+            .expect("scratch lock");
+        };
+        let manifest = dir.join("Cargo.toml");
+
+        // The lock predates the dependency the manifest now declares.
+        lock("\n[[package]]\nname = \"aplan-tui-eval\"\nversion = \"0.0.0\"\n");
+        let error = audit_tui_evaluator_manifest(&root, &manifest)
+            .expect_err("a stale evaluator lock must be refused");
+        assert!(
+            format!("{error:#}").contains("lock must resolve its manifest unchanged"),
+            "{error:#}"
+        );
+
+        // With the lock up to date, the audit gets past it to the parser check.
+        lock(
+            "\n[[package]]\nname = \"added\"\nversion = \"0.0.0\"\n\n\
+             [[package]]\nname = \"aplan-tui-eval\"\nversion = \"0.0.0\"\ndependencies = [\n \"added\",\n]\n",
+        );
+        let error = audit_tui_evaluator_manifest(&root, &manifest)
+            .expect_err("a workspace without the parser fails the parser check");
+        assert!(
+            !format!("{error:#}").contains("lock must resolve"),
+            "an up-to-date lock must pass the lock step: {error:#}"
+        );
+        assert!(format!("{error:#}").contains("yaml_compat"), "{error:#}");
     }
 
     #[test]

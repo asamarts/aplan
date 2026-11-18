@@ -78,13 +78,17 @@ fn is_absent(v: &yaml_compat::Value) -> bool {
 /// An integer wider than 64 bits is refused, as the YAML bridge refused it:
 /// `ayaml` keeps it exactly, but no KEP is numbered past `u64`, and the parser
 /// switch must not turn a file aplan refused into an id (A2-166).
-fn kep_number(v: &yaml_compat::Value) -> Option<String> {
+fn kep_number(v: Option<&yaml_compat::Value>) -> Result<String, String> {
     match v {
-        yaml_compat::Value::Number(n) if n.is_u64() || n.is_i64() || n.is_f64() => {
-            Some(n.to_string())
+        Some(yaml_compat::Value::Number(n)) if n.is_u64() || n.is_i64() || n.is_f64() => {
+            Ok(n.to_string())
         }
-        yaml_compat::Value::String(s) if !s.trim().is_empty() => Some(s.trim().to_string()),
-        _ => None,
+        Some(yaml_compat::Value::Number(n)) => Err(format!(
+            "`kep-number` {n} is wider than 64 bits, and no KEP is numbered past {}",
+            u64::MAX
+        )),
+        Some(yaml_compat::Value::String(s)) if !s.trim().is_empty() => Ok(s.trim().to_string()),
+        _ => Err("`kep-number` is missing or not a number".to_string()),
     }
 }
 
@@ -244,11 +248,7 @@ impl ProposalSource for Kep {
             message: message.to_string(),
         };
 
-        let number = doc
-            .kep_number
-            .as_ref()
-            .and_then(kep_number)
-            .ok_or_else(|| malformed("`kep-number` is missing or not a number"))?;
+        let number = kep_number(doc.kep_number.as_ref()).map_err(|message| malformed(&message))?;
         let id = format!("KEP-{number}");
         let title = present(doc.title.as_ref())
             .ok_or_else(|| malformed("`title` is missing"))?

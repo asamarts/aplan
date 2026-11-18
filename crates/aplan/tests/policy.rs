@@ -367,12 +367,14 @@ fn every_untestable_task_says_why_in_its_body() {
 /// A tag nobody uses is a vocabulary, not a policy: if the exemption ever falls
 /// out of use, this says so rather than leaving a dead word in the config.
 ///
-/// The epoch is A2 tasks plus the `M-` cut milestones that order them.
-fn is_explicit_exemption_free_epoch(tasks: &[String]) -> bool {
+/// The epoch is A2 tasks plus the `M-` cut milestones that order them: each
+/// entry is a task id and whether that task is a milestone, so an `M-` id that
+/// is not one does not pass.
+fn is_explicit_exemption_free_epoch(tasks: &[(&str, bool)]) -> bool {
     !tasks.is_empty()
         && tasks
             .iter()
-            .all(|name| name.starts_with("A2-") || name.starts_with("M-"))
+            .all(|&(id, milestone)| id.starts_with("A2-") || (id.starts_with("M-") && milestone))
 }
 
 /// Named before the epoch admitted its `M-` cut milestones; the name stays
@@ -380,18 +382,22 @@ fn is_explicit_exemption_free_epoch(tasks: &[String]) -> bool {
 #[test]
 fn the_exemption_free_epoch_is_only_a2() {
     assert!(is_explicit_exemption_free_epoch(&[
-        "A2-001.md".to_string(),
-        "A2-004.md".to_string(),
+        ("A2-001", false),
+        ("A2-004", false),
     ]));
     assert!(is_explicit_exemption_free_epoch(&[
-        "A2-001.md".to_string(),
-        "M-v0.7.md".to_string(),
+        ("A2-001", false),
+        ("M-v0.7", true),
     ]));
     assert!(!is_explicit_exemption_free_epoch(&[]));
     assert!(!is_explicit_exemption_free_epoch(&[
-        "A2-001.md".to_string(),
-        "A3-001.md".to_string(),
+        ("A2-001", false),
+        ("A3-001", false),
     ]));
+    assert!(
+        !is_explicit_exemption_free_epoch(&[("A2-001", false), ("M-x", false)]),
+        "an `M-` task that is not a milestone is outside the epoch"
+    );
 }
 
 #[test]
@@ -403,11 +409,15 @@ fn the_exemption_is_used_and_stays_a_minority() {
         .map(|(id, _, _)| id)
         .collect();
     if exempt.is_empty() {
-        let tasks = std::fs::read_dir(repo_root().join("aplan/tasks"))
-            .expect("public plan task directory")
-            .flatten()
-            .filter(|entry| entry.path().extension().is_some_and(|value| value == "md"))
-            .map(|entry| entry.file_name().to_string_lossy().into_owned())
+        let plan = aplan_core::load_plan(&repo_root().join("aplan"));
+        assert!(
+            plan.load_diagnostics.is_empty(),
+            "the repository plan must load"
+        );
+        let tasks = plan
+            .tasks
+            .iter()
+            .map(|loaded| (loaded.task.id.as_str(), loaded.task.is_milestone()))
             .collect::<Vec<_>>();
         assert!(
             is_explicit_exemption_free_epoch(&tasks),
