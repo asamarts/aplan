@@ -20,15 +20,15 @@ task that blocks its implementation task.
 ### v0.7, Security, safe parsing and gates that tell the truth
 
 It clears the RustSec advisories that turned the scheduled CI red (`A2-016`), keeps the source
-clean under Rust 1.100 while the pin stays at 1.99.1 (`A2-017`), and finds the cause of the hosted
-TUI latency regression before any budget moves (`A2-018`). It replaces the C-derived YAML bridge
-with the safe Rust parser (`A2-009`), fixes the reported cases where a check passed on input it
-never looked at or a report said something false (#18, #24, #27, #29, #33 items 1 and 6, #26,
-#28), and makes the Action's install sturdier and better documented (#35, #36). It moves the open
-pre-public backlog and every open issue into this plan (`A2-019`) and ends with the v0.7.0 release
-(`A2-020`).
+clean under Rust 1.100 while the pin stays at 1.99.1 (`A2-017`), finds the cause of the hosted TUI
+latency regression before any budget moves (`A2-018`), and stops the render gate failing on slower
+hosted runners (`A2-164`). It replaces the C-derived YAML bridge with the safe Rust parser
+(`A2-009`), fixes the reported cases where a check passed on input it never looked at or a report
+said something false (#18, #24, #27, #29, #33 items 1 and 6, #26, #28), and makes the Action's
+install sturdier and better documented (#35, #36). It moves the open pre-public backlog and every
+open issue into this plan (`A2-019`) and ends with the v0.7.0 release (`A2-020`).
 
-**Tasks:** `A2-009`, `A2-016`, `A2-017`, `A2-018`, `A2-019`, `A2-020`, `A2-021`, `A2-022`, `A2-023`, `A2-024`, `A2-025`, `A2-026`, `A2-027`, `A2-028`, `A2-079`, `A2-137`
+**Tasks:** `A2-009`, `A2-016`, `A2-017`, `A2-018`, `A2-019`, `A2-020`, `A2-021`, `A2-022`, `A2-023`, `A2-024`, `A2-025`, `A2-026`, `A2-027`, `A2-028`, `A2-079`, `A2-137`, `A2-164`
 
 ### v0.8, Correctness and the most reported adoption failures
 
