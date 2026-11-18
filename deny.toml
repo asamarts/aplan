@@ -2,6 +2,14 @@
 all-features = false
 no-default-features = false
 
+[advisories]
+# Every advisory fails the gate except these reasoned exceptions (A2-016). Each
+# names its path into the graph, why no upgrade resolves it, and what ends it.
+ignore = [
+  { id = "RUSTSEC-2026-0543", reason = "A2-016: chrono is declared unmaintained with no fixed release; it ships only as a dependency of rmcp, the MCP SDK. Revisit when rmcp drops chrono or a maintained successor is released" },
+  { id = "RUSTSEC-2026-0542", reason = "A2-016: humantime is declared unmaintained with no fixed release; it arrives only through the test-only trycmd and never ships. Revisit when trycmd drops it" },
+]
+
 [licenses]
 confidence-threshold = 0.8
 allow = [
