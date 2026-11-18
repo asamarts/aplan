@@ -26,12 +26,12 @@ hosted runners (`A2-164`). It replaces the C-derived YAML bridge with the safe R
 (`A2-009`), fixes the reported cases where a check passed on input it never looked at or a report
 said something false (#18, #24, #27, #29, #33 items 1 and 6, #26, #28), and makes the Action's
 install sturdier and better documented (#35, #36). It closes what an audit of the increment found:
-the parser switch's unchecked corners (`A2-166`), the files it refuses that v0.6.0 read
-(`A2-169`), a README recipe that failed as written (`A2-167`), and a per-task walk of the roadmap
-(`A2-168`). It moves the open pre-public backlog and every open issue into this plan (`A2-019`)
-and ends with the v0.7.0 release (`A2-020`).
+the parser switch's unchecked corners (`A2-166`), the files it refuses that v0.6.0 read (`A2-169`),
+a README recipe that failed as written (`A2-167`), a per-task walk of the roadmap (`A2-168`), and
+what a second audit found in those fixes (`A2-177`). It moves the open pre-public backlog and every
+open issue into this plan (`A2-019`) and ends with the v0.7.0 release (`A2-020`).
 
-**Tasks:** `A2-009`, `A2-016`, `A2-017`, `A2-018`, `A2-019`, `A2-020`, `A2-021`, `A2-022`, `A2-023`, `A2-024`, `A2-025`, `A2-026`, `A2-027`, `A2-028`, `A2-079`, `A2-137`, `A2-164`, `A2-166`, `A2-167`, `A2-168`, `A2-169`
+**Tasks:** `A2-009`, `A2-016`, `A2-017`, `A2-018`, `A2-019`, `A2-020`, `A2-021`, `A2-022`, `A2-023`, `A2-024`, `A2-025`, `A2-026`, `A2-027`, `A2-028`, `A2-079`, `A2-137`, `A2-164`, `A2-166`, `A2-167`, `A2-168`, `A2-169`, `A2-177`
 
 ### v0.8, Correctness and the most reported adoption failures
 
@@ -49,10 +49,11 @@ generated guidance that can mislead, ratification and precedence edge cases, and
 resolving test evidence inside the plan gate. It also makes the TUI end by its signal, not with an
 error, when its terminal hangs up, and holds the audit's lower-severity findings: MCP replies lost
 when a client closes its input (`A2-170`), TUI ranking on keys that change only the selection
-(`A2-171`), CI that skips the tests reading a changed plan or README (`A2-172`), and YAML limits
-not yet proven through product reads (`A2-173`).
+(`A2-171`), CI that skips the tests reading a changed plan or README (`A2-172`), YAML limits
+not yet proven through product reads (`A2-173`), and real-terminal tests that fail when the host
+is busy (`A2-176`).
 
-**Tasks:** `A2-069`, `A2-087`, `A2-127`, `A2-131`, `A2-133`, `A2-141`, `A2-145`, `A2-162`, `A2-165`, `A2-170`, `A2-171`, `A2-172`, `A2-173`
+**Tasks:** `A2-069`, `A2-087`, `A2-127`, `A2-131`, `A2-133`, `A2-141`, `A2-145`, `A2-162`, `A2-165`, `A2-170`, `A2-171`, `A2-172`, `A2-173`, `A2-176`
 
 ### adoption, Adoption and ergonomics
 
@@ -62,7 +63,7 @@ recording note evidence from the CLI (#19), how parked effort counts (#20), rest
 tasks at once (#22) and roadmap order (#23). Each decision is recorded, and any superseded ADR
 updated, before its implementation task can start.
 
-**Tasks:** `A2-029`, `A2-030`, `A2-031`, `A2-032`, `A2-033`, `A2-035`, `A2-036`, `A2-037`, `A2-038`, `A2-039`, `A2-040`, `A2-041`, `A2-042`, `A2-043`, `A2-044`, `A2-045`, `A2-046`, `A2-047`, `A2-048`, `A2-049`, `A2-057`, `A2-058`, `A2-059`, `A2-060`, `A2-061`, `A2-063`, `A2-064`, `A2-065`, `A2-066`, `A2-067`, `A2-068`, `A2-070`, `A2-071`, `A2-072`, `A2-073`, `A2-074`, `A2-075`, `A2-076`, `A2-077`, `A2-080`, `A2-082`, `A2-083`, `A2-084`, `A2-086`, `A2-090`, `A2-092`, `A2-093`, `A2-094`, `A2-098`, `A2-100`, `A2-102`, `A2-103`, `A2-104`, `A2-105`, `A2-107`, `A2-123`, `A2-124`, `A2-125`, `A2-126`, `A2-128`, `A2-129`, `A2-130`, `A2-132`, `A2-138`, `A2-143`, `A2-144`, `A2-146`, `A2-148`, `A2-149`, `A2-150`, `A2-151`, `A2-154`, `A2-155`, `A2-158`, `A2-159`, `A2-163`
+**Tasks:** `A2-029`, `A2-030`, `A2-031`, `A2-032`, `A2-033`, `A2-035`, `A2-036`, `A2-037`, `A2-038`, `A2-039`, `A2-040`, `A2-041`, `A2-042`, `A2-043`, `A2-044`, `A2-045`, `A2-046`, `A2-047`, `A2-048`, `A2-049`, `A2-057`, `A2-058`, `A2-059`, `A2-060`, `A2-061`, `A2-063`, `A2-064`, `A2-065`, `A2-066`, `A2-067`, `A2-068`, `A2-070`, `A2-071`, `A2-072`, `A2-073`, `A2-074`, `A2-075`, `A2-076`, `A2-077`, `A2-080`, `A2-082`, `A2-083`, `A2-084`, `A2-086`, `A2-090`, `A2-092`, `A2-093`, `A2-094`, `A2-098`, `A2-100`, `A2-102`, `A2-103`, `A2-104`, `A2-105`, `A2-107`, `A2-123`, `A2-124`, `A2-125`, `A2-126`, `A2-128`, `A2-129`, `A2-130`, `A2-132`, `A2-138`, `A2-143`, `A2-144`, `A2-146`, `A2-148`, `A2-149`, `A2-150`, `A2-151`, `A2-154`, `A2-155`, `A2-158`, `A2-159`, `A2-163`, `A2-174`, `A2-175`
 
 ### workflow, Workflow ergonomics
 

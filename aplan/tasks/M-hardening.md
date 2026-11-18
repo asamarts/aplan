@@ -18,6 +18,7 @@ blocked_by:
 - A2-171
 - A2-172
 - A2-173
+- A2-176
 tags:
 - milestone
 - hardening
@@ -29,8 +30,8 @@ Integrity work that is not yet a reported wrong answer: diagnostics and generate
 can mislead, ratification and precedence edge cases, and the cost of resolving test evidence
 inside the plan gate. It also holds what an audit of v0.7 found below that bar: MCP replies lost
 when a client closes its input, the TUI ranking its work on keys that change only the selection,
-CI that skips the tests reading a changed plan or README, and the YAML limits not yet proven
-through product reads.
+CI that skips the tests reading a changed plan or README, the YAML limits not yet proven
+through product reads, and real-terminal tests that fail when the host is busy.
 
 ## Exit criteria
 
