@@ -197,15 +197,19 @@ fn an_edit_to_a_traced_row_re_flags_exactly_its_owner() {
             .flatten()
             .filter(|entry| entry.path().extension().is_some_and(|value| value == "md"))
             .collect::<Vec<_>>();
+        // The epoch is A2 tasks plus their `M-` cut milestones. Public tasks may
+        // trace other documents, but none may trace `HLD.md`, whose row this
+        // test edits: such a trace is a real owner and the test must use it.
         assert!(
             !tasks.is_empty()
                 && tasks.iter().all(|entry| {
-                    entry.file_name().to_string_lossy().starts_with("A2-")
+                    let name = entry.file_name().to_string_lossy().into_owned();
+                    (name.starts_with("A2-") || name.starts_with("M-"))
                         && !std::fs::read_to_string(entry.path())
                             .expect("public task")
-                            .contains("\ntraces:")
+                            .contains("HLD.md#")
                 }),
-            "the historical traced-row owner may be absent only in the trace-free A2 epoch"
+            "the historical traced-row owner may be absent only while no A2 task traces HLD.md"
         );
         return;
     }
