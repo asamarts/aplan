@@ -8,7 +8,7 @@
 
 | cut | status | done/total | ready | blocked | effort | weeks | critical path |
 | --- | --- | --- | --- | --- | --- | --- | --- |
-| v0.7 | todo | 1/16 | 14 | 1 | 14.8d | 0.5 (0.5 left) | 3.5d |
+| v0.7 | todo | 3/17 | 13 | 1 | 15.2d | 0.6 (0.4 left) | 3.5d |
 | v0.8 | todo | 0/27 | 0 | 27 | 41.8d | 1.5 (1.5 left) | 4.5d |
 | adoption | todo | 0/76 | 0 | 76 | 99.8d | 3.7 (3.7 left) | 10.0d |
 | backlog | todo | 0/1 | 0 | 1 | 1.0d | <0.1 (<0.1 left) | 1.0d |
@@ -21,12 +21,12 @@
 
 | task | title | status | blocked_by | evidence |
 | --- | --- | --- | --- | --- |
-| A2-009 | Qualify and replace the YAML bridge with a safe Rust backend | todo | A2-002 | - |
+| A2-009 | Qualify and replace the YAML bridge with a safe Rust backend | done | A2-002 | commit:f315e6641f1a, test:yaml_differential::every_aplan_yaml_document_matches_the_pinned_bridge, test:yaml_differential::every_task_front_matter_decodes_to_the_same_types_under_both_parsers, test:yaml_differential::hostile_inputs_meet_the_same_outcome_under_both_parsers, test:yaml_contract::empty_documents_read_as_absent_values_and_an_explicit_null_does_not, test:tests::every_owned_configuration_decodes_the_same_under_the_retired_bridge, test:dependency_audit::tests::yaml_parser_is_exactly_pinned, test:dependency_audit::tests::product_graph_policy_rejects_each_budget_and_shape_escape |
 | A2-016 | Clear the supply-chain advisories against the locked dependency graph | todo | - | - |
-| A2-017 | Keep the workspace clean under Rust 1.100 without moving the pinned toolchain | todo | - | - |
+| A2-017 | Keep the workspace clean under Rust 1.100 without moving the pinned toolchain | done | - | commit:cc6d669cd006, commit:c09603f6606a |
 | A2-018 | Diagnose the large-fixture TUI latency regression on the current hosted image | todo | - | - |
 | A2-019 | Migrate the open pre-public backlog and every open issue into the public plan | done | - | commit:4420b69c4fe9 |
-| A2-020 | Publish v0.7.0 | todo | A2-009, A2-016, A2-017, A2-018, A2-019, A2-021, A2-022, A2-023, A2-024, A2-025, A2-026, A2-027, A2-028, A2-079, A2-137 | - |
+| A2-020 | Publish v0.7.0 | todo | A2-009, A2-016, A2-017, A2-018, A2-019, A2-021, A2-022, A2-023, A2-024, A2-025, A2-026, A2-027, A2-028, A2-079, A2-137, A2-164 | - |
 | A2-021 | Report APLAN045 when traces_root is relative or left at its default | todo | - | - |
 | A2-022 | Report a refused inbox promotion with the capture's real state | todo | - | - |
 | A2-023 | List same-second captures newest first, as the inbox documents | todo | - | - |
@@ -37,6 +37,7 @@
 | A2-028 | Document the Action's self-hosted runner prerequisites | todo | - | - |
 | A2-079 | critical-path says "of it" about a chain that is not part of what it printed | todo | - | - |
 | A2-137 | Generated agent guidance drops id families once their tasks are done | todo | - | - |
+| A2-164 | Stop the TUI render gate failing on the slower hosted runners | todo | - | - |
 
 ## v0.8 Correctness and the most reported adoption failures
 
