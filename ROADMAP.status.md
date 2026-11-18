@@ -8,11 +8,11 @@
 
 | cut | status | done/total | ready | blocked | effort | weeks | critical path |
 | --- | --- | --- | --- | --- | --- | --- | --- |
-| v0.7 | todo | 4/17 | 12 | 1 | 15.2d | 0.6 (0.4 left) | 3.5d |
+| v0.7 | todo | 4/21 | 16 | 1 | 17.8d | 0.7 (0.4 left) | 3.5d |
 | v0.8 | todo | 0/27 | 0 | 27 | 41.8d | 1.5 (1.5 left) | 4.5d |
 | adoption | todo | 0/76 | 0 | 76 | 99.8d | 3.7 (3.7 left) | 10.0d |
 | backlog | todo | 0/1 | 0 | 1 | 1.0d | <0.1 (<0.1 left) | 1.0d |
-| hardening | todo | 0/10 | 0 | 10 | 10.2d | 0.4 (0.4 left) | 3.0d |
+| hardening | todo | 0/14 | 0 | 14 | 13.2d | 0.5 (0.5 left) | 3.0d |
 | qualification | todo | 0/1 | 0 | 1 | 8.0d | 0.3 (0.3 left) | 8.0d |
 | tui-quality | todo | 0/2 | 0 | 2 | 4.0d | 0.1 (0.1 left) | 4.0d |
 | workflow | todo | 0/17 | 0 | 17 | 50.0d | 1.9 (1.9 left) | 17.5d |
@@ -38,6 +38,10 @@
 | A2-079 | critical-path says "of it" about a chain that is not part of what it printed | todo | - | - |
 | A2-137 | Generated agent guidance drops id families once their tasks are done | todo | - | - |
 | A2-164 | Stop the TUI render gate failing on the slower hosted runners | todo | - | - |
+| A2-166 | Close the gaps an audit found in the safe YAML parser cutover | todo | - | - |
+| A2-167 | Make the README's first-plan commands work as written | todo | - | - |
+| A2-168 | Find each task's cut in one pass over the roadmap | todo | - | - |
+| A2-169 | Read values tagged outside YAML's core schema as the bridge did | todo | - | - |
 
 ## v0.8 Correctness and the most reported adoption failures
 
@@ -172,6 +176,10 @@
 | A2-145 | Keep test-evidence resolution from rebuilding the product in the plan gate | todo | - | - |
 | A2-162 | Check the runner's gh version before the Action verifies provenance | todo | - | - |
 | A2-165 | End the TUI by its own signal when its terminal hangs up | todo | - | - |
+| A2-170 | Answer every MCP request already received when the client closes its input | todo | - | - |
+| A2-171 | Rank the TUI's work once per change rather than once or twice per key | todo | - | - |
+| A2-172 | Run the tests that read the plan and the README when only those change | todo | - | - |
+| A2-173 | Prove the YAML limits through product reads, and name a missing bracket as one | todo | - | - |
 
 ## qualification Product qualification
 

@@ -21,6 +21,10 @@ blocked_by:
 - A2-079
 - A2-137
 - A2-164
+- A2-166
+- A2-167
+- A2-168
+- A2-169
 tags:
 - milestone
 - v0.7
@@ -32,7 +36,9 @@ The first public increment after v0.6.0. It clears the supply-chain advisories t
 the scheduled CI red, keeps the source clean under the next stable compiler, finds the cause
 of the hosted TUI latency regression, replaces the C-derived YAML bridge with the safe Rust
 parser, and fixes the reported findings where a gate passed, or a report said something false,
-for reasons the user could not see. It also moves every open issue and the open pre-public
+for reasons the user could not see. It also closes what an audit of the increment found: the
+parser switch's gaps, the files it refuses that v0.6.0 read, a README recipe that failed as
+written, and a per-task walk of the roadmap. It moves every open issue and the open pre-public
 backlog into this plan, and ends with the v0.7.0 release.
 
 ## Exit criteria
