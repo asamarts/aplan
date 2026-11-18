@@ -35,8 +35,13 @@ fn assert_fresh_public_epoch() {
         .filter(|entry| entry.path().extension().is_some_and(|value| value == "md"))
         .map(|entry| entry.file_name().to_string_lossy().into_owned())
         .collect::<Vec<_>>();
+    // The epoch is A2 tasks plus the `M-` cut milestones that order them; any
+    // other prefix means an earlier ledger came back and its measurement must too.
     assert!(
-        !tasks.is_empty() && tasks.iter().all(|name| name.starts_with("A2-")),
+        !tasks.is_empty()
+            && tasks
+                .iter()
+                .all(|name| name.starts_with("A2-") || name.starts_with("M-")),
         "the A1 edge measurement may be absent only in the explicit A2 public-plan epoch"
     );
 }
