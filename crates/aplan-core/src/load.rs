@@ -1211,20 +1211,19 @@ pub fn is_plan_file_path(relative: &Path) -> bool {
 #[must_use]
 pub fn is_plan_directory_path(relative: &Path) -> bool {
     let components: Vec<_> = relative.components().collect();
-    if components.iter().any(|component| {
+    let version_control = components.iter().any(|component| {
         matches!(
             component.as_os_str().to_str(),
             Some(".git" | ".jj" | ".hg" | ".svn")
         )
-    }) || (!components.is_empty()
-        && matches!(
-            components[0].as_os_str().to_str(),
+    });
+    let excluded_root = components.first().is_some_and(|first| {
+        matches!(
+            first.as_os_str().to_str(),
             Some("target" | "node_modules" | crate::capture::INBOX_DIR)
-        ))
-    {
-        return false;
-    }
-    true
+        )
+    });
+    !(version_control || excluded_root)
 }
 
 /// Load a committed plan from its repository-relative file contents.

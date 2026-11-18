@@ -6,6 +6,25 @@ to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+### Changed
+
+- **The source builds without warnings under Rust 1.100 while the pin stays at 1.99.1**
+  (`A2-017`). One plan-walk predicate is rewritten to satisfy the new `needless_bool` lint, the
+  test-only `trycmd` dependency is declared once through the workspace, and the packages drop
+  `homepage`, which only repeated `repository`; crates.io still links the repository.
+
+### Security
+
+- **The locked dependency graph clears every current RustSec advisory** (`A2-016`). The MCP SDK
+  requirement rises to `rmcp >= 3.9.0` (locked at 3.10.0) for RUSTSEC-2026-0457, -0461 and -0462;
+  the server uses only the stdio transport, but the vulnerable HTTP transport code no longer ships.
+  `rustix` moves to 1.1.6 (RUSTSEC-2026-0486) and `libz-sys`, reached through `git2`, to 1.1.33,
+  whose bundled zlib fixes a heap overflow (RUSTSEC-2026-0544). The unmaintained-crate notices for
+  `chrono` (through `rmcp`) and the test-only `humantime` (through `trycmd`) have no fixed release
+  and are recorded as reasoned `deny.toml` exceptions with the condition that ends each. rmcp's new
+  `socket2` dependency raises the measured package budgets by one (lock and default) and two
+  (headless).
+
 ## [0.6.0] - 2026-11-04
 
 ### Added

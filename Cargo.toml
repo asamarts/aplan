@@ -31,7 +31,6 @@ edition = "2024"
 rust-version = "1.88"
 license = "Apache-2.0 OR MIT"
 repository = "https://github.com/asamarts/aplan"
-homepage = "https://github.com/asamarts/aplan"
 readme = "README.md"
 publish = ["crates-io"]
 authors = ["aplan contributors"]
@@ -69,7 +68,7 @@ clap = { version = "4", features = ["derive", "cargo", "env", "wrap_help"] }
 # and two constructors: 3.x widened `call_tool`'s reply to an enum. The MSRV is
 # unchanged at 1.88 either way, which `cargo xtask msrv` now checks rather than
 # anybody asserting it.
-rmcp = { version = "3.4.0", features = ["server", "transport-io"] }
+rmcp = { version = "3.9.0", features = ["server", "transport-io"] }
 tokio = { version = "1.53", features = ["rt-multi-thread", "macros", "io-std"] }
 globset = "0.4"
 ignore = "0.4"
@@ -108,7 +107,7 @@ ctrlc = "3.5"
 fs2 = "0.4.3"
 
 tempfile = "3"
-trycmd = "1"
+trycmd = "1.2"
 
 [workspace.lints.rust]
 unsafe_code = "forbid"

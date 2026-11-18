@@ -7,7 +7,6 @@ edition.workspace = true
 rust-version.workspace = true
 license.workspace = true
 repository.workspace = true
-homepage = "https://github.com/asamarts/aplan"
 readme = "../../README.md"
 publish.workspace = true
 keywords = ["planning", "tasks", "dependencies", "ci", "cli"]
@@ -53,7 +52,7 @@ sha2.workspace = true
 
 [dev-dependencies]
 anstyle.workspace = true
-trycmd = "1.2"
+trycmd.workspace = true
 git2 = { version = "0.21", default-features = false }
 serde.workspace = true
 serde_json.workspace = true

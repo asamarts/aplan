@@ -935,7 +935,7 @@ fn assert_publish_order_matches_workspace(order: &[&str]) {
         };
         assert_eq!(package["publish"], serde_json::json!(["crates-io"]));
         assert!(
-            package["homepage"]
+            package["repository"]
                 .as_str()
                 .is_some_and(|value| !value.is_empty())
         );

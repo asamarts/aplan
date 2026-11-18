@@ -2,9 +2,9 @@
   "schema": "aplan/dependency-policy/v1",
   "target": "x86_64-unknown-linux-gnu",
   "budgets": {
-    "lock": 289,
-    "default": 200,
-    "headless": 169,
+    "lock": 290,
+    "default": 201,
+    "headless": 171,
     "tui_increment": 32
   },
   "binary_budget": {
