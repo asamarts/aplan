@@ -12,7 +12,7 @@
 | v0.8 | todo | 0/28 | 0 | 28 | 42.2d | 1.6 (1.6 left) | 4.5d |
 | adoption | todo | 0/78 | 0 | 78 | 101.8d | 3.8 (3.8 left) | 10.0d |
 | backlog | todo | 0/1 | 0 | 1 | 1.0d | <0.1 (<0.1 left) | 1.0d |
-| hardening | todo | 0/14 | 0 | 14 | 13.8d | 0.5 (0.5 left) | 3.0d |
+| hardening | todo | 0/15 | 0 | 15 | 14.8d | 0.5 (0.5 left) | 3.0d |
 | qualification | todo | 0/1 | 0 | 1 | 8.0d | 0.3 (0.3 left) | 8.0d |
 | tui-quality | todo | 0/2 | 0 | 2 | 4.0d | 0.1 (0.1 left) | 4.0d |
 | workflow | todo | 0/17 | 0 | 17 | 50.0d | 1.9 (1.9 left) | 17.5d |
@@ -186,6 +186,7 @@
 | A2-172 | Run the tests that read the plan and the README when only those change | todo | - | - |
 | A2-173 | Prove the YAML limits through product reads, and name a missing bracket as one | todo | - | - |
 | A2-176 | Keep the real-terminal tests passing when the suite shares a busy host | todo | - | - |
+| A2-180 | Make the nine TUI timings the reference host cannot yet budget measurable there | todo | A2-164 | - |
 
 ## qualification Product qualification
 

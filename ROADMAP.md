@@ -52,10 +52,10 @@ resolving test evidence inside the plan gate. It also makes the TUI end by its s
 error, when its terminal hangs up, and holds the audit's lower-severity findings: MCP replies lost
 when a client closes its input (`A2-170`), TUI ranking on keys that change only the selection
 (`A2-171`), CI that skips the tests reading a changed plan or README (`A2-172`), YAML limits
-not yet proven through product reads (`A2-173`), and real-terminal tests that fail when the host is busy
-(`A2-176`).
+not yet proven through product reads (`A2-173`), real-terminal tests that fail when the host is busy
+(`A2-176`), and nine TUI timings the reference host cannot yet budget (`A2-180`).
 
-**Tasks:** `A2-069`, `A2-087`, `A2-127`, `A2-131`, `A2-133`, `A2-141`, `A2-145`, `A2-162`, `A2-165`, `A2-170`, `A2-171`, `A2-172`, `A2-173`, `A2-176`
+**Tasks:** `A2-069`, `A2-087`, `A2-127`, `A2-131`, `A2-133`, `A2-141`, `A2-145`, `A2-162`, `A2-165`, `A2-170`, `A2-171`, `A2-172`, `A2-173`, `A2-176`, `A2-180`
 
 ### adoption, Adoption and ergonomics
 
