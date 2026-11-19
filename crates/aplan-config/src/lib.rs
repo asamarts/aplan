@@ -3345,7 +3345,11 @@ pub fn unknown_keys(text: &str) -> Vec<(String, Option<String>)> {
 /// different problem, and it is exactly what the adopter would have met next.
 #[must_use]
 fn scan_unknown(text: &str) -> (Vec<(String, Option<String>)>, Option<String>) {
-    let Ok(mut doc) = aplan_core::yaml::from_str::<yaml_compat::Value>(text) else {
+    // The document is read with its tags kept, so writing it back keeps them and the parse below
+    // reads every value as the real load does. Read under the tag rule instead, a value beneath a
+    // dropped tag would be written back as quoted text, and `!<tag:example.com,2000:n> 7.5`
+    // would come back as a string that a number field refuses (`A2-179`).
+    let Ok(mut doc) = yaml_compat::compat::from_str::<yaml_compat::Value>(text) else {
         return (Vec::new(), None);
     };
     let accepted = accepted_keys();
@@ -3379,6 +3383,12 @@ fn walk_unknown(
     accepted: &[String],
     out: &mut Vec<(String, Option<String>)>,
 ) {
+    // The document keeps its tags (see `scan_unknown`), and the keys beneath
+    // a tag are the document's keys all the same.
+    if let yaml_compat::Value::Tagged(tagged) = node {
+        walk_unknown(&mut tagged.value, prefix, accepted, out);
+        return;
+    }
     // A sequence of runners: `test:` takes one mapping or a list of them, and
     // each element's keys are `test.*` either way.
     if let Some(seq) = node.as_sequence_mut() {
@@ -5239,6 +5249,31 @@ test:
             names,
             vec!["polciy", "zzz"],
             "the valid key must not appear"
+        );
+    }
+
+    /// The scan reads the document with its tags and writes them back, so what
+    /// it reports as still failing is what the real load meets, and a key
+    /// beneath a tag is found like any other (`A2-179`). Read under the tag
+    /// rule, the number beneath `!<tag:example.com,2000:n>` came back as quoted
+    /// text, and the report blamed a field the load reads correctly.
+    #[test]
+    fn the_unknown_key_scan_reads_a_tag_as_the_load_does() {
+        let tagged = "effort_days_per_week: !<tag:example.com,2000:n> 7.5\nzzz: 1\n";
+        let Err(Error::UnknownKeys(keys)) = parse_config(tagged, Path::new(".aplan.yml")) else {
+            panic!("an unknown key is reported");
+        };
+        assert_eq!(keys.keys, vec![("zzz".to_string(), None)]);
+        assert_eq!(keys.remaining, None, "nothing else is wrong with the file");
+        let cleaned = parse_config(
+            "effort_days_per_week: !<tag:example.com,2000:n> 7.5\n",
+            Path::new(".aplan.yml"),
+        )
+        .expect("the load reads the number beneath the tag");
+        assert_eq!(cleaned.effort_days_per_week, Some(7.5));
+        assert_eq!(
+            unknown_keys("test: !<tag:example.com,2000:t>\n  covrs: [a]\n"),
+            vec![("test.covrs".to_string(), Some("test.covers".to_string()))]
         );
     }
 

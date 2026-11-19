@@ -102,7 +102,9 @@ fn every_aplan_yaml_document_matches_the_pinned_bridge() {
     let mut compared = 0usize;
     let mut both_error = 0usize;
     for (path, text) in docs {
-        let ayaml = yaml_compat::compat::from_str::<Value>(&text);
+        // The product reads every document through `aplan_core::yaml`, so the corpus is read the
+        // same way (`A2-179`).
+        let ayaml = aplan_core::yaml::from_str::<Value>(&text);
         let baseline = yaml_serde_baseline::from_str::<yaml_serde_baseline::Value>(&text);
         match (ayaml, baseline) {
             (Ok(ayaml), Ok(baseline)) => {
@@ -115,9 +117,10 @@ fn every_aplan_yaml_document_matches_the_pinned_bridge() {
                 );
                 // aplan's own formats use the default reader; on this corpus it
                 // must read what the compatibility reader and the bridge read.
-                let default = yaml_compat::from_str::<Value>(&text).unwrap_or_else(|error| {
-                    panic!("the default reader refused {}: {error}", path.display())
-                });
+                let default =
+                    aplan_core::yaml::from_str_strict::<Value>(&text).unwrap_or_else(|error| {
+                        panic!("the default reader refused {}: {error}", path.display())
+                    });
                 assert_eq!(
                     normalized(&default),
                     expected,
@@ -232,7 +235,8 @@ fn alias_bomb() -> String {
 /// Hostile and degenerate inputs, each read by both parsers as a generic
 /// `Value`, as the loader's `serde_json::Value` and as a typed `Task`.
 fn hostile_inputs() -> Vec<(&'static str, String)> {
-    vec![
+    let mut inputs = tagged_inputs();
+    inputs.extend([
         ("empty document", String::new()),
         ("comment only", "# nothing here\n".to_owned()),
         ("explicit empty document", "---\n...\n".to_owned()),
@@ -245,6 +249,42 @@ fn hostile_inputs() -> Vec<(&'static str, String)> {
         ("tab indentation", "a:\n\tb: 1\n".to_owned()),
         ("undefined alias", "a: *missing\n".to_owned()),
         ("self-referencing alias", "a: &a [*a]\n".to_owned()),
+        ("byte order mark", "\u{feff}a: 1\n".to_owned()),
+        (
+            "byte order mark before a document start",
+            "\u{feff}---\na: 1\n".to_owned(),
+        ),
+        (
+            "question mark starting a flow scalar",
+            "a: [?x]\n".to_owned(),
+        ),
+        (
+            "anchor name with a colon",
+            "a: &x:y 1\nb: *x:y\n".to_owned(),
+        ),
+        (
+            "enum as a single-entry mapping",
+            "id: T-1\ntitle: t\nstatus: {todo: ~}\nphase: 1\n".to_owned(),
+        ),
+        ("control character", "a: \"\u{1}\"\n".to_owned()),
+        ("integer past u64", "a: 18446744073709551616\n".to_owned()),
+        ("non-string key", "? [a, b]\n: 1\n".to_owned()),
+        (
+            "literal merge key",
+            "base: &b {x: 1}\nderived:\n  <<: *b\n  y: 2\n".to_owned(),
+        ),
+        ("redefined anchor", "a: &x 1\nb: &x 2\nc: *x\n".to_owned()),
+        ("long scalar", format!("a: {}\n", "x".repeat(64 * 1024))),
+        ("deep flow nesting", nested_flow(10_000)),
+        ("alias bomb", alias_bomb()),
+    ]);
+    inputs
+}
+
+/// The hostile inputs that carry a tag, where the bridge's tag rule applies (`A2-169`,
+/// `A2-179`), and one spelled like a tag that is not one.
+fn tagged_inputs() -> Vec<(&'static str, String)> {
+    vec![
         ("undefined tag handle", "a: !e!x 1\n".to_owned()),
         (
             "declared tag handle",
@@ -263,6 +303,10 @@ fn hostile_inputs() -> Vec<(&'static str, String)> {
             "a: !<tag:example.com,2000:x> hello\n".to_owned(),
         ),
         ("global tag on a mapping", "a: !!set {x, y}\n".to_owned()),
+        ("global tag on a sequence", "a: !!binary [1]\n".to_owned()),
+        ("non-specific tag", "a: ! 1\n".to_owned()),
+        ("integer tag on a leading zero", "a: !!int 017\n".to_owned()),
+        ("null tag with no value", "a: !!null\n".to_owned()),
         (
             "global tag on a key",
             "!!timestamp 2026-01-01: x\n".to_owned(),
@@ -296,25 +340,26 @@ fn hostile_inputs() -> Vec<(&'static str, String)> {
             "task estimate with a core tag on a quoted scalar",
             "id: T-1\ntitle: t\nstatus: todo\nphase: 1\neffort_days: !!int \"2\"\n".to_owned(),
         ),
-        ("byte order mark", "\u{feff}a: 1\n".to_owned()),
-        ("control character", "a: \"\u{1}\"\n".to_owned()),
-        ("integer past u64", "a: 18446744073709551616\n".to_owned()),
-        ("non-string key", "? [a, b]\n: 1\n".to_owned()),
         (
-            "literal merge key",
-            "base: &b {x: 1}\nderived:\n  <<: *b\n  y: 2\n".to_owned(),
+            "task estimate with a float tag on a quoted scalar",
+            "id: T-1\ntitle: t\nstatus: todo\nphase: 1\neffort_days: !!float \"2.5\"\n".to_owned(),
         ),
-        ("redefined anchor", "a: &x 1\nb: &x 2\nc: *x\n".to_owned()),
-        ("long scalar", format!("a: {}\n", "x".repeat(64 * 1024))),
-        ("deep flow nesting", nested_flow(10_000)),
-        ("alias bomb", alias_bomb()),
+        (
+            "task title with the non-specific tag",
+            "id: T-1\ntitle: ! t\nstatus: todo\nphase: 1\n".to_owned(),
+        ),
+        (
+            "task status with a global tag on a mapping key",
+            "id: T-1\ntitle: t\nstatus: {\"<x>\": todo}\nphase: 1\n".to_owned(),
+        ),
     ]
 }
 
-/// Where the parsers knowingly part, as (input, read, why). One lets the product
-/// accept a value the bridge refused, a core tag on a quoted scalar, which YAML
-/// defines; the others are refusals where the bridge accepted, or a generic value
-/// no product read turns into output.
+/// Where the parsers knowingly part, as (input, read, why). Some let the product
+/// read a value the bridge refused where YAML's core schema defines it: a core tag
+/// on a quoted scalar, `!!int` on a number with a leading zero, and `!!null` with
+/// no value. The others are refusals where the bridge read a value, or a generic
+/// value no product read turns into output.
 const KNOWN_DIVERGENCES: &[(&str, &str, &str)] = &[
     (
         "duplicate key",
@@ -334,6 +379,33 @@ const KNOWN_DIVERGENCES: &[(&str, &str, &str)] = &[
          YAML does; the compatibility reader still accepts them as libyaml did",
     ),
     (
+        "byte order mark before a document start",
+        "default-reader JSON",
+        "the default reader takes a byte order mark before `---`, which YAML allows at the start \
+         of a stream and the bridge refused (A2-009, recorded by A2-179)",
+    ),
+    (
+        "question mark starting a flow scalar",
+        "default-reader JSON",
+        "in a flow collection `?x` is the plain scalar `?x`, as YAML 1.2 defines it; libyaml read \
+         it as a key with no value, and the compatibility reader still does (A2-009, recorded by \
+         A2-179)",
+    ),
+    (
+        "anchor name with a colon",
+        "default-reader JSON",
+        "YAML 1.2 lets an anchor's name hold a colon, which libyaml refused (A2-009, recorded by \
+         A2-179)",
+    ),
+    (
+        "enum as a single-entry mapping",
+        "Task",
+        "`ayaml` reads an enum written as a mapping with one key, as the variant that key names; \
+         the bridge took only a tag or a string. A task's loader validates its front matter as \
+         JSON first, where the schema refuses a mapping for `status`, so no task loads this way; \
+         `.aplan.yml`'s `id_strategy: {ulid: ~}` does (A2-009, recorded by A2-179)",
+    ),
+    (
         "task estimate with a string tag",
         "Task",
         "`!!str 2` is the string `2`, as YAML defines it, which a number field refuses; the \
@@ -348,9 +420,59 @@ const KNOWN_DIVERGENCES: &[(&str, &str, &str)] = &[
     (
         "task estimate with a core tag on a quoted scalar",
         "Task",
-        "`!!int \"2\"` is the integer 2, as YAML defines it; the bridge resolved the integer and \
-         then refused it for a float field. Refusing it would copy that quirk rather than a rule \
-         (A2-169)",
+        "`!!int \"2\"` is the integer 2, as YAML defines it; the bridge's numeric reads took only \
+         a plain scalar, so it refused every quoted one whatever its tag. Refusing it would copy \
+         that quirk rather than a rule (A2-169, A2-179)",
+    ),
+    (
+        "task estimate with a float tag on a quoted scalar",
+        "Task",
+        "`!!float \"2.5\"` is the float 2.5, refused by the bridge for the same reason (A2-179)",
+    ),
+    (
+        "integer tag on a leading zero",
+        "Value",
+        "YAML 1.2's core schema reads `!!int 017` as 17; the bridge, reading YAML 1.1's octal \
+         rules, refused it (A2-179)",
+    ),
+    (
+        "integer tag on a leading zero",
+        "JSON",
+        "the same reading, as JSON",
+    ),
+    (
+        "integer tag on a leading zero",
+        "default-reader JSON",
+        "the same reading, by the default reader",
+    ),
+    (
+        "null tag with no value",
+        "Value",
+        "an empty scalar tagged `!!null` is null, as YAML defines it; the bridge refused a tag \
+         with no value (A2-179)",
+    ),
+    (
+        "null tag with no value",
+        "JSON",
+        "the same reading, as JSON",
+    ),
+    (
+        "null tag with no value",
+        "default-reader JSON",
+        "the same reading, by the default reader",
+    ),
+    (
+        "non-specific tag",
+        "Value",
+        "both keep the non-specific tag `!` in a generic value; YAML makes the scalar beneath it \
+         a string, as `ayaml` does, where the bridge resolved it as a number. Read as JSON, both \
+         refuse it (A2-179)",
+    ),
+    (
+        "task title with the non-specific tag",
+        "Value",
+        "the same tag on a task's title. Both refuse it as JSON, the read the loader validates \
+         first, so neither loads the task",
     ),
     (
         "integer past u64",
