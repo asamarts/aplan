@@ -8,7 +8,7 @@
 
 | cut | status | done/total | ready | blocked | effort | weeks | critical path |
 | --- | --- | --- | --- | --- | --- | --- | --- |
-| v0.7 | todo | 11/24 | 12 | 1 | 20.8d | 0.8 (0.4 left) | 3.5d |
+| v0.7 | todo | 12/24 | 11 | 1 | 20.8d | 0.8 (0.3 left) | 3.5d |
 | v0.8 | todo | 0/28 | 0 | 28 | 42.2d | 1.6 (1.6 left) | 4.5d |
 | adoption | todo | 0/78 | 0 | 78 | 101.8d | 3.8 (3.8 left) | 10.0d |
 | backlog | todo | 0/1 | 0 | 1 | 1.0d | <0.1 (<0.1 left) | 1.0d |
@@ -37,7 +37,7 @@
 | A2-028 | Document the Action's self-hosted runner prerequisites | todo | - | - |
 | A2-079 | critical-path says "of it" about a chain that is not part of what it printed | todo | - | - |
 | A2-137 | Generated agent guidance drops id families once their tasks are done | todo | - | - |
-| A2-164 | Stop the TUI render gate failing on the slower hosted runners | todo | - | - |
+| A2-164 | Stop the TUI render gate failing on the slower hosted runners | done | - | commit:f76cea421e84, test:performance_tests::a_wall_clock_metric_is_held_to_the_budget_of_its_host, test:performance_tests::every_metric_past_its_budget_is_reported_when_the_gate_ends, test:tui_performance::reference_runs_give_budgets_only_when_they_agree, test:tui_performance::the_reference_script_refuses_to_run_without_its_host_or_with_an_unknown_profile, test:tui_performance::a_wall_clock_metric_is_held_to_the_budget_of_its_host |
 | A2-166 | Close the gaps an audit found in the safe YAML parser cutover | done | - | commit:44e3da191c2f, test:dependency_audit::tests::the_tui_evaluator_parses_yaml_with_the_product_parser, test:kep::unusable_input_is_an_error_not_a_silent_empty_import, test:yaml_limits::tag_expansion_boundary, test:yaml_limits::product_task_loader_refuses_depth_past_the_default |
 | A2-167 | Make the README's first-plan commands work as written | done | - | commit:44e3da191c2f, test:greenfield::the_readme_start_commands_run_as_written |
 | A2-168 | Find each task's cut in one pass over the roadmap | done | - | commit:44e3da191c2f, test:export::tests::the_cut_map_matches_its_one_task_at_a_time_definition |
