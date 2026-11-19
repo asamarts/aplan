@@ -8,7 +8,7 @@
 
 | cut | status | done/total | ready | blocked | effort | weeks | critical path |
 | --- | --- | --- | --- | --- | --- | --- | --- |
-| v0.7 | todo | 10/24 | 13 | 1 | 20.8d | 0.8 (0.4 left) | 3.5d |
+| v0.7 | todo | 11/24 | 12 | 1 | 20.8d | 0.8 (0.4 left) | 3.5d |
 | v0.8 | todo | 0/28 | 0 | 28 | 42.2d | 1.6 (1.6 left) | 4.5d |
 | adoption | todo | 0/78 | 0 | 78 | 101.8d | 3.8 (3.8 left) | 10.0d |
 | backlog | todo | 0/1 | 0 | 1 | 1.0d | <0.1 (<0.1 left) | 1.0d |
@@ -44,7 +44,7 @@
 | A2-169 | Read values tagged outside YAML's core schema as the bridge did | done | - | commit:ceb33e587824, test:yaml::tests::every_request_reads_beneath_a_global_tag_as_the_bridge_did, test:yaml::tests::a_local_tag_is_refused_by_name_where_the_target_cannot_keep_it, test:yaml::tests::the_strict_reader_drops_a_global_tag_and_keeps_its_own_refusals, test:yaml_differential::hostile_inputs_meet_the_same_outcome_under_both_parsers, test:kep::a_global_tag_is_read_past_as_v0_6_0_read_it, test:capture::tests::a_capture_reads_past_a_global_tag_and_refuses_a_local_one |
 | A2-177 | Close what a second audit found in the v0.7 audit fixes | done | - | commit:2ded96d439d1, test:dependency_audit::tests::yaml_parser_is_exactly_pinned, test:dependency_audit::tests::the_tui_evaluator_parses_yaml_with_the_product_parser, test:dependency_audit::tests::a_tui_evaluator_lock_that_no_longer_matches_its_manifest_is_refused, test:kep::unusable_input_is_an_error_not_a_silent_empty_import, test:policy::the_exemption_free_epoch_is_only_a2 |
 | A2-178 | Draw the progress row a pause held back, so a slow run never shows only its end | todo | - | - |
-| A2-179 | Close what an audit of the tag rule found in A2-169 | todo | - | - |
+| A2-179 | Close what an audit of the tag rule found in A2-169 | done | - | commit:1a2a56a41133, test:yaml::tests::a_tagged_document_keeps_the_strict_grammar, test:yaml::tests::an_enum_written_without_a_tag_reads_exactly_as_ayaml_reads_it, test:yaml::tests::a_global_tag_over_an_enum_is_dropped_and_adds_nothing_to_the_path, test:yaml::tests::a_scalar_beneath_a_tag_in_yamls_namespace_is_refused_by_naming_the_tag, test:yaml::tests::a_local_tag_is_named_as_it_can_be_written_back, test:yaml::tests::every_request_reads_beneath_a_local_tag_as_the_bridge_did_but_a_unit, test:tests::the_unknown_key_scan_reads_a_tag_as_the_load_does, test:yaml_differential::hostile_inputs_meet_the_same_outcome_under_both_parsers |
 
 ## v0.8 Correctness and the most reported adoption failures
 
