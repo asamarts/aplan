@@ -148,6 +148,7 @@ const SCRIPT_WARNING_POLICY: &[(&str, WarningPolicy)] = &[
         "pushed.sh",
         WarningPolicy::NoWorkspaceCompilation("observes a pushed workflow run"),
     ),
+    ("reference-tui-perf.sh", WarningPolicy::Cargo),
     (
         "release-source.sh",
         WarningPolicy::NoWorkspaceCompilation("validates an immutable Git source"),

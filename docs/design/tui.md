@@ -2059,6 +2059,15 @@ lane. That keeps optimized linking, real PTYs and generated 10,000-task plans ou
 handoffs while requiring the lane before a release. Every gate prints its samples and budgets even
 when it passes.
 
+Since `A2-164` (ADR-0067) a quiet reference host owns the wall-clock budgets.
+`ci/scripts/reference-tui-perf.sh` runs the three gates there, pinned to one CPU at a load of 0.25
+or less, against budgets measured from five runs there. `docs/design/read-path-performance.md`
+records those budgets and their basis, and the nine metrics that keep the hosted rule until
+`A2-180`: three graph-focus timings and every first feedback. The ceilings in the tables below are the hosted budgets of
+2026-11-18. A hosted run now fails a wall-clock metric only past 1.5 times its ceiling, so a slower
+machine in GitHub's fleet cannot turn the nightly run red. Every gate prints every metric before
+it fails. Memory, the list-paint ratio and the semantic checks keep their limits on every host.
+
 The real-terminal gate uses stable generated fixtures rather than this repository's changing task
 count. A forced `refresh` cache mode is the cold case; the following `auto` process is the warm
 generation-hit case. Three cold/warm pairs are interleaved so host drift does not favor one state.

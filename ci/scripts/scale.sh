@@ -24,6 +24,10 @@ cargo test -q -p aplan-e2e --test integration 'scale::' -- --ignored --nocapture
 # nightly/manual lane gives them a stable Linux runner class and a bounded
 # thirty-minute job (`A1-447`). The in-process gate isolates reducer, scene and
 # viewport work; the serial PTY gate measures cold/warm startup and interaction.
+# The hosted machines differ by about 35%, so here a wall-clock metric fails only
+# past 1.5 times its budget, which catches a gross regression; the quiet
+# reference host owns the budgets themselves (`A2-164`, ADR-0067,
+# `ci/scripts/reference-tui-perf.sh`). Every metric prints before a gate fails.
 echo "==> cargo test --release -p aplan-tui performance_tests::layered_graph_performance_gate_layout_and_semantic_hits -- --ignored --exact --nocapture"
 cargo test -q --release -p aplan-tui \
     'performance_tests::layered_graph_performance_gate_layout_and_semantic_hits' -- \

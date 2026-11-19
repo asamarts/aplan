@@ -42,6 +42,13 @@ to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   test-only `trycmd` dependency is declared once through the workspace, and the packages drop
   `homepage`, which only repeated `repository`; crates.io still links the repository.
 
+- **The TUI's wall-clock budgets are judged on a quiet reference host** (`A2-164`, ADR-0067). The
+  nightly `scale` run on GitHub's machines, whose speed varies by about 35%, failed four nights
+  running with no change in aplan. It now fails a TUI timing only past 1.5 times its budget, and
+  prints every metric before it fails. The budgets themselves are measured on, and enforced by,
+  `ci/scripts/reference-tui-perf.sh` on a quiet host that runs one benchmark at a time, and a
+  release must pass there. Nothing that ships changes.
+
 ### Fixed
 
 - **Ranking ready work no longer costs quadratic time in the number of ready tasks** (`A2-018`).

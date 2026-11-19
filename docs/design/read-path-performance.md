@@ -106,6 +106,153 @@ not milliseconds, and its own recorded 6,000-task load phase is about 0.9 to 1.1
 validation. Replace the ambiguous word `cold` with the states above when this proposal is accepted;
 do not lower a target silently or continue publishing one the product does not meet.
 
+### The TUI's wall-clock budgets on the reference host (`A2-164`)
+
+The TUI's three release gates (the in-process render gate, the layered-graph gate and the
+real-terminal gate of `A1-447`) hold their wall-clock metrics to budgets measured on the reference
+host (ADR-0067). The hosted `scale` run holds them only to 1.5 times their hosted budgets, the
+ceilings `docs/design/tui.md` lists, because GitHub's machines differ by about 35%.
+
+**The host and the setting.** The reference host has a four-core, eight-thread Intel Core
+i7-6700HQ at 2.6 GHz, with turbo off and the performance governor. It runs one benchmark at a time
+through a queue. `ci/scripts/reference-tui-perf.sh` builds the gates in release with Rust 1.99.1,
+inside one slot of that queue. Before each gate it waits for the one-minute load to fall to 0.25
+or less, then runs the gate pinned to CPU 2. It prints every metric's p95: the slowest of seven
+samples in process, or of three launches in a real terminal. The real terminal's first feedback,
+usable frame, action, search and refresh are separate metrics, each cold and warm, for 32, 700 and
+10,000 tasks.
+
+**The runs.** Five runs with `--budgets measure`, each in its own slot, measured source
+`58025c81b7ad-0d81d7890265-32f79219ed53` on 2026-11-19 between 06:00 and 06:54 UTC. That id names
+the trees of `crates/`, `Cargo.toml` and `Cargo.lock`. The load before each gate was 0.20 to 0.25,
+and after each run 0.60 to 0.74.
+
+`ci/scripts/reference-tui-budgets.py` compared the runs:
+- 68 of the 74 wall-clock metrics agreed within the spread agreed in advance: 5% of the smallest
+  p95, or 0.1 ms for a metric whose worst p95 is under 2 ms.
+- 65 of them have a reference budget: the worst p95 times 1.25, and at least the worst p95 plus
+  0.1 ms. The maintainer decided the floor on 2026-11-19, after this measurement. It sets the
+  budget of ten metrics under 0.4 ms, among them hit tests of 76 to 126 ns and a 9 ns progress
+  tick, which an unrelated change in code layout could otherwise fail.
+- Nine metrics keep the hosted rule on the reference host too, by the maintainer's decisions of the
+  same day, until `A2-180` makes them measurable:
+  - Three graph-focus metrics vary up to 11% between runs but agree to 1% within one, which points
+    at something fixed per process.
+  - All six real-terminal first-feedback metrics. Each is about 7 ms and the slowest of three
+    launches. Three of them varied by up to 6.4%, and one that agreed failed a passing revision
+    once (see the proof below).
+
+The two metrics whose hosted budgets failed the scheduled run from 2026-11-11 to 2026-11-14
+agreed well:
+
+| metric | p95 spread across five runs | reference budget |
+|---|---:|---:|
+| `model_and_graph_10000` | 1.4% | 2.075 s |
+| `status_only_refresh_10000` | 2.7% | 1.154 s |
+
+The reference host is slower than most hosted runners at some of these. So a reference budget
+can be above the hosted one, and only the reference host's own runs can set it.
+
+**The proof.** Four runs with `--budgets reference` followed, each in its own slot:
+- **The first run, on the commit that added the budgets, failed one metric.**
+  `pty_small_cold_feedback` read 9.70 ms against its 9.17 ms budget. One of its three launches was
+  slow, and the others took about 7.3 ms. That is why every first feedback keeps the hosted rule.
+- **The first doubling run passed, which exposed a bug in the script.** The doubling commit did the
+  measured work of `model_and_graph_10000` and `status_only_refresh_10000` twice. `git archive`
+  stamps files with their commit's time, and that commit was older than the previous run's build,
+  so cargo measured the previous run's binary. The script now extracts with the time of
+  extraction.
+- **With that fix, the commit with the budgets passed twice.** The doubling commit failed exactly
+  the two doubled metrics, at 3.26 s against 2.075 s and at 1.85 s against 1.154 s, and still
+  printed all 80 metrics.
+
+**Re-basing.** A new host, or a new pinned compiler, takes five new runs and the same comparison,
+never an edit of the numbers.
+
+In-process gates:
+
+| metric | p95, fastest to slowest run | spread | reference budget |
+|---|---:|---:|---:|
+| `layered_cell_scene_layered_sparse` | 488.8 us to 490.5 us | 0.002 ms | 613.1 us |
+| `layered_hit_layered_sparse` | 81 ns to 87 ns | 0.000 ms | 100.1 us |
+| `layered_cell_scene_layered_fan_in` | 583.6 us to 588.1 us | 0.004 ms | 735.1 us |
+| `layered_hit_layered_fan_in` | 76 ns to 76 ns | 0.000 ms | 100.1 us |
+| `layered_cell_scene_layered_crossing` | 781.9 us to 784.2 us | 0.002 ms | 980.2 us |
+| `layered_hit_layered_crossing` | 93 ns to 99 ns | 0.000 ms | 100.1 us |
+| `list_paint_small` | 511.9 us to 512.8 us | 0.001 ms | 641.0 us |
+| `list_paint_repository` | 504.7 us to 507.1 us | 0.002 ms | 633.9 us |
+| `model_and_graph_10000` | 1.638 s to 1.660 s | 1.4% | 2.075 s |
+| `list_paint_10000` | 511.0 us to 513.4 us | 0.002 ms | 641.7 us |
+| `search_and_render_10000` | 121.95 ms to 123.68 ms | 1.4% | 154.60 ms |
+| `graph_search_and_render_10000` | 636.7 us to 656.5 us | 0.020 ms | 820.6 us |
+| `summary_resize_and_reflow_10000` | 574.5 us to 589.1 us | 0.015 ms | 736.4 us |
+| `graph_window_sparse` | 180.47 ms to 181.67 ms | 0.7% | 227.09 ms |
+| `graph_scene_sparse` | 622.8 us to 632.0 us | 0.009 ms | 790.0 us |
+| `graph_paint_sparse` | 519.9 us to 522.1 us | 0.002 ms | 652.7 us |
+| `graph_pan_sparse` | 1.23 ms to 1.24 ms | 0.016 ms | 1.55 ms |
+| `graph_hit_sparse` | 80 ns to 85 ns | 0.000 ms | 100.1 us |
+| `graph_focus_sparse` | 17.19 ms to 19.10 ms | 11.1% | hosted rule (`A2-180`) |
+| `graph_window_traversal_sparse` | 107.02 ms to 108.25 ms | 1.1% | 135.31 ms |
+| `graph_window_fan_in` | 19.15 ms to 19.28 ms | 0.7% | 24.10 ms |
+| `graph_scene_fan_in` | 487.7 us to 503.3 us | 0.016 ms | 629.2 us |
+| `graph_paint_fan_in` | 527.0 us to 528.0 us | 0.001 ms | 660.0 us |
+| `graph_pan_fan_in` | 1.26 ms to 1.33 ms | 0.071 ms | 1.66 ms |
+| `graph_hit_fan_in` | 80 ns to 85 ns | 0.000 ms | 100.1 us |
+| `graph_focus_fan_in` | 1.62 ms to 1.83 ms | 0.215 ms | hosted rule (`A2-180`) |
+| `graph_window_traversal_fan_in` | 10.18 ms to 10.22 ms | 0.3% | 12.77 ms |
+| `graph_window_crossing` | 57.86 ms to 58.45 ms | 1.0% | 73.06 ms |
+| `graph_scene_crossing` | 1.41 ms to 1.44 ms | 0.023 ms | 1.80 ms |
+| `graph_paint_crossing` | 535.4 us to 539.4 us | 0.004 ms | 674.2 us |
+| `graph_pan_crossing` | 1.28 ms to 1.31 ms | 0.024 ms | 1.63 ms |
+| `graph_hit_crossing` | 121 ns to 126 ns | 0.000 ms | 100.1 us |
+| `graph_focus_crossing` | 3.92 ms to 4.28 ms | 9.2% | hosted rule (`A2-180`) |
+| `graph_window_traversal_crossing` | 21.76 ms to 22.02 ms | 1.2% | 27.52 ms |
+| `graph_window_too_wide` | 10.42 ms to 10.48 ms | 0.5% | 13.10 ms |
+| `graph_scene_too_wide` | 385.7 us to 392.4 us | 0.007 ms | 492.4 us |
+| `graph_paint_too_wide` | 531.5 us to 533.4 us | 0.002 ms | 666.7 us |
+| `graph_pan_too_wide` | 1.27 ms to 1.28 ms | 0.008 ms | 1.60 ms |
+| `graph_hit_too_wide` | 80 ns to 85 ns | 0.000 ms | 100.1 us |
+| `graph_focus_too_wide` | 764.5 us to 859.0 us | 0.095 ms | 1.07 ms |
+| `graph_window_traversal_too_wide` | 5.48 ms to 5.56 ms | 1.4% | 6.95 ms |
+| `status_only_refresh_10000` | 898.69 ms to 923.27 ms | 2.7% | 1.154 s |
+| `loading_progress_paint` | 337.7 us to 339.0 us | 0.001 ms | 439.0 us |
+| `loading_progress_tick` | 9 ns to 9 ns | 0.000 ms | 100.0 us |
+
+Real-terminal gate:
+
+| metric | p95, fastest to slowest run | spread | reference budget |
+|---|---:|---:|---:|
+| `pty_small_cold_feedback` | 7.20 ms to 7.34 ms | 1.9% | hosted rule (`A2-180`) |
+| `pty_small_cold_usable` | 308.71 ms to 310.20 ms | 0.5% | 387.75 ms |
+| `pty_small_cold_action` | 1.99 ms to 2.08 ms | 4.7% | 2.60 ms |
+| `pty_small_cold_search` | 16.48 ms to 17.23 ms | 4.6% | 21.54 ms |
+| `pty_small_cold_refresh` | 102.15 ms to 103.94 ms | 1.8% | 129.92 ms |
+| `pty_small_warm_feedback` | 7.20 ms to 7.32 ms | 1.6% | hosted rule (`A2-180`) |
+| `pty_small_warm_usable` | 308.89 ms to 310.27 ms | 0.4% | 387.83 ms |
+| `pty_small_warm_action` | 1.99 ms to 2.03 ms | 2.1% | 2.54 ms |
+| `pty_small_warm_search` | 17.02 ms to 17.51 ms | 2.9% | 21.88 ms |
+| `pty_small_warm_refresh` | 102.14 ms to 102.19 ms | 0.1% | 127.74 ms |
+| `pty_repository_cold_feedback` | 6.89 ms to 7.26 ms | 5.4% | hosted rule (`A2-180`) |
+| `pty_repository_cold_usable` | 423.29 ms to 424.21 ms | 0.2% | 530.26 ms |
+| `pty_repository_cold_action` | 5.20 ms to 5.30 ms | 2.1% | 6.63 ms |
+| `pty_repository_cold_search` | 52.17 ms to 52.94 ms | 1.5% | 66.18 ms |
+| `pty_repository_cold_refresh` | 206.97 ms to 207.38 ms | 0.2% | 259.23 ms |
+| `pty_repository_warm_feedback` | 6.84 ms to 7.25 ms | 5.9% | hosted rule (`A2-180`) |
+| `pty_repository_warm_usable` | 323.59 ms to 323.96 ms | 0.1% | 404.95 ms |
+| `pty_repository_warm_action` | 5.17 ms to 5.31 ms | 2.6% | 6.63 ms |
+| `pty_repository_warm_search` | 51.32 ms to 52.57 ms | 2.4% | 65.72 ms |
+| `pty_repository_warm_refresh` | 207.03 ms to 208.56 ms | 0.7% | 260.70 ms |
+| `pty_large_cold_feedback` | 6.90 ms to 7.35 ms | 6.4% | hosted rule (`A2-180`) |
+| `pty_large_cold_usable` | 2.335 s to 2.451 s | 5.0% | 3.064 s |
+| `pty_large_cold_action` | 56.97 ms to 59.62 ms | 4.6% | 74.52 ms |
+| `pty_large_cold_search` | 646.49 ms to 669.31 ms | 3.5% | 836.64 ms |
+| `pty_large_cold_refresh` | 2.683 s to 2.789 s | 4.0% | 3.487 s |
+| `pty_large_warm_feedback` | 7.08 ms to 7.26 ms | 2.6% | hosted rule (`A2-180`) |
+| `pty_large_warm_usable` | 1.937 s to 1.945 s | 0.4% | 2.432 s |
+| `pty_large_warm_action` | 56.94 ms to 58.53 ms | 2.8% | 73.16 ms |
+| `pty_large_warm_search` | 630.66 ms to 654.71 ms | 3.8% | 818.38 ms |
+| `pty_large_warm_refresh` | 2.087 s to 2.088 s | 0.0% | 2.610 s |
+
 ## What the implementation did at proposal time
 
 The pre-A1-588 one-shot path was approximately:
