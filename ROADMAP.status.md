@@ -8,11 +8,11 @@
 
 | cut | status | done/total | ready | blocked | effort | weeks | critical path |
 | --- | --- | --- | --- | --- | --- | --- | --- |
-| v0.7 | todo | 10/22 | 11 | 1 | 19.2d | 0.7 (0.4 left) | 3.5d |
+| v0.7 | todo | 10/24 | 13 | 1 | 20.8d | 0.8 (0.4 left) | 3.5d |
 | v0.8 | todo | 0/28 | 0 | 28 | 42.2d | 1.6 (1.6 left) | 4.5d |
 | adoption | todo | 0/78 | 0 | 78 | 101.8d | 3.8 (3.8 left) | 10.0d |
 | backlog | todo | 0/1 | 0 | 1 | 1.0d | <0.1 (<0.1 left) | 1.0d |
-| hardening | todo | 0/15 | 0 | 15 | 14.2d | 0.5 (0.5 left) | 3.0d |
+| hardening | todo | 0/14 | 0 | 14 | 13.8d | 0.5 (0.5 left) | 3.0d |
 | qualification | todo | 0/1 | 0 | 1 | 8.0d | 0.3 (0.3 left) | 8.0d |
 | tui-quality | todo | 0/2 | 0 | 2 | 4.0d | 0.1 (0.1 left) | 4.0d |
 | workflow | todo | 0/17 | 0 | 17 | 50.0d | 1.9 (1.9 left) | 17.5d |
@@ -26,7 +26,7 @@
 | A2-017 | Keep the workspace clean under Rust 1.100 without moving the pinned toolchain | done | - | commit:cc6d669cd006, commit:c09603f6606a |
 | A2-018 | Diagnose the large-fixture TUI latency regression on the current hosted image | done | - | commit:73eeb5472dac, test:graph::ranking::the_preference_pass_matches_its_one_task_at_a_time_definition |
 | A2-019 | Migrate the open pre-public backlog and every open issue into the public plan | done | - | commit:4420b69c4fe9, commit:02d6c3c9c1ed |
-| A2-020 | Publish v0.7.0 | todo | A2-009, A2-016, A2-017, A2-018, A2-019, A2-021, A2-022, A2-023, A2-024, A2-025, A2-026, A2-027, A2-028, A2-079, A2-137, A2-164, A2-166, A2-167, A2-168, A2-169, A2-177 | - |
+| A2-020 | Publish v0.7.0 | todo | A2-009, A2-016, A2-017, A2-018, A2-019, A2-021, A2-022, A2-023, A2-024, A2-025, A2-026, A2-027, A2-028, A2-079, A2-137, A2-164, A2-166, A2-167, A2-168, A2-169, A2-177, A2-178, A2-179 | - |
 | A2-021 | Report APLAN045 when traces_root has a dot component or is left at its default | todo | - | - |
 | A2-022 | Report a refused inbox promotion with the capture's real state | todo | - | - |
 | A2-023 | List same-second captures newest first, as the inbox documents | todo | - | - |
@@ -43,6 +43,8 @@
 | A2-168 | Find each task's cut in one pass over the roadmap | done | - | commit:44e3da191c2f, test:export::tests::the_cut_map_matches_its_one_task_at_a_time_definition |
 | A2-169 | Read values tagged outside YAML's core schema as the bridge did | done | - | commit:ceb33e587824, test:yaml::tests::every_request_reads_beneath_a_global_tag_as_the_bridge_did, test:yaml::tests::a_local_tag_is_refused_by_name_where_the_target_cannot_keep_it, test:yaml::tests::the_strict_reader_drops_a_global_tag_and_keeps_its_own_refusals, test:yaml_differential::hostile_inputs_meet_the_same_outcome_under_both_parsers, test:kep::a_global_tag_is_read_past_as_v0_6_0_read_it, test:capture::tests::a_capture_reads_past_a_global_tag_and_refuses_a_local_one |
 | A2-177 | Close what a second audit found in the v0.7 audit fixes | done | - | commit:2ded96d439d1, test:dependency_audit::tests::yaml_parser_is_exactly_pinned, test:dependency_audit::tests::the_tui_evaluator_parses_yaml_with_the_product_parser, test:dependency_audit::tests::a_tui_evaluator_lock_that_no_longer_matches_its_manifest_is_refused, test:kep::unusable_input_is_an_error_not_a_silent_empty_import, test:policy::the_exemption_free_epoch_is_only_a2 |
+| A2-178 | Draw the progress row a pause held back, so a slow run never shows only its end | todo | - | - |
+| A2-179 | Close what an audit of the tag rule found in A2-169 | todo | - | - |
 
 ## v0.8 Correctness and the most reported adoption failures
 
@@ -184,7 +186,6 @@
 | A2-172 | Run the tests that read the plan and the README when only those change | todo | - | - |
 | A2-173 | Prove the YAML limits through product reads, and name a missing bracket as one | todo | - | - |
 | A2-176 | Keep the real-terminal tests passing when the suite shares a busy host | todo | - | - |
-| A2-178 | Draw the progress row a pause held back, so a slow run never shows only its end | todo | - | - |
 
 ## qualification Product qualification
 
