@@ -2121,7 +2121,10 @@ impl TestResolver {
         };
         let spawned = run_configured_command(
             &argv,
-            configured.command_policy(),
+            // Test execution is deliberately unbounded by `test.timeout_seconds`
+            // (which bounds discovery only, ADR-0054), while keeping the
+            // runner's resource, output and wrapper controls (`A2-181`).
+            configured.command_policy().without_timeout(),
             &self.dir_of(configured),
             "test.batch.run",
             0,
@@ -2133,7 +2136,10 @@ impl TestResolver {
         }
         let output = match spawned.map(|(ran, _)| ran) {
             Ok(Ran::Exited(output)) => output,
-            Ok(Ran::TimedOut(_)) => unreachable!("no batch timeout was set"),
+            Ok(Ran::TimedOut(after)) => {
+                self.record_batch_timeout(runner, names, after.as_secs());
+                return;
+            }
             Err(reason) => {
                 self.reject_batch(
                     runner,
@@ -2194,6 +2200,15 @@ impl TestResolver {
             executed.insert((runner, name.clone()), Outcome::Stopped(breach));
         }
         true
+    }
+
+    /// Fan a batch timeout out to every requested identity so no batch command
+    /// can panic or drop requested identities silently (`A2-181`).
+    fn record_batch_timeout(&self, runner: usize, names: &BTreeSet<String>, after_seconds: u64) {
+        let mut executed = self.executed.borrow_mut();
+        for name in names {
+            executed.insert((runner, name.clone()), Outcome::TimedOut(after_seconds));
+        }
     }
 
     fn reported_batch_outcome(
@@ -2456,6 +2471,14 @@ impl TestResolver {
                 )),
                 true,
             ),
+            Some(Outcome::TimedOut(after)) => (
+                TestBatchOutcome::TimedOut,
+                None,
+                Some(format!(
+                    "the provider had not returned after {after}s and was killed"
+                )),
+                false,
+            ),
             Some(Outcome::BatchUnavailable(diagnostic)) => {
                 (TestBatchOutcome::FrameworkCrash, None, diagnostic, false)
             }
@@ -2553,6 +2576,10 @@ impl TestResolver {
                 out.push(self.stopped(runner, breach, ev, task, file));
                 Executed::Stopped
             }
+            Outcome::TimedOut(after) => {
+                out.push(self.timed_out(runner, after, ev, task, file));
+                Executed::TimedOut
+            }
             Outcome::Failed(shown) => {
                 // Attached to the first citation of this test and referred to
                 // afterwards (`A1-365`, criterion 5): one failing test cited by
@@ -2613,12 +2640,13 @@ impl TestResolver {
         let argv = configured.run_argv(name);
         let spawned = run_configured_command(
             &argv,
-            configured.command_policy(),
+            // Unbounded by `test.timeout_seconds` on purpose: under `--execute`
+            // a long run is the point rather than a symptom (`A1-121`, `A2-181`,
+            // ADR-0054), while memory, process, output and wrapper controls
+            // still apply.
+            configured.command_policy().without_timeout(),
             &self.dir_of(configured),
             "test.run",
-            // Unbounded on purpose: under `--execute` a long run is the
-            // point rather than a symptom (`A1-121`, and the reasoning is
-            // on `test.timeout_seconds` where an adopter reads it).
             0,
         );
         if let Ok((_, cost)) = &spawned {
@@ -2671,7 +2699,7 @@ impl TestResolver {
                     true,
                 ))
             }
-            Ok(Ran::TimedOut(_)) => unreachable!("no limit was set"),
+            Ok(Ran::TimedOut(after)) => Some((Outcome::TimedOut(after.as_secs()), true)),
             Err(why) => {
                 self.fault(
                     runner,
@@ -2812,9 +2840,10 @@ impl TestResolver {
         file: &Path,
     ) -> Option<Diagnostic> {
         match executed {
-            // A cap breach was already reported by `execute_citation`; the
-            // other two states make no negative claim about this citation.
-            Executed::Stopped | Executed::NotAsked | Executed::Passed => None,
+            // A cap breach or timeout was already reported by
+            // `execute_citation`; the other two states make no negative claim
+            // about this citation.
+            Executed::Stopped | Executed::TimedOut | Executed::NotAsked | Executed::Passed => None,
             Executed::Failed(shown) => Some(Self::failed(ev, task, file, shown)),
             Executed::Reported(outcome, shown) => Some(Self::batch_not_proved(
                 ev,
@@ -2863,6 +2892,33 @@ impl TestResolver {
             "Raise this runner's limit in `.aplan.yml` if the command needs the room, or make \
              the test cost less. The citation is neither proved nor disproved until the command \
              runs inside it.",
+        )
+    }
+
+    /// The finding for an execution command killed after a timeout (`A2-181`).
+    fn timed_out(
+        &self,
+        runner: usize,
+        after: u64,
+        ev: &Evidence,
+        task: &Task,
+        file: &Path,
+    ) -> Diagnostic {
+        Diagnostic::error(
+            code::TEST_FAILED,
+            format!(
+                "test `{}` timed out under `--execute`: the `{}` runner had not returned after \
+                 {after}s and was killed, so it neither passed nor failed",
+                ev.reference,
+                self.label(runner),
+            ),
+        )
+        .with_task(&task.id)
+        .with_file(file)
+        .with_agent_instruction(
+            "Raise the execution time limit if the test legitimately needs longer, or make the \
+             test finish within it. The citation is neither proved nor disproved until the \
+             command completes.",
         )
     }
 
@@ -3389,6 +3445,7 @@ impl EvidenceResolver for TestResolver {
                         ) => CitationOutcome::Failed,
                         Some(Outcome::Reported { outcome, .. }) => outcome.citation_outcome(),
                         Some(Outcome::Stopped(_)) => CitationOutcome::Refused,
+                        Some(Outcome::TimedOut(_)) => CitationOutcome::TimedOut,
                         Some(Outcome::BatchUnavailable(_)) => CitationOutcome::Unavailable,
                         None => self
                             .checkers
@@ -3705,7 +3762,7 @@ impl TestResolver {
         let argv = configured.run_argv(MISS_SENTINEL);
         let spawned = run_configured_command(
             &argv,
-            configured.command_policy(),
+            configured.command_policy().without_timeout(),
             &self.dir_of(configured),
             "test.run",
             0,
@@ -3897,6 +3954,9 @@ enum Outcome {
     BatchUnavailable(Option<String>),
     /// The kernel stopped it at a declared cap (`A1-310`).
     Stopped(Breach),
+    /// The command timed out after the given number of seconds and was killed
+    /// (`A2-181`).
+    TimedOut(u64),
 }
 
 /// What a failed citation may show of the output (`A1-365`).
@@ -3929,6 +3989,9 @@ enum Executed {
     /// It was stopped at a declared cap. The finding is already reported, and
     /// the citation is neither proved nor disproved.
     Stopped,
+    /// It timed out and was killed. The finding is already reported, and the
+    /// citation is neither proved nor disproved (`A2-181`).
+    TimedOut,
 }
 
 /// Output retained from each pipe when no value is configured (`A1-366`).
@@ -8425,6 +8488,113 @@ mod tests {
                 // printed and a citation has to match it exactly.
                 "a name with spaces and: a colon in it",
             ]
+        );
+    }
+
+    #[test]
+    fn timed_out_execution_outcome_reports_structured_finding_and_ledger_state_without_panicking() {
+        use std::collections::BTreeMap;
+
+        use aplan_core::task::{Evidence, EvidenceKind, Status, Task};
+
+        use super::{CitationStrength, EvidenceResolver as _, Executed, TestBatchOutcome};
+
+        let runner = aplan_config::TestRunner {
+            name: Some("unit".into()),
+            dir: None,
+            list: vec!["true".into()],
+            run: vec!["true".into(), aplan_config::PLACEHOLDER.into()],
+            skipped: None,
+            covers: None,
+            covers_by_test: None,
+            inputs_by_test: None,
+            expect_tests: None,
+            run_selects: None,
+            timeout_seconds: Some(1),
+            max_memory: None,
+            max_processes: None,
+            max_output: None,
+            output_lines: None,
+            wrap: None,
+            weight: None,
+            exclusive: None,
+            batch: None,
+        };
+        let resolver = TestResolver::new(vec![runner], PathBuf::from("."), true, None);
+        resolver.listings.borrow_mut()[0] = Some(vec!["alpha".into(), "beta".into()]);
+        let names = BTreeSet::from(["alpha".to_string(), "beta".to_string()]);
+        resolver.record_batch_timeout(0, &names, 9);
+
+        let task = Task {
+            id: "T-1".into(),
+            title: "T-1".into(),
+            phase: 1,
+            status: Status::Done,
+            owner: None,
+            effort_days: None,
+            blocked_by: Vec::new(),
+            contains: Vec::new(),
+            ratified_by: Vec::new(),
+            prefer_after: Vec::new(),
+            paths: Vec::new(),
+            traces: Vec::new(),
+            trace_fingerprints: BTreeMap::new(),
+            evidence: Vec::new(),
+            evidence_fingerprints: BTreeMap::new(),
+            tags: Vec::new(),
+            revisit_at: None,
+            version_impact: None,
+            version_impact_reason: None,
+            version: None,
+        };
+        let ev = Evidence {
+            kind: EvidenceKind::Test,
+            reference: "alpha".into(),
+            captured: None,
+        };
+        let mut diagnostics = Vec::new();
+        let executed =
+            resolver.execute_citation(0, &ev, &task, Path::new("plan/T-1.md"), &mut diagnostics);
+        assert!(matches!(executed, Executed::TimedOut));
+        assert!(
+            TestResolver::execution_finding(executed, &ev, &task, Path::new("plan/T-1.md"))
+                .is_none(),
+            "timeout finding is already emitted by execute_citation and must not duplicate"
+        );
+        assert_eq!(diagnostics.len(), 1, "{diagnostics:#?}");
+        let finding = &diagnostics[0];
+        assert_eq!(finding.code, code::TEST_FAILED);
+        assert!(
+            finding.message.contains("timed out under `--execute`")
+                && finding.message.contains("after 9s")
+                && finding.message.contains("`unit`"),
+            "{}",
+            finding.message
+        );
+        assert!(
+            finding
+                .agent_instruction
+                .as_deref()
+                .is_some_and(|text| text.contains("neither proved nor disproved")),
+            "{:?}",
+            finding.agent_instruction
+        );
+
+        let resolution = resolver.observation(&task, &ev, &diagnostics);
+        assert_eq!(resolution.outcome, CitationOutcome::TimedOut);
+        assert_eq!(resolution.strength, CitationStrength::Resolved);
+
+        let (entry, attributable) =
+            TestResolver::receipt_entry("beta", Some(Outcome::TimedOut(9)), true);
+        assert!(!attributable);
+        assert_eq!(entry.outcome, TestBatchOutcome::TimedOut);
+        assert!(
+            entry
+                .diagnostic
+                .as_deref()
+                .is_some_and(|text| text.contains("after 9s")),
+            "{:?}",
+            entry.diagnostic
         );
     }
 }

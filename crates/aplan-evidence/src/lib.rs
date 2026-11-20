@@ -6935,6 +6935,117 @@ mod tests {
         );
     }
 
+    /// `test.timeout_seconds` bounds discovery (`test.list` / `test.skipped`),
+    /// never test execution (`test.run`, `test.batch.run`, or the miss
+    /// sentinel) (`A2-181`, ADR-0054).
+    ///
+    /// Proves `verify.test_timeout_bounds_discovery_only`: a runner whose
+    /// `timeout_seconds` is 1 still lets a 2-second single test, its 2-second
+    /// miss sentinel, and a 2-second batch adapter run to completion under
+    /// `--execute` instead of killing them and panicking on `unreachable!`.
+    #[cfg(unix)]
+    #[test]
+    fn test_timeout_seconds_bounds_discovery_without_cutting_off_single_or_batch_execution() {
+        // Proof back-reference for `verify.test_timeout_bounds_discovery_only`.
+        let (dir, _repo) = init();
+        let assert_executed_clean = |id: &str, test_name: &str, configured: TestRunner| {
+            let opts = VerifyOptions {
+                detect_drift: false,
+                execute: true,
+                test_runner: Some(TestRunners::One(configured)),
+                ..VerifyOptions::default()
+            };
+            let plan = plan_of(done_task(id, vec![test_ev(test_name)], vec![]));
+            let observed = verify_observed(&plan, dir.path(), &opts)
+                .expect("execution must not panic or time out");
+            assert!(
+                observed.report.diagnostics.is_empty(),
+                "execution for `{test_name}` should pass cleanly: {:?}",
+                observed.report.diagnostics
+            );
+            assert_eq!(
+                observed.citations[0].resolution.outcome,
+                CitationOutcome::Resolved
+            );
+            assert_eq!(
+                observed.citations[0].resolution.strength,
+                CitationStrength::Executed
+            );
+        };
+
+        // 1. Single-test `test.run` + miss sentinel both take 2s with
+        // `timeout_seconds: Some(1)` and a `wrap` prefix. Both must finish
+        // cleanly without hitting the discovery timeout or triggering
+        // `APLAN037`, while still running through `wrap`.
+        let mut single = runner(
+            &["printf", "slow_single_test\n"],
+            &[
+                "sh",
+                "-c",
+                "sleep 2; if [ \"$APLAN_WRAP_PROOF\" != \"1\" ]; then echo missing-wrap; exit 2; fi; if [ \"$1\" = \"slow_single_test\" ]; then echo ran-hit; exit 0; else echo ran-miss; exit 1; fi",
+                "sh",
+                PLACEHOLDER,
+            ],
+        );
+        single.timeout_seconds = Some(1);
+        single.wrap = Some(vec!["env".into(), "APLAN_WRAP_PROOF=1".into()]);
+        assert_executed_clean("A", "slow_single_test", single);
+
+        // 2. Batched `test.batch.run` takes 2s with `timeout_seconds: Some(1)`
+        // and a `wrap` prefix. Must finish cleanly without hitting the
+        // discovery timeout or panicking while keeping `wrap`.
+        let mut batched = runner(&["printf", "slow_batch_test\n"], &["false", PLACEHOLDER]);
+        batched.timeout_seconds = Some(1);
+        batched.wrap = Some(vec!["env".into(), "APLAN_WRAP_PROOF=1".into()]);
+        batched.batch = Some(TestBatch {
+            protocol: aplan_config::TEST_BATCH_PROTOCOL,
+            run: vec![
+                "python3".into(),
+                "-c".into(),
+                "import json,os,sys,time\nassert os.environ.get('APLAN_WRAP_PROOF')=='1'\ntime.sleep(2)\nmanifest,result=sys.argv[1:]\nwith open(manifest,encoding='utf-8') as stream: request=json.load(stream)\nanswer={'schema':'aplan/test-batch-result/v1','nonce':request['nonce'],'provider':request['provider'],'complete':True,'tests':[{'test':name,'outcome':'passed'} for name in request['tests']]}\nwith open(result,'x',encoding='utf-8') as stream: json.dump(answer,stream,sort_keys=True)\n".into(),
+                aplan_config::BATCH_MANIFEST_PLACEHOLDER.into(),
+                aplan_config::BATCH_RESULT_PLACEHOLDER.into(),
+            ],
+        });
+        assert_executed_clean("B", "slow_batch_test", batched);
+
+        // 3. Discovery (`test.list`) still honours `timeout_seconds: Some(1)`.
+        let blocked = dir.path().join("discovery-blocked.fifo");
+        assert!(
+            std::process::Command::new("mkfifo")
+                .arg(&blocked)
+                .status()
+                .expect("mkfifo runs")
+                .success()
+        );
+        let mut slow_list = runner(
+            &["cat", blocked.to_str().expect("fixture path is UTF-8")],
+            &["true", PLACEHOLDER],
+        );
+        slow_list.timeout_seconds = Some(1);
+        let list_opts = VerifyOptions {
+            detect_drift: false,
+            execute: true,
+            test_runner: Some(TestRunners::One(slow_list)),
+            ..VerifyOptions::default()
+        };
+        let list_plan = plan_of(done_task("C", vec![test_ev("never_listed")], vec![]));
+        let list_observed = verify_observed(&list_plan, dir.path(), &list_opts)
+            .expect("discovery timeout must report cleanly");
+        assert!(
+            list_observed.report.diagnostics.iter().any(|d| {
+                d.code == aplan_core::code::TEST_UNRESOLVED
+                    && d.message.contains("had not returned after 1s")
+            }),
+            "discovery timeout must still be enforced: {:?}",
+            list_observed.report.diagnostics
+        );
+        assert_eq!(
+            list_observed.citations[0].resolution.outcome,
+            CitationOutcome::TimedOut
+        );
+    }
+
     /// A merge commit is almost never the commit that did the work (`A1-145`).
     ///
     /// The first pilot's case, reproduced: `git rev-parse HEAD` at the wrong

@@ -58,6 +58,15 @@ to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Fixed
 
+- **Setting `test.timeout_seconds` no longer cuts off or panics `verify --execute`** (`A2-181`,
+  `--require verify.test_timeout_bounds_discovery_only`). `test.timeout_seconds` is specified to
+  bound discovery (`test.list` and `test.skipped`) rather than execution (ADR-0054), while
+  `test.run`, `test.batch.run` and the miss sentinel remain unbounded by it so slow test runs are
+  owned by the test framework or adapter. Sharing `CommandPolicy` caused execution commands to
+  inherit a configured `test.timeout_seconds` and hit `unreachable!` when a test or batch ran past
+  it. Execution commands now clear `timeout_seconds` while retaining `max_memory`, `max_processes`,
+  `max_output` and `wrap`, and both execution paths replace `unreachable!` with structured
+  `APLAN014` / `CitationOutcome::TimedOut` / `TestBatchOutcome::TimedOut` handling.
 - **`APLAN045` now reports stale premises when `traces_root` is left at its default `.` or
   contains `.` / `..` components** (`A2-021`). `historical_trace_path` previously canonicalised
   only absolute roots, so `.`, `./docs`, `docs/.`, and subdirectory roots such as `..` or

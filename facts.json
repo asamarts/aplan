@@ -1,6 +1,10 @@
 {
   "behaviours": [
     {
+      "name": "verify.test_timeout_bounds_discovery_only",
+      "what": "`test.timeout_seconds` bounds test discovery (`list` and `skipped`) without cutting off or panicking test execution (`run`, `batch.run` or the miss sentinel) under `verify --execute`"
+    },
+    {
       "name": "capture.body_is_non_vacuous",
       "what": "capture bodies from profiles, commands and loaded records are absent or contain visible content, never blank or invisible placeholders"
     },
@@ -1407,7 +1411,7 @@
     "version.require_impact"
   ],
   "counts": {
-    "behaviours": 225,
+    "behaviours": 226,
     "build_capabilities": 1,
     "commands": 48,
     "config_keys": 124,
