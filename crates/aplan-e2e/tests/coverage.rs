@@ -64,6 +64,8 @@ struct Scenario {
     tag_families: Option<aplan_core::TagFamily>,
     /// Declare canonical owners (enables `APLAN056`).
     owners: &'static [&'static str],
+    /// Declare scoped evidence policies (enables `APLAN058`).
+    evidence_scopes: Vec<aplan_core::validate::EvidenceScope>,
     /// The generated block `export-agents-md` would write now, compared against
     /// the scenario's own `AGENTS.md` (enables `APLAN041`). `None` is a caller
     /// that cannot render one, which switches the rule off.
@@ -117,6 +119,11 @@ impl Scenario {
         self
     }
 
+    fn policy_scope(mut self, scope: aplan_core::validate::EvidenceScope) -> Self {
+        self.evidence_scopes.push(scope);
+        self
+    }
+
     /// What the contract would say now, for `APLAN041` (`A1-273`). The file it
     /// is compared against is an ordinary scenario file at `AGENTS.md`.
     fn agents_block(mut self, current: &'static str) -> Self {
@@ -139,6 +146,7 @@ fn scen(name: &'static str, rule: Rule, expect: Expect, files: Vec<(String, Stri
         require_cut_membership: false,
         tag_families: None,
         owners: &[],
+        evidence_scopes: Vec::new(),
         agents_block: None,
     }
 }
@@ -470,6 +478,7 @@ fn corpus() -> Vec<Scenario> {
     all.extend(cancelled_cut_rules());
     all.extend(tag_family_rules());
     all.extend(owner_vocabulary_rules());
+    all.extend(policy_selector_rules());
     all.extend(drift_rules());
     all.extend(interpolated_reason_branches());
     all.extend(partial_stamp_rules());
@@ -1736,6 +1745,114 @@ fn owner_vocabulary_rules() -> Vec<Scenario> {
     ]
 }
 
+fn policy_scope_for(cuts: &[&str], tags: &[&str]) -> aplan_core::validate::EvidenceScope {
+    let named_dimensions = usize::from(!cuts.is_empty()) + usize::from(!tags.is_empty());
+    aplan_core::validate::EvidenceScope {
+        selector: aplan_core::select::Selector {
+            cuts: cuts.iter().map(|s| (*s).to_string()).collect(),
+            tags: tags.iter().map(|s| (*s).to_string()).collect(),
+            ..Default::default()
+        },
+        named_dimensions,
+        require_min_strength: Some(vec![]),
+        exempt_tags: None,
+    }
+}
+
+fn policy_selector_rules() -> Vec<Scenario> {
+    vec![
+        scen(
+            "policy-selector-cut-fires",
+            Rule::PolicySelectorUnmatched,
+            Fires,
+            vec![
+                tf(
+                    "m",
+                    "id: M-one\ntitle: M-one\nphase: 0\nstatus: todo\ntags: [milestone, v0.1]\n\
+                     blocked_by: [A-1]",
+                ),
+                tf("a", "id: A-1\ntitle: A-1\nphase: 0\nstatus: todo"),
+                doc(
+                    ".aplan.yml",
+                    "policy:\n  - when: { cut: [M-on] }\n    evidence:\n      require_min_strength: []\n",
+                ),
+            ],
+        )
+        .policy_scope(policy_scope_for(&["M-on"], &[])),
+        scen(
+            "policy-selector-cut-unmatched-fires",
+            Rule::PolicySelectorUnmatched,
+            Fires,
+            vec![
+                tf(
+                    "m",
+                    "id: M-one\ntitle: M-one\nphase: 0\nstatus: todo\ntags: [milestone, v0.1]\n\
+                     blocked_by: [A-1]",
+                ),
+                tf("a", "id: A-1\ntitle: A-1\nphase: 0\nstatus: todo"),
+                doc(
+                    ".aplan.yml",
+                    "policy:\n  - when: { cut: [M-noon] }\n    evidence:\n      require_min_strength: []\n",
+                ),
+            ],
+        )
+        .policy_scope(policy_scope_for(&["M-noon"], &[])),
+        scen(
+            "policy-selector-tag-fires",
+            Rule::PolicySelectorUnmatched,
+            Fires,
+            vec![
+                tf(
+                    "a",
+                    "id: A-1\ntitle: A-1\nphase: 0\nstatus: todo\ntags: [kind-impl]",
+                ),
+                doc(
+                    ".aplan.yml",
+                    "policy:\n  - when: { tag: [kind-imql] }\n    evidence:\n      require_min_strength: []\n",
+                ),
+            ],
+        )
+        .policy_scope(policy_scope_for(&[], &["kind-imql"])),
+        scen(
+            "policy-selector-tag-unmatched-fires",
+            Rule::PolicySelectorUnmatched,
+            Fires,
+            vec![
+                tf(
+                    "a",
+                    "id: A-1\ntitle: A-1\nphase: 0\nstatus: todo\ntags: [kind-impl]",
+                ),
+                doc(
+                    ".aplan.yml",
+                    "policy:\n  - when: { tag: [unknown-tag] }\n    evidence:\n      require_min_strength: []\n",
+                ),
+            ],
+        )
+        .policy_scope(policy_scope_for(&[], &["unknown-tag"])),
+        scen(
+            "policy-selector-silent",
+            Rule::PolicySelectorUnmatched,
+            Silent,
+            vec![
+                tf(
+                    "m",
+                    "id: M-one\ntitle: M-one\nphase: 0\nstatus: todo\ntags: [milestone, v0.1]\n\
+                     blocked_by: [A-1]",
+                ),
+                tf(
+                    "a",
+                    "id: A-1\ntitle: A-1\nphase: 0\nstatus: todo\ntags: [kind-impl, epic-b]",
+                ),
+            ],
+        )
+        .tag_families_of(&["epic-a", "epic-b"])
+        .policy_scope(policy_scope_for(
+            &["M-one", "v0.1"],
+            &["kind-impl", "epic-a"],
+        )),
+    ]
+}
+
 /// `APLAN027`, split out because `milestone_rules` outgrew the line limit when
 /// this arrived: the gate noticing a function had become a list.
 fn cancelled_cut_rules() -> Vec<Scenario> {
@@ -1839,6 +1956,7 @@ fn options_for(s: &Scenario, dir: &std::path::Path) -> Options {
             std::collections::BTreeMap::new()
         },
         owners: s.owners.iter().map(|owner| (*owner).to_string()).collect(),
+        evidence_scopes: s.evidence_scopes.clone(),
         agents_block: s.agents_block.map(|current| aplan_core::AgentsBlock {
             path: dir.join("AGENTS.md"),
             current: current.to_string(),

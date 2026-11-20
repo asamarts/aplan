@@ -45,7 +45,7 @@ inputs:
 
       Worth knowing before this action is the only thing reading the output: a
       warning does not fail it. Both commands exit `0` with warnings outstanding,
-      and 27 of aplan's 57 rules are warnings -- including most of what this tool
+      and 28 of aplan's 58 rules are warnings -- including most of what this tool
       says about evidence, such as a task closed over its own unticked criteria
       (`APLAN038`) or, under `command: verify`, a commit citation too broad to
       prove anything (`APLAN024`). Under the default `github` format they still

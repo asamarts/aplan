@@ -394,12 +394,11 @@ pub struct Options {
     pub agents_block: Option<AgentsBlock>,
     /// The `.aplan.yml` the options came from, when there was one.
     ///
-    /// Only `APLAN029` reads it, and only to point at the file its finding is
-    /// about. Every other rule concerns a task and names that task's file; this
-    /// one concerns a declaration, and without the path it was the one rule in
-    /// twenty-nine that could point nowhere, so a second unused family rendered
-    /// as a bare sentence with no location and no fix line, `check` printing that
-    /// once per rule (`A1-085`, `A1-086`).
+    /// Config-level rules (`APLAN029`, `APLAN058`) read it to point at the file
+    /// their finding is about. Every other rule concerns a task and names that
+    /// task's file; config-level findings concern a declaration, and without the
+    /// path they would point nowhere and render without a location (`A1-085`,
+    /// `A1-086`, `A2-024`).
     pub config_file: Option<std::path::PathBuf>,
 }
 
@@ -670,6 +669,7 @@ pub fn validate_with_graph(plan: &Plan, opts: &Options, graph: &Graph<'_>) -> Re
         check_revisit(lt, &mut report.diagnostics);
     }
     check_vocabularies(plan, opts, &mut report.diagnostics);
+    check_policy_selectors(plan, opts, &mut report.diagnostics);
     check_agents_block(opts, &mut report.diagnostics);
     check_cancelled_cuts(plan, graph, &mut report.diagnostics);
     check_preference_cycles(plan, graph, &mut report.diagnostics);
@@ -1474,6 +1474,164 @@ fn members_of_any_cut(plan: &Plan) -> BTreeSet<&str> {
         }
     }
     out
+}
+
+/// `APLAN058`: every cut and tag named in `policy[].when` can match this plan
+/// (`A2-024`).
+///
+/// A `when.cut` value matches either a milestone's id or its derived cut label
+/// (`roadmap::cut_label`), including milestones with no members yet. A
+/// `when.tag` value is known when any task in the plan carries it or any
+/// `tag_families` entry declares it, which is how a repository declares an
+/// intended tag before its first task uses it.
+fn check_policy_selectors(plan: &Plan, opts: &Options, out: &mut Vec<Diagnostic>) {
+    if opts.evidence_scopes.is_empty() {
+        return;
+    }
+
+    let mut known_cuts: BTreeSet<&str> = BTreeSet::new();
+    let mut known_tags: BTreeSet<&str> = BTreeSet::new();
+    for lt in &plan.tasks {
+        let task = &lt.task;
+        if task.is_milestone() {
+            known_cuts.insert(task.id.as_str());
+            let label = crate::roadmap::cut_label(task);
+            if !label.is_empty() {
+                known_cuts.insert(label);
+            }
+        }
+        for tag in &task.tags {
+            known_tags.insert(tag.as_str());
+        }
+    }
+    for family in opts.tag_families.values() {
+        for member in &family.members {
+            known_tags.insert(member.as_str());
+        }
+    }
+
+    for (idx, scope) in opts.evidence_scopes.iter().enumerate() {
+        check_policy_cut_selectors(idx, &scope.selector.cuts, &known_cuts, opts, out);
+        check_policy_tag_selectors(idx, &scope.selector.tags, &known_tags, opts, out);
+    }
+}
+
+fn check_policy_cut_selectors(
+    idx: usize,
+    cuts: &[String],
+    known_cuts: &BTreeSet<&str>,
+    opts: &Options,
+    out: &mut Vec<Diagnostic>,
+) {
+    let unique: BTreeSet<&str> = cuts.iter().map(String::as_str).collect();
+    for want in unique {
+        if known_cuts.contains(want) {
+            continue;
+        }
+        let near: Vec<&str> = known_cuts
+            .iter()
+            .copied()
+            .filter(|known| is_one_edit_apart(known, want))
+            .collect();
+        let (message, instruction) = match near.as_slice() {
+            [] => (
+                format!(
+                    "`policy[{idx}].when.cut` names `{want}`, which matches no milestone id or cut label in this plan"
+                ),
+                format!(
+                    "Correct `policy[{idx}].when.cut` in `.aplan.yml` to an existing milestone id or cut label, or remove the selector if that cut does not exist."
+                ),
+            ),
+            [known] => (
+                format!(
+                    "`policy[{idx}].when.cut` names `{want}`, which matches no milestone id or cut label in this plan: did you mean `{known}`?"
+                ),
+                format!(
+                    "Change `{want}` to `{known}` in `policy[{idx}].when.cut` in `.aplan.yml`, or add the missing milestone if `{want}` is a new cut."
+                ),
+            ),
+            many => {
+                let listed = many
+                    .iter()
+                    .map(|known| format!("`{known}`"))
+                    .collect::<Vec<_>>()
+                    .join(", ");
+                (
+                    format!(
+                        "`policy[{idx}].when.cut` names `{want}`, which matches no milestone id or cut label in this plan; it is one edit from {listed}"
+                    ),
+                    format!(
+                        "Choose the intended milestone id or cut label ({listed}) in `policy[{idx}].when.cut` in `.aplan.yml`, or add the missing milestone."
+                    ),
+                )
+            }
+        };
+        let mut d = Diagnostic::warning(code::POLICY_SELECTOR_UNMATCHED, message)
+            .with_agent_instruction(instruction);
+        if let Some(path) = &opts.config_file {
+            d = d.with_file(path);
+        }
+        out.push(d);
+    }
+}
+
+fn check_policy_tag_selectors(
+    idx: usize,
+    tags: &[String],
+    known_tags: &BTreeSet<&str>,
+    opts: &Options,
+    out: &mut Vec<Diagnostic>,
+) {
+    let unique: BTreeSet<&str> = tags.iter().map(String::as_str).collect();
+    for want in unique {
+        if known_tags.contains(want) {
+            continue;
+        }
+        let near: Vec<&str> = known_tags
+            .iter()
+            .copied()
+            .filter(|known| is_one_edit_apart(known, want))
+            .collect();
+        let (message, instruction) = match near.as_slice() {
+            [] => (
+                format!(
+                    "`policy[{idx}].when.tag` names `{want}`, which no task carries and no `tag_families` entry declares"
+                ),
+                format!(
+                    "Correct `policy[{idx}].when.tag` in `.aplan.yml`, or declare `{want}` in `tag_families` if it is an intended tag that no task carries yet."
+                ),
+            ),
+            [known] => (
+                format!(
+                    "`policy[{idx}].when.tag` names `{want}`, which no task carries and no `tag_families` entry declares: did you mean `{known}`?"
+                ),
+                format!(
+                    "Change `{want}` to `{known}` in `policy[{idx}].when.tag` in `.aplan.yml`, or declare `{want}` in `tag_families` if it is an intended tag that no task carries yet."
+                ),
+            ),
+            many => {
+                let listed = many
+                    .iter()
+                    .map(|known| format!("`{known}`"))
+                    .collect::<Vec<_>>()
+                    .join(", ");
+                (
+                    format!(
+                        "`policy[{idx}].when.tag` names `{want}`, which no task carries and no `tag_families` entry declares; it is one edit from {listed}"
+                    ),
+                    format!(
+                        "Choose the intended tag ({listed}) in `policy[{idx}].when.tag` in `.aplan.yml`, or declare `{want}` in `tag_families` if it is an intended tag."
+                    ),
+                )
+            }
+        };
+        let mut d = Diagnostic::warning(code::POLICY_SELECTOR_UNMATCHED, message)
+            .with_agent_instruction(instruction);
+        if let Some(path) = &opts.config_file {
+            d = d.with_file(path);
+        }
+        out.push(d);
+    }
 }
 
 /// `APLAN056`: every present owner is in the declared vocabulary.
@@ -8461,5 +8619,258 @@ mod tests {
         ] {
             assert_eq!(iso_date_to_epoch(bad), None, "{bad}");
         }
+    }
+
+    fn policy_scope(cuts: &[&str], tags: &[&str]) -> EvidenceScope {
+        let mut named_dimensions = 0;
+        if !cuts.is_empty() {
+            named_dimensions += 1;
+        }
+        if !tags.is_empty() {
+            named_dimensions += 1;
+        }
+        EvidenceScope {
+            selector: crate::select::Selector {
+                cuts: cuts.iter().map(|s| (*s).to_string()).collect(),
+                tags: tags.iter().map(|s| (*s).to_string()).collect(),
+                ..Default::default()
+            },
+            named_dimensions,
+            require_min_strength: Some(vec![]),
+            exempt_tags: None,
+        }
+    }
+
+    #[test]
+    fn policy_selector_cut_warns_when_unmatched_and_suggests_close_matches() {
+        let mut m1 = t("M-one", Status::Todo);
+        m1.tags = vec!["milestone".into(), "v0.1".into()];
+        let mut m2 = t("M-two", Status::Todo);
+        m2.tags = vec!["milestone".into(), "v0.2".into()];
+        let mut m3 = t("M-ono", Status::Todo);
+        m3.tags = vec!["milestone".into()];
+
+        let plan = plan_of(vec![m1, m2, m3]);
+
+        // Unmatched cut with no close match (like `M-noon` against `M-one`),
+        // unmatched cut with one close match (`M-tw`), and unmatched cut with
+        // two close matches (`M-on` is one edit from `M-one` and `M-ono`).
+        let opts = Options {
+            require_effort: false,
+            config_file: Some(PathBuf::from(".aplan.yml")),
+            evidence_scopes: vec![
+                policy_scope(&["M-noon", "M-noon"], &[]),
+                policy_scope(&["M-tw"], &[]),
+                policy_scope(&["M-on"], &[]),
+            ],
+            ..Default::default()
+        };
+
+        let report = validate(&plan, &opts);
+        let findings: Vec<&Diagnostic> = report
+            .diagnostics
+            .iter()
+            .filter(|d| d.code == code::POLICY_SELECTOR_UNMATCHED)
+            .collect();
+        assert_eq!(findings.len(), 3, "{findings:#?}");
+
+        // Every finding carries the config file path and warning severity.
+        for d in &findings {
+            assert_eq!(d.severity, crate::diagnostic::Severity::Warning);
+            assert_eq!(d.file.as_deref(), Some(Path::new(".aplan.yml")));
+        }
+
+        // Duplicate `M-noon` in policy[0] produces one finding with no suggestion.
+        let no_match = findings
+            .iter()
+            .find(|d| d.message.contains("`M-noon`"))
+            .expect("M-noon finding");
+        assert!(no_match.message.contains("`policy[0].when.cut`"));
+        assert!(!no_match.message.contains("did you mean"));
+        let instr = no_match.agent_instruction.as_deref().expect("instruction");
+        assert!(instr.contains("`policy[0].when.cut`") && instr.contains("`.aplan.yml`"));
+
+        // Single close match on policy[1].
+        let one_match = findings
+            .iter()
+            .find(|d| d.message.contains("`M-tw`"))
+            .expect("M-tw finding");
+        assert!(one_match.message.contains("`policy[1].when.cut`"));
+        assert!(one_match.message.contains("did you mean `M-two`?"));
+        let instr = one_match.agent_instruction.as_deref().expect("instruction");
+        assert!(instr.contains("`M-two`"));
+
+        // Multiple close matches on policy[2], sorted deterministically.
+        let many_matches = findings
+            .iter()
+            .find(|d| d.message.contains("`M-on`"))
+            .expect("M-on finding");
+        assert!(many_matches.message.contains("`policy[2].when.cut`"));
+        assert!(
+            many_matches
+                .message
+                .contains("one edit from `M-one`, `M-ono`")
+        );
+        let instr = many_matches
+            .agent_instruction
+            .as_deref()
+            .expect("instruction");
+        assert!(instr.contains("`M-one`, `M-ono`"));
+    }
+
+    #[test]
+    fn policy_selector_cut_accepts_milestone_id_and_cut_label_including_empty_milestones() {
+        let mut m1 = t("M-one", Status::Todo);
+        m1.tags = vec!["milestone".into(), "v0.1".into()];
+        m1.blocked_by = vec!["A-1".into()];
+        m1.effort_days = None;
+        // Second milestone has no members yet (`blocked_by` empty) and no cut tag:
+        // only its milestone id (`M-future`) matches, not `future`.
+        let mut m2 = t("M-future", Status::Todo);
+        m2.tags = vec!["milestone".into()];
+        m2.effort_days = None;
+        // Third milestone uses a non-version cut label (`phase-2`).
+        let mut m3 = t("M-p2", Status::Todo);
+        m3.tags = vec!["milestone".into(), "phase-2".into()];
+        m3.effort_days = None;
+        let a = t("A-1", Status::Todo);
+
+        let plan = plan_of(vec![m1, m2, m3, a]);
+        let opts = Options {
+            require_effort: false,
+            evidence_scopes: vec![
+                policy_scope(&["M-one", "v0.1"], &[]),
+                policy_scope(&["M-future", "M-p2", "phase-2"], &[]),
+            ],
+            ..Default::default()
+        };
+
+        let report = validate(&plan, &opts);
+        assert!(
+            report
+                .diagnostics
+                .iter()
+                .all(|d| d.code != code::POLICY_SELECTOR_UNMATCHED),
+            "existing milestone ids and cut labels must stay silent: {:#?}",
+            report.diagnostics
+        );
+    }
+
+    #[test]
+    fn policy_selector_tag_warns_when_unmatched_and_accepts_task_or_family_tags() {
+        let mut a = t("A-1", Status::Todo);
+        a.tags = vec!["kind-impl".into(), "kind-imp".into()];
+        let mut b = t("A-2", Status::Done);
+        b.tags = vec!["spike".into()];
+        b.evidence = vec![commit_ev()];
+
+        let plan = plan_of(vec![a, b]);
+        let mut families = BTreeMap::new();
+        families.insert(
+            "kind".to_string(),
+            TagFamily::members(vec![
+                "kind-impl".into(),
+                "kind-imp".into(),
+                "kind-docs".into(),
+            ]),
+        );
+
+        // Matched: `kind-impl` (task), `spike` (done task), `kind-docs` (family only).
+        // Unmatched: `totally-unknown` (0 near), `spke` (1 near: `spike`),
+        // `kind-imq` (2 near: `kind-imp` and `kind-impl`? wait: `kind-imq` is 1 edit from
+        // `kind-imp` only; `kind-impx` is 1 edit from `kind-imp` and `kind-impl`).
+        let opts = Options {
+            require_effort: false,
+            tag_families: families,
+            config_file: Some(PathBuf::from(".aplan.yml")),
+            evidence_scopes: vec![
+                policy_scope(&[], &["kind-impl", "spike", "kind-docs"]),
+                policy_scope(&[], &["totally-unknown", "totally-unknown"]),
+                policy_scope(&[], &["kind-imql"]),
+                policy_scope(&[], &["kind-impx"]),
+            ],
+            ..Default::default()
+        };
+
+        let report = validate(&plan, &opts);
+        let findings: Vec<&Diagnostic> = report
+            .diagnostics
+            .iter()
+            .filter(|d| d.code == code::POLICY_SELECTOR_UNMATCHED)
+            .collect();
+        assert_eq!(findings.len(), 3, "{findings:#?}");
+
+        let no_match = findings
+            .iter()
+            .find(|d| d.message.contains("`totally-unknown`"))
+            .expect("totally-unknown finding");
+        assert!(no_match.message.contains("`policy[1].when.tag`"));
+        assert!(!no_match.message.contains("did you mean"));
+        let instr = no_match.agent_instruction.as_deref().expect("instruction");
+        assert!(instr.contains("`tag_families`"));
+
+        let one_match = findings
+            .iter()
+            .find(|d| d.message.contains("`kind-imql`"))
+            .expect("kind-imql finding");
+        assert!(one_match.message.contains("`policy[2].when.tag`"));
+        assert!(one_match.message.contains("did you mean `kind-impl`?"));
+        let instr = one_match.agent_instruction.as_deref().expect("instruction");
+        assert!(instr.contains("`kind-impl`") && instr.contains("`tag_families`"));
+
+        let many_matches = findings
+            .iter()
+            .find(|d| d.message.contains("`kind-impx`"))
+            .expect("kind-impx finding");
+        assert!(many_matches.message.contains("`policy[3].when.tag`"));
+        assert!(
+            many_matches
+                .message
+                .contains("one edit from `kind-imp`, `kind-impl`")
+        );
+        let instr = many_matches
+            .agent_instruction
+            .as_deref()
+            .expect("instruction");
+        assert!(instr.contains("`kind-imp`, `kind-impl`"));
+    }
+
+    #[test]
+    fn policy_selector_rejects_non_milestone_task_id_as_cut_and_reports_only_unmatched_entries() {
+        let mut m1 = t("M-one", Status::Todo);
+        m1.tags = vec!["milestone".into(), "v0.1".into()];
+        m1.blocked_by = vec!["A-1".into()];
+        m1.effort_days = None;
+        let mut a1 = t("A-1", Status::Todo);
+        a1.tags = vec!["kind-impl".into()];
+        let plan = plan_of(vec![m1, a1]);
+
+        // `A-1` is a real task id, not a milestone; `M-one` and `kind-impl` are
+        // valid siblings beside the invalid entries.
+        let opts = Options {
+            require_effort: false,
+            evidence_scopes: vec![policy_scope(&["M-one", "A-1"], &["kind-impl", "kind-imql"])],
+            ..Default::default()
+        };
+
+        let report = validate(&plan, &opts);
+        let findings: Vec<&Diagnostic> = report
+            .diagnostics
+            .iter()
+            .filter(|d| d.code == code::POLICY_SELECTOR_UNMATCHED)
+            .collect();
+        assert_eq!(findings.len(), 2, "{findings:#?}");
+        assert!(
+            findings
+                .iter()
+                .any(|d| d.message.contains("`policy[0].when.cut` names `A-1`")),
+            "non-milestone task id must not count as a cut: {findings:#?}"
+        );
+        assert!(
+            findings
+                .iter()
+                .any(|d| d.message.contains("`policy[0].when.tag` names `kind-imql`")),
+            "unmatched sibling tag must still be reported: {findings:#?}"
+        );
     }
 }

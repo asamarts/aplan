@@ -6,6 +6,13 @@ to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+### Added
+
+- **Policy selectors naming an unmatched cut or tag now warn with a suggestion (`APLAN058`,
+  `A2-024`)**. `aplan check` warns when `policy[].when.cut` matches neither an existing milestone
+  id nor a cut label, or when `policy[].when.tag` names a tag that no task carries and no
+  `tag_families` entry declares, offering a did-you-mean when a close match exists.
+
 ### Changed
 
 - **YAML is parsed by the safe Rust `ayaml` 0.1.3** (`A2-009`, `A2-166`, `A2-169`, `A2-179`). The

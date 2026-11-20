@@ -35,6 +35,12 @@ const NOT_A_SWITCH: &[(&str, &str)] = &[
          and no rule read it directly any more (`A1-183`)",
     ),
     (
+        "evidence_scopes",
+        "a list of scoped policy rules rather than an on/off switch. `APLAN058` checks each \
+         declared `policy[].when` selector against the plan's milestones, tags and tag families; \
+         turning it `on` means inventing policy rules the repository never wrote",
+    ),
+    (
         "tag_families",
         "a vocabulary rather than a switch. Turning it `on` means inventing families, and a \
          family this tool made up would make `APLAN026`'s near-miss report nonsense",
