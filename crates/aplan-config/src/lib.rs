@@ -1425,6 +1425,19 @@ impl CommandPolicy<'_> {
     pub fn timeout_or(self, default_seconds: u64) -> u64 {
         self.timeout_seconds.unwrap_or(default_seconds)
     }
+
+    /// Return the same resource, output and wrapper policy without a timeout
+    /// override.
+    ///
+    /// Test execution (`test.run`, `test.batch.run` and the miss sentinel)
+    /// inherits the runner's memory, process, output and wrapper controls while
+    /// remaining deliberately unbounded by `test.timeout_seconds`, which bounds
+    /// discovery (`test.list` and `test.skipped`) only (`A2-181`, ADR-0054).
+    #[must_use]
+    pub fn without_timeout(mut self) -> Self {
+        self.timeout_seconds = None;
+        self
+    }
 }
 
 /// The floor each level of the plan carries (`A1-312`, ADR-0034).
@@ -6089,5 +6102,24 @@ mod published_schema_tests {
         let oversized = format!("root: {}\n", "x".repeat(32 * 1024 * 1024));
         let error = parse_config(&oversized, path).expect_err("input bytes are bounded");
         assert!(error.to_string().contains("input bytes"), "{error}");
+    }
+
+    #[test]
+    fn command_policy_without_timeout_preserves_other_limits() {
+        let wrap = vec!["nice".to_string(), "-n".to_string(), "10".to_string()];
+        let policy = CommandPolicy {
+            timeout_seconds: Some(15),
+            max_memory: Some("512M"),
+            max_processes: Some(32),
+            max_output: Some("2M"),
+            wrap: Some(&wrap),
+        };
+        let unbounded = policy.without_timeout();
+        assert_eq!(unbounded.timeout_seconds, None);
+        assert_eq!(unbounded.timeout_or(0), 0);
+        assert_eq!(unbounded.max_memory, Some("512M"));
+        assert_eq!(unbounded.max_processes, Some(32));
+        assert_eq!(unbounded.max_output, Some("2M"));
+        assert_eq!(unbounded.wrap, Some(wrap.as_slice()));
     }
 }

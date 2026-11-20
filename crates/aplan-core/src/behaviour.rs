@@ -60,6 +60,21 @@ pub struct Behaviour {
 
 /// Every named behaviour this build has.
 pub const ALL: &[Behaviour] = &[
+    // `A2-181`. `test.timeout_seconds` is documented (ADR-0054, HLD section 5.5)
+    // as bounding test discovery (`list` and `skipped`) rather than test
+    // execution, but sharing `CommandPolicy` caused `test.run`,
+    // `test.batch.run` and the miss sentinel to inherit an explicit
+    // `test.timeout_seconds` and panic on `unreachable!` when execution ran
+    // past it.
+    Behaviour {
+        name: "verify.test_timeout_bounds_discovery_only",
+        what: "`test.timeout_seconds` bounds test discovery (`list` and `skipped`) without \
+               cutting off or panicking test execution (`run`, `batch.run` or the miss sentinel) \
+               under `verify --execute`",
+        proof: &[
+            "test_timeout_seconds_bounds_discovery_without_cutting_off_single_or_batch_execution",
+        ],
+    },
     // `A1-515`. `APLAN057` and its capture schema already existed, but an older
     // build accepts a body made only of whitespace as durable content. The
     // rule code cannot distinguish that weaker predicate.
