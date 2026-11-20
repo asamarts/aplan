@@ -8,9 +8,9 @@
 
 | cut | status | done/total | ready | blocked | effort | weeks | critical path |
 | --- | --- | --- | --- | --- | --- | --- | --- |
-| v0.7 | todo | 12/24 | 11 | 1 | 20.8d | 0.8 (0.3 left) | 3.5d |
-| v0.8 | todo | 0/28 | 0 | 28 | 42.2d | 1.6 (1.6 left) | 4.5d |
-| adoption | todo | 0/78 | 0 | 78 | 101.8d | 3.8 (3.8 left) | 10.0d |
+| v0.7 | todo | 12/25 | 12 | 1 | 21.2d | 0.8 (0.3 left) | 3.5d |
+| v0.8 | todo | 0/30 | 0 | 30 | 43.8d | 1.6 (1.6 left) | 4.5d |
+| adoption | todo | 0/81 | 0 | 81 | 105.8d | 3.9 (3.9 left) | 10.0d |
 | backlog | todo | 0/1 | 0 | 1 | 1.0d | <0.1 (<0.1 left) | 1.0d |
 | hardening | todo | 0/15 | 0 | 15 | 14.8d | 0.5 (0.5 left) | 3.0d |
 | qualification | todo | 0/1 | 0 | 1 | 8.0d | 0.3 (0.3 left) | 8.0d |
@@ -26,7 +26,7 @@
 | A2-017 | Keep the workspace clean under Rust 1.100 without moving the pinned toolchain | done | - | commit:cc6d669cd006, commit:c09603f6606a |
 | A2-018 | Diagnose the large-fixture TUI latency regression on the current hosted image | done | - | commit:73eeb5472dac, test:graph::ranking::the_preference_pass_matches_its_one_task_at_a_time_definition |
 | A2-019 | Migrate the open pre-public backlog and every open issue into the public plan | done | - | commit:4420b69c4fe9, commit:02d6c3c9c1ed |
-| A2-020 | Publish v0.7.0 | todo | A2-009, A2-016, A2-017, A2-018, A2-019, A2-021, A2-022, A2-023, A2-024, A2-025, A2-026, A2-027, A2-028, A2-079, A2-137, A2-164, A2-166, A2-167, A2-168, A2-169, A2-177, A2-178, A2-179 | - |
+| A2-020 | Publish v0.7.0 | todo | A2-009, A2-016, A2-017, A2-018, A2-019, A2-021, A2-022, A2-023, A2-024, A2-025, A2-026, A2-027, A2-028, A2-079, A2-137, A2-164, A2-166, A2-167, A2-168, A2-169, A2-177, A2-178, A2-179, A2-181 | - |
 | A2-021 | Report APLAN045 when traces_root has a dot component or is left at its default | todo | - | - |
 | A2-022 | Report a refused inbox promotion with the capture's real state | todo | - | - |
 | A2-023 | List same-second captures newest first, as the inbox documents | todo | - | - |
@@ -45,6 +45,7 @@
 | A2-177 | Close what a second audit found in the v0.7 audit fixes | done | - | commit:2ded96d439d1, test:dependency_audit::tests::yaml_parser_is_exactly_pinned, test:dependency_audit::tests::the_tui_evaluator_parses_yaml_with_the_product_parser, test:dependency_audit::tests::a_tui_evaluator_lock_that_no_longer_matches_its_manifest_is_refused, test:kep::unusable_input_is_an_error_not_a_silent_empty_import, test:policy::the_exemption_free_epoch_is_only_a2 |
 | A2-178 | Draw the progress row a pause held back, so a slow run never shows only its end | todo | - | - |
 | A2-179 | Close what an audit of the tag rule found in A2-169 | done | - | commit:1a2a56a41133, test:yaml::tests::a_tagged_document_keeps_the_strict_grammar, test:yaml::tests::an_enum_written_without_a_tag_reads_exactly_as_ayaml_reads_it, test:yaml::tests::a_global_tag_over_an_enum_is_dropped_and_adds_nothing_to_the_path, test:yaml::tests::a_scalar_beneath_a_tag_in_yamls_namespace_is_refused_by_naming_the_tag, test:yaml::tests::a_local_tag_is_named_as_it_can_be_written_back, test:yaml::tests::every_request_reads_beneath_a_local_tag_as_the_bridge_did_but_a_unit, test:tests::the_unknown_key_scan_reads_a_tag_as_the_load_does, test:yaml_differential::hostile_inputs_meet_the_same_outcome_under_both_parsers |
+| A2-181 | Keep test.timeout_seconds discovery-only and handle execution timeouts without panicking | todo | - | - |
 
 ## v0.8 Correctness and the most reported adoption failures
 
@@ -78,6 +79,8 @@
 | A2-157 | Make add path-list syntax unambiguous and reject separator-shaped paths | todo | - | - |
 | A2-160 | `start` on parked work keeps its `revisit_at`, which `check` then reports as APLAN042 | todo | - | - |
 | A2-161 | A withdrawn delivery has no named route: a hand reopen of a done task passes, and supersede and amend describe other cases | todo | - | - |
+| A2-182 | Stop refused mutation commands from advising --format agent when they do not accept --format | todo | - | - |
+| A2-183 | Fix APLAN015 file-evidence fix text and warn at close when a commit deletes a cited file | todo | - | - |
 
 ## adoption Adoption and ergonomics
 
@@ -161,6 +164,9 @@
 | A2-163 | Let check-docs accept another plan's ids when a document names that plan | todo | - | - |
 | A2-174 | Cite every listed case of a parametrized test with one citation | todo | - | - |
 | A2-175 | Show a failed test batch's adapter output on the first finding printed | todo | - | - |
+| A2-184 | Detect acceptance-criteria or paths rewrites in the commit that closes a task | todo | - | - |
+| A2-185 | Let a plan declare task ownership of shared resource paths so overlapping tasks see their owner | todo | - | - |
+| A2-186 | Decide whether add and check should recognise phase-carrying ID prefixes | todo | - | - |
 
 ## backlog Considered and deferred
 
