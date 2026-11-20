@@ -147,3 +147,138 @@ fn the_traces_root_reaches_verify() {
         moved.text()
     );
 }
+
+fn commit_all(repo: &git2::Repository, message: &str) {
+    let mut index = repo.index().expect("index");
+    index
+        .add_all(["."].iter(), git2::IndexAddOption::DEFAULT, None)
+        .expect("add");
+    index.write().expect("write index");
+    let tree = repo
+        .find_tree(index.write_tree().expect("tree"))
+        .expect("tree");
+    let sig = git2::Signature::now("t", "t@e.com").expect("sig");
+    let parents: Vec<git2::Commit<'_>> = repo
+        .head()
+        .ok()
+        .and_then(|head| head.peel_to_commit().ok())
+        .into_iter()
+        .collect();
+    let refs: Vec<&git2::Commit<'_>> = parents.iter().collect();
+    repo.commit(Some("HEAD"), &sig, &sig, message, &tree, &refs)
+        .expect("commit");
+}
+
+/// `APLAN045` (`A2-021`): leaving `traces_root` at its default `.`, naming
+/// `.` or `./docs` or `docs/.`, or passing `..` / `../docs` from a
+/// subdirectory must all report stale premises identically to an absolute root.
+#[test]
+fn stale_premise_reports_for_default_dotted_and_subdirectory_traces_roots() {
+    let dir = tempfile::Builder::new()
+        .tempdir_in(aplan_core::fixture::fixture_root())
+        .expect("tempdir");
+    let root = dir.path();
+    std::fs::create_dir_all(root.join("aplan/tasks")).expect("tasks");
+    std::fs::create_dir_all(root.join("sub")).expect("sub");
+    std::fs::write(root.join(".aplan.yml"), "detect_drift: true\n").expect("config");
+    std::fs::write(
+        root.join("DOC.md"),
+        "# Spec\n\n## Heading\n\noriginal heading text\n\n| Key | Value |\n|---|---|\n| Row One | original |\n",
+    )
+    .expect("doc");
+    std::fs::write(
+        root.join("aplan/tasks/H-1.md"),
+        "---\nid: H-1\ntitle: Heading task\nphase: 1\nstatus: todo\neffort_days: 1\n\
+         traces:\n- DOC.md#heading\n---\n\n## Why\n\nx\n",
+    )
+    .expect("H-1");
+    std::fs::write(
+        root.join("aplan/tasks/R-1.md"),
+        "---\nid: R-1\ntitle: Row task\nphase: 1\nstatus: todo\neffort_days: 1\n\
+         traces:\n- DOC.md#row-one\n---\n\n## Why\n\nx\n",
+    )
+    .expect("R-1");
+    let repo = git2::Repository::init(root).expect("git init");
+    commit_all(&repo, "initial");
+
+    std::fs::write(
+        root.join("DOC.md"),
+        "# Spec\n\n## Heading\n\nchanged heading text\n\n| Key | Value |\n|---|---|\n| Row One | changed |\n",
+    )
+    .expect("updated doc");
+    commit_all(&repo, "move heading and row");
+
+    let assert_both_stale = |cwd: &std::path::Path, args: &[&str], label: &str| {
+        let out = common::run(cwd, args);
+        let text = out.text();
+        assert!(
+            text.contains("warning[APLAN045] H-1:") && text.contains("warning[APLAN045] R-1:"),
+            "{label} missed APLAN045:\n{text}"
+        );
+    };
+
+    let abs_root = root.to_str().expect("utf-8 root").to_string();
+    assert_both_stale(root, &["verify"], "default traces_root");
+    assert_both_stale(root, &["verify", "--traces-root", "."], "--traces-root .");
+    assert_both_stale(
+        root,
+        &["verify", "--traces-root", &abs_root],
+        "absolute --traces-root",
+    );
+    assert_both_stale(
+        &root.join("sub"),
+        &["verify", "--root", "../aplan", "--traces-root", ".."],
+        "subdirectory --traces-root ..",
+    );
+
+    // Explicit `traces_root: .` in `.aplan.yml`.
+    std::fs::write(
+        root.join(".aplan.yml"),
+        "detect_drift: true\ntraces_root: .\n",
+    )
+    .expect("config");
+    commit_all(&repo, "explicit traces_root: .");
+    assert_both_stale(root, &["verify"], "config traces_root: .");
+}
+
+#[test]
+fn stale_premise_treats_docs_dot_spellings_identically() {
+    let dir = tempfile::Builder::new()
+        .tempdir_in(aplan_core::fixture::fixture_root())
+        .expect("tempdir");
+    let root = dir.path();
+    std::fs::create_dir_all(root.join("aplan/tasks")).expect("tasks");
+    std::fs::create_dir_all(root.join("docs")).expect("docs");
+    std::fs::create_dir_all(root.join("sub")).expect("sub");
+    std::fs::write(root.join(".aplan.yml"), "detect_drift: true\n").expect("config");
+    std::fs::write(root.join("docs/DOC.md"), "# Spec\n\n## Section\n\nfirst\n").expect("doc");
+    std::fs::write(
+        root.join("aplan/tasks/D-1.md"),
+        "---\nid: D-1\ntitle: Docs task\nphase: 1\nstatus: todo\neffort_days: 1\n\
+         traces:\n- DOC.md#section\n---\n\n## Why\n\nx\n",
+    )
+    .expect("D-1");
+    let repo = git2::Repository::init(root).expect("git init");
+    commit_all(&repo, "initial");
+
+    std::fs::write(root.join("docs/DOC.md"), "# Spec\n\n## Section\n\nsecond\n").expect("doc");
+    commit_all(&repo, "move docs section");
+
+    for (cwd, args, label) in [
+        (root, vec!["verify", "--traces-root", "docs"], "docs"),
+        (root, vec!["verify", "--traces-root", "./docs"], "./docs"),
+        (root, vec!["verify", "--traces-root", "docs/."], "docs/."),
+        (
+            &root.join("sub"),
+            vec!["verify", "--root", "../aplan", "--traces-root", "../docs"],
+            "../docs from sub",
+        ),
+    ] {
+        let out = common::run(cwd, &args);
+        let text = out.text();
+        assert!(
+            text.contains("warning[APLAN045] D-1:"),
+            "{label} missed APLAN045:\n{text}"
+        );
+    }
+}
