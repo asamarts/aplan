@@ -3150,6 +3150,20 @@ fn note_unopened_evidence(unopened: &aplan_evidence::Unopened) {
     );
 }
 
+/// Anchor a relative CLI `traces_root` (such as `.`, `./docs`, or `../docs`
+/// from a subdirectory) to the process working directory before handing it to
+/// `aplan_evidence::verify`, where `APLAN045` strips the repository root to
+/// query Git history (`A2-021`).
+fn verify_traces_root(traces_root: Option<&std::path::Path>) -> Option<PathBuf> {
+    traces_root.map(|root| {
+        if root.is_relative() {
+            std::env::current_dir().map_or_else(|_| root.to_path_buf(), |cwd| cwd.join(root))
+        } else {
+            root.to_path_buf()
+        }
+    })
+}
+
 /// Merge `.aplan.yml` with the check flags into the validator options.
 /// Precedence: an explicit flag wins over the file, which wins over the built-in
 /// default. `traces` defaults to on, rooted at the current directory.
@@ -4796,7 +4810,7 @@ fn cmd_verify(root: &std::path::Path, args: &VerifyArgs) -> Result<u8> {
     // The same root `check` resolves traces from, so `APLAN045` reads the
     // document git actually has rather than looking for it at the repository
     // root and quietly finding nothing (`A1-301`, audit).
-    opts.traces_root.clone_from(&check_opts.traces_root);
+    opts.traces_root = verify_traces_root(check_opts.traces_root.as_deref());
     opts.detect_drift = check_opts.detect_drift;
     refuse_absent_external_roots(&check_opts)?;
     // `verify` is a superset of `check` (`A1-058`), so it reports `APLAN041` too:
@@ -9565,7 +9579,7 @@ fn cmd_show(root: &std::path::Path, args: &ShowArgs) -> Result<u8> {
     let mut opts = aplan_app::configured_verification(
         &config,
         selected_config_file(config_dir.as_deref()),
-        check_opts.traces_root.clone(),
+        verify_traces_root(check_opts.traces_root.as_deref()),
     );
     // A single-task inspection does not run the repository's version command.
     opts.version = None;
@@ -14547,7 +14561,7 @@ fn cmd_attest(
     let mut report = timed("validate", || validate(&plan, &check_opts));
     let opts = aplan_evidence::VerifyOptions {
         detect_drift: check_opts.detect_drift,
-        traces_root: check_opts.traces_root.clone(),
+        traces_root: verify_traces_root(check_opts.traces_root.as_deref()),
         execute,
         test_runner: config.test.clone(),
         max_unrelated_files: config.evidence.as_ref().and_then(|e| e.max_unrelated_files),

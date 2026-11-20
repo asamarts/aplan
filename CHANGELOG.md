@@ -58,6 +58,12 @@ to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Fixed
 
+- **`APLAN045` now reports stale premises when `traces_root` is left at its default `.` or
+  contains `.` / `..` components** (`A2-021`). `historical_trace_path` previously canonicalised
+  only absolute roots, so `.`, `./docs`, `docs/.`, and subdirectory roots such as `..` or
+  `../docs` joined into paths that matched no Git tree entry and stayed silently clean. Relative
+  CLI trace roots are now anchored to the working directory before verification and normalised
+  against the canonical repository root alongside task paths.
 - **Ranking ready work no longer costs quadratic time in the number of ready tasks** (`A2-018`).
   The pass that honours `prefer_after` placed each task by removing it from the front of a list,
   which on a plan with 10,000 ready tasks moved about 2 GB of memory per ranking even when no task

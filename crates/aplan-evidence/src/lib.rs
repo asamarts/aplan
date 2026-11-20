@@ -899,10 +899,28 @@ pub fn unresolved_by_verify(plan: &Plan, repo_root: &Path, opts: &VerifyOptions)
 }
 
 fn repository_relative_path(path: &Path, workdir: Option<&Path>) -> std::path::PathBuf {
-    workdir
-        .and_then(|root| path.strip_prefix(root).ok())
-        .unwrap_or(path)
-        .to_path_buf()
+    let Some(root) = workdir else {
+        return aplan_core::anchor::normalise(path);
+    };
+    if let Ok(stripped) = path.strip_prefix(root) {
+        return aplan_core::anchor::normalise(stripped);
+    }
+    let canonical_root =
+        std::fs::canonicalize(root).unwrap_or_else(|_| aplan_core::anchor::normalise(root));
+    if let Ok(canonical_path) = std::fs::canonicalize(path)
+        && let Ok(stripped) = canonical_path.strip_prefix(&canonical_root)
+    {
+        return aplan_core::anchor::normalise(stripped);
+    }
+    if path.is_relative() {
+        let joined = canonical_root.join(path);
+        let resolved = std::fs::canonicalize(&joined)
+            .unwrap_or_else(|_| aplan_core::anchor::normalise(&joined));
+        if let Ok(stripped) = resolved.strip_prefix(&canonical_root) {
+            return aplan_core::anchor::normalise(stripped);
+        }
+    }
+    aplan_core::anchor::normalise(path)
 }
 
 fn historical_trace_path(
@@ -910,20 +928,34 @@ fn historical_trace_path(
     traces_root: Option<&Path>,
     repository_root: &Path,
 ) -> Option<String> {
-    let prefix = match traces_root {
+    let canonical_repo = std::fs::canonicalize(repository_root)
+        .unwrap_or_else(|_| aplan_core::anchor::normalise(repository_root));
+    let root = match traces_root {
         Some(root) if root.is_absolute() => {
-            let root = std::fs::canonicalize(root).unwrap_or_else(|_| root.to_path_buf());
-            let repository_root = std::fs::canonicalize(repository_root)
-                .unwrap_or_else(|_| repository_root.to_path_buf());
-            return root
-                .strip_prefix(repository_root)
-                .ok()
-                .map(|prefix| prefix.join(document).to_string_lossy().replace('\\', "/"));
+            std::fs::canonicalize(root).unwrap_or_else(|_| aplan_core::anchor::normalise(root))
         }
-        Some(root) => root,
-        None => return Some(document.to_string()),
+        Some(root) => {
+            let joined = canonical_repo.join(root);
+            std::fs::canonicalize(&joined)
+                .unwrap_or_else(|_| aplan_core::anchor::normalise(&joined))
+        }
+        None => canonical_repo.clone(),
     };
-    Some(prefix.join(document).to_string_lossy().replace('\\', "/"))
+    let prefix = root.strip_prefix(&canonical_repo).ok()?;
+    let rel = aplan_core::anchor::normalise(&prefix.join(document));
+    if rel.as_os_str().is_empty()
+        || rel.components().any(|component| {
+            matches!(
+                component,
+                std::path::Component::ParentDir
+                    | std::path::Component::RootDir
+                    | std::path::Component::Prefix(_)
+            )
+        })
+    {
+        return None;
+    }
+    Some(rel.to_string_lossy().replace('\\', "/"))
 }
 
 /// `APLAN045`: a live task whose traced section moved while it waited
@@ -1000,7 +1032,7 @@ fn report_stale_premises(
         // re-reads the task and records it, then re-runs, would still be told
         // the ground had moved, because the baseline is a commit and their edit
         // is not one yet (`A1-301`, found by dogfooding it).
-        let on_disk_path = if lt.path.is_absolute() {
+        let on_disk_path = if lt.path.is_absolute() || lt.path.exists() {
             lt.path.clone()
         } else {
             repo_root.join(&lt.path)
@@ -3022,6 +3054,106 @@ mod tests {
         assert!(
             !without.iter().any(|d| d.code == code::STALE_PREMISE),
             "reading from the wrong root should find nothing, not something"
+        );
+    }
+
+    /// Relative and dotted `traces_root` spellings normalize to the same
+    /// repository-relative Git history path (`A2-021`).
+    #[test]
+    fn stale_premise_fires_for_relative_and_dotted_traces_roots() {
+        let (dir, repo) = init();
+        let mut root_task = done_task("H-1", Vec::new(), Vec::new());
+        root_task.status = Status::Todo;
+        root_task.traces = vec!["DOC.md#intro".to_string()];
+        let root_plan = plan_of(root_task);
+
+        let mut docs_task = done_task("D-1", Vec::new(), Vec::new());
+        docs_task.status = Status::Todo;
+        docs_task.traces = vec!["d.md#intro".to_string()];
+        let docs_plan = plan_of(docs_task);
+
+        commit(
+            &repo,
+            &[
+                ("DOC.md", "# Intro\n\nthe original ground\n"),
+                ("docs/d.md", "# Intro\n\nthe original docs ground\n"),
+                ("plan/tasks/x.md", "the task"),
+            ],
+            "initial docs and task",
+        );
+        commit(
+            &repo,
+            &[
+                ("DOC.md", "# Intro\n\nthe moved ground\n"),
+                ("docs/d.md", "# Intro\n\nthe moved docs ground\n"),
+            ],
+            "move both traced sections",
+        );
+
+        // Root-level document with `.`, `./`, and absolute root spellings.
+        for traces_root in [
+            None,
+            Some(PathBuf::from(".")),
+            Some(PathBuf::from("./")),
+            Some(dir.path().to_path_buf()),
+            Some(dir.path().join(".")),
+        ] {
+            let opts = VerifyOptions {
+                detect_drift: false,
+                traces_root: traces_root.clone(),
+                ..VerifyOptions::default()
+            };
+            let found = verify(&root_plan, dir.path(), &opts)
+                .expect("verify runs")
+                .diagnostics;
+            assert!(
+                found.iter().any(|d| d.code == code::STALE_PREMISE),
+                "APLAN045 stayed silent for traces_root={traces_root:?}: {found:?}"
+            );
+        }
+
+        // Subdirectory document with `docs`, `./docs`, `docs/.`, and absolute `docs`.
+        for traces_root in [
+            PathBuf::from("docs"),
+            PathBuf::from("./docs"),
+            PathBuf::from("docs/."),
+            dir.path().join("docs"),
+            dir.path().join("docs/."),
+        ] {
+            let opts = VerifyOptions {
+                detect_drift: false,
+                traces_root: Some(traces_root.clone()),
+                ..VerifyOptions::default()
+            };
+            let found = verify(&docs_plan, dir.path(), &opts)
+                .expect("verify runs")
+                .diagnostics;
+            assert!(
+                found.iter().any(|d| d.code == code::STALE_PREMISE),
+                "APLAN045 stayed silent for traces_root={traces_root:?}: {found:?}"
+            );
+        }
+
+        // Path normalization refuses external roots and escaping `..` documents.
+        assert_eq!(
+            historical_trace_path("DOC.md", Some(Path::new(".")), dir.path()),
+            Some("DOC.md".to_string())
+        );
+        assert_eq!(
+            historical_trace_path("d.md", Some(Path::new("./docs")), dir.path()),
+            Some("docs/d.md".to_string())
+        );
+        assert_eq!(
+            historical_trace_path("d.md", Some(Path::new("docs/.")), dir.path()),
+            Some("docs/d.md".to_string())
+        );
+        assert_eq!(
+            historical_trace_path("../outside.md", Some(Path::new(".")), dir.path()),
+            None
+        );
+        assert_eq!(
+            historical_trace_path("DOC.md", Some(Path::new("../elsewhere")), dir.path()),
+            None
         );
     }
 
