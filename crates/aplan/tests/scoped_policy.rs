@@ -249,3 +249,77 @@ fn a_status_the_model_does_not_have_is_refused_in_a_scope_too() {
         "the plan was accepted with a scope that constrains nothing:\n{all}"
     );
 }
+
+/// `APLAN058` (`A2-024`): a policy selector naming a cut or tag that cannot
+/// match the plan warns with a did-you-mean, while valid milestone ids, cut
+/// labels, task tags and `tag_families` members stay silent.
+#[test]
+fn a_scope_naming_an_unknown_cut_or_tag_warns_with_a_suggestion() {
+    let dir = tempfile::Builder::new()
+        .tempdir_in(aplan_core::fixture::fixture_root())
+        .expect("tempdir");
+    plan(
+        dir.path(),
+        "deny_warnings: true\n\
+         evidence:\n  require_min_strength: [commit]\n\
+         policy:\n  - when: { cut: [M-on] }\n    evidence:\n      require_min_strength: []\n\
+         \x20 - when: { tag: [spke] }\n    evidence:\n      require_min_strength: []\n",
+    );
+    std::fs::write(
+        dir.path().join("aplan/tasks/M-one.md"),
+        "---\nid: M-one\ntitle: First cut\nphase: 0\nstatus: todo\ntags: [milestone, v0.1]\n\
+         blocked_by: [T-2]\n---\n\n## Why\n\nx\n",
+    )
+    .expect("milestone");
+
+    let out = common::run(dir.path(), &["check"]);
+    let all = format!("{}{}", out.stdout, out.stderr);
+    assert_eq!(out.code, 1, "deny_warnings must block on APLAN058:\n{all}");
+    assert!(all.contains("APLAN058"), "{all}");
+    assert!(
+        all.contains("`M-on`") && all.contains("did you mean `M-one`?"),
+        "cut typo did not suggest milestone id:\n{all}"
+    );
+    assert!(
+        all.contains("`spke`") && all.contains("did you mean `spike`?"),
+        "tag typo did not suggest carried tag:\n{all}"
+    );
+
+    // JSON output carries the config file path and warning severity for both findings.
+    let json_out = common::run(dir.path(), &["check", "--format", "json"]);
+    assert_eq!(json_out.code, 1, "{}", json_out.text());
+    let doc: serde_json::Value =
+        serde_json::from_str(&json_out.stdout).expect("valid json check report");
+    let diags = doc["diagnostics"].as_array().expect("diagnostics array");
+    let aplan058: Vec<&serde_json::Value> = diags
+        .iter()
+        .filter(|d| d["code"].as_str() == Some("APLAN058"))
+        .collect();
+    assert_eq!(aplan058.len(), 2, "{doc:#}");
+    for d in aplan058 {
+        assert_eq!(d["severity"].as_str(), Some("warning"), "{d:#}");
+        assert!(
+            d["file"]
+                .as_str()
+                .is_some_and(|f| f.ends_with(".aplan.yml")),
+            "APLAN058 should point at .aplan.yml: {d:#}"
+        );
+    }
+
+    // Fix the selectors: use the cut label (`v0.1`) and a tag declared only in
+    // `tag_families` (`kind-docs`) alongside carried tag `spike`.
+    std::fs::write(
+        dir.path().join(".aplan.yml"),
+        "deny_warnings: true\n\
+         tag_families:\n  kind: [kind-docs, spike]\n\
+         evidence:\n  require_min_strength: [commit]\n\
+         policy:\n  - when: { cut: [v0.1] }\n    evidence:\n      require_min_strength: []\n\
+         \x20 - when: { tag: [kind-docs] }\n    evidence:\n      require_min_strength: []\n",
+    )
+    .expect("config");
+
+    let clean = common::run(dir.path(), &["check"]);
+    let clean_all = format!("{}{}", clean.stdout, clean.stderr);
+    assert_eq!(clean.code, 0, "valid selectors must pass:\n{clean_all}");
+    assert!(!clean_all.contains("APLAN058"), "{clean_all}");
+}

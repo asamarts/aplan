@@ -487,3 +487,16 @@ every inbox entry is one canonical, valid and cross-record-consistent V1 capture
 - **says:** invalid capture YAML: unterminated flow sequence at line 3 column 1, opened at line 2 column 5
   - **fix:** Repair the YAML so it is one `aplan/capture/v1` mapping.
 
+## APLAN058 (warning)
+
+every cut and tag in policy[].when can match this plan
+
+- **says:** `policy[0].when.cut` names `M-noon`, which matches no milestone id or cut label in this plan
+  - **fix:** Correct `policy[0].when.cut` in `.aplan.yml` to an existing milestone id or cut label, or remove the selector if that cut does not exist.
+- **says:** `policy[0].when.cut` names `M-on`, which matches no milestone id or cut label in this plan: did you mean `M-one`?
+  - **fix:** Change `M-on` to `M-one` in `policy[0].when.cut` in `.aplan.yml`, or add the missing milestone if `M-on` is a new cut.
+- **says:** `policy[0].when.tag` names `kind-imql`, which no task carries and no `tag_families` entry declares: did you mean `kind-impl`?
+  - **fix:** Change `kind-imql` to `kind-impl` in `policy[0].when.tag` in `.aplan.yml`, or declare `kind-imql` in `tag_families` if it is an intended tag that no task carries yet.
+- **says:** `policy[0].when.tag` names `unknown-tag`, which no task carries and no `tag_families` entry declares
+  - **fix:** Correct `policy[0].when.tag` in `.aplan.yml`, or declare `unknown-tag` in `tag_families` if it is an intended tag that no task carries yet.
+

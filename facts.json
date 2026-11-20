@@ -1414,7 +1414,7 @@
     "evidence_kinds": 5,
     "formats": 9,
     "mcp_tools": 13,
-    "rules": 57
+    "rules": 58
   },
   "evidence_kinds": [
     "commit",
@@ -1779,6 +1779,11 @@
       "code": "APLAN057",
       "severity": "error",
       "title": "every inbox entry is one canonical, valid and cross-record-consistent V1 capture"
+    },
+    {
+      "code": "APLAN058",
+      "severity": "warning",
+      "title": "every cut and tag in policy[].when can match this plan"
     }
   ],
   "schema_version": "v1",

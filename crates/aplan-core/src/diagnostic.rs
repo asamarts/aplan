@@ -1397,6 +1397,28 @@ define_rules! {
     CaptureInvalid => CAPTURE_INVALID = "APLAN057", Error,
         "every inbox entry is one canonical, valid and cross-record-consistent V1 capture",
         points_at: None;
+    /// Every cut and tag named by a `policy[].when` selector can match this
+    /// plan (`A2-024`).
+    ///
+    /// A typo in `policy[].when` silently produces an evidence policy that
+    /// applies to nothing, and a requirement that applies to nothing looks
+    /// identical to one that passed: `when: { cut: [M-noon] }` for milestone
+    /// `M-one`, or `when: { tag: [kind-imql] }` for the plan's `kind-impl`,
+    /// both leave `check` clean while the intended subset stays on the
+    /// whole-plan setting.
+    ///
+    /// A `when.cut` entry is valid when it names any existing milestone id or
+    /// its derived cut label, including an empty milestone. A `when.tag` entry
+    /// is valid when any task carries it or when any `tag_families` entry
+    /// declares it, which is how a repository declares an intended tag before
+    /// its first task uses it.
+    ///
+    /// A warning, matching `APLAN026`, `APLAN029` and `APLAN056`: the selector
+    /// may be a typo or a rule staged ahead of its first task. `deny_warnings`
+    /// makes the finding block the gate.
+    PolicySelectorUnmatched => POLICY_SELECTOR_UNMATCHED = "APLAN058", Warning,
+        "every cut and tag in policy[].when can match this plan",
+        points_at: None;
 }
 
 /// A repository's verdict policy: what makes a report fail its build.
@@ -1745,7 +1767,7 @@ mod tests {
         // Every rule's `code()` is one of the module constants and vice versa is
         // structurally guaranteed by the macro; this pins the count so dropping
         // a row is a visible change.
-        assert_eq!(Rule::ALL.len(), 57);
+        assert_eq!(Rule::ALL.len(), 58);
     }
 
     /// Severity is declared per rule in the macro. Pin the warnings so a
@@ -1764,7 +1786,7 @@ mod tests {
                 "APLAN009", "APLAN016", "APLAN018", "APLAN019", "APLAN021", "APLAN023", "APLAN024",
                 "APLAN025", "APLAN026", "APLAN027", "APLAN029", "APLAN035", "APLAN036", "APLAN037",
                 "APLAN038", "APLAN039", "APLAN040", "APLAN041", "APLAN042", "APLAN043", "APLAN044",
-                "APLAN045", "APLAN051", "APLAN052", "APLAN053", "APLAN054", "APLAN056"
+                "APLAN045", "APLAN051", "APLAN052", "APLAN053", "APLAN054", "APLAN056", "APLAN058"
             ]
         );
     }
@@ -1849,6 +1871,9 @@ mod points_at_tests {
                 // about a versioned inbox record rather than task frontmatter;
                 // the diagnostic still carries the capture file path
                 "APLAN057",
+                // about a `policy[].when` selector in `.aplan.yml`, not about a
+                // task; the diagnostic carries the config file path when known
+                "APLAN058",
             ],
             "the set of rules with no location changed; if that is deliberate, say so here"
         );
