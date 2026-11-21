@@ -107,6 +107,16 @@ pub const ALL: &[Behaviour] = &[
         what: "inbox promotion creates one ordinary validated task and freezes its capture link in one retry-safe guarded transaction whose late failure rolls back every write",
         proof: &["capture_inbox::capture_promotion_is_validated_atomic_and_idempotent"],
     },
+    // `A2-022`. Refused `inbox promote` previously rendered the predicted
+    // `state: promoted` capture record even though nothing was written and the
+    // capture on disk stayed `open` (#27).
+    Behaviour {
+        name: "capture.refused_promotion_reports_real_state",
+        what: "a refused `inbox promote` (both `--dry-run` and applied) reports the capture's \
+               actual `open` state on disk in human, JSON and agent output, labelling the \
+               unreached target state separately as `would become` / `would_become`",
+        proof: &["capture_inbox::refused_inbox_promotion_reports_open_state_for_dry_run_and_apply"],
+    },
     // `A1-518`. Native capture forms and the guarded lifecycle operations
     // already existed, but the plan input identity deliberately excludes the
     // inbox. An older build could therefore seed editable defaults from one

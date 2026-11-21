@@ -650,6 +650,10 @@ fn capture_promotion_refusals_leave_task_and_capture_unchanged() {
         serde_json::from_str(&denied_preview.stdout).unwrap();
     assert_eq!(denied_preview_json["outcome"], "refused");
     assert_eq!(denied_preview_json["publishable"], false);
+    assert_eq!(denied_preview_json["capture"]["state"], "open");
+    assert_eq!(denied_preview_json["would_become"], "promoted");
+    assert!(denied_preview_json["capture"].get("promoted_to").is_none());
+    assert!(denied_preview_json["capture"].get("disposed_at").is_none());
     assert_eq!(
         std::fs::read_to_string(&invalid_path).unwrap(),
         invalid_before
@@ -674,6 +678,10 @@ fn capture_promotion_refusals_leave_task_and_capture_unchanged() {
     let denied_json: serde_json::Value = serde_json::from_str(&denied.stdout).unwrap();
     assert_eq!(denied_json["outcome"], "refused");
     assert_eq!(denied_json["publishable"], false);
+    assert_eq!(denied_json["capture"]["state"], "open");
+    assert_eq!(denied_json["would_become"], "promoted");
+    assert!(denied_json["capture"].get("promoted_to").is_none());
+    assert!(denied_json["capture"].get("disposed_at").is_none());
     assert!(
         denied_json["findings"]
             .as_array()
@@ -720,6 +728,115 @@ fn capture_promotion_refusals_leave_task_and_capture_unchanged() {
         collision_still_before
     );
     assert!(!dir.path().join("aplan/A-4.md").exists());
+}
+
+/// Proof for `capture.refused_promotion_reports_real_state` (`A2-022`, #27):
+/// when `aplan inbox promote` is refused (for instance a missing `effort_days`
+/// estimate under `deny_warnings: true`), both `--dry-run` and applied runs
+/// report the capture's real `open` state on disk and label `promoted` only as
+/// `would become` / `would_become`, in human, JSON, and agent output.
+#[test]
+fn refused_inbox_promotion_reports_open_state_for_dry_run_and_apply() {
+    let dir = repository("root: aplan\ndeny_warnings: true\nrequire_effort: true\n");
+    let created = capture_json(
+        dir.path(),
+        &[
+            "capture",
+            "An idea worth keeping around",
+            "--kind",
+            "idea",
+            "--body",
+            "Some body.",
+            "--format",
+            "json",
+        ],
+    );
+    let id = created["capture"]["id"].as_str().expect("capture id");
+    let capture_path = dir.path().join(format!("aplan/.inbox/{id}.yml"));
+    let before = std::fs::read_to_string(&capture_path).expect("open capture");
+
+    for dry_run in [true, false] {
+        let mut human_args = vec!["inbox", "promote", id];
+        if dry_run {
+            human_args.push("--dry-run");
+        }
+        let human = common::run(dir.path(), &human_args);
+        assert_eq!(human.code, 1, "dry_run={dry_run}: {}", human.text());
+        assert!(
+            human.stdout.contains(&format!("capture {id}: refused")),
+            "dry_run={dry_run}: {}",
+            human.stdout
+        );
+        assert!(
+            human.stdout.contains("state: open"),
+            "refused promotion must report on-disk state `open` (dry_run={dry_run}):\n{}",
+            human.stdout
+        );
+        assert!(
+            human.stdout.contains("would become: promoted"),
+            "refused promotion must label target state as `would become` (dry_run={dry_run}):\n{}",
+            human.stdout
+        );
+        assert!(
+            human.stdout.contains("publishable: no"),
+            "dry_run={dry_run}:\n{}",
+            human.stdout
+        );
+        assert!(
+            human.stdout.contains("APLAN009"),
+            "dry_run={dry_run}:\n{}",
+            human.stdout
+        );
+        for forbidden in [
+            "state: promoted",
+            "disposed at:",
+            "promoted to:",
+            "promotion fingerprint:",
+        ] {
+            assert!(
+                !human.stdout.contains(forbidden),
+                "refused promotion falsely printed `{forbidden}` (dry_run={dry_run}):\n{}",
+                human.stdout
+            );
+        }
+
+        for format in ["json", "agent"] {
+            let mut machine_args = vec!["inbox", "promote", id, "--format", format];
+            if dry_run {
+                machine_args.push("--dry-run");
+            }
+            let machine = common::run(dir.path(), &machine_args);
+            assert_eq!(
+                machine.code,
+                1,
+                "dry_run={dry_run} format={format}: {}",
+                machine.text()
+            );
+            let doc: serde_json::Value =
+                serde_json::from_str(&machine.stdout).expect("machine json");
+            assert_eq!(doc["outcome"], "refused", "{doc}");
+            assert_eq!(doc["publishable"], false, "{doc}");
+            assert_eq!(doc["capture"]["state"], "open", "{doc}");
+            assert_eq!(doc["would_become"], "promoted", "{doc}");
+            assert!(doc["capture"].get("disposed_at").is_none(), "{doc}");
+            assert!(doc["capture"].get("promoted_to").is_none(), "{doc}");
+            assert!(
+                doc["capture"].get("promotion_fingerprint").is_none(),
+                "{doc}"
+            );
+            assert_eq!(doc["task_id"], "A-2", "{doc}");
+        }
+
+        assert_eq!(
+            std::fs::read_to_string(&capture_path).expect("after refusal"),
+            before,
+            "refused promotion modified capture file (dry_run={dry_run})"
+        );
+        assert!(
+            !dir.path().join("aplan/A-2.md").exists(),
+            "refused promotion wrote task file (dry_run={dry_run})"
+        );
+    }
 }
 
 #[test]

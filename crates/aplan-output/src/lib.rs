@@ -31,7 +31,7 @@ use std::fmt::Write as _;
 use std::io::Write as _;
 
 use aplan_core::TaskExport;
-use aplan_core::capture::{Capture, CaptureList};
+use aplan_core::capture::{Capture, CaptureList, CaptureState};
 use aplan_core::deprecation::{DEPRECATION_TAG, Deprecations, REMOVAL_TAG};
 use aplan_core::diagnostic::Binding;
 use aplan_core::vacuity::RuleReach;
@@ -60,6 +60,11 @@ pub struct CaptureActionReport {
     pub outcome: CaptureActionOutcome,
     pub publishable: bool,
     pub capture: Capture,
+    /// The state this capture would have reached had a refused mutation been
+    /// written (`A2-022`). Absent when `capture` itself already carries the
+    /// written or predicted state.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub would_become: Option<CaptureState>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub task_id: Option<String>,
     pub files: Vec<String>,
@@ -154,7 +159,7 @@ pub fn render_capture_focused(
         return unsupported_capture_format(format, "one focused capture");
     }
     let mut out = anstream::stdout().lock();
-    render_capture_human_to(&mut out, &report.capture, None)
+    render_capture_human_to(&mut out, &report.capture, None, None)
 }
 
 /// Render one capture mutation result. Machine results always carry the full
@@ -190,7 +195,12 @@ pub fn render_capture_action(report: &CaptureActionReport, format: Format) -> st
 
 fn render_capture_action_human(report: &CaptureActionReport) -> std::io::Result<()> {
     let mut out = anstream::stdout().lock();
-    render_capture_human_to(&mut out, &report.capture, Some(report.outcome))?;
+    render_capture_human_to(
+        &mut out,
+        &report.capture,
+        Some(report.outcome),
+        report.would_become,
+    )?;
     render_capture_action_details_to(&mut out, report)
 }
 
@@ -241,6 +251,7 @@ fn render_capture_human_to(
     out: &mut impl std::io::Write,
     capture: &Capture,
     outcome: Option<CaptureActionOutcome>,
+    would_become: Option<CaptureState>,
 ) -> std::io::Result<()> {
     let heading = crate::style::HEADING;
     let id = crate::style::ID;
@@ -260,6 +271,15 @@ fn render_capture_human_to(
     let state_word = capture_state(capture.state);
     let state = crate::style::capture_state(state_word);
     render_capture_field(out, "state", &format!("{state}{state_word}{state:#}"))?;
+    if let Some(target) = would_become {
+        let target_word = capture_state(target);
+        let target_style = crate::style::capture_state(target_word);
+        render_capture_field(
+            out,
+            "would become",
+            &format!("{target_style}{target_word}{target_style:#}"),
+        )?;
+    }
     render_capture_field(out, "captured at", &capture.captured_at)?;
     render_capture_field(out, "origin", capture_origin(capture.origin))?;
     if let Some(at) = &capture.revisit_at {
@@ -281,42 +301,7 @@ fn render_capture_human_to(
         render_capture_field(out, "profile", &one_line(profile))?;
     }
     if let Some(defaults) = &capture.promotion_defaults {
-        if let Some(phase) = defaults.phase {
-            render_capture_field(out, "promotion phase", &phase.to_string())?;
-        }
-        if let Some(cut) = &defaults.cut {
-            render_capture_field(out, "promotion cut", &one_line(cut))?;
-        }
-        if let Some(effort) = defaults.effort_days {
-            render_capture_field(out, "promotion effort", &effort.to_string())?;
-        }
-        if let Some(owner) = &defaults.owner {
-            render_capture_field(out, "promotion owner", &one_line(owner))?;
-        }
-        if !defaults.paths.is_empty() {
-            render_capture_field(
-                out,
-                "promotion paths",
-                &defaults
-                    .paths
-                    .iter()
-                    .map(|path| one_line(path))
-                    .collect::<Vec<_>>()
-                    .join(", "),
-            )?;
-        }
-        if !defaults.tags.is_empty() {
-            render_capture_field(
-                out,
-                "promotion tags",
-                &defaults
-                    .tags
-                    .iter()
-                    .map(|tag| one_line(tag))
-                    .collect::<Vec<_>>()
-                    .join(", "),
-            )?;
-        }
+        render_capture_promotion_defaults(out, defaults)?;
     }
     if let Some(source) = &capture.source {
         render_capture_field(out, "source namespace", &one_line(&source.namespace))?;
@@ -339,6 +324,49 @@ fn render_capture_human_to(
         for line in body.lines() {
             writeln!(out, "{}", fold::row("    ", &sanitize::visible(line)))?;
         }
+    }
+    Ok(())
+}
+
+fn render_capture_promotion_defaults(
+    out: &mut impl std::io::Write,
+    defaults: &aplan_core::capture::PromotionDefaults,
+) -> std::io::Result<()> {
+    if let Some(phase) = defaults.phase {
+        render_capture_field(out, "promotion phase", &phase.to_string())?;
+    }
+    if let Some(cut) = &defaults.cut {
+        render_capture_field(out, "promotion cut", &one_line(cut))?;
+    }
+    if let Some(effort) = defaults.effort_days {
+        render_capture_field(out, "promotion effort", &effort.to_string())?;
+    }
+    if let Some(owner) = &defaults.owner {
+        render_capture_field(out, "promotion owner", &one_line(owner))?;
+    }
+    if !defaults.paths.is_empty() {
+        render_capture_field(
+            out,
+            "promotion paths",
+            &defaults
+                .paths
+                .iter()
+                .map(|path| one_line(path))
+                .collect::<Vec<_>>()
+                .join(", "),
+        )?;
+    }
+    if !defaults.tags.is_empty() {
+        render_capture_field(
+            out,
+            "promotion tags",
+            &defaults
+                .tags
+                .iter()
+                .map(|tag| one_line(tag))
+                .collect::<Vec<_>>()
+                .join(", "),
+        )?;
     }
     Ok(())
 }
@@ -4223,10 +4251,10 @@ mod tests {
             (CaptureActionOutcome::Predicted, "predicted"),
             (CaptureActionOutcome::Applied, "applied"),
             (CaptureActionOutcome::Unchanged, "unchanged"),
-            (CaptureActionOutcome::Refused, "refused"),
         ] {
             let mut bytes = Vec::new();
-            render_capture_human_to(&mut bytes, &capture, Some(outcome)).expect("capture human");
+            render_capture_human_to(&mut bytes, &capture, Some(outcome), None)
+                .expect("capture human");
             let rendered = plain(&String::from_utf8(bytes).expect("UTF-8 output"));
             for required in [
                 word,
@@ -4257,6 +4285,47 @@ mod tests {
             }
         }
 
+        // A refused promotion carries the capture's real `open` state on disk
+        // and labels the target state separately (`A2-022`, #27).
+        let mut refused_capture = capture.clone();
+        refused_capture.state = CaptureState::Open;
+        refused_capture.disposed_at = None;
+        refused_capture.reason = None;
+        refused_capture.promoted_to = None;
+        refused_capture.promotion_fingerprint = None;
+        let mut refused_bytes = Vec::new();
+        render_capture_human_to(
+            &mut refused_bytes,
+            &refused_capture,
+            Some(CaptureActionOutcome::Refused),
+            Some(CaptureState::Promoted),
+        )
+        .expect("refused capture human");
+        let refused_rendered = plain(&String::from_utf8(refused_bytes).expect("UTF-8 output"));
+        for required in [
+            "refused",
+            "title: captured idea",
+            "state: open",
+            "would become: promoted",
+            "origin: mcp",
+        ] {
+            assert!(
+                refused_rendered.contains(required),
+                "missing `{required}`:\n{refused_rendered}"
+            );
+        }
+        for forbidden in [
+            "state: promoted",
+            "disposed at:",
+            "promoted to:",
+            "promotion fingerprint:",
+        ] {
+            assert!(
+                !refused_rendered.contains(forbidden),
+                "refused promotion falsely printed `{forbidden}`:\n{refused_rendered}"
+            );
+        }
+
         let report = CaptureActionReport {
             input: serde_json::json!({
                 "sha256": "input",
@@ -4268,6 +4337,7 @@ mod tests {
             outcome: CaptureActionOutcome::Applied,
             publishable: true,
             capture: capture.clone(),
+            would_become: None,
             task_id: Some("A-1".into()),
             files: vec!["aplan/.inbox/I.yml".into()],
             findings: vec!["APLAN009 warning: estimate missing".into()],
