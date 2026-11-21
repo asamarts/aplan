@@ -137,6 +137,10 @@
       "what": "`check-docs` matches overlapping one-digit-typo families longest-first, so the finding retains the complete referenced id and recommends the exact source family"
     },
     {
+      "name": "check_docs.recognises_non_numeric_prefixed_ids",
+      "what": "`check-docs` learns uppercase-prefixed non-numeric id families (including milestone and release ids such as `M-one`, `M-tui-quality` and `R-a`), reports unknown ids of those shapes with did-you-mean suggestions, and leaves bare words and lowercase hyphenated prose untouched"
+    },
+    {
       "name": "check_docs.complete_multi_hyphen_ids",
       "what": "`check-docs` learns when a numeric id family carries hyphen-separated suffixes, resolves known complete ids and reports an unknown sibling without truncating it"
     },
@@ -1415,7 +1419,7 @@
     "version.require_impact"
   ],
   "counts": {
-    "behaviours": 227,
+    "behaviours": 228,
     "build_capabilities": 1,
     "commands": 48,
     "config_keys": 124,

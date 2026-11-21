@@ -56,13 +56,21 @@ pub struct Reference {
     pub mistyped_prefix: Vec<String>,
 }
 
-/// What the plan teaches about how its ids are written (`A1-148`).
+/// What the plan teaches about how its ids are written (`A1-148`, `A2-026`).
 ///
-/// A prefix, whether ids under it carry dots, and whether their numeric core may
-/// be followed by hyphen-separated words. All are learned from the plan's own
-/// ids and none is a pattern this crate owns: `A1-042` teaches `A1-` without
-/// dots or a suffix, `M-v0.8` teaches `M-v` with dots, `M-phase-2` teaches
-/// `M-phase-`, and `M-p0-design` teaches a suffix-bearing `M-p` family.
+/// A prefix and the shapes ids under it take: whether it has a numeric core
+/// (with optional dots or hyphen-separated suffixes) and whether it has
+/// non-numeric named ids (single-segment or multi-hyphen). All are learned from
+/// the plan's own ids and none is a pattern this crate owns: `A1-042` teaches
+/// numeric `A1-` without dots or a suffix, `M-v0.8` teaches dotted numeric
+/// `M-v`, `M-phase-2` teaches numeric `M-phase-`, `M-p0-design` teaches a
+/// suffix-bearing numeric `M-p` family, `M-one` and `R-a` teach named `M-` and
+/// `R-` families, and `M-tui-quality` teaches a multi-hyphen named `M-` family.
+///
+/// Non-numeric families require an uppercase code-style prefix before the first
+/// hyphen (all uppercase letters or ASCII digits, with at least one uppercase
+/// letter, such as `M-`, `R-`, `OPS-` or `A1B-`), so bare words (`alpha`) and
+/// lowercase hyphenated words (`auth-login`) still teach no prose pattern.
 ///
 /// The dot is why this is a type rather than a set of strings. `M-v0.N` is how
 /// prose writes "a milestone" and must not read as `M-v0`; `aplan/tasks/T-999.md`
@@ -75,11 +83,43 @@ pub struct Vocabulary {
     entries: Vec<Family>,
 }
 
-#[derive(Debug, Clone)]
-struct Family {
-    prefix: String,
+#[derive(Debug, Clone, Copy, Default)]
+struct NumericShape {
     dotted: bool,
     hyphenated_suffix: bool,
+}
+
+#[derive(Debug, Clone, Copy, Default)]
+struct NamedShape {
+    hyphenated: bool,
+}
+
+#[derive(Debug, Clone, Default)]
+struct Family {
+    prefix: String,
+    numeric: Option<NumericShape>,
+    named: Option<NamedShape>,
+}
+
+impl Family {
+    fn merge_numeric(&mut self, dotted: bool, hyphenated_suffix: bool) {
+        let shape = self.numeric.get_or_insert_with(NumericShape::default);
+        shape.dotted |= dotted;
+        shape.hyphenated_suffix |= hyphenated_suffix;
+    }
+
+    fn merge_named(&mut self, hyphenated: bool) {
+        let shape = self.named.get_or_insert_with(NamedShape::default);
+        shape.hyphenated |= hyphenated;
+    }
+
+    fn dotted(&self) -> bool {
+        self.numeric.is_some_and(|shape| shape.dotted)
+    }
+
+    fn hyphenated_suffix(&self) -> bool {
+        self.numeric.is_some_and(|shape| shape.hyphenated_suffix)
+    }
 }
 
 fn sort_families(entries: &mut [Family]) {
@@ -128,11 +168,50 @@ fn hyphenated_suffix(chars: &[char]) -> bool {
     segment_len > 0 && saw_letter
 }
 
+/// Extract a non-numeric prefixed id's uppercase prefix (including its trailing
+/// `-`) and whether its tail contains further hyphens (`A2-026`).
+///
+/// Only code-style uppercase stems (`M-`, `R-`, `REL-`, `T-`, `A1B-`) teach a
+/// non-numeric family. Bare words (`alpha`) and lowercase or title-case
+/// hyphenated words (`auth-login`, `Pre-flight`) return `None` so ordinary
+/// hyphenated prose is never mistaken for task references.
+fn named_prefix(chars: &[char]) -> Option<(String, bool)> {
+    let sep = chars.iter().position(|c| *c == '-')?;
+    let stem = &chars[..sep];
+    let tail = &chars[sep + 1..];
+    if stem.is_empty()
+        || tail.is_empty()
+        || !stem.iter().any(|c| c.is_uppercase())
+        || !stem.iter().all(|c| c.is_uppercase() || c.is_ascii_digit())
+    {
+        return None;
+    }
+    let mut segment_len = 0usize;
+    let mut hyphenated = false;
+    for c in tail {
+        if *c == '-' {
+            if segment_len == 0 {
+                return None;
+            }
+            segment_len = 0;
+            hyphenated = true;
+        } else if c.is_alphanumeric() {
+            segment_len += 1;
+        } else {
+            return None;
+        }
+    }
+    if segment_len == 0 {
+        return None;
+    }
+    Some((chars[..=sep].iter().collect(), hyphenated))
+}
+
 impl Vocabulary {
     /// Learn it from the plan's ids.
     #[must_use]
     pub fn of(ids: &BTreeSet<String>) -> Self {
-        let mut by_prefix: std::collections::BTreeMap<String, (bool, bool)> =
+        let mut by_prefix: std::collections::BTreeMap<String, Family> =
             std::collections::BTreeMap::new();
         for id in ids {
             if crate::ids::contains_a_ulid(id) {
@@ -160,29 +239,30 @@ impl Vocabulary {
                     .take_while(|c| c.is_ascii_digit() || **c == '.')
                     .count();
             // A prefix of nothing would match every number in the document.
-            if digits == 0 || digits >= numeric_end {
+            if digits > 0 && digits < numeric_end {
+                let head: String = chars[..digits].iter().collect();
+                // A prefix has to be a *word*, not punctuation. An id like `-42`
+                // would otherwise teach `-`, and every negative number in the
+                // document would read as a reference to a task.
+                if head.chars().any(char::is_alphanumeric) {
+                    let dotted = chars[digits..numeric_end].contains(&'.');
+                    let entry = by_prefix.entry(head.clone()).or_insert_with(|| Family {
+                        prefix: head,
+                        ..Family::default()
+                    });
+                    entry.merge_numeric(dotted, suffix.is_some());
+                }
                 continue;
             }
-            let head: String = chars[..digits].iter().collect();
-            // A prefix has to be a *word*, not punctuation. An id like `-42`
-            // would otherwise teach `-`, and every negative number in the
-            // document would read as a reference to a task.
-            if !head.chars().any(char::is_alphanumeric) {
-                continue;
+            if let Some((head, named_hyphenated)) = named_prefix(&chars) {
+                let entry = by_prefix.entry(head.clone()).or_insert_with(|| Family {
+                    prefix: head,
+                    ..Family::default()
+                });
+                entry.merge_named(named_hyphenated);
             }
-            let dotted = chars[digits..numeric_end].contains(&'.');
-            let entry = by_prefix.entry(head).or_insert((false, false));
-            entry.0 |= dotted;
-            entry.1 |= suffix.is_some();
         }
-        let mut entries: Vec<Family> = by_prefix
-            .into_iter()
-            .map(|(prefix, (dotted, hyphenated_suffix))| Family {
-                prefix,
-                dotted,
-                hyphenated_suffix,
-            })
-            .collect();
+        let mut entries: Vec<Family> = by_prefix.into_values().collect();
         sort_families(&mut entries);
         Self { entries }
     }
@@ -204,23 +284,17 @@ impl Vocabulary {
             .collect()
     }
 
-    fn matching(&self, chars: &[char], at: usize) -> Option<(usize, bool, bool)> {
-        self.entries
-            .iter()
-            .find(|family| {
-                let prefix_len = family.prefix.chars().count();
-                starts_with(chars, at, &family.prefix)
-                    && chars
-                        .get(at + prefix_len)
-                        .is_some_and(|c| c.is_ascii_digit() || (family.dotted && *c == '.'))
-            })
-            .map(|family| {
-                (
-                    family.prefix.chars().count(),
-                    family.dotted,
-                    family.hyphenated_suffix,
-                )
-            })
+    fn matching(&self, chars: &[char], at: usize) -> Option<&Family> {
+        self.entries.iter().find(|family| {
+            let prefix_len = family.prefix.chars().count();
+            starts_with(chars, at, &family.prefix)
+                && chars.get(at + prefix_len).is_some_and(|c| {
+                    family
+                        .numeric
+                        .is_some_and(|shape| c.is_ascii_digit() || (shape.dotted && *c == '.'))
+                        || (family.named.is_some() && c.is_alphanumeric())
+                })
+        })
     }
 
     /// Prefixes a digit's typo away from a taught one, each with the prefix it
@@ -237,12 +311,25 @@ impl Vocabulary {
     /// position too. A letter is where another project's ids live.
     #[must_use]
     pub fn near_prefixes(&self) -> std::collections::BTreeMap<String, (bool, bool, Vec<String>)> {
+        self.near_families()
+            .into_iter()
+            .map(|(variant, (family, taught))| {
+                (
+                    variant,
+                    (family.dotted(), family.hyphenated_suffix(), taught),
+                )
+            })
+            .collect()
+    }
+
+    fn near_families(&self) -> std::collections::BTreeMap<String, (Family, Vec<String>)> {
         let taught: BTreeSet<&str> = self
             .entries
             .iter()
             .map(|family| family.prefix.as_str())
             .collect();
-        let mut out = std::collections::BTreeMap::new();
+        let mut out: std::collections::BTreeMap<String, (Family, Vec<String>)> =
+            std::collections::BTreeMap::new();
         for family in &self.entries {
             let chars: Vec<char> = family.prefix.chars().collect();
             for (i, c) in chars.iter().enumerate() {
@@ -259,13 +346,23 @@ impl Vocabulary {
                     if taught.contains(variant.as_str()) {
                         continue;
                     }
-                    let entry = out
-                        .entry(variant)
-                        .or_insert_with(|| (family.dotted, family.hyphenated_suffix, Vec::new()));
-                    entry.0 |= family.dotted;
-                    entry.1 |= family.hyphenated_suffix;
-                    if !entry.2.contains(&family.prefix) {
-                        entry.2.push(family.prefix.clone());
+                    let entry = out.entry(variant.clone()).or_insert_with(|| {
+                        (
+                            Family {
+                                prefix: variant,
+                                ..Family::default()
+                            },
+                            Vec::new(),
+                        )
+                    });
+                    if let Some(shape) = family.numeric {
+                        entry.0.merge_numeric(shape.dotted, shape.hyphenated_suffix);
+                    }
+                    if let Some(shape) = family.named {
+                        entry.0.merge_named(shape.hyphenated);
+                    }
+                    if !entry.1.contains(&family.prefix) {
+                        entry.1.push(family.prefix.clone());
                     }
                 }
             }
@@ -274,14 +371,96 @@ impl Vocabulary {
     }
 }
 
+enum NumericScan {
+    Matched(usize),
+    Template,
+    NoMatch,
+}
+
+/// Match a numeric-core reference beginning at `start` (immediately after the
+/// prefix).
+fn scan_numeric_tail(chars: &[char], start: usize, shape: NumericShape) -> NumericScan {
+    let mut end = start;
+    while end < chars.len() && (chars[end].is_ascii_digit() || (shape.dotted && chars[end] == '.'))
+    {
+        end += 1;
+    }
+    // A trailing dot is the sentence's, not the id's: `ships in M-v0.8.`
+    while end > start && chars[end - 1] == '.' {
+        end -= 1;
+    }
+    if end == start {
+        return NumericScan::NoMatch;
+    }
+    if shape.hyphenated_suffix {
+        while chars.get(end) == Some(&'-') {
+            let mut next = end + 1;
+            while chars.get(next).is_some_and(|c| c.is_alphanumeric()) {
+                next += 1;
+            }
+            if next == end + 1 {
+                break;
+            }
+            end = next;
+        }
+    }
+    // The end boundary. A ULID continues into letters, so it is not a
+    // reference to the id its leading digits spell.
+    if chars.get(end).is_some_and(|c| continues_word(*c)) {
+        return NumericScan::NoMatch;
+    }
+    // A dot only matters where the plan's own ids use dots. There, a dot
+    // sitting against the token means the token was cut short, and the only
+    // innocent reason for that is a sentence ending: `ships in M-v0.8.`
+    // Anything else is a template -- `M-v0.N`, and `M-v0.{N-1}`, which this
+    // task's audit found in a task body after the first rule let it through.
+    // Where the plan's ids carry no dots there is nothing to cut short, and
+    // `aplan/tasks/T-999.md` is a filename naming a task that must resolve.
+    if shape.dotted
+        && chars.get(end) == Some(&'.')
+        && chars.get(end + 1).is_some_and(|c| !c.is_whitespace())
+    {
+        return NumericScan::Template;
+    }
+    NumericScan::Matched(end)
+}
+
+/// Match a non-numeric prefixed reference beginning at `start` (immediately
+/// after the prefix) (`A2-026`).
+fn scan_named_tail(chars: &[char], start: usize, shape: NamedShape) -> Option<usize> {
+    let mut end = start;
+    while chars.get(end).is_some_and(|c| c.is_alphanumeric()) {
+        end += 1;
+    }
+    if end == start {
+        return None;
+    }
+    if shape.hyphenated {
+        while chars.get(end) == Some(&'-') {
+            let mut next = end + 1;
+            while chars.get(next).is_some_and(|c| c.is_alphanumeric()) {
+                next += 1;
+            }
+            if next == end + 1 {
+                break;
+            }
+            end = next;
+        }
+    }
+    if chars.get(end).is_some_and(|c| continues_word(*c)) {
+        return None;
+    }
+    Some(end)
+}
+
 /// Every reference in `text` to something shaped like one of the plan's ids.
 ///
 /// Both ends are word boundaries. The start rule keeps `xT-042` from reading as
 /// a reference; the end rule is what the first measurement added, without which
 /// `M-v0.N` reports a missing `M-v0` and every ULID in a document reports a
-/// missing task built from its leading digits. Between them, a family always
-/// has a numeric core and carries dots or single-hyphen suffix segments only
-/// where the plan taught that shape.
+/// missing task built from its leading digits. Between them, a family matches
+/// its learned numeric shape (with dots or hyphenated suffixes only where the
+/// plan taught them) or its learned non-numeric prefixed shape (`A2-026`).
 ///
 /// A hyphen at the front is *not* a boundary character, which the audit of this
 /// task had to fix: this project writes `--` where another would write an em
@@ -305,54 +484,43 @@ pub fn references(text: &str, vocabulary: &Vocabulary) -> Vec<Reference> {
         if i > 0 && continues_word(chars[i - 1]) {
             continue;
         }
-        let Some((prefix_len, dotted, hyphenated)) = vocabulary.matching(&chars, i) else {
+        let Some(family) = vocabulary.matching(&chars, i) else {
             continue;
         };
-        let start = i + prefix_len;
-        let mut end = start;
-        while end < chars.len() && (chars[end].is_ascii_digit() || (dotted && chars[end] == '.')) {
-            end += 1;
-        }
-        // A trailing dot is the sentence's, not the id's: `ships in M-v0.8.`
-        while end > start && chars[end - 1] == '.' {
-            end -= 1;
-        }
-        if end == start {
-            continue; // The prefix with no number after it is just a word.
-        }
-        if hyphenated {
-            while chars.get(end) == Some(&'-') {
-                let mut next = end + 1;
-                while chars.get(next).is_some_and(|c| c.is_alphanumeric()) {
-                    next += 1;
-                }
-                if next == end + 1 {
-                    break;
-                }
-                end = next;
-            }
-        }
-        // The end boundary. A ULID continues into letters, so it is not a
-        // reference to the id its leading digits spell.
-        if chars.get(end).is_some_and(|c| continues_word(*c)) {
-            continue;
-        }
-        // A dot only matters where the plan's own ids use dots. There, a dot
-        // sitting against the token means the token was cut short, and the only
-        // innocent reason for that is a sentence ending: `ships in M-v0.8.`
-        // Anything else is a template -- `M-v0.N`, and `M-v0.{N-1}`, which this
-        // task's audit found in a task body after the first rule let it through.
-        // Where the plan's ids carry no dots there is nothing to cut short, and
-        // `aplan/tasks/T-999.md` is a filename naming a task that must resolve.
-        if dotted
-            && chars.get(end) == Some(&'.')
-            && chars.get(end + 1).is_some_and(|c| !c.is_whitespace())
+        let start = i + family.prefix.chars().count();
+        let end = if let Some(numeric) = family.numeric
+            && chars
+                .get(start)
+                .is_some_and(|c| c.is_ascii_digit() || (numeric.dotted && *c == '.'))
         {
+            match scan_numeric_tail(&chars, start, numeric) {
+                NumericScan::Matched(end) => end,
+                NumericScan::NoMatch if family.named.is_some() => {
+                    let Some(named) = family.named else {
+                        continue;
+                    };
+                    let Some(end) = scan_named_tail(&chars, start, named) else {
+                        continue;
+                    };
+                    end
+                }
+                NumericScan::Template | NumericScan::NoMatch => continue,
+            }
+        } else if let Some(named) = family.named {
+            let Some(end) = scan_named_tail(&chars, start, named) else {
+                continue;
+            };
+            end
+        } else {
+            continue;
+        };
+        let id: String = chars[i..end].iter().collect();
+        if crate::ids::contains_a_ulid(&id) {
             continue;
         }
         out.push(Reference {
             mistyped_prefix: Vec::new(),
-            id: chars[i..end].iter().collect(),
+            id,
             line,
             column: i - line_start + 1,
         });
@@ -378,16 +546,9 @@ pub fn dangling(text: &str, ids: &BTreeSet<String>) -> Vec<Reference> {
     // vocabulary built from the near misses, so the boundary rules -- what
     // starts a word, where the digits end, a trailing dot belonging to the
     // sentence -- are the ones above rather than a second reading of them.
-    let near = vocabulary.near_prefixes();
+    let near = vocabulary.near_families();
     if !near.is_empty() {
-        let mut entries: Vec<Family> = near
-            .iter()
-            .map(|(variant, (dotted, hyphenated_suffix, _))| Family {
-                prefix: variant.clone(),
-                dotted: *dotted,
-                hyphenated_suffix: *hyphenated_suffix,
-            })
-            .collect();
+        let mut entries: Vec<Family> = near.values().map(|(family, _)| family.clone()).collect();
         sort_families(&mut entries);
         let variants = Vocabulary { entries };
         for mut r in references(text, &variants) {
@@ -397,7 +558,7 @@ pub fn dangling(text: &str, ids: &BTreeSet<String>) -> Vec<Reference> {
             r.mistyped_prefix = near
                 .iter()
                 .find(|(v, _)| r.id.starts_with(v.as_str()))
-                .map(|(_, (_, _, taught))| taught.clone())
+                .map(|(_, (_, taught))| taught.clone())
                 .unwrap_or_default();
             out.push(r);
         }
@@ -1327,5 +1488,100 @@ mod tests {
         // `["M-v9.9", "T-999"]` until the audit, and that it passed is the
         // clearest evidence the reordering was invisible.
         assert_eq!(ids, vec!["T-999", "M-v9.9"], "{ids:?}");
+    }
+
+    /// Proof for `check_docs.recognises_non_numeric_prefixed_ids`: uppercase
+    /// code-style prefixes without a numeric core (`M-one`, `M-tui-quality`,
+    /// `R-a`, `A1B-alpha`) are learned from the plan, checked with symmetric
+    /// word boundaries and did-you-mean suggestions, and never turn ordinary
+    /// prose, dotted templates, ULIDs, bare words or lowercase hyphenated words
+    /// into findings (`A2-026`, #33 item 1).
+    #[test]
+    fn non_numeric_prefixed_ids_are_checked_while_ordinary_words_stay_silent() {
+        let plan = ids(&[
+            "ABC-001",
+            "M-one",
+            "M-tui-quality",
+            "M-v0.8",
+            "R-a",
+            "A1B-alpha",
+        ]);
+        let vocab = Vocabulary::of(&plan);
+        assert_eq!(
+            vocab.prefixes(),
+            vec!["A1B-", "ABC-", "M-v", "M-", "R-"],
+            "longest prefix first so M-v beats M-"
+        );
+
+        let text = "Known: `ABC-001`, `M-one`, `M-tui-quality`, `M-v0.8`, `R-a`, `A1B-alpha`.\n\
+                    Silent: `M-v0.N`, `M-v0.{N-1}`, `M-01K9ZBW7YQ8N4TQGX2H6RC3PVD`, \
+                    `prefix_M-oen`, `M-oen_suffix`, `xM-oen`, self-hosted, auth-login, \
+                    Pre-flight, C-derived, X-ray, v0.9.\n\
+                    Dangling: `ABC-999`, `M-oen`, `M-tui-qualtiy`, `R-v9`, `A2B-alpha`, \
+                    `aplan/tasks/M-two.md`, clause--M-three.\n";
+        let found = dangling(text, &plan);
+        let found_ids: Vec<&str> = found.iter().map(|r| r.id.as_str()).collect();
+        assert_eq!(
+            found_ids,
+            vec![
+                "ABC-999",
+                "M-oen",
+                "M-tui-qualtiy",
+                "R-v9",
+                "A2B-alpha",
+                "M-two",
+                "M-three",
+            ],
+            "{found:#?}"
+        );
+        assert_eq!(nearest("M-oen", &plan), vec!["M-one"]);
+        assert_eq!(nearest("M-tui-qualtiy", &plan), vec!["M-tui-quality"]);
+        assert_eq!(nearest("A2B-alpha", &plan), vec!["A1B-alpha"]);
+        assert_eq!(found[4].mistyped_prefix, vec!["A1B-".to_string()]);
+    }
+
+    #[test]
+    fn non_numeric_prefix_learning_refuses_ordinary_and_malformed_shapes() {
+        for ignored in [
+            "alpha",
+            "auth-login",
+            "Pre-flight",
+            "2026-alpha",
+            "M--bad",
+            "M-bad-",
+            "M-bad.ext",
+            "-alpha",
+        ] {
+            assert!(
+                Vocabulary::of(&ids(&[ignored])).is_empty(),
+                "`{ignored}` should not teach a prefix"
+            );
+        }
+        // A plan holding only uppercase-prefixed non-numeric ids teaches them.
+        assert_eq!(
+            Vocabulary::of(&ids(&["M-one", "R-a"])).prefixes(),
+            vec!["M-", "R-"]
+        );
+    }
+
+    #[test]
+    fn a_prefix_with_both_numeric_and_named_ids_checks_every_shape_and_membership() {
+        let plan = ids(&["R-1", "R-a", "T-init", "T-setup", "M-cut"]);
+        let found = dangling(
+            "Known: R-1, R-a, R-1_suffix. Unknown: R-2, R-beta, R-1a.",
+            &plan,
+        );
+        let found_ids: Vec<&str> = found.iter().map(|r| r.id.as_str()).collect();
+        assert_eq!(found_ids, vec!["R-2", "R-beta", "R-1a"]);
+
+        let doc = "### cut, Named work\n\n**Tasks:** `T-init`\n";
+        let problems = membership(
+            doc,
+            &cut(&[("M-cut", &["T-init", "T-setup"])]),
+            &DeclaredBy::Line("**Tasks:**".to_string()),
+            &plan,
+        );
+        assert_eq!(problems.len(), 1, "{problems:?}");
+        assert_eq!(problems[0].undeclared, vec!["T-setup".to_string()]);
     }
 }

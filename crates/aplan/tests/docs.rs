@@ -98,6 +98,80 @@ fn validation_assurance_vocabulary_has_one_documented_authority() {
     );
 }
 
+/// End-to-end proof for `check_docs.recognises_non_numeric_prefixed_ids`: the
+/// CLI learns uppercase-prefixed non-numeric families such as milestones
+/// (`M-one`, `M-tui-quality`) and releases (`R-a`), reports typos and unknown
+/// siblings with did-you-mean suggestions, and leaves ordinary prose silent.
+#[test]
+fn check_docs_recognises_non_numeric_prefixed_ids_end_to_end() {
+    let dir = tempfile::Builder::new()
+        .tempdir_in(aplan_core::fixture::fixture_root())
+        .expect("tempdir");
+    let tasks = dir.path().join("aplan/tasks");
+    std::fs::create_dir_all(&tasks).expect("plan directory");
+    for (id, tags) in [
+        ("ABC-001", ""),
+        ("M-one", "tags: [milestone]\n"),
+        ("M-tui-quality", "tags: [milestone]\n"),
+        ("M-v0.8", "tags: [milestone]\n"),
+        ("R-a", "tags: [milestone, release]\n"),
+    ] {
+        std::fs::write(
+            tasks.join(format!("{id}.md")),
+            format!("---\nid: {id}\ntitle: {id}\nphase: 1\nstatus: todo\n{tags}---\n"),
+        )
+        .expect("task");
+    }
+    std::fs::write(
+        dir.path().join("NOTES.md"),
+        "Known: `ABC-001`, `M-one`, `M-tui-quality`, `M-v0.8`, `R-a`.\n\
+         Templates and prose: `M-v0.N`, `M-v0.{N-1}`, self-hosted, auth-login, C-derived, X-ray.\n\
+         Missing: `ABC-999`, `M-oen`, `M-tui-qualtiy`, and `R-v9`.\n",
+    )
+    .expect("document");
+
+    let run = common::run(dir.path(), &["check-docs", "NOTES.md"]);
+    assert_eq!(run.code, 1, "{}", run.text());
+    assert!(run.stdout.contains("`ABC-999`"), "{}", run.text());
+    assert!(
+        run.stdout
+            .contains("`M-oen` is not a task in this plan (did you mean M-one?)"),
+        "{}",
+        run.text()
+    );
+    assert!(
+        run.stdout
+            .contains("`M-tui-qualtiy` is not a task in this plan (did you mean M-tui-quality?)"),
+        "{}",
+        run.text()
+    );
+    assert!(
+        run.stdout.contains("`R-v9` is not a task in this plan"),
+        "{}",
+        run.text()
+    );
+    assert!(
+        run.stdout.contains("4 reference(s) naming no task"),
+        "ordinary prose or known ids were misreported: {}",
+        run.text()
+    );
+
+    let json_run = common::run(dir.path(), &["check-docs", "NOTES.md", "--format", "json"]);
+    assert_eq!(json_run.code, 1, "{}", json_run.text());
+    let doc: Value = serde_json::from_str(&json_run.stdout).expect("check-docs json");
+    let findings = doc["findings"].as_array().expect("findings array");
+    let found_ids: Vec<&str> = findings
+        .iter()
+        .filter_map(|row| row["id"].as_str())
+        .collect();
+    assert_eq!(found_ids, vec!["ABC-999", "M-oen", "M-tui-qualtiy", "R-v9"]);
+    assert_eq!(findings[1]["did_you_mean"], serde_json::json!(["M-one"]));
+    assert_eq!(
+        findings[2]["did_you_mean"],
+        serde_json::json!(["M-tui-quality"])
+    );
+}
+
 /// End-to-end proof for `check_docs.complete_multi_hyphen_ids`: the CLI learns
 /// the P00024-shaped family solely from the loaded plan, resolves exact ids and
 /// reports an unknown sibling under its complete spelling.
