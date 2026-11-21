@@ -76,6 +76,15 @@ to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Fixed
 
+- **Static CLI progress no longer prints a terminal `complete` or `interrupted` line without an
+  active row when the grace period expires during an output pause** (`A2-178`). Previously,
+  `Resume` redrew a suppressed progress row only for animated terminal output, so under static
+  output (such as `--progress always` in CI or an instrumented coverage run) a command that
+  crossed the grace deadline inside its final report print pause could emit
+  `progress: command: complete` (or `interrupted`) without ever printing an active line. `Resume`
+  now draws any held-back row for static output too, and both `finish` and `Stop` withhold their
+  static terminal line if no active row was ever written.
+
 - **`aplan inbox` now lists same-second captures newest first** (`A2-023`, `--require
   capture.inbox_orders_same_second_newest_first`). Because `captured_at` has one-second resolution
   and the tie-break compared full ULID ids ascending, captures recorded within the same second

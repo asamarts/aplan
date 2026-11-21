@@ -2418,24 +2418,66 @@ enum ProgressRowState {
     Painted,
 }
 
-struct CliProgressRenderer {
+/// Write seam for CLI progress rendering so deterministic unit tests assert the
+/// exact lines and clears without touching process stderr (`A2-178`).
+trait ProgressSink {
+    fn write_row(&mut self, row: &str, transient: bool);
+    fn clear_row(&mut self);
+}
+
+struct StderrProgressSink;
+
+impl ProgressSink for StderrProgressSink {
+    fn write_row(&mut self, row: &str, transient: bool) {
+        let _ = aplan_output::progress::write_row(row, transient);
+    }
+
+    fn clear_row(&mut self) {
+        let _ = aplan_output::progress::clear_row();
+    }
+}
+
+struct CliProgressRenderer<S: ProgressSink = StderrProgressSink> {
     epoch: std::time::Instant,
     gate: aplan_output::progress::ProgressGate,
     state: ProgressViewState,
     row: ProgressRowState,
+    /// Whether at least one active row has actually been written to `sink`
+    /// during this command (`A2-178`). Guards static terminal/interrupted
+    /// lines when the command ends before a paused reveal ever resumed.
+    ever_painted: bool,
     pause_depth: usize,
     frame: usize,
     deadline: Option<std::time::Instant>,
     animated: bool,
     color: bool,
+    sink: S,
 }
 
-impl CliProgressRenderer {
+impl CliProgressRenderer<StderrProgressSink> {
     fn new(
         epoch: std::time::Instant,
         command_operation: aplan_app::OperationId,
         animated: bool,
         color: bool,
+    ) -> Self {
+        Self::with_sink(
+            epoch,
+            command_operation,
+            animated,
+            color,
+            StderrProgressSink,
+        )
+    }
+}
+
+impl<S: ProgressSink> CliProgressRenderer<S> {
+    fn with_sink(
+        epoch: std::time::Instant,
+        command_operation: aplan_app::OperationId,
+        animated: bool,
+        color: bool,
+        sink: S,
     ) -> Self {
         Self {
             epoch,
@@ -2445,11 +2487,13 @@ impl CliProgressRenderer {
             ),
             state: ProgressViewState::new(command_operation),
             row: ProgressRowState::Hidden,
+            ever_painted: false,
             pause_depth: 0,
             frame: 0,
             deadline: None,
             animated,
             color,
+            sink,
         }
     }
 
@@ -2462,7 +2506,8 @@ impl CliProgressRenderer {
 
     fn draw_active(&mut self) {
         if self.pause_depth == 0 {
-            write_progress_line(
+            write_progress_line_to(
+                &mut self.sink,
                 &self.state.detail(),
                 "active",
                 self.animated,
@@ -2470,6 +2515,7 @@ impl CliProgressRenderer {
                 self.frame,
             );
             self.row = ProgressRowState::Painted;
+            self.ever_painted = true;
             self.frame = self.frame.wrapping_add(1);
         } else {
             self.row = ProgressRowState::Suppressed;
@@ -2478,7 +2524,11 @@ impl CliProgressRenderer {
     }
 
     fn timeout(&mut self) {
-        match self.gate.due(self.epoch.elapsed()) {
+        self.timeout_at(self.epoch.elapsed());
+    }
+
+    fn timeout_at(&mut self, elapsed: std::time::Duration) {
+        match self.gate.due(elapsed) {
             aplan_output::progress::ProgressDraw::Reveal
             | aplan_output::progress::ProgressDraw::Update => self.draw_active(),
             _ => self.deadline = None,
@@ -2492,10 +2542,11 @@ impl CliProgressRenderer {
             .expect("terminal draw follows a terminal command event");
         if self.animated {
             if self.row == ProgressRowState::Painted {
-                clear_progress_line();
+                self.sink.clear_row();
             }
-        } else {
-            write_progress_line(
+        } else if self.ever_painted {
+            write_progress_line_to(
+                &mut self.sink,
                 "command",
                 progress_lifecycle_label(lifecycle),
                 false,
@@ -2504,28 +2555,35 @@ impl CliProgressRenderer {
             );
         }
         self.row = ProgressRowState::Hidden;
+        self.ever_painted = false;
         self.deadline = None;
     }
 
     /// Apply one message; false means the renderer has reached its terminal.
     fn message(&mut self, message: ProgressMessage) -> bool {
+        self.message_at(self.epoch.elapsed(), message)
+    }
+
+    fn message_at(&mut self, elapsed: std::time::Duration, message: ProgressMessage) -> bool {
         match message {
             ProgressMessage::Stop(acknowledge) => {
-                if self.row != ProgressRowState::Hidden {
-                    if self.animated {
-                        if self.row == ProgressRowState::Painted {
-                            clear_progress_line();
-                        }
-                    } else {
-                        write_progress_line(
-                            "command",
-                            "interrupted",
-                            false,
-                            self.color,
-                            self.frame,
-                        );
+                if self.animated {
+                    if self.row == ProgressRowState::Painted {
+                        self.sink.clear_row();
                     }
+                } else if self.ever_painted {
+                    write_progress_line_to(
+                        &mut self.sink,
+                        "command",
+                        "interrupted",
+                        false,
+                        self.color,
+                        self.frame,
+                    );
                 }
+                self.row = ProgressRowState::Hidden;
+                self.ever_painted = false;
+                self.deadline = None;
                 if let Some(acknowledge) = acknowledge {
                     let _ = acknowledge.send(());
                 }
@@ -2534,7 +2592,7 @@ impl CliProgressRenderer {
             ProgressMessage::Pause(acknowledge) => {
                 self.pause_depth = self.pause_depth.saturating_add(1);
                 if self.pause_depth == 1 && self.animated && self.row == ProgressRowState::Painted {
-                    clear_progress_line();
+                    self.sink.clear_row();
                     self.row = ProgressRowState::Suppressed;
                 }
                 let _ = acknowledge.send(());
@@ -2542,7 +2600,10 @@ impl CliProgressRenderer {
             }
             ProgressMessage::Resume => {
                 self.pause_depth = self.pause_depth.saturating_sub(1);
-                if self.pause_depth == 0 && self.animated && self.row != ProgressRowState::Hidden {
+                // Draw any row held back during the pause for both animated and
+                // static output so a slow run never later ends without having
+                // shown it was active (`A2-178`).
+                if self.pause_depth == 0 && self.row == ProgressRowState::Suppressed {
                     self.draw_active();
                 }
                 true
@@ -2551,7 +2612,7 @@ impl CliProgressRenderer {
                 let accepted = self.state.accept(event);
                 let terminal = accepted && self.state.command_terminal.is_some();
                 if accepted {
-                    match self.gate.changed(self.epoch.elapsed(), terminal) {
+                    match self.gate.changed(elapsed, terminal) {
                         aplan_output::progress::ProgressDraw::WaitUntil(at) => {
                             self.deadline = Some(self.epoch + at);
                         }
@@ -2617,7 +2678,14 @@ fn progress_lifecycle_label(lifecycle: aplan_app::ProgressLifecycle) -> &'static
     }
 }
 
-fn write_progress_line(detail: &str, state: &str, animated: bool, color: bool, frame: usize) {
+fn write_progress_line_to(
+    sink: &mut impl ProgressSink,
+    detail: &str,
+    state: &str,
+    animated: bool,
+    color: bool,
+    frame: usize,
+) {
     let marker = if animated {
         [
             "\u{280b}", "\u{2819}", "\u{2839}", "\u{2838}", "\u{283c}", "\u{2834}", "\u{2826}",
@@ -2640,11 +2708,7 @@ fn write_progress_line(detail: &str, state: &str, animated: bool, color: bool, f
     } else {
         fitted
     };
-    let _ = aplan_output::progress::write_row(&rendered, animated);
-}
-
-fn clear_progress_line() {
-    let _ = aplan_output::progress::clear_row();
+    sink.write_row(&rendered, animated);
 }
 
 fn load_store_snapshot(
@@ -19328,6 +19392,177 @@ mod tests {
             ),
         ] {
             assert!(view.accept(progress));
+        }
+    }
+
+    #[derive(Default)]
+    struct RecordingProgressSink {
+        writes: Vec<(String, bool)>,
+        clears: usize,
+    }
+
+    impl ProgressSink for RecordingProgressSink {
+        fn write_row(&mut self, row: &str, transient: bool) {
+            self.writes.push((row.to_string(), transient));
+        }
+
+        fn clear_row(&mut self) {
+            self.clears += 1;
+        }
+    }
+
+    fn run_paused_reveal_scenario(
+        animated: bool,
+        resume: bool,
+        interrupt: bool,
+    ) -> RecordingProgressSink {
+        use aplan_app::{
+            OperationId, OperationKind, ProgressLifecycle, ProgressMeasure, ProgressPhase,
+            ProgressSubject,
+        };
+        use std::time::Duration;
+
+        let grace = aplan_output::progress::ProgressTiming::default().grace;
+        let command = OperationId::new(71);
+        let mut renderer = CliProgressRenderer::with_sink(
+            std::time::Instant::now(),
+            command,
+            animated,
+            false,
+            RecordingProgressSink::default(),
+        );
+        for (sequence, subject, lifecycle) in [
+            (0, ProgressSubject::Operation, ProgressLifecycle::Queued),
+            (1, ProgressSubject::Operation, ProgressLifecycle::Started),
+            (
+                2,
+                ProgressSubject::Phase {
+                    phase: ProgressPhase::Projection,
+                    child: None,
+                },
+                ProgressLifecycle::Started,
+            ),
+        ] {
+            assert!(renderer.message_at(
+                Duration::ZERO,
+                ProgressMessage::Event(
+                    renderer_event(
+                        command,
+                        sequence,
+                        OperationKind::CliCommand,
+                        subject,
+                        lifecycle,
+                        ProgressMeasure::Indeterminate,
+                    ),
+                    None,
+                ),
+            ));
+        }
+
+        let (tx, rx) = std::sync::mpsc::sync_channel(1);
+        assert!(renderer.message_at(Duration::from_millis(10), ProgressMessage::Pause(tx)));
+        rx.recv().expect("pause ack");
+
+        // Grace period expires while output is paused: row is held back.
+        renderer.timeout_at(grace);
+        assert!(
+            renderer.sink.writes.is_empty(),
+            "nothing may write while paused (animated={animated})"
+        );
+
+        if resume {
+            assert!(renderer.message_at(grace + Duration::from_millis(5), ProgressMessage::Resume));
+        }
+
+        let end_at = grace + Duration::from_millis(10);
+        if interrupt {
+            let (stop_tx, stop_rx) = std::sync::mpsc::sync_channel(1);
+            assert!(!renderer.message_at(end_at, ProgressMessage::Stop(Some(stop_tx))));
+            stop_rx.recv().expect("stop ack");
+        } else {
+            assert!(!renderer.message_at(
+                end_at,
+                ProgressMessage::Event(
+                    renderer_event(
+                        command,
+                        3,
+                        OperationKind::CliCommand,
+                        ProgressSubject::Operation,
+                        ProgressLifecycle::Completed,
+                        ProgressMeasure::Indeterminate,
+                    ),
+                    None,
+                ),
+            ));
+        }
+        renderer.sink
+    }
+
+    /// Proof for `progress.cli_renderer_is_identity_safe_and_terminal_safe`
+    /// (`A2-178`): when the grace period expires while output is paused,
+    /// resuming writes the held-back active row for both static and animated
+    /// output so a command's completion or interruption never appears without
+    /// first showing it was active; if the command finishes or stops while
+    /// still paused before any row was written, no orphan terminal/interrupted
+    /// line is emitted.
+    #[test]
+    fn paused_reveal_draws_on_resume_and_never_emits_terminal_without_active() {
+        // Static: paused reveal -> Resume -> Complete writes active, then complete.
+        let static_complete = run_paused_reveal_scenario(false, true, false);
+        assert_eq!(static_complete.clears, 0);
+        assert_eq!(
+            static_complete.writes,
+            vec![
+                (
+                    "progress: building the requested view: active".to_string(),
+                    false
+                ),
+                ("progress: command: complete".to_string(), false),
+            ]
+        );
+
+        // Static: paused reveal -> Resume -> Stop writes active, then interrupted.
+        let static_interrupt = run_paused_reveal_scenario(false, true, true);
+        assert_eq!(static_interrupt.clears, 0);
+        assert_eq!(
+            static_interrupt.writes,
+            vec![
+                (
+                    "progress: building the requested view: active".to_string(),
+                    false
+                ),
+                ("progress: command: interrupted".to_string(), false),
+            ]
+        );
+
+        // Static: ending or stopping while still paused before any row was written
+        // never emits an orphan terminal/interrupted line.
+        let static_paused_complete = run_paused_reveal_scenario(false, false, false);
+        assert!(static_paused_complete.writes.is_empty());
+        assert_eq!(static_paused_complete.clears, 0);
+
+        let static_paused_interrupt = run_paused_reveal_scenario(false, false, true);
+        assert!(static_paused_interrupt.writes.is_empty());
+        assert_eq!(static_paused_interrupt.clears, 0);
+
+        // Animated: paused reveal -> Resume -> Complete/Stop paints transient row
+        // on resume and clears it on exit.
+        for interrupt in [false, true] {
+            let animated = run_paused_reveal_scenario(true, true, interrupt);
+            assert_eq!(animated.writes.len(), 1, "interrupt={interrupt}");
+            assert!(animated.writes[0].1, "animated row must be transient");
+            assert!(
+                animated.writes[0]
+                    .0
+                    .contains("progress: building the requested view"),
+                "{:?}",
+                animated.writes
+            );
+            assert_eq!(animated.clears, 1, "interrupt={interrupt}");
+
+            let animated_still_paused = run_paused_reveal_scenario(true, false, interrupt);
+            assert!(animated_still_paused.writes.is_empty());
+            assert_eq!(animated_still_paused.clears, 0);
         }
     }
 
