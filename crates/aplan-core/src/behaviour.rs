@@ -2673,6 +2673,7 @@ pub const ALL: &[Behaviour] = &[
                catchable process interruption",
         proof: &[
             "progress_renderer_validates_identities_and_aggregates_children",
+            "paused_reveal_draws_on_resume_and_never_emits_terminal_without_active",
             "progress::auto_is_hidden_in_pipes_and_machine_modes_but_visible_for_an_attended_human_mode",
             "progress::concurrent_runners_are_aggregated_without_identity_or_escape_leaks",
             "progress::a_slow_command_error_emits_one_failed_terminal_before_the_diagnostic",
