@@ -33,7 +33,7 @@ what a second audit found in those fixes (`A2-177`), what an audit of the tag ru
 the open pre-public backlog and every open issue into this plan (`A2-019`) and ends with the
 v0.7.0 release (`A2-020`).
 
-**Tasks:** `A2-009`, `A2-016`, `A2-017`, `A2-018`, `A2-019`, `A2-020`, `A2-021`, `A2-022`, `A2-023`, `A2-024`, `A2-025`, `A2-026`, `A2-027`, `A2-028`, `A2-079`, `A2-137`, `A2-164`, `A2-166`, `A2-167`, `A2-168`, `A2-169`, `A2-177`, `A2-178`, `A2-179`, `A2-181`
+**Tasks:** `A2-009`, `A2-016`, `A2-017`, `A2-018`, `A2-019`, `A2-020`, `A2-021`, `A2-022`, `A2-023`, `A2-024`, `A2-025`, `A2-026`, `A2-027`, `A2-028`, `A2-079`, `A2-137`, `A2-164`, `A2-166`, `A2-167`, `A2-168`, `A2-169`, `A2-177`, `A2-178`, `A2-179`, `A2-181`, `A2-188`
 
 ### v0.8, Correctness and the most reported adoption failures
 

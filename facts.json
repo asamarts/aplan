@@ -661,6 +661,10 @@
       "what": "the build-time source identity ignores inherited `GIT_` context and follows the active checkout through loose refs, packed refs, disabled reflogs and linked worktrees without making ordinary unrelated branches build inputs"
     },
     {
+      "name": "facts.source_identity_survives_relocated_checkout",
+      "what": "the build-time source identity reads `CARGO_MANIFEST_DIR` at runtime and watches it for changes, so relocating a checkout while reusing `target/` retains `source` and keeps refreshing on subsequent commits"
+    },
+    {
       "name": "facts.reports_build_capabilities",
       "what": "`aplan facts` reports whether optional build capability `build.tui` is enabled, and `facts --require` accepts it only in a build that compiled the interface"
     },
@@ -1411,7 +1415,7 @@
     "version.require_impact"
   ],
   "counts": {
-    "behaviours": 226,
+    "behaviours": 227,
     "build_capabilities": 1,
     "commands": 48,
     "config_keys": 124,
