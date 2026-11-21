@@ -357,6 +357,21 @@ pub const ALL: &[Behaviour] = &[
                finding retains the complete referenced id and recommends the exact source family",
         proof: &["overlapping_near_prefixes_are_matched_longest_first"],
     },
+    // `A2-137`. `export-agents-md` previously derived its id-family examples
+    // from live tasks, so closing or dropping the last live task in an
+    // established family removed that family from the generated contract and
+    // triggered `APLAN041` (#28).
+    Behaviour {
+        name: "agent_contract.keeps_completed_id_families",
+        what: "`export-agents-md` derives established task-id families from a status-independent \
+               repeated-sequence signal (stems with at least two non-milestone, non-ULID tasks), \
+               so completing or dropping a family's last live task never alters the generated \
+               contract or causes `APLAN041` drift while lone legacy outliers stay excluded",
+        proof: &[
+            "established_families_survive_completion_and_drop_while_excluding_lone_outliers",
+            "agents_md::completing_or_dropping_a_familys_last_live_task_causes_no_drift",
+        ],
+    },
     // `A2-079`. `aplan critical-path` previously formatted the re-walked
     // remaining chain's total as `"<N>d of it not yet done"` on the full
     // chain's header even when the remaining chain was a different chain not

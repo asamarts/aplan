@@ -70,17 +70,13 @@ struct Family {
     width: usize,
     /// Highest number seen.
     max: u32,
-    /// How many ids are in this family, for choosing between rival conventions.
-    count: usize,
-    /// How many of them are not terminal, which is what makes a convention
-    /// *current* rather than merely large (`A1-180`).
+    /// How many non-milestone, non-ULID tasks carry this stem.
     ///
-    /// Counted in the same pass as the rest, and that is the point: the first
-    /// version asked the plan a second time and did not repeat this loop's
-    /// exclusions, so a live *milestone* sharing a family's stem made that
-    /// family read as current even when every task in it was closed. One fact
-    /// read twice drifts, and here it took four lines to drift.
-    live: usize,
+    /// Used in two distinct ways: `convention_for` prefers the busiest stem
+    /// when minting a new phase, while `example_ids` uses only the
+    /// status-independent structural distinction between an established
+    /// sequence (`count >= 2`) and a lone one-off id (`count == 1`) (`A2-137`).
+    count: usize,
 }
 
 /// Split an id into (stem, number, width). `A1-046` -> (`A1-`, 46, 3).
@@ -113,7 +109,6 @@ fn families(plan: &Plan) -> BTreeMap<String, Family> {
         out.entry(stem.to_string())
             .and_modify(|f| {
                 f.count += 1;
-                f.live += usize::from(!lt.task.status.is_terminal());
                 if num >= f.max {
                     f.max = num;
                     f.width = width;
@@ -124,14 +119,13 @@ fn families(plan: &Plan) -> BTreeMap<String, Family> {
                 width,
                 max: num,
                 count: 1,
-                live: usize::from(!lt.task.status.is_terminal()),
             });
     }
     out
 }
 
-/// The id shapes this plan currently mints, with the number left as `nn`
-/// (`A1-038`, and `A1-180`).
+/// The established numeric id shapes this plan uses, with the number left as
+/// `nn` (`A1-038`, `A1-180`, `A2-137`).
 ///
 /// For prose an adopter reads: `AL1-nn`, `WH2-nn`, `A1-nnn`. Empty where the
 /// plan teaches no convention -- ULIDs, or ids that are words -- because an
@@ -140,34 +134,32 @@ fn families(plan: &Plan) -> BTreeMap<String, Family> {
 /// The *width* is copied, so a plan of three-digit ids gets `nnn`: an example
 /// that would not validate as an id in this plan teaches the wrong shape.
 ///
-/// **A family counts when it still has live work, not when it has the most
-/// tasks.** The first version took the family with the most tasks, which made a
-/// generated *policy* block move whenever ordinary work changed a count: in
-/// `p003`, `K4-*` and `K6-*` are equally real cohorts, and adding one K6 task
-/// rewrote the contract from `K4-nnn` to `K6-nnn` in three places and failed the
-/// drift gate, though no id policy had changed
-/// (pre-public adoption evidence). `AgentContract`'s own doc says what that costs: a
-/// block that moves when work happens fails its own check daily and is turned
-/// off within a week.
+/// **Status-independent structural signal (`A2-137`): repeated sequence.**
+/// `A1-038` originally picked the family with the most tasks, so ordinary work
+/// could flip the generated contract when one cohort overtook another.
+/// `A1-180` replaced that with live work, which stopped count competition but
+/// made task completion itself a policy change: closing or dropping the final
+/// live task in a phase or family silently deleted that family from `AGENTS.md`
+/// and failed `APLAN041` (#28).
 ///
-/// Live work is the signal the count was groping for. A *stray* convention is
-/// one nobody is adding to -- this repository's `A0-` has two tasks and both are
-/// closed, against `A1-`'s 181 -- so it is described by its main one, which is
-/// what the majority rule was for. Two cohorts both being worked are two
-/// conventions, and saying so is the honest answer rather than picking the
-/// bigger.
+/// A numeric stem is an established convention once the plan has actually used
+/// it as a sequence -- at least two non-milestone, non-ULID tasks sharing that
+/// stem -- regardless of task status and without comparing family sizes against
+/// each other. That preserves every completed cohort alongside live ones,
+/// never moves when tasks are completed, dropped, or added to a peer cohort,
+/// and still excludes a lone historical outlier (a single stray id beside
+/// established sequences) as well as milestones, ULIDs, and word ids.
 ///
-/// Where nothing is live the whole plan is history, and every family is
-/// returned: there is no current convention to prefer, and a closed plan does
-/// not change again.
+/// Where no family has two tasks yet (for instance a brand-new single-task
+/// plan), every numeric family is returned so the plan still gets its example.
 #[must_use]
 pub fn example_ids(plan: &Plan) -> Vec<String> {
     let all = families(plan);
-    let current: Vec<&Family> = all.values().filter(|f| f.live > 0).collect();
-    let chosen = if current.is_empty() {
+    let established: Vec<&Family> = all.values().filter(|f| f.count >= 2).collect();
+    let chosen = if established.is_empty() {
         all.values().collect()
     } else {
-        current
+        established
     };
     chosen
         .into_iter()
@@ -895,6 +887,56 @@ mod tests {
     fn a_non_ascii_id_is_not_a_panic() {
         assert!(!contains_a_ulid("A1-046-cafe\u{e9}"));
         assert!(!contains_a_ulid(&"\u{e9}".repeat(30)));
+    }
+
+    /// Proof for `agent_contract.keeps_completed_id_families` (`A2-137`, #28):
+    /// `example_ids` uses the status-independent repeated-sequence signal so
+    /// completing or dropping the final live task of an established family
+    /// never drops it from generated guidance, while a lone closed legacy
+    /// outlier, milestones, ULIDs and word ids stay excluded.
+    #[test]
+    fn established_families_survive_completion_and_drop_while_excluding_lone_outliers() {
+        let with_status = |id: &str, phase: u32, milestone: bool, status: Status| {
+            let mut lt = task(id, phase, milestone);
+            lt.task.status = status;
+            lt
+        };
+        let ulid = mint(&plan(Vec::new()), 1, IdStrategy::Ulid).expect("ulid");
+
+        // Generic reproducer from A2-137: ABC-001..003 (all done) beside
+        // XYZ-001..004 (two live), plus a lone closed outlier, milestone, ULID
+        // and bare word id.
+        let mut tasks = vec![
+            with_status("ABC-001", 1, false, Status::Done),
+            with_status("ABC-002", 1, false, Status::Done),
+            with_status("ABC-003", 1, false, Status::Done),
+            with_status("XYZ-001", 2, false, Status::Todo),
+            with_status("XYZ-002", 2, false, Status::InProgress),
+            with_status("XYZ-003", 2, false, Status::Done),
+            with_status("XYZ-004", 2, false, Status::Done),
+            with_status("OLD-001", 0, false, Status::Done),
+            with_status("OLD-900", 0, true, Status::Todo),
+            with_status(&format!("OLD-{ulid}"), 0, false, Status::Todo),
+            with_status("groundwork", 1, false, Status::Todo),
+        ];
+        let expected = vec!["ABC-nnn".to_string(), "XYZ-nnn".to_string()];
+        assert_eq!(example_ids(&plan(tasks.clone())), expected);
+
+        // Complete one and drop the last live XYZ task: neither changes the set.
+        tasks[3].task.status = Status::Done;
+        tasks[4].task.status = Status::Dropped;
+        assert_eq!(
+            example_ids(&plan(tasks)),
+            expected,
+            "completing or dropping the last live task must not drop a family or admit the lone outlier"
+        );
+
+        // Nascent plan with only single-task families falls back to all of them,
+        // still status-independently.
+        let single_live = plan(vec![with_status("WH2-01", 2, false, Status::Todo)]);
+        let single_done = plan(vec![with_status("WH2-01", 2, false, Status::Done)]);
+        assert_eq!(example_ids(&single_live), vec!["WH2-nn".to_string()]);
+        assert_eq!(example_ids(&single_done), vec!["WH2-nn".to_string()]);
     }
 }
 
