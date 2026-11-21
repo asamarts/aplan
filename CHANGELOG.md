@@ -76,6 +76,17 @@ to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Fixed
 
+- **`aplan export-agents-md` no longer drops established id families when their final live task
+  is closed or dropped** (`A2-137`, `--require agent_contract.keeps_completed_id_families`).
+  Previously, `example_ids` selected families that still had live work, so completing or dropping
+  the last open task in a phase or cohort silently removed its id convention from `AGENTS.md` and
+  triggered `APLAN041`. Established families are now derived from a status-independent structural
+  signal -- numeric stems reused across at least two non-milestone, non-ULID tasks (falling back
+  to all numeric stems when no family has two tasks yet). Completing or dropping any task can no
+  longer drift the generated contract, while lone legacy outliers, milestones, ULIDs and word ids
+  remain excluded. Repositories that previously regenerated `AGENTS.md` after closing a phase or
+  kept a placeholder task open to avoid `APLAN041` can retire that workaround.
+
 - **`aplan critical-path` no longer attributes a separate remaining chain as `"of it"` on the
   full chain's header** (`A2-079`, `--require critical_path.reconciles_remaining_chain`). When
   the re-walked remaining-work chain differed from the unfinished rows of the printed critical

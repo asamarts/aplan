@@ -137,6 +137,10 @@
       "what": "`check-docs` matches overlapping one-digit-typo families longest-first, so the finding retains the complete referenced id and recommends the exact source family"
     },
     {
+      "name": "agent_contract.keeps_completed_id_families",
+      "what": "`export-agents-md` derives established task-id families from a status-independent repeated-sequence signal (stems with at least two non-milestone, non-ULID tasks), so completing or dropping a family's last live task never alters the generated contract or causes `APLAN041` drift while lone legacy outliers stay excluded"
+    },
+    {
       "name": "critical_path.reconciles_remaining_chain",
       "what": "`critical-path` reconciles its opening `of it` clause strictly against the unfinished rows of the printed critical path, prints a separate `longest remaining chain` table whenever the re-walked remaining chain differs, and carries matching `path_remaining_effort_days`, `path_remaining` and `remaining_tasks` fields in JSON"
     },
@@ -1423,7 +1427,7 @@
     "version.require_impact"
   ],
   "counts": {
-    "behaviours": 229,
+    "behaviours": 230,
     "build_capabilities": 1,
     "commands": 48,
     "config_keys": 124,

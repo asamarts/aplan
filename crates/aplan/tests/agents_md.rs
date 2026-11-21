@@ -277,15 +277,13 @@ fn two_live_id_families_keep_the_contract_byte_stable() {
     assert!(ok, "nor must one more task: {out}{err}");
 }
 
-/// A live *cut* is not live work (`A1-180`, audit).
+/// A live *cut* does not turn a lone task into an established family (`A1-180`, `A2-137`).
 ///
 /// `families` excludes milestones by tag on purpose: `M-v0.7` would otherwise
 /// parse as the family `M-v0.` and the next task would be offered `M-v0.8`,
-/// which is a cut rather than a task. The first version of the liveness rule
-/// asked the plan a second time and did not repeat that exclusion, so a live
-/// milestone sharing a family's stem made the family read as current even
-/// though every task in it was closed. Counted in one pass now, with one set of
-/// exclusions.
+/// which is a cut rather than a task. Under `A2-137`'s repeated-sequence rule,
+/// a milestone sharing a lone task's stem still does not count toward that stem
+/// and cannot promote a lone `K4-001` beside an established `K6-` sequence.
 #[test]
 fn a_live_milestone_does_not_make_a_closed_family_current() {
     let dir = tempfile::Builder::new()
@@ -301,34 +299,34 @@ fn a_live_milestone_does_not_make_a_closed_family_current() {
     std::fs::write(
         dir.path().join("aplan/tasks/K4-900.md"),
         "---\nid: K4-900\ntitle: a live cut sharing the K4 stem\nphase: 1\nstatus: todo\n\
-         tags: [milestone]\nblocked_by: [K6-001]\n---\n\nbody\n",
+         tags: [milestone]\nblocked_by: [K6-001, K6-002]\n---\n\nbody\n",
     )
     .expect("cut");
-    std::fs::write(
-        dir.path().join("aplan/tasks/K6-001.md"),
-        "---\nid: K6-001\ntitle: the live work\nphase: 1\nstatus: todo\neffort_days: 1\n---\n\nbody\n",
-    )
-    .expect("task");
+    for id in ["K6-001", "K6-002"] {
+        std::fs::write(
+            dir.path().join(format!("aplan/tasks/{id}.md")),
+            format!(
+                "---\nid: {id}\ntitle: the live work {id}\nphase: 1\nstatus: todo\neffort_days: 1\n---\n\nbody\n"
+            ),
+        )
+        .expect("task");
+    }
 
     let (out, _, ok) = run(dir.path(), &["export-agents-md"]);
     assert!(ok, "{out}");
     assert!(
         out.contains("this plan's own convention (`K6-nnn`)"),
-        "the family with live work, alone: {out}"
+        "the established family, alone: {out}"
     );
     assert!(
         !out.contains("K4-nnn"),
-        "a cut is not a task, and does not keep its stem current: {out}"
+        "a cut is not a task, and does not turn a lone stem into a sequence: {out}"
     );
 }
 
-/// A stray convention is still described by the plan's main one (`A1-180`).
-///
-/// The majority rule was reaching for this and got it by counting: a family
-/// nobody is adding to should not be named. Live work is the signal it wanted --
-/// this repository's own `A0-` has two tasks and both are closed, against
-/// `A1-`'s 181 -- so a closed family is silent and the single example survives,
-/// which is what a predominantly single-family plan needs.
+/// A lone stray historical outlier stays excluded beside an established family,
+/// both while the main family has live work and once it is completely finished
+/// (`A1-180`, `A2-137`).
 #[test]
 fn a_family_with_no_live_work_is_not_named_as_a_convention() {
     let dir = tempfile::Builder::new()
@@ -356,19 +354,19 @@ fn a_family_with_no_live_work_is_not_named_as_a_convention() {
     assert!(ok, "{out}");
     assert!(
         out.contains("this plan's own convention (`A1-nnn`)"),
-        "the live family, alone: {out}"
+        "the established family, alone: {out}"
     );
     assert!(
         !out.contains("A0-"),
-        "the closed family is not a convention: {out}"
+        "the lone outlier is not an established convention: {out}"
     );
     assert!(
         out.contains("aplan why A1-nnn"),
         "and the command uses it: {out}"
     );
 
-    // Where nothing is live the whole plan is history, so every family is named
-    // rather than none: there is no current convention to prefer.
+    // Closing or dropping the last live task must not change the generated
+    // contract or suddenly pull the lone outlier into AGENTS.md.
     write(
         "A1-001",
         "done",
@@ -377,10 +375,89 @@ fn a_family_with_no_live_work_is_not_named_as_a_convention() {
     write("A1-002", "dropped", "");
     let (closed, _, ok) = run(dir.path(), &["export-agents-md"]);
     assert!(ok, "{closed}");
-    assert!(
-        closed.contains("conventions (`A0-nnn` or `A1-nnn`)"),
-        "a finished plan names what it used: {closed}"
+    assert_eq!(
+        closed, out,
+        "finishing the established family must keep the contract byte-identical and keep the lone outlier out"
     );
+}
+
+/// Proof for `agent_contract.keeps_completed_id_families` (`A2-137`, #28):
+/// completing or dropping the final live task in either of two established
+/// families leaves both families in `AGENTS.md` and produces no `APLAN041`
+/// drift, while a lone closed historical outlier stays excluded.
+#[test]
+fn completing_or_dropping_a_familys_last_live_task_causes_no_drift() {
+    let dir = tempfile::Builder::new()
+        .tempdir_in(aplan_core::fixture::fixture_root())
+        .expect("tempdir");
+    std::fs::create_dir_all(dir.path().join("aplan/tasks")).expect("mkdir");
+    std::fs::write(
+        dir.path().join(".aplan.yml"),
+        "root: aplan\ndeny_warnings: true\n",
+    )
+    .expect("config");
+    let write = |id: &str, phase: u32, status: &str, extra: &str| {
+        std::fs::write(
+            dir.path().join(format!("aplan/tasks/{id}.md")),
+            format!(
+                "---\nid: {id}\ntitle: {id}\nphase: {phase}\nstatus: {status}\n\
+                 effort_days: 1\n{extra}---\n\nbody\n"
+            ),
+        )
+        .expect("task");
+    };
+    let ev = "evidence:\n  - kind: note\n    ref: shipped\n    captured: 2026-01-01\n";
+
+    // Two established families (ABC- and XYZ-) plus a lone closed legacy outlier (OLD-001).
+    write("ABC-001", 1, "done", ev);
+    write("ABC-002", 1, "done", ev);
+    write("ABC-003", 1, "todo", "");
+    write("XYZ-001", 2, "todo", "");
+    write("XYZ-002", 2, "todo", "");
+    write("XYZ-003", 2, "done", ev);
+    write("XYZ-004", 2, "done", ev);
+    write("OLD-001", 0, "done", ev);
+
+    let (_, err, ok) = run(dir.path(), &["export-agents-md", "--write", "AGENTS.md"]);
+    assert!(ok, "{err}");
+    let initial = std::fs::read_to_string(dir.path().join("AGENTS.md")).expect("read");
+    assert!(
+        initial.contains("this plan's own conventions (`ABC-nnn` or `XYZ-nnn`)"),
+        "both established families belong in the contract:\n{initial}"
+    );
+    assert!(
+        !initial.contains("OLD-"),
+        "the lone closed legacy outlier stays excluded:\n{initial}"
+    );
+
+    // Complete the final live task of ABC- (reproducing #28 / A2-137).
+    write("ABC-003", 1, "done", ev);
+    let (out, err, ok) = run(dir.path(), &["check"]);
+    assert!(
+        ok,
+        "completing ABC-'s last live task must not trigger APLAN041:\n{out}{err}"
+    );
+    let (out, err, ok) = run(dir.path(), &["export-agents-md", "--check", "AGENTS.md"]);
+    assert!(
+        ok,
+        "AGENTS.md must stay current after completing ABC-003:\n{out}{err}"
+    );
+
+    // Drop the remaining live tasks of XYZ- too.
+    write("XYZ-001", 2, "dropped", "");
+    write("XYZ-002", 2, "dropped", "");
+    let (out, err, ok) = run(dir.path(), &["check"]);
+    assert!(
+        ok,
+        "dropping XYZ-'s last live tasks must not trigger APLAN041:\n{out}{err}"
+    );
+    let (out, err, ok) = run(dir.path(), &["export-agents-md", "--check", "AGENTS.md"]);
+    assert!(
+        ok,
+        "AGENTS.md must stay current after dropping XYZ-'s last live tasks:\n{out}{err}"
+    );
+    let after = std::fs::read_to_string(dir.path().join("AGENTS.md")).expect("read");
+    assert_eq!(after, initial, "contract bytes stayed untouched");
 }
 
 fn fixture(dir: &Path) {
