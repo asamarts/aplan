@@ -595,3 +595,207 @@ fn the_help_says_why_a_cut_row_reports_a_different_number() {
     );
     assert_eq!(doc["total_effort_days"], serde_json::json!(6.0), "{doc}");
 }
+
+/// A plan whose full chain (`A-1` 5d done -> `A-2` 1d todo) differs from its
+/// longest remaining chain (`B-1` 3d todo), matching #26 / `A2-079`.
+fn divergent_fixture(dir: &Path) {
+    std::fs::create_dir_all(dir.join("aplan/tasks")).expect("mkdir");
+    std::fs::write(dir.join(".aplan.yml"), "root: aplan\n").expect("config");
+    let write_task = |id: &str, status: &str, effort: f64, blocked: &[&str], evidence: &str| {
+        let deps = if blocked.is_empty() {
+            String::new()
+        } else {
+            let rows: Vec<String> = blocked.iter().map(|b| format!("  - {b}\n")).collect();
+            format!("blocked_by:\n{}", rows.concat())
+        };
+        std::fs::write(
+            dir.join(format!("aplan/tasks/{id}.md")),
+            format!(
+                "---\nid: {id}\ntitle: task {id}\nphase: 1\nstatus: {status}\n\
+                 effort_days: {effort}\n{deps}{evidence}---\n\nbody\n"
+            ),
+        )
+        .expect("task");
+    };
+    let done_ev = "evidence:\n  - kind: note\n    ref: shipped\n    captured: 2026-01-01\n";
+    write_task("A-1", "done", 5.0, &[], done_ev);
+    write_task("A-2", "todo", 1.0, &["A-1"], "");
+    write_task("B-1", "todo", 3.0, &[], "");
+    std::fs::write(
+        dir.join("aplan/tasks/M-x.md"),
+        "---\nid: M-x\ntitle: checkpoint M-x\nphase: 1\nstatus: todo\n\
+         tags:\n  - milestone\n  - x\nblocked_by:\n  - A-2\n  - B-1\n---\n\nbody\n",
+    )
+    .expect("milestone");
+}
+
+/// Proof for `critical_path.reconciles_remaining_chain` (`A2-079`, #26): when
+/// the re-walked remaining chain differs from the unfinished rows of the
+/// printed full chain, the opening `"of it"` clause measures only the printed
+/// chain's unfinished rows and the separate remaining chain is printed with its
+/// own header and rows; JSON exposes the exact same split.
+#[test]
+fn a_divergent_remaining_chain_is_named_separately_from_the_printed_path() {
+    let dir = tmp();
+    divergent_fixture(dir.path());
+
+    let checked = common::run(dir.path(), &["check"]);
+    assert_eq!(checked.code, 0, "{}", checked.text());
+
+    // Whole-plan human output reconciles both sections against their rows.
+    let human = common::run(dir.path(), &["critical-path"]);
+    assert_eq!(human.code, 0, "{}", human.text());
+    assert!(
+        human.stdout.contains(
+            "critical path: 6.0 days across 2 task(s), 1.0d of it not yet done across 1 task(s)"
+        ),
+        "opening line must reconcile against the printed rows A-1 and A-2:\n{}",
+        human.stdout
+    );
+    assert!(
+        !human.stdout.contains("3.0d of it"),
+        "remaining chain total must never be attributed as `of it`:\n{}",
+        human.stdout
+    );
+    assert!(
+        human
+            .stdout
+            .contains("\n\nlongest remaining chain: 3.0 days across 1 task(s)\n"),
+        "divergent remaining chain must have its own named section:\n{}",
+        human.stdout
+    );
+    let (_, rest) = human
+        .stdout
+        .split_once("longest remaining chain:")
+        .expect("second section");
+    assert!(
+        rest.contains("B-1") && rest.contains("3.0d") && rest.contains("todo"),
+        "second section must list the remaining chain's rows:\n{rest}"
+    );
+
+    // Whole-plan JSON carries exact parity with both human sections.
+    let doc = json(dir.path(), &[]);
+    assert_eq!(doc["total_effort_days"], serde_json::json!(6.0), "{doc}");
+    assert_eq!(ids(&doc), ["A-1", "A-2"], "{doc}");
+    assert_eq!(
+        doc["path_remaining_effort_days"],
+        serde_json::json!(1.0),
+        "{doc}"
+    );
+    assert_eq!(doc["path_remaining"], serde_json::json!(["A-2"]), "{doc}");
+    assert_eq!(
+        doc["remaining_effort_days"],
+        serde_json::json!(3.0),
+        "{doc}"
+    );
+    assert_eq!(doc["remaining"], serde_json::json!(["B-1"]), "{doc}");
+    assert_eq!(
+        doc["remaining_tasks"],
+        serde_json::json!([{
+            "id": "B-1",
+            "title": "task B-1",
+            "effort_days": 3.0,
+            "status": "todo",
+        }]),
+        "{doc}"
+    );
+
+    // Endpoint-bounded human and JSON carry the target on both sections.
+    let to_human = common::run(dir.path(), &["critical-path", "M-x"]);
+    assert_eq!(to_human.code, 0, "{}", to_human.text());
+    assert!(
+        to_human.stdout.contains(
+            "critical path to `M-x`: 6.0 days across 2 task(s), 1.0d of it not yet done across 1 task(s)"
+        ),
+        "{}",
+        to_human.stdout
+    );
+    assert!(
+        to_human
+            .stdout
+            .contains("\n\nlongest remaining chain to `M-x`: 3.0 days across 1 task(s)\n"),
+        "{}",
+        to_human.stdout
+    );
+    let to_doc = json(dir.path(), &["M-x"]);
+    assert_eq!(to_doc["to"], serde_json::json!("M-x"), "{to_doc}");
+    assert_eq!(to_doc["path_remaining_effort_days"], serde_json::json!(1.0));
+    assert_eq!(to_doc["path_remaining"], serde_json::json!(["A-2"]));
+    assert_eq!(to_doc["remaining_effort_days"], serde_json::json!(3.0));
+    assert_eq!(to_doc["remaining"], serde_json::json!(["B-1"]));
+}
+
+/// Proof for `critical_path.reconciles_remaining_chain` (`A2-079`): when every
+/// row of the printed critical path is `done` while another live chain remains,
+/// the first header says none of the printed chain is left and the separate
+/// remaining chain is printed below it with all of its rows.
+#[test]
+fn a_fully_done_critical_path_still_prints_a_separate_live_remaining_chain() {
+    let dir = tmp();
+    std::fs::create_dir_all(dir.path().join("aplan/tasks")).expect("mkdir");
+    std::fs::write(dir.path().join(".aplan.yml"), "root: aplan\n").expect("config");
+    let done_ev = "evidence:\n  - kind: note\n    ref: shipped\n    captured: 2026-01-01\n";
+    for (id, status, effort, deps, ev) in [
+        ("A-1", "done", 5.0, "", done_ev),
+        ("A-2", "done", 2.0, "blocked_by:\n  - A-1\n", done_ev),
+        ("B-1", "todo", 3.0, "", ""),
+        ("B-2", "todo", 1.5, "blocked_by:\n  - B-1\n", ""),
+    ] {
+        std::fs::write(
+            dir.path().join(format!("aplan/tasks/{id}.md")),
+            format!(
+                "---\nid: {id}\ntitle: task {id}\nphase: 1\nstatus: {status}\n\
+                 effort_days: {effort}\n{deps}{ev}---\n\nbody\n"
+            ),
+        )
+        .expect("task");
+    }
+
+    let human = common::run(dir.path(), &["critical-path"]);
+    assert_eq!(human.code, 0, "{}", human.text());
+    assert!(
+        human
+            .stdout
+            .contains("critical path: 7.0 days across 2 task(s), and none of it is left"),
+        "all printed rows of the critical path are done:\n{}",
+        human.stdout
+    );
+    assert!(
+        human
+            .stdout
+            .contains("\n\nlongest remaining chain: 4.5 days across 2 task(s)\n"),
+        "the separate live remaining chain must still be printed:\n{}",
+        human.stdout
+    );
+    let (_, rest) = human
+        .stdout
+        .split_once("longest remaining chain:")
+        .expect("second section");
+    assert!(
+        rest.contains("B-1") && rest.contains("B-2"),
+        "both rows of the remaining chain must be listed:\n{rest}"
+    );
+
+    let doc = json(dir.path(), &[]);
+    assert_eq!(doc["total_effort_days"], serde_json::json!(7.0), "{doc}");
+    assert_eq!(
+        doc["path_remaining_effort_days"],
+        serde_json::json!(0.0),
+        "{doc}"
+    );
+    assert_eq!(doc["path_remaining"], serde_json::json!([]), "{doc}");
+    assert_eq!(
+        doc["remaining_effort_days"],
+        serde_json::json!(4.5),
+        "{doc}"
+    );
+    assert_eq!(doc["remaining"], serde_json::json!(["B-1", "B-2"]), "{doc}");
+    assert_eq!(
+        doc["remaining_tasks"]
+            .as_array()
+            .expect("remaining_tasks")
+            .len(),
+        2,
+        "{doc}"
+    );
+}

@@ -137,6 +137,10 @@
       "what": "`check-docs` matches overlapping one-digit-typo families longest-first, so the finding retains the complete referenced id and recommends the exact source family"
     },
     {
+      "name": "critical_path.reconciles_remaining_chain",
+      "what": "`critical-path` reconciles its opening `of it` clause strictly against the unfinished rows of the printed critical path, prints a separate `longest remaining chain` table whenever the re-walked remaining chain differs, and carries matching `path_remaining_effort_days`, `path_remaining` and `remaining_tasks` fields in JSON"
+    },
+    {
       "name": "check_docs.recognises_non_numeric_prefixed_ids",
       "what": "`check-docs` learns uppercase-prefixed non-numeric id families (including milestone and release ids such as `M-one`, `M-tui-quality` and `R-a`), reports unknown ids of those shapes with did-you-mean suggestions, and leaves bare words and lowercase hyphenated prose untouched"
     },
@@ -1419,7 +1423,7 @@
     "version.require_impact"
   ],
   "counts": {
-    "behaviours": 228,
+    "behaviours": 229,
     "build_capabilities": 1,
     "commands": 48,
     "config_keys": 124,

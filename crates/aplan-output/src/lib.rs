@@ -2010,28 +2010,52 @@ pub fn render_critical_path(
     }
 }
 
-/// How much of a chain is still to do, as a clause for the header.
+/// The unfinished rows of `path` and the sum of their `effort_days` (`A2-079`).
 ///
-/// **A second number, not a flag** (`A1-352`). A flag makes a reader choose
-/// before they know there are two quantities to choose between, and the total
-/// alone reads as work remaining: this repository's own plan has a 22.0-day
-/// chain of which 19.0 days are finished. The roadmap already pairs an effort
-/// total with a `left` companion on one line, and this is that shape one rung
-/// down.
+/// The opening header's `"of it not yet done"` clause describes the rows printed
+/// directly beneath it, so it always sums the non-`done` tasks of `path` itself
+/// rather than borrowing a figure from a separate remaining-work chain.
+fn unfinished_on_path(path: &CriticalPath) -> (f64, Vec<&aplan_core::graph::CriticalTask>) {
+    let tasks: Vec<_> = path
+        .tasks
+        .iter()
+        .filter(|t| t.status != aplan_core::Status::Done)
+        .collect();
+    let effort = tasks.iter().map(|t| t.effort_days).sum();
+    (effort, tasks)
+}
+
+/// Whether the re-walked remaining chain consists of the exact unfinished rows
+/// of the printed critical path.
+fn remaining_matches_path_tail(
+    path_unfinished: &[&aplan_core::graph::CriticalTask],
+    remaining: &CriticalPath,
+) -> bool {
+    path_unfinished.len() == remaining.tasks.len()
+        && path_unfinished
+            .iter()
+            .zip(&remaining.tasks)
+            .all(|(a, b)| a.id == b.id)
+}
+
+/// How much of the printed chain is still to do, as a clause for its header.
+///
+/// **A second number, not a flag** (`A1-352`, `A2-079`). When nothing on `path`
+/// is finished, the two quantities agree and the clause is omitted. Otherwise
+/// `"of it"` measures the unfinished rows of `path` itself so the opening line
+/// always reconciles with the table beneath it; if the re-walked longest
+/// remaining chain diverges from those rows, [`render_critical_path_human`]
+/// prints it as its own named section rather than misattributing its total to
+/// `path`.
 fn remaining_clause(path: &CriticalPath, remaining: Option<&CriticalPath>) -> String {
-    let Some(left) = remaining else {
+    if remaining.is_none() {
         return String::new();
-    };
-    if left.tasks.is_empty() {
-        return ", and none of it is left".to_string();
     }
-    // **Asked of the rows, not of the totals** (`A1-352`, audit). This compared
-    // the two numbers with `f64::EPSILON`, which is the gap either side of 1.0
-    // and far smaller than the gap between two sums of days -- so it was both
-    // the wrong tolerance and a proxy for the wrong question. What suppresses
-    // the clause is that nothing on the chain is finished, which is exact and
-    // needs no comparison: with no finished row the two weightings agree
-    // everywhere, so the second number would say the first again.
+    // **Asked of the rows, not of the totals** (`A1-352`, audit). What
+    // suppresses the clause is that nothing on the chain is finished, which is
+    // exact and needs no floating-point comparison: with no finished row the
+    // two weightings agree everywhere, so the second number would say the first
+    // again.
     if path
         .tasks
         .iter()
@@ -2039,47 +2063,21 @@ fn remaining_clause(path: &CriticalPath, remaining: Option<&CriticalPath>) -> St
     {
         return String::new();
     }
+    let (path_left_days, path_left_tasks) = unfinished_on_path(path);
+    if path_left_tasks.is_empty() {
+        return ", and none of it is left".to_string();
+    }
     format!(
-        ", {:.1}d of it not yet done across {} task(s)",
-        left.total_effort_days,
-        left.tasks.len()
+        ", {path_left_days:.1}d of it not yet done across {} task(s)",
+        path_left_tasks.len()
     )
 }
 
-fn render_critical_path_human(
-    path: &CriticalPath,
-    remaining: Option<&CriticalPath>,
-    to: Option<&str>,
+fn write_critical_path_rows(
+    out: &mut impl std::io::Write,
+    tasks: &[aplan_core::graph::CriticalTask],
 ) -> std::io::Result<()> {
-    let mut out = anstream::stdout().lock();
-    let bold = crate::style::HEADING;
-    // **The target is named, and so is the reason there is no chain** (`A1-345`).
-    // A checkpoint with no live ancestry is a real answer -- nothing has to
-    // finish before it -- and printing nothing reads as a command that failed.
-    let subject = to.map_or_else(
-        || "critical path".to_string(),
-        |id| format!("critical path to `{id}`"),
-    );
-    // Folded, because naming the target put an id a reader chose into a line
-    // whose length used to be the renderer's alone (`A1-345`). Not hung: a
-    // continuation at the row indent of two would read as a task on the chain.
-    if path.tasks.is_empty() {
-        let why = if to.is_some() {
-            "nothing it waits on carries effort"
-        } else {
-            "no tasks"
-        };
-        let line = format!("{subject}: none ({why})");
-        return writeln!(out, "{}", fold::fold(&line, fold::out_width(), 0));
-    }
-    let head = format!(
-        "{bold}{subject}: {:.1} days across {} task(s){}{bold:#}",
-        path.total_effort_days,
-        path.tasks.len(),
-        remaining_clause(path, remaining)
-    );
-    writeln!(out, "{}", fold::fold(&head, fold::out_width(), 0))?;
-    for t in &path.tasks {
+    for t in tasks {
         // **The status is on the row** (`A1-345`). A chain ending at a late
         // checkpoint runs through work that is already finished -- on this
         // repository's own plan, five of the seven rows -- and a total with no
@@ -2109,23 +2107,78 @@ fn render_critical_path_human(
     Ok(())
 }
 
+fn render_critical_path_human(
+    path: &CriticalPath,
+    remaining: Option<&CriticalPath>,
+    to: Option<&str>,
+) -> std::io::Result<()> {
+    let mut out = anstream::stdout().lock();
+    let bold = crate::style::HEADING;
+    // **The target is named, and so is the reason there is no chain** (`A1-345`).
+    // A checkpoint with no live ancestry is a real answer -- nothing has to
+    // finish before it -- and printing nothing reads as a command that failed.
+    let subject = to.map_or_else(
+        || "critical path".to_string(),
+        |id| format!("critical path to `{id}`"),
+    );
+    // Folded, because naming the target put an id a reader chose into a line
+    // whose length used to be the renderer's alone (`A1-345`). Not hung: a
+    // continuation at the row indent of two would read as a task on the chain.
+    if path.tasks.is_empty() {
+        let why = if to.is_some() {
+            "nothing it waits on carries effort"
+        } else {
+            "no tasks"
+        };
+        let line = format!("{subject}: none ({why})");
+        return writeln!(out, "{}", fold::fold(&line, fold::out_width(), 0));
+    }
+    let (_, path_left_tasks) = unfinished_on_path(path);
+    let head = format!(
+        "{bold}{subject}: {:.1} days across {} task(s){}{bold:#}",
+        path.total_effort_days,
+        path.tasks.len(),
+        remaining_clause(path, remaining)
+    );
+    writeln!(out, "{}", fold::fold(&head, fold::out_width(), 0))?;
+    write_critical_path_rows(&mut out, &path.tasks)?;
+    if let Some(left) = remaining
+        && !left.tasks.is_empty()
+        && !remaining_matches_path_tail(&path_left_tasks, left)
+    {
+        let remaining_subject = to.map_or_else(
+            || "longest remaining chain".to_string(),
+            |id| format!("longest remaining chain to `{id}`"),
+        );
+        let remaining_head = format!(
+            "{bold}{remaining_subject}: {:.1} days across {} task(s){bold:#}",
+            left.total_effort_days,
+            left.tasks.len(),
+        );
+        writeln!(out)?;
+        writeln!(out, "{}", fold::fold(&remaining_head, fold::out_width(), 0))?;
+        write_critical_path_rows(&mut out, &left.tasks)?;
+    }
+    Ok(())
+}
+
+fn critical_task_json(t: &aplan_core::graph::CriticalTask) -> serde_json::Value {
+    serde_json::json!({
+        "id": t.id,
+        "title": t.title,
+        "effort_days": t.effort_days,
+        "status": t.status.to_string(),
+    })
+}
+
 fn render_critical_path_json(
     path: &CriticalPath,
     remaining: Option<&CriticalPath>,
     to: Option<&str>,
 ) -> std::io::Result<()> {
-    let tasks: Vec<serde_json::Value> = path
-        .tasks
-        .iter()
-        .map(|t| {
-            serde_json::json!({
-                "id": t.id,
-                "title": t.title,
-                "effort_days": t.effort_days,
-                "status": t.status.to_string(),
-            })
-        })
-        .collect();
+    let tasks: Vec<serde_json::Value> = path.tasks.iter().map(critical_task_json).collect();
+    let (path_left_days, path_left_tasks) = unfinished_on_path(path);
+    let path_left_ids: Vec<String> = path_left_tasks.iter().map(|t| t.id.clone()).collect();
     let doc = serde_json::json!({
         "schema": "aplan/critical-path/v1",
         // The checkpoint the chain ends at, `null` for the whole plan. A
@@ -2133,13 +2186,20 @@ fn render_critical_path_json(
         // (`A1-345`).
         "to": to,
         "total_effort_days": path.total_effort_days,
-        // What is still to do, re-walked with `done` weighing nothing rather
-        // than subtracted from the chain above -- the two ordinarily end at
-        // different tasks (`A1-352`). `null` only where it could not be
-        // computed, which is where the total could not be either.
+        // The unfinished rows of `tasks` above: what the opening human line's
+        // `"of it"` figure reconciles against (`A2-079`).
+        "path_remaining_effort_days": path_left_days,
+        "path_remaining": path_left_ids,
+        // What is still to do overall, re-walked with `done` weighing nothing
+        // rather than subtracted from the chain above -- the two ordinarily end
+        // at different tasks (`A1-352`, `A2-079`). `null` only where it could
+        // not be computed, which is where the total could not be either.
         "remaining_effort_days": remaining.map(|r| r.total_effort_days),
         "remaining": remaining.map(|r| {
             r.tasks.iter().map(|t| t.id.clone()).collect::<Vec<_>>()
+        }),
+        "remaining_tasks": remaining.map(|r| {
+            r.tasks.iter().map(critical_task_json).collect::<Vec<_>>()
         }),
         "tasks": tasks,
     });
