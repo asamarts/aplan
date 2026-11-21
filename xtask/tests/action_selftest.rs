@@ -238,6 +238,14 @@ fn action_release_verification_refuses_bad_identity_and_bytes_before_gh() {
 }
 
 fn run_release_downloader(tag: &str, gh_script: &str) -> (Output, usize) {
+    run_release_downloader_with_backoff(tag, Some("0 0 0"), gh_script)
+}
+
+fn run_release_downloader_with_backoff(
+    tag: &str,
+    backoff: Option<&str>,
+    gh_script: &str,
+) -> (Output, usize) {
     let dir = tempfile::Builder::new()
         .tempdir_in(aplan_core::fixture::fixture_root())
         .expect("tempdir");
@@ -255,8 +263,8 @@ fn run_release_downloader(tag: &str, gh_script: &str) -> (Output, usize) {
         std::env::var("PATH").expect("PATH is set")
     );
     let asset = format!("aplan-{tag}-x86_64-unknown-linux-musl.tar.gz");
-    let output = Command::new("bash")
-        .arg(repo_root().join("ci/scripts/download-action-release.sh"))
+    let mut cmd = Command::new("bash");
+    cmd.arg(repo_root().join("ci/scripts/download-action-release.sh"))
         .args([
             tag,
             "asamarts/aplan",
@@ -264,10 +272,16 @@ fn run_release_downloader(tag: &str, gh_script: &str) -> (Output, usize) {
             dest.to_str().expect("dest path is UTF-8"),
         ])
         .env("PATH", path)
-        .env("APLAN_DOWNLOAD_BACKOFF_SECONDS", "0 0 0")
-        .env("ATTEMPT_FILE", &count_file)
-        .output()
-        .expect("run action release downloader");
+        .env("ATTEMPT_FILE", &count_file);
+    match backoff {
+        Some(spec) => {
+            cmd.env("APLAN_DOWNLOAD_BACKOFF_SECONDS", spec);
+        }
+        None => {
+            cmd.env_remove("APLAN_DOWNLOAD_BACKOFF_SECONDS");
+        }
+    }
+    let output = cmd.output().expect("run action release downloader");
     let attempts = fs::read_to_string(&count_file)
         .expect("read attempt counter")
         .trim()
@@ -334,6 +348,38 @@ exit 1
         stderr.contains("Install failed:") && stderr.contains("no plan check ran"),
         "final failure must state install failed and no plan check ran: {stderr}"
     );
+
+    // `gh` connectivity wrapper message is also classified as transient (`A2-190`).
+    let connect_wrapper = r#"#!/usr/bin/env bash
+set -eu
+count=$(( $(cat "$ATTEMPT_FILE") + 1 ))
+printf '%s\n' "$count" > "$ATTEMPT_FILE"
+if (( count == 1 )); then
+    echo "error connecting to api.github.com" >&2
+    echo "check your internet connection or https://githubstatus.com" >&2
+    exit 1
+fi
+exit 0
+"#;
+    let (output, attempts) = run_release_downloader("v0.6.0", connect_wrapper);
+    assert!(
+        output.status.success(),
+        "gh connectivity wrapper error should succeed on retry: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert_eq!(attempts, 2);
+
+    // Explicit empty backoff means single attempt (0 retries) without set -u errors (`A2-190`).
+    let (output, attempts) =
+        run_release_downloader_with_backoff("v0.6.0", Some(""), persistent_503);
+    assert!(!output.status.success(), "single attempt 503 must fail");
+    assert_eq!(attempts, 1, "empty backoff spec must run one attempt only");
+
+    // Non-numeric backoff is rejected before invoking gh (`A2-190`).
+    let (output, attempts) =
+        run_release_downloader_with_backoff("v0.6.0", Some("abc"), persistent_503);
+    assert_eq!(output.status.code(), Some(2));
+    assert_eq!(attempts, 0, "invalid backoff must fail before running gh");
 }
 
 #[test]

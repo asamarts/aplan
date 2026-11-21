@@ -179,17 +179,34 @@ pub fn render_capture_action(report: &CaptureActionReport, format: Format) -> st
                 .expect("CaptureActionReport serializes as an object");
             object.insert("schema".to_string(), schema.into());
             if format == Format::Agent {
-                let instruction = if report.task_id.is_some() {
-                    "Use the reported full capture id and task id for later machine requests; never shorten the capture id to the human prefix."
-                } else {
-                    "Use the reported full capture id for any later machine request; never shorten it to the human prefix."
-                };
+                let instruction =
+                    capture_action_agent_instruction(report.outcome, report.task_id.is_some());
                 object.insert("agent_instruction".to_string(), instruction.into());
             }
             let mut out = std::io::stdout().lock();
             writeln!(out, "{}", serde_json::to_string_pretty(&value)?)
         }
         other => unsupported_capture_format(other, "a capture action"),
+    }
+}
+
+const fn capture_action_agent_instruction(
+    outcome: CaptureActionOutcome,
+    has_task_id: bool,
+) -> &'static str {
+    match (outcome, has_task_id) {
+        (CaptureActionOutcome::Refused, true) => {
+            "Fix the reported findings or change the promotion inputs, then preview or promote again using the reported full capture id; never shorten it to the human prefix. Nothing was written and the reported task id was not created."
+        }
+        (CaptureActionOutcome::Refused, false) => {
+            "Fix the reported findings or change the request inputs, then preview or apply again using the reported full capture id; never shorten it to the human prefix. Nothing was written."
+        }
+        (_, true) => {
+            "Use the reported full capture id and task id for later machine requests; never shorten the capture id to the human prefix."
+        }
+        (_, false) => {
+            "Use the reported full capture id for any later machine request; never shorten it to the human prefix."
+        }
     }
 }
 
@@ -4325,6 +4342,32 @@ mod tests {
                 "refused promotion falsely printed `{forbidden}`:\n{refused_rendered}"
             );
         }
+        // Refused `--format agent` output must never tell an agent to reuse a
+        // task id that was never created (`A2-190`).
+        let refused_promo_instruction =
+            capture_action_agent_instruction(CaptureActionOutcome::Refused, true);
+        assert!(
+            refused_promo_instruction.contains("Nothing was written")
+                && refused_promo_instruction.contains("was not created")
+                && !refused_promo_instruction
+                    .contains("Use the reported full capture id and task id"),
+            "{refused_promo_instruction}"
+        );
+        let refused_plain_instruction =
+            capture_action_agent_instruction(CaptureActionOutcome::Refused, false);
+        assert!(
+            refused_plain_instruction.contains("Nothing was written")
+                && !refused_plain_instruction.contains("task id"),
+            "{refused_plain_instruction}"
+        );
+        assert!(
+            capture_action_agent_instruction(CaptureActionOutcome::Applied, true)
+                .contains("full capture id and task id")
+        );
+        assert!(
+            capture_action_agent_instruction(CaptureActionOutcome::Applied, false)
+                .contains("full capture id for any later machine request")
+        );
 
         let report = CaptureActionReport {
             input: serde_json::json!({

@@ -475,6 +475,29 @@ fn bound_selector(
 
 #[must_use]
 pub fn review_rows(preview: &CapturePreview) -> Vec<String> {
+    if let CapturePreview::Promotion(promotion) = preview
+        && promotion.change_set().disposition() == aplan_app::ChangeDisposition::Denied
+    {
+        let original = promotion.original_capture();
+        let target_state = promotion.capture().state;
+        return vec![
+            format!("Capture: {}", original.id),
+            format!("Capture state: {}", state_name(original.state)),
+            format!("Would become: {}", state_name(target_state)),
+            format!("Origin retained: {:?}", original.origin),
+            format!(
+                "Retry: {}",
+                if promotion.idempotent_retry() {
+                    "equivalent request; no new write"
+                } else {
+                    "new guarded change"
+                }
+            ),
+            format!("Proposed task: {}", promotion.task_id()),
+            "Not publishable: nothing will be written until the reported findings are fixed."
+                .to_string(),
+        ];
+    }
     let capture = preview.capture();
     let mut rows = vec![
         format!("Capture: {}", capture.id),
@@ -959,5 +982,70 @@ mod tests {
         assert_eq!(retained.title, "newer external amendment");
         assert_eq!(retained.state, CaptureState::Open);
         assert!(!fixture.plan.join("tasks/T-9.md").exists());
+    }
+
+    #[test]
+    fn denied_promotion_review_rows_report_open_state_and_would_become() {
+        let fixture = Fixture::new();
+        std::fs::write(
+            fixture.root.join(".aplan.yml"),
+            "root: aplan\nrequire_effort: true\ndeny_warnings: true\ncapture:\n  kinds: [question]\n",
+        )
+        .expect("strict configuration");
+        fixture.create(FIRST, "missing estimate");
+        let config = aplan_config::load_config(&fixture.root).expect("configuration");
+        let context = PlanContext::new(
+            aplan_core::load_plan_identified(&fixture.plan),
+            aplan_app::ContextInputs {
+                repository_root: fixture.root.clone(),
+                configuration_file: Some(fixture.root.join(".aplan.yml")),
+                trust: aplan_app::Trust::RepositoryRead,
+                options: aplan_core::Options {
+                    require_effort: true,
+                    ..aplan_core::Options::default()
+                },
+                verdict: aplan_core::Verdict {
+                    deny_warnings: true,
+                    ..aplan_core::Verdict::default()
+                },
+            },
+        )
+        .with_captured_report_config(config)
+        .expect("captured configuration");
+        let promote = submission(
+            &context,
+            CaptureWorkflow::Promote,
+            Some(FIRST),
+            &[
+                ("id", &["T-10"]),
+                ("phase", &["1"]),
+                ("tags", &["cross-cutting"]),
+            ],
+        );
+        let denied = preview(&context, CaptureWorkflow::Promote, &promote)
+            .expect("denied promotion preview");
+        let rows = review_rows(&denied);
+        assert!(
+            rows.iter().any(|row| row == "Capture state: OPEN"),
+            "{rows:?}"
+        );
+        assert!(
+            rows.iter().any(|row| row == "Would become: PROMOTED"),
+            "{rows:?}"
+        );
+        assert!(
+            rows.iter().any(|row| row == "Proposed task: T-10"),
+            "{rows:?}"
+        );
+        assert!(
+            rows.iter().any(|row| row.contains("Not publishable:")),
+            "{rows:?}"
+        );
+        assert!(
+            rows.iter()
+                .all(|row| !row.contains("Capture state after preview: PROMOTED")
+                    && !row.contains("publish atomically")),
+            "{rows:?}"
+        );
     }
 }
