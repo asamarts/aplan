@@ -1,14 +1,15 @@
 # YAML parser migration
 
-Status: cut over. Since `A2-009` the product parses YAML with the safe Rust `ayaml` 0.1.3 behind
-`yaml_compat`; the `yaml_serde` bridge survives only as a test oracle. Earlier sections call the
-parser `d0026`, the name it was evaluated under before it was published as `ayaml`.
+Status: cut over. Since `A2-009` (updated to `0.2.2` in `A2-187`) the product parses YAML with
+the safe Rust `ayaml` 0.2.2 behind `yaml_compat`; the `yaml_serde` bridge survives only as a test
+oracle. Earlier sections call the parser `d0026`, the name it was evaluated under before it was
+published as `ayaml`.
 
 ## Decision
 
 aplan has one YAML ownership boundary: the root manifest's logical `yaml_compat` dependency. Its
-backend is exact `ayaml` 0.1.3 with the `libyaml-compat` feature (see "Cutover to ayaml 0.1.3"
-below). Before that cutover it was exact `yaml_serde` 0.10.7 over `libyaml-rs` 0.3.0. This removes the archived `serde_yaml_ng` /
+backend is exact `ayaml` 0.2.2 with the `libyaml-compat` feature (see "Cutover to ayaml 0.1.3"
+and "Upgrade to ayaml 0.2.2" below). Before that cutover it was exact `yaml_serde` 0.10.7 over `libyaml-rs` 0.3.0. This removes the archived `serde_yaml_ng` /
 `unsafe-libyaml` stack and `RUSTSEC-2024-0449` waiver while preserving the mature `serde_yaml`
 value and error contract.
 
@@ -276,6 +277,31 @@ compatibility mode. `A2-009` consumes 0.1.3 directly, through the same `yaml_com
   trace as missing and exits 1 under both parsers alike. The qualification limits were a
   regression of at most 10% and warm reads under 100 ms; both hold.
 
+## Upgrade to ayaml 0.2.2
+
+`A2-187` bumps the exact pin to `ayaml` `=0.2.2` across the main workspace, the TUI evaluator,
+and the dependency audit (`xtask`), adopting two APIs introduced in `ayaml` 0.2.2:
+
+- **`ayaml::compat::GlobalTags::Drop`.** `aplan_core::yaml::from_str` now passes
+  `ParseOptions::new().with_global_tags(GlobalTags::Drop)` to `compat::from_str_seed_with`. Every
+  non-core global tag (`!!timestamp`, `!!binary`, verbatim URI tags, and `%TAG`-expanded handles)
+  is dropped natively inside `ayaml`: scalars beneath one read as their text for any-value
+  targets (`~` stays `"~"`) and parse as the requested type for typed targets, collections read
+  untagged, and enums read directly through `ayaml`. This retires all three `from_str`
+  global-tag divergences documented under `A2-179`:
+  1. numbers, booleans, and structs beneath `!!timestamp` / `!!binary` now parse as the bridge
+     parsed them (zero divergences across all 3 global tags x 32 non-byte Serde requests);
+  2. `~` beneath any dropped global tag is refused for unit / unit-struct / unit-variant targets,
+     matching the bridge;
+  3. errors inside an enum variant named by a string or local tag keep the variant name in their
+     error paths because `from_str` no longer routes enums through an any-value probe.
+  A thin `LocalTag` wrapper remains on `from_str` solely to reword refusals of local tags
+  (`!custom`, `!`) where a target cannot keep them.
+- **`ayaml::from_str_seed`.** `aplan_core::yaml::from_str_strict` now reads directly through
+  crate-root `ayaml::from_str_seed` in a single pass rather than scanning for tags and
+  re-deserializing a `Value`, preserving the strict YAML 1.2.2 grammar (duplicate keys,
+  unindented flow continuations, trailing documents) alongside the tag rule.
+
 ## d0026 readiness gates
 
 These were the gates `A2-009` set for replacing the bridge, and how the cutover met each, in full or
@@ -347,7 +373,7 @@ The gates as they were set:
 
 Before the cutover both bridge layers were exact: `yaml_serde` was pinned to 0.10.7 and a private
 resolver-only `yaml_engine_pin` held `libyaml-rs` at 0.3.0. After it, the executable dependency
-audit pins `ayaml` to `=0.1.3` and rejects a compatible or floating requirement, so a lock refresh
+audit pins `ayaml` to `=0.2.2` and rejects a compatible or floating requirement, so a lock refresh
 still cannot silently change plan semantics. Rolling back is reverting the `A2-009` change: the
 bridge comes back as one root dependency revision, and the callers that moved to
 `yaml_compat::compat` move back with it. The d0026 cutover keeps a short-lived test oracle and a last-known-good bridge commit,

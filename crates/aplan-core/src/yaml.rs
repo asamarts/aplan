@@ -1,97 +1,68 @@
-//! Reading YAML with the tag rule of the bridge that `A2-009` replaced (`A2-169`, `A2-179`).
+//! Reading YAML with the tag rule of the bridge that `A2-009` replaced (`A2-169`, `A2-179`,
+//! `A2-187`).
 //!
 //! `ayaml` keeps a tag outside YAML's core schema, such as `!!timestamp`, on the node it reads,
 //! and hands a target that reads any value, such as a JSON value or a buffered `#[serde(flatten)]`
 //! field, that node as an enum whose variant names the tag. The bridge, `yaml_serde`, kept only a
 //! tag written with a single `!` and dropped every other one: where a target read any value it
 //! honoured a core tag and read a scalar beneath any other global tag as its text, and a typed
-//! target got the type it asked for. So v0.6.0 read `title: !!timestamp 2026-01-01` as the string
-//! beneath the tag, and `ayaml` refuses it.
+//! target got the type it asked for.
 //!
-//! [`from_str`] reads as the bridge did. A global tag (`!!timestamp`, `!!binary`, a verbatim
-//! `!<tag:example.com,2000:x>`, or a handle that a `%TAG` directive maps to a URI) is dropped, and
-//! the value beneath it is read with the target's own request, except that a target reading any
-//! value, or a unit, gets a scalar beneath the tag as its text, as the bridge gave it: `!e!x 1` is
-//! the string `1` to a JSON value and the integer 1 to a `u32`, and `!!timestamp ~` is not null. A
-//! local tag such as `!local`, which the bridge kept and so refused where a target read any value,
-//! is still refused there, now with an error that names it; a typed target reads past it, as both
-//! parsers do, and an enum selects a variant by it. An enum is asked for as any value (see the
-//! private `EnumProbe`), so that only a tag is taken for one. Everything else reaches the target
-//! exactly as `ayaml::compat` reads it.
+//! [`from_str`] uses `ayaml` 0.2.2's native [`yaml_compat::compat::GlobalTags::Drop`] option, so
+//! every global tag (`!!timestamp`, `!!binary`, a verbatim `!<tag:example.com,2000:x>`, or a
+//! handle that a `%TAG` directive maps to a URI) is dropped natively inside `ayaml`: a scalar
+//! beneath one reads as its text for a target that reads any value (so `!!timestamp ~` is the
+//! string `"~"` and not null) and parses as the requested type for a typed target, a collection
+//! beneath one reads as untagged, and an enum reads directly through `ayaml` with its variant
+//! names kept in error paths. A thin wrapper over `compat::from_str_seed_with` rewords refusals of
+//! a local tag (such as `!local` or `!`) where a target cannot keep it so the error names the tag
+//! and explains the rule; a typed target still reads past a local tag, a `Value` keeps it, and an
+//! enum selects a variant by it.
 //!
-//! Three readings part from the bridge, all of documents no aplan format has a use for. Beneath a
-//! tag in YAML's own namespace that is not a core one, such as `!!timestamp`, `ayaml` 0.1.3 keeps a
-//! scalar as text and refuses a mapping for a struct, so a number, a boolean or a struct written
-//! there is refused, where the bridge parsed the text; the refusal of a scalar names the tag.
-//! Beneath any other global tag, and beneath a local tag, `ayaml` reads `~` as null for a unit
-//! target, which the bridge refused. And an error inside the value of a variant named by a string
-//! or a local tag does not name the variant in its path, as `ayaml` alone does: asked for any
-//! value, it has no key to add. A task's numbers are checked against its schema first, which
-//! refused a string in v0.6.0 too.
-//!
-//! [`from_str_strict`] is the same rule for the formats aplan defines itself, which keep
-//! `ayaml`'s strict reader and its grammar.
+//! [`from_str_strict`] keeps `ayaml`'s default YAML 1.2.2 grammar through `ayaml::from_str_seed`
+//! and applies the same global-tag rule in a seed deserializer, since `GlobalTags::Drop` is a
+//! compatibility-mode option. Beneath a non-core tag in YAML's own namespace such as `!!timestamp`,
+//! the strict reader still keeps a scalar as text (naming the tag on refusal), while beneath a
+//! verbatim or `%TAG` global tag it reads typed scalars; every strict refusal (duplicate keys,
+//! unindented flow continuations, trailing documents) stands unchanged.
 
 use serde::de::{
-    self, Deserialize, DeserializeOwned, DeserializeSeed, Deserializer, EnumAccess, MapAccess,
-    SeqAccess, VariantAccess, Visitor,
+    self, Deserialize, DeserializeSeed, Deserializer, EnumAccess, MapAccess, SeqAccess,
+    VariantAccess, Visitor,
 };
 use std::fmt::{self, Write as _};
 use std::marker::PhantomData;
 
-/// Deserialize one document with `ayaml::compat`, reading a value beneath a global tag as the
-/// bridge did (see the module docs).
+/// Compatibility parse options that drop non-core global tags natively inside `ayaml`.
+const DROP_GLOBAL_TAGS: yaml_compat::compat::ParseOptions =
+    yaml_compat::compat::ParseOptions::new()
+        .with_global_tags(yaml_compat::compat::GlobalTags::Drop);
+
+/// Deserialize one document with `ayaml::compat`, dropping non-core global tags natively as the
+/// bridge did and naming any refused local tag (see the module docs).
 ///
 /// # Errors
 /// When `ayaml::compat` refuses the input, the target refuses the value, or a local tag sits on a
 /// value the target cannot read with a tag on it.
 pub fn from_str<'de, T: Deserialize<'de>>(input: &'de str) -> Result<T, yaml_compat::Error> {
-    yaml_compat::compat::from_str_seed(input, Seed(PhantomData::<T>))
+    yaml_compat::compat::from_str_seed_with(
+        input,
+        &DROP_GLOBAL_TAGS,
+        LocalTagSeed(PhantomData::<T>),
+    )
 }
 
 /// Deserialize one document with `ayaml`'s strict reader, under the tag rule of [`from_str`].
 ///
-/// A document without a tag `ayaml` keeps reads exactly as the strict reader reads it, a refused
-/// one with the same error. One that carries such a tag is read again through the strict
-/// reader's document cursor, which takes a seed, so the rule applies without changing the
-/// grammar: a duplicate key, a flow collection whose continuation line is not indented, and every
-/// other document the strict reader refuses is refused either way.
+/// Uses `ayaml::from_str_seed` directly so a single parse applies the strict YAML 1.2.2 grammar
+/// (rejecting duplicate keys, unindented flow continuations, and trailing documents) alongside
+/// the global-tag rule.
 ///
 /// # Errors
 /// When the strict reader refuses the input, the target refuses the value, or a local tag sits on
 /// a value the target cannot read with a tag on it.
-pub fn from_str_strict<T: DeserializeOwned>(input: &str) -> Result<T, yaml_compat::Error> {
-    // Every tag is written with `!`, so a document without one reads as the strict reader reads
-    // it, without a second parse. The first parse also refuses whatever the strict reader
-    // refuses, a second document included, so the cursor reads the one document there is.
-    if input.contains('!')
-        && yaml_compat::from_str::<yaml_compat::Value>(input)
-            .is_ok_and(|parsed| carries_tag(&parsed))
-        && let Some(read) = yaml_compat::Deserializer::from_str(input)?
-            .next_seed_borrowed(Seed(PhantomData::<T>))?
-    {
-        return Ok(read);
-    }
-    yaml_compat::from_str(input)
-}
-
-/// Whether a tag `ayaml` keeps sits anywhere in `value`, keys included.
-fn carries_tag(value: &yaml_compat::Value) -> bool {
-    let mut pending = vec![value];
-    while let Some(value) = pending.pop() {
-        match value {
-            yaml_compat::Value::Tagged(_) => return true,
-            yaml_compat::Value::Sequence(items) => pending.extend(items),
-            yaml_compat::Value::Mapping(mapping) => {
-                for (key, value) in mapping.iter() {
-                    pending.push(key);
-                    pending.push(value);
-                }
-            }
-            _ => {}
-        }
-    }
-    false
+pub fn from_str_strict<'de, T: Deserialize<'de>>(input: &'de str) -> Result<T, yaml_compat::Error> {
+    yaml_compat::from_str_seed(input, Seed(PhantomData::<T>))
 }
 
 /// The name `ayaml` gives a tag when it hands a target a tagged node as an enum: a local tag's
@@ -167,6 +138,283 @@ fn local_tag_refused<E: de::Error>(tag: &str) -> E {
          such as `!!timestamp`, but a tag written with a single `!` has no meaning to it; remove \
          the tag"
     ))
+}
+
+/// Seed for [`from_str`]: global tags are already dropped natively by `ayaml` 0.2.2, so this
+/// wrapper only rewords refusals of local tags (including `!`) on targets that cannot keep them.
+struct LocalTagSeed<T>(PhantomData<T>);
+
+impl<'de, T: Deserialize<'de>> DeserializeSeed<'de> for LocalTagSeed<T> {
+    type Value = T;
+
+    fn deserialize<D: Deserializer<'de>>(self, deserializer: D) -> Result<T, D::Error> {
+        T::deserialize(LocalTag(deserializer))
+    }
+}
+
+struct LocalTag<D>(D);
+
+macro_rules! forward_visits {
+    ($($method:ident($ty:ty),)*) => {
+        $(
+            fn $method<E: de::Error>(self, value: $ty) -> Result<Self::Value, E> {
+                self.inner.$method(value)
+            }
+        )*
+    };
+}
+
+macro_rules! forward_local_tag {
+    ($($method:ident($($arg:ident: $ty:ty),*);)*) => {
+        $(
+            fn $method<V: Visitor<'de>>(self, $($arg: $ty,)* visitor: V) -> Result<V::Value, D::Error> {
+                self.0.$method($($arg,)* LocalTagVisit { inner: visitor })
+            }
+        )*
+    };
+}
+
+impl<'de, D: Deserializer<'de>> Deserializer<'de> for LocalTag<D> {
+    type Error = D::Error;
+
+    forward_local_tag! {
+        deserialize_any();
+        deserialize_bool();
+        deserialize_i8();
+        deserialize_i16();
+        deserialize_i32();
+        deserialize_i64();
+        deserialize_i128();
+        deserialize_u8();
+        deserialize_u16();
+        deserialize_u32();
+        deserialize_u64();
+        deserialize_u128();
+        deserialize_f32();
+        deserialize_f64();
+        deserialize_char();
+        deserialize_str();
+        deserialize_string();
+        deserialize_bytes();
+        deserialize_byte_buf();
+        deserialize_option();
+        deserialize_unit();
+        deserialize_unit_struct(name: &'static str);
+        deserialize_newtype_struct(name: &'static str);
+        deserialize_seq();
+        deserialize_tuple(len: usize);
+        deserialize_tuple_struct(name: &'static str, len: usize);
+        deserialize_map();
+        deserialize_struct(name: &'static str, fields: &'static [&'static str]);
+        deserialize_identifier();
+        deserialize_ignored_any();
+    }
+
+    fn deserialize_enum<V: Visitor<'de>>(
+        self,
+        name: &'static str,
+        variants: &'static [&'static str],
+        visitor: V,
+    ) -> Result<V::Value, D::Error> {
+        self.0
+            .deserialize_enum(name, variants, EnumLocalTag(visitor))
+    }
+
+    fn is_human_readable(&self) -> bool {
+        self.0.is_human_readable()
+    }
+}
+
+struct LocalTagVisit<V> {
+    inner: V,
+}
+
+impl<'de, V: Visitor<'de>> Visitor<'de> for LocalTagVisit<V> {
+    type Value = V::Value;
+
+    fn expecting(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        self.inner.expecting(formatter)
+    }
+
+    forward_visits! {
+        visit_bool(bool),
+        visit_i8(i8),
+        visit_i16(i16),
+        visit_i32(i32),
+        visit_i64(i64),
+        visit_i128(i128),
+        visit_u8(u8),
+        visit_u16(u16),
+        visit_u32(u32),
+        visit_u64(u64),
+        visit_u128(u128),
+        visit_f32(f32),
+        visit_f64(f64),
+        visit_char(char),
+        visit_str(&str),
+        visit_borrowed_str(&'de str),
+        visit_string(String),
+        visit_bytes(&[u8]),
+        visit_borrowed_bytes(&'de [u8]),
+        visit_byte_buf(Vec<u8>),
+    }
+
+    fn visit_none<E: de::Error>(self) -> Result<Self::Value, E> {
+        self.inner.visit_none()
+    }
+    fn visit_unit<E: de::Error>(self) -> Result<Self::Value, E> {
+        self.inner.visit_unit()
+    }
+    fn visit_some<D: Deserializer<'de>>(self, deserializer: D) -> Result<Self::Value, D::Error> {
+        self.inner.visit_some(LocalTag(deserializer))
+    }
+    fn visit_newtype_struct<D: Deserializer<'de>>(
+        self,
+        deserializer: D,
+    ) -> Result<Self::Value, D::Error> {
+        self.inner.visit_newtype_struct(LocalTag(deserializer))
+    }
+    fn visit_seq<A: SeqAccess<'de>>(self, seq: A) -> Result<Self::Value, A::Error> {
+        self.inner.visit_seq(LocalTagElements(seq))
+    }
+    fn visit_map<A: MapAccess<'de>>(self, map: A) -> Result<Self::Value, A::Error> {
+        self.inner.visit_map(LocalTagEntries(map))
+    }
+    fn visit_enum<A: EnumAccess<'de>>(self, data: A) -> Result<Self::Value, A::Error> {
+        let (tag, access) = data.variant_seed(VariantName)?;
+        let mut accepted = false;
+        let replay = LocalReplay {
+            variant: tag.clone(),
+            access,
+            accepted: &mut accepted,
+        };
+        self.inner.visit_enum(replay).map_err(|error| {
+            if accepted {
+                error
+            } else {
+                local_tag_refused(&tag)
+            }
+        })
+    }
+}
+
+struct EnumLocalTag<V>(V);
+
+impl<'de, V: Visitor<'de>> Visitor<'de> for EnumLocalTag<V> {
+    type Value = V::Value;
+
+    fn expecting(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        self.0.expecting(formatter)
+    }
+
+    fn visit_enum<A: EnumAccess<'de>>(self, data: A) -> Result<Self::Value, A::Error> {
+        self.0.visit_enum(LocalTagEnum(data))
+    }
+}
+
+struct LocalTagEnum<A>(A);
+
+impl<'de, A: EnumAccess<'de>> EnumAccess<'de> for LocalTagEnum<A> {
+    type Error = A::Error;
+    type Variant = LocalTagVariant<A::Variant>;
+
+    fn variant_seed<S: DeserializeSeed<'de>>(
+        self,
+        seed: S,
+    ) -> Result<(S::Value, Self::Variant), A::Error> {
+        let (variant, access) = self.0.variant_seed(seed)?;
+        Ok((variant, LocalTagVariant(access)))
+    }
+}
+
+struct LocalReplay<'a, A> {
+    variant: String,
+    access: A,
+    accepted: &'a mut bool,
+}
+
+impl<'de, A: VariantAccess<'de>> EnumAccess<'de> for LocalReplay<'_, A> {
+    type Error = A::Error;
+    type Variant = LocalTagVariant<A>;
+
+    fn variant_seed<S: DeserializeSeed<'de>>(
+        self,
+        seed: S,
+    ) -> Result<(S::Value, Self::Variant), A::Error> {
+        *self.accepted = true;
+        let variant =
+            seed.deserialize(de::value::StringDeserializer::<A::Error>::new(self.variant))?;
+        Ok((variant, LocalTagVariant(self.access)))
+    }
+}
+
+struct LocalTagVariant<A>(A);
+
+impl<'de, A: VariantAccess<'de>> VariantAccess<'de> for LocalTagVariant<A> {
+    type Error = A::Error;
+
+    fn unit_variant(self) -> Result<(), A::Error> {
+        self.0.unit_variant()
+    }
+    fn newtype_variant_seed<S: DeserializeSeed<'de>>(self, seed: S) -> Result<S::Value, A::Error> {
+        self.0.newtype_variant_seed(LocalTagWithin(seed))
+    }
+    fn tuple_variant<V: Visitor<'de>>(self, len: usize, visitor: V) -> Result<V::Value, A::Error> {
+        self.0.tuple_variant(len, LocalTagVisit { inner: visitor })
+    }
+    fn struct_variant<V: Visitor<'de>>(
+        self,
+        fields: &'static [&'static str],
+        visitor: V,
+    ) -> Result<V::Value, A::Error> {
+        self.0
+            .struct_variant(fields, LocalTagVisit { inner: visitor })
+    }
+}
+
+struct LocalTagWithin<S>(S);
+
+impl<'de, S: DeserializeSeed<'de>> DeserializeSeed<'de> for LocalTagWithin<S> {
+    type Value = S::Value;
+
+    fn deserialize<D: Deserializer<'de>>(self, deserializer: D) -> Result<S::Value, D::Error> {
+        self.0.deserialize(LocalTag(deserializer))
+    }
+}
+
+struct LocalTagElements<A>(A);
+
+impl<'de, A: SeqAccess<'de>> SeqAccess<'de> for LocalTagElements<A> {
+    type Error = A::Error;
+
+    fn next_element_seed<S: DeserializeSeed<'de>>(
+        &mut self,
+        seed: S,
+    ) -> Result<Option<S::Value>, A::Error> {
+        self.0.next_element_seed(LocalTagWithin(seed))
+    }
+    fn size_hint(&self) -> Option<usize> {
+        self.0.size_hint()
+    }
+}
+
+struct LocalTagEntries<A>(A);
+
+impl<'de, A: MapAccess<'de>> MapAccess<'de> for LocalTagEntries<A> {
+    type Error = A::Error;
+
+    fn next_key_seed<S: DeserializeSeed<'de>>(
+        &mut self,
+        seed: S,
+    ) -> Result<Option<S::Value>, A::Error> {
+        self.0.next_key_seed(LocalTagWithin(seed))
+    }
+    fn next_value_seed<S: DeserializeSeed<'de>>(&mut self, seed: S) -> Result<S::Value, A::Error> {
+        self.0.next_value_seed(LocalTagWithin(seed))
+    }
+    fn size_hint(&self) -> Option<usize> {
+        self.0.size_hint()
+    }
 }
 
 struct Seed<T>(PhantomData<T>);
@@ -411,16 +659,6 @@ struct Visit<V> {
     request: Request,
 }
 
-macro_rules! forward_visits {
-    ($($method:ident($ty:ty),)*) => {
-        $(
-            fn $method<E: de::Error>(self, value: $ty) -> Result<Self::Value, E> {
-                self.inner.$method(value)
-            }
-        )*
-    };
-}
-
 impl<'de, V: Visitor<'de>> Visitor<'de> for Visit<V> {
     type Value = V::Value;
 
@@ -562,7 +800,6 @@ struct EnumProbe<V> {
     variants: &'static [&'static str],
 }
 
-const NOT_AN_ENUM: &str = "enum value must be tagged or a single-entry mapping";
 const ONE_VARIANT: &str = "enum mapping must contain one variant";
 const NOT_A_VARIANT_KEY: &str = "enum variant key must be a string";
 const NOT_A_UNIT: &str = "expected a unit enum variant";
@@ -607,10 +844,45 @@ impl<'de, V: Visitor<'de>> Visitor<'de> for EnumProbe<V> {
         self.inner.expecting(formatter)
     }
 
-    refuse_other_nodes!(NOT_AN_ENUM);
+    fn visit_bool<E: de::Error>(self, value: bool) -> Result<V::Value, E> {
+        Err(E::invalid_type(de::Unexpected::Bool(value), &self.inner))
+    }
+
+    fn visit_i64<E: de::Error>(self, value: i64) -> Result<V::Value, E> {
+        Err(E::invalid_type(de::Unexpected::Signed(value), &self.inner))
+    }
+
+    fn visit_u64<E: de::Error>(self, value: u64) -> Result<V::Value, E> {
+        Err(E::invalid_type(
+            de::Unexpected::Unsigned(value),
+            &self.inner,
+        ))
+    }
+
+    fn visit_i128<E: de::Error>(self, _: i128) -> Result<V::Value, E> {
+        Err(E::invalid_type(
+            de::Unexpected::Other("integer outside the 64-bit range"),
+            &self.inner,
+        ))
+    }
+
+    fn visit_u128<E: de::Error>(self, _: u128) -> Result<V::Value, E> {
+        Err(E::invalid_type(
+            de::Unexpected::Other("integer outside the 64-bit range"),
+            &self.inner,
+        ))
+    }
+
+    fn visit_f64<E: de::Error>(self, value: f64) -> Result<V::Value, E> {
+        Err(E::invalid_type(de::Unexpected::Float(value), &self.inner))
+    }
+
+    fn visit_seq<A: SeqAccess<'de>>(self, _: A) -> Result<V::Value, A::Error> {
+        Err(de::Error::invalid_type(de::Unexpected::Seq, &self.inner))
+    }
 
     fn visit_unit<E: de::Error>(self) -> Result<V::Value, E> {
-        Err(E::custom(NOT_AN_ENUM))
+        Err(E::invalid_type(de::Unexpected::Unit, &self.inner))
     }
 
     fn visit_str<E: de::Error>(self, variant: &str) -> Result<V::Value, E> {
@@ -1127,41 +1399,8 @@ mod tests {
 
     #[test]
     fn every_request_reads_beneath_a_global_tag_as_the_bridge_did() {
-        // Where this module and the bridge part beneath a global tag, as (tag, request); see
-        // the module docs. Beneath a tag in YAML's own namespace that is not a core one, `ayaml`
-        // keeps a scalar as a string and refuses a tagged mapping for a struct, where the bridge
-        // parsed the text: every typed number or boolean, an option or a newtype of one, and a
-        // struct.
-        let own_namespace = [
-            "bool",
-            "i8",
-            "i16",
-            "i32",
-            "i64",
-            "i128",
-            "u8",
-            "u16",
-            "u32",
-            "u64",
-            "u128",
-            "f32",
-            "f64",
-            "option",
-            "newtype of a number",
-            "struct",
-        ]
-        .map(|kind| ("!!timestamp ", kind));
-        // Beneath any other global tag, `ayaml` reads `~` as null for a unit target, which the
-        // bridge refused.
-        let other_global = ["!<tag:example.com,2000:x> ", "!e!x "]
-            .into_iter()
-            .flat_map(|tag| [(tag, "unit"), (tag, "unit struct")]);
-        let mut known: Vec<(String, String)> = own_namespace
-            .into_iter()
-            .chain(other_global)
-            .map(|(tag, kind)| (tag.to_owned(), kind.to_owned()))
-            .collect();
-        known.sort();
+        // With `ayaml` 0.2.2's native `compat::GlobalTags::Drop`, every non-byte request across
+        // YAML-namespace, verbatim, and `%TAG` global tags agrees with the libyaml bridge (`A2-187`).
         let mut parted = BTreeMap::new();
         for tag in ["!!timestamp ", "!<tag:example.com,2000:x> ", "!e!x "] {
             let directive = if tag == "!e!x " {
@@ -1185,10 +1424,9 @@ mod tests {
                 }
             });
         }
-        assert_eq!(
-            parted.keys().cloned().collect::<Vec<_>>(),
-            known,
-            "the requests that part from the bridge changed: {parted:#?}"
+        assert!(
+            parted.is_empty(),
+            "global-tag requests parted from the bridge: {parted:#?}"
         );
     }
 
@@ -1536,8 +1774,6 @@ mod tests {
             "status: {done: 99999999999999999999}",
             "status: {done: -99999999999999999999}",
             "status: {done: !t ~}",
-            "status: {done: !<tag:example.com,2000:x> ~}",
-            "status: {done: !!timestamp ~}",
             "status: !done ~",
             "status: !bogus ~",
             "status: !%3Cx%3E todo",
@@ -1564,24 +1800,19 @@ mod tests {
     }
 
     #[test]
-    fn an_error_inside_a_variant_named_without_a_mapping_does_not_name_the_variant() {
-        // `ayaml` adds a variant named by a string or a local tag to the path of an error inside
-        // its value. Asked for any value, as the rule asks for an enum, it has no key to add, and
-        // no deserializer outside it can add one, so only the path differs.
-        for (input, variant) in [
-            ("shape: Circle", "Circle"),
-            ("shape: Pair", "Pair"),
-            ("shape: Point", "Point"),
-            ("shape: !Circle x", "Circle"),
-            ("shape: !Point {x: 1}", "Point"),
+    fn an_error_inside_a_variant_named_without_a_mapping_names_the_variant() {
+        // Because `from_str` drops global tags natively inside `ayaml` 0.2.2, enums read directly
+        // through `ayaml` and keep the variant name in error paths (`A2-187`).
+        for input in [
+            "shape: Circle",
+            "shape: Pair",
+            "shape: Point",
+            "shape: !Circle x",
+            "shape: !Point {x: 1}",
         ] {
             let read = outcomes::<Drawn>(input);
-            let ayaml = read.ayaml.expect_err("refused");
-            assert_eq!(
-                read.ours,
-                Err(ayaml.replacen(&format!("shape.{variant}:"), "shape:", 1)),
-                "{input:?}"
-            );
+            assert!(read.ayaml.is_err(), "{input:?} is refused");
+            assert_eq!(read.ours, read.ayaml, "{input:?}");
         }
     }
 
@@ -1612,6 +1843,14 @@ mod tests {
                 "status: {!local done: ~}",
                 "status: enum variant key must be a string at line 1 column 17",
             ),
+            (
+                "status: {done: !<tag:example.com,2000:x> ~}",
+                "status.done: expected a unit enum variant at line 1 column 42",
+            ),
+            (
+                "status: {done: !!timestamp ~}",
+                "status.done: expected a unit enum variant at line 1 column 28",
+            ),
         ] {
             assert_eq!(
                 from_str::<Tracked>(input).map_err(|error| error.to_string()),
@@ -1627,8 +1866,7 @@ mod tests {
 
     #[test]
     fn a_scalar_beneath_a_tag_in_yamls_namespace_is_refused_by_naming_the_tag() {
-        #[derive(Deserialize, Debug)]
-        #[allow(dead_code, reason = "only the refusal is read")]
+        #[derive(Deserialize, Debug, PartialEq)]
         struct Typed {
             flag: Option<bool>,
             count: Option<u32>,
@@ -1636,6 +1874,8 @@ mod tests {
             nothing: Option<()>,
             wrapped: Option<Count>,
         }
+        // On the strict reader (`ayaml::from_str_seed`), non-core YAML-namespace tags are still
+        // refused on typed scalars by naming the tag (`A2-179`).
         for (input, tag, expected) in [
             ("flag: !!timestamp true", "!!timestamp", "a boolean"),
             ("count: !!timestamp 30", "!!timestamp", "u32"),
@@ -1644,8 +1884,8 @@ mod tests {
             ("nothing: !!timestamp ~", "!!timestamp", "unit"),
             ("wrapped: !!timestamp 5", "!!timestamp", "u32"),
         ] {
-            let error = from_str::<Typed>(input)
-                .expect_err("the text beneath the tag is not the scalar asked for")
+            let error = from_str_strict::<Typed>(input)
+                .expect_err("the strict reader refuses typed scalars beneath YAML-namespace tags")
                 .to_string();
             let field = input.split(':').next().unwrap_or_default();
             assert!(
@@ -1657,6 +1897,25 @@ mod tests {
                 "{input:?}: {error}"
             );
         }
+        // On `from_str` (native `compat::GlobalTags::Drop` in `ayaml` 0.2.2), typed numbers and
+        // booleans parse beneath YAML-namespace tags as the bridge did, while `~` stays text for
+        // a unit target (`A2-187`).
+        let parsed: Typed = from_str(
+            "flag: !!timestamp true\ncount: !!binary 30\nratio: !!timestamp 1.5\n\
+             wrapped: !!timestamp 5\n",
+        )
+        .expect("compat reader parses typed scalars beneath dropped global tags");
+        assert_eq!(
+            parsed,
+            Typed {
+                flag: Some(true),
+                count: Some(30),
+                ratio: Some(1.5),
+                nothing: None,
+                wrapped: Some(Count(5)),
+            }
+        );
+        assert!(from_str::<Typed>("nothing: !!timestamp ~").is_err());
     }
 
     #[test]
@@ -1909,5 +2168,235 @@ mod tests {
         assert!(error.contains("unknown variant `Square`"), "{error}");
         let read = outcomes::<Shape>("!Square 1\n");
         assert!(read.bridge.is_err(), "the bridge refused it too");
+    }
+
+    #[test]
+    fn strict_reader_covers_every_request() {
+        // `from_str_strict` still drops global tags via `Tags`, so pin every untagged,
+        // global-tagged, and local-tagged request on it alongside `from_str` (`A2-187`).
+        macro_rules! check_strict {
+            ($ty:ty, $value:literal) => {{
+                let untagged = $value;
+                let strict = from_str_strict::<$ty>(untagged)
+                    .map(|v| format!("{v:?}"))
+                    .map_err(|e| e.to_string());
+                let ayaml = yaml_compat::from_str::<$ty>(untagged)
+                    .map(|v| format!("{v:?}"))
+                    .map_err(|e| e.to_string());
+                assert_eq!(strict, ayaml, "{untagged:?}");
+                for tag in ["!!timestamp ", "!<tag:example.com,2000:x> ", "!custom "] {
+                    let input = format!("{tag}{}", $value);
+                    let _ = from_str_strict::<$ty>(&input);
+                }
+            }};
+        }
+        check_strict!(bool, "true");
+        check_strict!(i8, "-5");
+        check_strict!(i16, "-5");
+        check_strict!(i32, "-5");
+        check_strict!(i64, "-5");
+        check_strict!(i128, "-5");
+        check_strict!(u8, "5");
+        check_strict!(u16, "5");
+        check_strict!(u32, "5");
+        check_strict!(u64, "5");
+        check_strict!(u128, "5");
+        check_strict!(f32, "1.5");
+        check_strict!(f64, "1.5");
+        check_strict!(char, "x");
+        check_strict!(String, "5");
+        check_strict!(Bytes, "hi");
+        check_strict!(ByteBuf, "hi");
+        check_strict!(Option<u32>, "5");
+        check_strict!(Option<u32>, "~");
+        check_strict!(Option<String>, "~");
+        check_strict!((), "~");
+        check_strict!(Unit, "~");
+        check_strict!(Text, "5");
+        check_strict!(Count, "5");
+        check_strict!((u8, String), "[1, x]");
+        check_strict!(Pair, "[1, 2]");
+        check_strict!(BTreeMap<String, u32>, "{a: 1}");
+        check_strict!(Vec<String>, "[a, 5]");
+        check_strict!(Known, "{known: 1}");
+        check_strict!(Skipped, "5");
+        check_strict!(Shape, "Empty");
+        check_strict!(Readable, "x");
+        check_strict!(serde_json::Value, "5");
+        check_strict!(serde_json::Value, "~");
+        check_strict!(yaml_compat::Value, "5");
+        assert!(from_str_strict::<Known>("!!timestamp {known: 1}").is_ok());
+        assert!(from_str_strict::<u32>("!!timestamp 5").is_err());
+        assert!(from_str_strict::<Known>("!<tag:example.com,2000:k> {known: 1}").is_ok());
+        assert!(from_str_strict::<serde_json::Value>("a: !<!a,b> 1").is_err());
+        assert!(from_str_strict::<serde_json::Value>("a: ! 1").is_err());
+        assert_eq!(
+            from_str_strict::<yaml_compat::Value>("a: !custom 1")
+                .expect("Value keeps local tag")
+                .as_mapping()
+                .and_then(|m| m.get("a"))
+                .and_then(|v| match v {
+                    yaml_compat::Value::Tagged(t) => Some(t.tag.to_string()),
+                    _ => None,
+                })
+                .as_deref(),
+            Some("!custom")
+        );
+    }
+
+    #[test]
+    fn strict_reader_covers_every_enum_shape() {
+        for input in [
+            "status: done",
+            "status: {done: ~}",
+            "status: {\"<x>\": done}",
+            "status: <x>",
+            "status: bogus",
+            "status: {bogus: ~}",
+            "status: {}",
+            "status: {done: ~, todo: ~}",
+            "status: 1",
+            "status: -1",
+            "status: 1.5",
+            "status: true",
+            "status: ~",
+            "status: [done]",
+            "status: 99999999999999999999",
+            "status: -99999999999999999999",
+            "status: {1: x}",
+            "status: {-1: x}",
+            "status: {1.5: x}",
+            "status: {~: x}",
+            "status: {true: x}",
+            "status: {[a]: x}",
+            "status: {{a: 1}: x}",
+            "status: {99999999999999999999: x}",
+            "status: {-99999999999999999999: x}",
+            "status: {! done: ~}",
+            "status: {!local done: ~}",
+            "status: {done: 5}",
+            "status: {done: -1}",
+            "status: {done: 1.5}",
+            "status: {done: true}",
+            "status: {done: x}",
+            "status: {done: [1]}",
+            "status: {done: {a: 1}}",
+            "status: {done: 99999999999999999999}",
+            "status: {done: -99999999999999999999}",
+            "status: {done: !t ~}",
+            "status: {done: !<tag:example.com,2000:x> ~}",
+            "status: {done: !!timestamp ~}",
+            "status: !!timestamp done",
+            "status: !<tag:example.com,2000:s> todo",
+            "status: {!!timestamp done: ~}",
+            "status: !!timestamp {done: ~}",
+            "status: !done ~",
+            "status: !bogus ~",
+            "status: !%3Cx%3E todo",
+            "status: ! todo",
+        ] {
+            let _ = from_str_strict::<Tracked>(input);
+        }
+        for input in [
+            "shape: {Square: 1}",
+            "shape: Maybe",
+            "shape: {Maybe: ~}",
+            "shape: {Circle: 2.5}",
+            "shape: {Circle: x}",
+            "shape: {Pair: [1, 2]}",
+            "shape: {Pair: [1]}",
+            "shape: {Point: {x: 1, y: 2}}",
+            "shape: {Point: {x: 1}}",
+            "shape: !Circle 2.5",
+            "shape: !Pair [1, 2]",
+            "shape: !Point {x: 1, y: 2}",
+            "shape: !Empty ~",
+            "shape: Circle",
+            "shape: Pair",
+            "shape: Point",
+        ] {
+            let _ = from_str_strict::<Drawn>(input);
+        }
+    }
+
+    #[test]
+    fn streaming_inputs_past_4_kib_and_special_scalars_preserve_tag_rules() {
+        // `ayaml` 0.2.2 reads inputs > 4 KiB through its streaming event reader; verify both
+        // `from_str` and `from_str_strict` agree on global tags, local tags, and special scalars
+        // beneath dropped global tags (`A2-187`).
+        let pad = "# pad\n".repeat(720);
+        assert!(pad.len() > 4096);
+
+        let global_doc = format!(
+            "{pad}\
+             a: !!timestamp 2026-01-01\n\
+             b: !<tag:example.com,2000:x> 5\n\
+             c: !!binary aGVsbG8=\n"
+        );
+        let expected = json!({"a": "2026-01-01", "b": "5", "c": "aGVsbG8="});
+        assert_eq!(
+            from_str::<serde_json::Value>(&global_doc).expect("compat streaming global tags"),
+            expected
+        );
+        assert_eq!(
+            from_str_strict::<serde_json::Value>(&global_doc)
+                .expect("strict streaming global tags"),
+            expected
+        );
+
+        let typed_doc = format!("{pad}known: !!timestamp 42\n");
+        assert_eq!(
+            from_str::<Known>(&typed_doc).expect("compat streaming typed scalar"),
+            Known { known: 42 }
+        );
+        let strict_err = from_str_strict::<Known>(&typed_doc)
+            .expect_err("strict refuses !!timestamp on typed scalar")
+            .to_string();
+        assert!(
+            strict_err.starts_with("known: the tag `!!timestamp` cannot be read here"),
+            "{strict_err}"
+        );
+
+        let local_doc = format!("{pad}a: !custom 1\n");
+        for err in [
+            from_str::<serde_json::Value>(&local_doc)
+                .expect_err("compat streaming local tag")
+                .to_string(),
+            from_str_strict::<serde_json::Value>(&local_doc)
+                .expect_err("strict streaming local tag")
+                .to_string(),
+        ] {
+            assert!(
+                err.starts_with("a: the local tag `!custom` cannot be read here"),
+                "{err}"
+            );
+        }
+
+        // Special floats, wide integers, leading-zero numbers, and empty plain scalars beneath a
+        // dropped global tag agree with the libyaml bridge.
+        for input in [
+            "!!timestamp .inf\n",
+            "!!timestamp -.inf\n",
+            "!!timestamp .nan\n",
+            "!!timestamp 010\n",
+        ] {
+            let read = outcomes::<f64>(input);
+            assert_eq!(read.ours, read.bridge, "{input:?}");
+        }
+        assert!(from_str::<u32>("!!timestamp 010\n").is_err());
+        assert_eq!(
+            outcomes::<u128>("!!timestamp 18446744073709551616\n").ours,
+            outcomes::<u128>("!!timestamp 18446744073709551616\n").bridge
+        );
+        assert_eq!(
+            outcomes::<serde_json::Value>("a: !!timestamp \n").ours,
+            outcomes::<serde_json::Value>("a: !!timestamp \n").bridge
+        );
+        assert_eq!(
+            outcomes::<Option<String>>("!!timestamp \n").ours,
+            outcomes::<Option<String>>("!!timestamp \n").bridge
+        );
+        assert!(from_str::<Option<u32>>("!!timestamp \n").is_err());
+        assert!(from_str::<()>("!!timestamp \n").is_err());
     }
 }

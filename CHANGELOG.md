@@ -21,18 +21,18 @@ to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Changed
 
-- **YAML is parsed by the safe Rust `ayaml` 0.1.3** (`A2-009`, `A2-166`, `A2-169`, `A2-179`). The
+- **YAML is parsed by the safe Rust `ayaml` 0.2.2** (`A2-009`, `A2-166`, `A2-169`, `A2-179`,
+  `A2-187`). The
   C-derived `yaml_serde` / `libyaml-rs` bridge leaves the dependency graphs of the product and of
   the TUI evaluator, and stays only as a test oracle. Every YAML file and task front matter in this
   repository parses to the same value under both parsers. Plans, configuration and imports are read
   as before, with `ayaml`'s native limits on input size, depth, aliases and expansion. A tag
   outside YAML's core schema (`!!timestamp`, `!!binary`, a verbatim tag such as
-  `!<tag:example.com,2000:x>`, or a handle a `%TAG` directive maps to one) is dropped and the value
-  beneath it read as the bridge read it: as its text where any value is accepted, and as the type a
-  field asks for. A number, boolean or nested record written beneath `!!timestamp` or `!!binary` is
-  still refused, where the bridge parsed it, and the refusal of a number or a boolean names the
-  tag. A local tag such as `!custom` is refused where it was refused before, and the error now
-  names it; `!custom ~` now reads as null where a field takes nothing, which the bridge refused. An
+  `!<tag:example.com,2000:x>`, or a handle a `%TAG` directive maps to one) is dropped natively by
+  `ayaml` (`compat::GlobalTags::Drop`) and the value beneath it read as the bridge read it: as its
+  text where any value is accepted, and as the type a field asks for (while `~` beneath a dropped
+  global tag stays text and is refused for a unit target, matching the bridge). A local tag such
+  as `!custom` is refused where it was refused before, and the error now names it; `!custom ~` now reads as null where a field takes nothing, which the bridge refused. An
   error under a tag points at the value beneath it rather than at the tag. A core tag now means
   what YAML says on every field. Values the bridge refused now read as the tag says: a core tag on
   a quoted scalar, such as `effort_days: !!int "2"` or `owner: !!null ""`, `!!int 017` (17), and
