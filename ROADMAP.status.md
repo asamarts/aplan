@@ -8,7 +8,7 @@
 
 | cut | status | done/total | ready | blocked | effort | weeks | critical path |
 | --- | --- | --- | --- | --- | --- | --- | --- |
-| v0.7 | todo | 15/25 | 9 | 1 | 21.2d | 0.8 (0.2 left) | 3.5d |
+| v0.7 | todo | 16/25 | 8 | 1 | 21.2d | 0.8 (0.2 left) | 3.5d |
 | v0.8 | todo | 0/30 | 0 | 30 | 43.8d | 1.6 (1.6 left) | 4.5d |
 | adoption | todo | 0/81 | 0 | 81 | 105.8d | 3.9 (3.9 left) | 10.0d |
 | backlog | todo | 0/1 | 0 | 1 | 1.0d | <0.1 (<0.1 left) | 1.0d |
@@ -31,7 +31,7 @@
 | A2-022 | Report a refused inbox promotion with the capture's real state | todo | - | - |
 | A2-023 | List same-second captures newest first, as the inbox documents | todo | - | - |
 | A2-024 | Warn when a policy selector names a cut or tag that cannot match | done | - | commit:ad2aed05bc80, test:validate::tests::policy_selector_cut_warns_when_unmatched_and_suggests_close_matches, test:validate::tests::policy_selector_tag_warns_when_unmatched_and_accepts_task_or_family_tags, test:validate::tests::policy_selector_cut_accepts_milestone_id_and_cut_label_including_empty_milestones, test:validate::tests::policy_selector_rejects_non_milestone_task_id_as_cut_and_reports_only_unmatched_entries, test:scoped_policy::a_scope_naming_an_unknown_cut_or_tag_warns_with_a_suggestion |
-| A2-025 | Warn when a policy requires an evidence kind nothing can resolve | todo | - | - |
+| A2-025 | Warn when a policy requires an evidence kind nothing can resolve | done | - | commit:f1bb1968c2de, test:validate::tests::policy_evidence_warns_for_unconfigured_top_level_and_scoped_resolvers, test:validate::tests::policy_evidence_is_silent_when_resolvers_are_configured_or_kinds_need_none, test:vacuity::switched_off_tests::probing_min_strength_does_not_report_policy_evidence_unresolvable_as_off, test:configuration::tests::configured_paths_share_the_configuration_frame, test:scoped_policy::a_policy_requiring_an_unconfigured_resolver_warns_and_agrees_with_vacuity, test:scoped_policy::unconfigured_test_policy_blocks_verify_and_mcp_until_a_runner_is_added |
 | A2-026 | Let check-docs see task and milestone ids that carry no number | todo | - | - |
 | A2-027 | Retry the Action's release download on a transient failure | todo | - | - |
 | A2-028 | Document the Action's self-hosted runner prerequisites | todo | - | - |
