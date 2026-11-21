@@ -8,7 +8,7 @@
 
 | cut | status | done/total | ready | blocked | effort | weeks | critical path |
 | --- | --- | --- | --- | --- | --- | --- | --- |
-| v0.7 | todo | 26/29 | 2 | 1 | 22.5d | 0.8 (<0.1 left) | 3.5d |
+| v0.7 | todo | 28/29 | 1 | 0 | 22.5d | 0.8 (<0.1 left) | 3.5d |
 | v0.8 | todo | 0/30 | 0 | 30 | 43.8d | 1.6 (1.6 left) | 4.5d |
 | adoption | todo | 0/81 | 0 | 81 | 105.8d | 3.9 (3.9 left) | 10.0d |
 | backlog | todo | 0/1 | 0 | 1 | 1.0d | <0.1 (<0.1 left) | 1.0d |
@@ -34,7 +34,7 @@
 | A2-025 | Warn when a policy requires an evidence kind nothing can resolve | done | - | commit:f1bb1968c2de, test:validate::tests::policy_evidence_warns_for_unconfigured_top_level_and_scoped_resolvers, test:validate::tests::policy_evidence_is_silent_when_resolvers_are_configured_or_kinds_need_none, test:vacuity::switched_off_tests::probing_min_strength_does_not_report_policy_evidence_unresolvable_as_off, test:configuration::tests::configured_paths_share_the_configuration_frame, test:scoped_policy::a_policy_requiring_an_unconfigured_resolver_warns_and_agrees_with_vacuity, test:scoped_policy::unconfigured_test_policy_blocks_verify_and_mcp_until_a_runner_is_added |
 | A2-026 | Let check-docs see task and milestone ids that carry no number | done | - | commit:68f6b616f4e4, test:docs::tests::non_numeric_prefixed_ids_are_checked_while_ordinary_words_stay_silent, test:docs::tests::non_numeric_prefix_learning_refuses_ordinary_and_malformed_shapes, test:docs::tests::a_prefix_with_both_numeric_and_named_ids_checks_every_shape_and_membership, test:docs::check_docs_recognises_non_numeric_prefixed_ids_end_to_end |
 | A2-027 | Retry the Action's release download on a transient failure | done | - | commit:e53ebebafd09, test:action_selftest::action_release_download_retries_transient_5xx_and_network_errors_with_backoff, test:action_selftest::action_release_download_never_retries_permanent_errors_and_action_verifies_without_retry |
-| A2-028 | Document the Action's self-hosted runner prerequisites | todo | - | - |
+| A2-028 | Document the Action's self-hosted runner prerequisites | done | - | commit:f4752ec9e8a1 |
 | A2-079 | critical-path says "of it" about a chain that is not part of what it printed | done | - | commit:8631ea409ea4, test:critical_path_to::a_divergent_remaining_chain_is_named_separately_from_the_printed_path, test:critical_path_to::a_fully_done_critical_path_still_prints_a_separate_live_remaining_chain |
 | A2-137 | Generated agent guidance drops id families once their tasks are done | done | - | commit:0c0ae4fb2ab1, test:ids::tests::established_families_survive_completion_and_drop_while_excluding_lone_outliers, test:agents_md::completing_or_dropping_a_familys_last_live_task_causes_no_drift |
 | A2-164 | Stop the TUI render gate failing on the slower hosted runners | done | - | commit:f76cea421e84, test:performance_tests::a_wall_clock_metric_is_held_to_the_budget_of_its_host, test:performance_tests::every_metric_past_its_budget_is_reported_when_the_gate_ends, test:tui_performance::reference_runs_give_budgets_only_when_they_agree, test:tui_performance::the_reference_script_refuses_to_run_without_its_host_or_with_an_unknown_profile, test:tui_performance::a_wall_clock_metric_is_held_to_the_budget_of_its_host |
@@ -49,7 +49,7 @@
 | A2-187 | Upgrade ayaml to 0.2.2 and adopt native global-tag dropping and strict seed reading | done | A2-179 | commit:fb8c159dc13b, test:dependency_audit::tests::yaml_parser_is_exactly_pinned, test:yaml::tests::every_request_reads_beneath_a_global_tag_as_the_bridge_did, test:yaml::tests::an_error_inside_a_variant_named_without_a_mapping_names_the_variant, test:yaml::tests::the_strict_reader_drops_a_global_tag_and_keeps_its_own_refusals, test:yaml_differential::hostile_inputs_meet_the_same_outcome_under_both_parsers |
 | A2-188 | Read CARGO_MANIFEST_DIR at runtime in aplan-attest build script so facts --identity retains source across relocated checkouts | done | - | commit:375b80b269d8, test:build_identity::relocated_checkout_retains_and_refreshes_source_identity |
 | A2-189 | Close what an audit found in A2-026 and A2-079 | done | - | commit:04e8c8247517, test:docs::tests::overlapping_named_and_numeric_near_prefixes_report_the_longest_source_family, test:docs::tests::a_prefix_with_both_numeric_and_named_ids_checks_every_shape_and_membership, test:tests::critical_path_remaining_clause_and_matching_reconcile_printed_rows |
-| A2-190 | Close what an audit found in A2-022, A2-178 and A2-027 | todo | - | - |
+| A2-190 | Close what an audit found in A2-022, A2-178 and A2-027 | done | - | commit:bab2467e366d, test:capture_inbox::refused_inbox_promotion_reports_open_state_for_dry_run_and_apply, test:tests::capture_promotion_adapter_reports_real_state_on_late_denied_commit, test:inbox::tests::denied_promotion_review_rows_report_open_state_and_would_become, test:tests::progress_renderer_control_messages_acknowledge_and_restore_rows, test:action_selftest::action_release_download_retries_transient_5xx_and_network_errors_with_backoff |
 
 ## v0.8 Correctness and the most reported adoption failures
 
