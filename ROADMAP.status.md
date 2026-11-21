@@ -8,7 +8,7 @@
 
 | cut | status | done/total | ready | blocked | effort | weeks | critical path |
 | --- | --- | --- | --- | --- | --- | --- | --- |
-| v0.7 | todo | 18/27 | 8 | 1 | 22.0d | 0.8 (0.2 left) | 3.5d |
+| v0.7 | todo | 21/27 | 5 | 1 | 22.0d | 0.8 (0.1 left) | 3.5d |
 | v0.8 | todo | 0/30 | 0 | 30 | 43.8d | 1.6 (1.6 left) | 4.5d |
 | adoption | todo | 0/81 | 0 | 81 | 105.8d | 3.9 (3.9 left) | 10.0d |
 | backlog | todo | 0/1 | 0 | 1 | 1.0d | <0.1 (<0.1 left) | 1.0d |
@@ -32,11 +32,11 @@
 | A2-023 | List same-second captures newest first, as the inbox documents | todo | - | - |
 | A2-024 | Warn when a policy selector names a cut or tag that cannot match | done | - | commit:ad2aed05bc80, test:validate::tests::policy_selector_cut_warns_when_unmatched_and_suggests_close_matches, test:validate::tests::policy_selector_tag_warns_when_unmatched_and_accepts_task_or_family_tags, test:validate::tests::policy_selector_cut_accepts_milestone_id_and_cut_label_including_empty_milestones, test:validate::tests::policy_selector_rejects_non_milestone_task_id_as_cut_and_reports_only_unmatched_entries, test:scoped_policy::a_scope_naming_an_unknown_cut_or_tag_warns_with_a_suggestion |
 | A2-025 | Warn when a policy requires an evidence kind nothing can resolve | done | - | commit:f1bb1968c2de, test:validate::tests::policy_evidence_warns_for_unconfigured_top_level_and_scoped_resolvers, test:validate::tests::policy_evidence_is_silent_when_resolvers_are_configured_or_kinds_need_none, test:vacuity::switched_off_tests::probing_min_strength_does_not_report_policy_evidence_unresolvable_as_off, test:configuration::tests::configured_paths_share_the_configuration_frame, test:scoped_policy::a_policy_requiring_an_unconfigured_resolver_warns_and_agrees_with_vacuity, test:scoped_policy::unconfigured_test_policy_blocks_verify_and_mcp_until_a_runner_is_added |
-| A2-026 | Let check-docs see task and milestone ids that carry no number | todo | - | - |
+| A2-026 | Let check-docs see task and milestone ids that carry no number | done | - | commit:68f6b616f4e4, test:docs::tests::non_numeric_prefixed_ids_are_checked_while_ordinary_words_stay_silent, test:docs::tests::non_numeric_prefix_learning_refuses_ordinary_and_malformed_shapes, test:docs::tests::a_prefix_with_both_numeric_and_named_ids_checks_every_shape_and_membership, test:docs::check_docs_recognises_non_numeric_prefixed_ids_end_to_end |
 | A2-027 | Retry the Action's release download on a transient failure | todo | - | - |
 | A2-028 | Document the Action's self-hosted runner prerequisites | todo | - | - |
-| A2-079 | critical-path says "of it" about a chain that is not part of what it printed | todo | - | - |
-| A2-137 | Generated agent guidance drops id families once their tasks are done | todo | - | - |
+| A2-079 | critical-path says "of it" about a chain that is not part of what it printed | done | - | commit:8631ea409ea4, test:critical_path_to::a_divergent_remaining_chain_is_named_separately_from_the_printed_path, test:critical_path_to::a_fully_done_critical_path_still_prints_a_separate_live_remaining_chain |
+| A2-137 | Generated agent guidance drops id families once their tasks are done | done | - | commit:0c0ae4fb2ab1, test:ids::tests::established_families_survive_completion_and_drop_while_excluding_lone_outliers, test:agents_md::completing_or_dropping_a_familys_last_live_task_causes_no_drift |
 | A2-164 | Stop the TUI render gate failing on the slower hosted runners | done | - | commit:f76cea421e84, test:performance_tests::a_wall_clock_metric_is_held_to_the_budget_of_its_host, test:performance_tests::every_metric_past_its_budget_is_reported_when_the_gate_ends, test:tui_performance::reference_runs_give_budgets_only_when_they_agree, test:tui_performance::the_reference_script_refuses_to_run_without_its_host_or_with_an_unknown_profile, test:tui_performance::a_wall_clock_metric_is_held_to_the_budget_of_its_host |
 | A2-166 | Close the gaps an audit found in the safe YAML parser cutover | done | - | commit:44e3da191c2f, test:dependency_audit::tests::the_tui_evaluator_parses_yaml_with_the_product_parser, test:kep::unusable_input_is_an_error_not_a_silent_empty_import, test:yaml_limits::tag_expansion_boundary, test:yaml_limits::product_task_loader_refuses_depth_past_the_default |
 | A2-167 | Make the README's first-plan commands work as written | done | - | commit:44e3da191c2f, test:greenfield::the_readme_start_commands_run_as_written |
