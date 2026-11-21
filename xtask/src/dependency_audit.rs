@@ -124,15 +124,15 @@ fn workspace_metadata(root: &Path) -> Result<serde_json::Value> {
 }
 
 /// The exact requirement every `yaml_compat` declaration must carry (A2-009).
-const SAFE_PARSER_REQUIREMENT: &str = "=0.1.3";
+const SAFE_PARSER_REQUIREMENT: &str = "=0.2.2";
 
 /// The version and source that requirement must resolve to. The requirement
 /// alone does not prove which code is built: a `[patch]` or `[replace]` entry
 /// keeps the declared requirement and swaps the resolved package (A2-166).
-const SAFE_PARSER_VERSION: &str = "0.1.3";
+const SAFE_PARSER_VERSION: &str = "0.2.2";
 const CRATES_IO_SOURCE: &str = "registry+https://github.com/rust-lang/crates.io-index";
 
-/// Every resolved `ayaml` package in `metadata` is the released 0.1.3 from
+/// Every resolved `ayaml` package in `metadata` is the released 0.2.2 from
 /// crates.io, and there is at least one.
 fn audit_resolved_parser(metadata: &serde_json::Value, graph: &str) -> Result<()> {
     let packages = metadata["packages"]
