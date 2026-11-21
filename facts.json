@@ -21,6 +21,10 @@
       "what": "inbox promotion creates one ordinary validated task and freezes its capture link in one retry-safe guarded transaction whose late failure rolls back every write"
     },
     {
+      "name": "capture.refused_promotion_reports_real_state",
+      "what": "a refused `inbox promote` (both `--dry-run` and applied) reports the capture's actual `open` state on disk in human, JSON and agent output, labelling the unreached target state separately as `would become` / `would_become`"
+    },
+    {
       "name": "tui.capture_forms_are_record_bound",
       "what": "every native TUI form populated from a retained capture carries that record's immutable fingerprint and refuses preview if the capture changes or the visible id is redirected before review"
     },
@@ -1427,7 +1431,7 @@
     "version.require_impact"
   ],
   "counts": {
-    "behaviours": 230,
+    "behaviours": 231,
     "build_capabilities": 1,
     "commands": 48,
     "config_keys": 124,

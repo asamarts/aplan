@@ -76,6 +76,13 @@ to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Fixed
 
+- **A refused `aplan inbox promote` now reports the capture's real `open` state on disk instead
+  of `state: promoted`** (`A2-022`, `--require capture.refused_promotion_reports_real_state`).
+  Previously, both `--dry-run` and applied refusals rendered the predicted `promoted` capture
+  record even though nothing was written. Refused promotions now report `capture.state: open`
+  without synthetic disposition/link fields, and label the unreached target state separately as
+  `would become: promoted` in human output and `"would_become": "promoted"` in JSON/agent output.
+
 - **`aplan export-agents-md` no longer drops established id families when their final live task
   is closed or dropped** (`A2-137`, `--require agent_contract.keeps_completed_id_families`).
   Previously, `example_ids` selected families that still had live work, so completing or dropping

@@ -168,6 +168,7 @@ pub struct CapturePromotionRequest {
 /// One promotion preview carrying both stable identities.
 #[derive(Debug)]
 pub struct CapturePromotionPreview {
+    original_capture: Box<Capture>,
     capture: Capture,
     task_id: String,
     change: ChangeSet,
@@ -176,6 +177,12 @@ pub struct CapturePromotionPreview {
 }
 
 impl CapturePromotionPreview {
+    /// The capture record currently on disk before promotion (`A2-022`).
+    #[must_use]
+    pub fn original_capture(&self) -> &Capture {
+        &self.original_capture
+    }
+
     #[must_use]
     pub const fn capture(&self) -> &Capture {
         &self.capture
@@ -688,6 +695,7 @@ pub fn preview_capture_promotion(
             )));
         }
         return Ok(CapturePromotionPreview {
+            original_capture: Box::new(loaded.capture.clone()),
             capture: loaded.capture,
             task_id: existing,
             change: empty_change(context, &snapshot),
@@ -738,6 +746,7 @@ pub fn preview_capture_promotion(
         },
     );
     Ok(CapturePromotionPreview {
+        original_capture: Box::new(loaded.capture),
         capture,
         task_id,
         change,

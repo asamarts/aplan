@@ -6282,7 +6282,10 @@ fn finish_capture_promotion_with(
         aplan_output::render_capture_action(&report, format)?;
         return Ok(if denied { EXIT_VIOLATIONS } else { EXIT_OK });
     }
-    let report = capture_promotion_report(&preview, aplan_output::CaptureActionOutcome::Predicted)?;
+    let original_capture = preview.original_capture().clone();
+    let predicted_state = preview.capture().state;
+    let mut report =
+        capture_promotion_report(&preview, aplan_output::CaptureActionOutcome::Predicted)?;
     let capture_id = report.capture.id.clone();
     let task_id = report
         .task_id
@@ -6298,6 +6301,10 @@ fn finish_capture_promotion_with(
             format,
         ),
         aplan_app::CommitOutcome::Denied(_) => {
+            // Nothing was written, so report the capture's real state on disk
+            // (`open`) and label the unreached target state separately (`A2-022`).
+            report.capture = original_capture;
+            report.would_become = Some(predicted_state);
             let code =
                 render_capture_report(report, aplan_output::CaptureActionOutcome::Refused, format)?;
             debug_assert_eq!(code, EXIT_OK);
@@ -6320,12 +6327,21 @@ fn capture_promotion_report(
     preview: &aplan_app::CapturePromotionPreview,
     outcome: aplan_output::CaptureActionOutcome,
 ) -> Result<aplan_output::CaptureActionReport> {
+    let (capture, would_become) = if outcome == aplan_output::CaptureActionOutcome::Refused {
+        (
+            preview.original_capture().clone(),
+            Some(preview.capture().state),
+        )
+    } else {
+        (preview.capture().clone(), None)
+    };
     Ok(aplan_output::CaptureActionReport {
         input: serde_json::to_value(preview.change_set().input())?,
         inbox_sha256: preview.inbox_sha256().to_string(),
         outcome,
         publishable: preview.change_set().disposition() != aplan_app::ChangeDisposition::Denied,
-        capture: preview.capture().clone(),
+        capture,
+        would_become,
         task_id: Some(preview.task_id().to_string()),
         files: preview
             .change_set()
@@ -6483,6 +6499,7 @@ fn capture_action_report(
         outcome,
         publishable: preview.change_set().disposition() != aplan_app::ChangeDisposition::Denied,
         capture: preview.capture().clone(),
+        would_become: None,
         task_id: None,
         files: preview
             .change_set()
