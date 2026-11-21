@@ -166,6 +166,12 @@ const SCRIPT_WARNING_POLICY: &[(&str, WarningPolicy)] = &[
         WarningPolicy::NoWorkspaceCompilation("reads and verifies the toolchain contract"),
     ),
     (
+        "download-action-release.sh",
+        WarningPolicy::NoWorkspaceCompilation(
+            "downloads a pinned release archive and checksum sidecar with transient retries without compiling",
+        ),
+    ),
+    (
         "verify-action-release.sh",
         WarningPolicy::NoWorkspaceCompilation(
             "checks a downloaded archive and its signed release identity without compiling",

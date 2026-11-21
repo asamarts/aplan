@@ -76,6 +76,13 @@ to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Fixed
 
+- **The GitHub Action now retries transient release download errors instead of failing the job on
+  a single HTTP 5xx or network blip** (`A2-027`). `action.yml` now downloads the release archive
+  and checksum sidecar through `ci/scripts/download-action-release.sh`, retrying up to three times
+  with short backoff (`2s`, `4s`, `8s`) on HTTP 5xx or transport errors only. HTTP 404, auth
+  failures, checksum mismatches and provenance failures are never retried, and any final install
+  failure reports clearly that the install failed and no plan check ran.
+
 - **Static CLI progress no longer prints a terminal `complete` or `interrupted` line without an
   active row when the grace period expires during an output pause** (`A2-178`). Previously,
   `Resume` redrew a suppressed progress row only for animated terminal output, so under static

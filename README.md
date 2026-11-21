@@ -68,8 +68,10 @@ permissions:
 ```
 
 Set `deny_warnings: true` in `.aplan.yml` when warnings should fail CI. Pin actions to full commit
-SHAs in production repositories. The Action verifies releases from v0.6.0 onward against the
-publishing repository, `release.yml` and the exact release tag before executing the binary.
+SHAs in production repositories. The Action retries transient HTTP 5xx and network download errors
+with short backoff, never retries HTTP 404 or verification failures, and verifies releases from
+v0.6.0 onward against the publishing repository, `release.yml` and the exact release tag before
+executing the binary.
 
 ## Other interfaces
 

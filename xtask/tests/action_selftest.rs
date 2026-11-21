@@ -237,6 +237,149 @@ fn action_release_verification_refuses_bad_identity_and_bytes_before_gh() {
     );
 }
 
+fn run_release_downloader(tag: &str, gh_script: &str) -> (Output, usize) {
+    let dir = tempfile::Builder::new()
+        .tempdir_in(aplan_core::fixture::fixture_root())
+        .expect("tempdir");
+    let bin = dir.path().join("bin");
+    let dest = dir.path().join("dest");
+    let count_file = dir.path().join("attempts");
+    fs::create_dir(&bin).expect("create mock bin");
+    fs::create_dir(&dest).expect("create dest");
+    fs::write(&count_file, "0\n").expect("init attempt counter");
+    write_executable(&bin.join("gh"), gh_script);
+
+    let path = format!(
+        "{}:{}",
+        bin.display(),
+        std::env::var("PATH").expect("PATH is set")
+    );
+    let asset = format!("aplan-{tag}-x86_64-unknown-linux-musl.tar.gz");
+    let output = Command::new("bash")
+        .arg(repo_root().join("ci/scripts/download-action-release.sh"))
+        .args([
+            tag,
+            "asamarts/aplan",
+            asset.as_str(),
+            dest.to_str().expect("dest path is UTF-8"),
+        ])
+        .env("PATH", path)
+        .env("APLAN_DOWNLOAD_BACKOFF_SECONDS", "0 0 0")
+        .env("ATTEMPT_FILE", &count_file)
+        .output()
+        .expect("run action release downloader");
+    let attempts = fs::read_to_string(&count_file)
+        .expect("read attempt counter")
+        .trim()
+        .parse::<usize>()
+        .expect("integer attempt count");
+    (output, attempts)
+}
+
+#[test]
+fn action_release_download_retries_transient_5xx_and_network_errors_with_backoff() {
+    let transient_500 = r#"#!/usr/bin/env bash
+set -eu
+count=$(( $(cat "$ATTEMPT_FILE") + 1 ))
+printf '%s\n' "$count" > "$ATTEMPT_FILE"
+if (( count < 3 )); then
+    echo "HTTP 500 (https://api.github.com/repos/asamarts/aplan/releases/assets/711204551)" >&2
+    exit 1
+fi
+exit 0
+"#;
+    let (output, attempts) = run_release_downloader("v0.6.0", transient_500);
+    assert!(
+        output.status.success(),
+        "transient HTTP 500 should succeed on retry: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert_eq!(attempts, 3, "expected 2 failed attempts + 1 success");
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        stderr.contains("Transient error downloading aplan v0.6.0"),
+        "retry attempt should be logged: {stderr}"
+    );
+
+    let transient_network = r#"#!/usr/bin/env bash
+set -eu
+count=$(( $(cat "$ATTEMPT_FILE") + 1 ))
+printf '%s\n' "$count" > "$ATTEMPT_FILE"
+if (( count == 1 )); then
+    echo 'Post "https://api.github.com/graphql": dial tcp 140.82.121.6:443: i/o timeout' >&2
+    exit 1
+fi
+exit 0
+"#;
+    let (output, attempts) = run_release_downloader("v0.6.0", transient_network);
+    assert!(
+        output.status.success(),
+        "transient network error should succeed on retry: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert_eq!(attempts, 2);
+
+    let persistent_503 = r#"#!/usr/bin/env bash
+set -eu
+count=$(( $(cat "$ATTEMPT_FILE") + 1 ))
+printf '%s\n' "$count" > "$ATTEMPT_FILE"
+echo "HTTP 503 Service Unavailable" >&2
+exit 1
+"#;
+    let (output, attempts) = run_release_downloader("v0.6.0", persistent_503);
+    assert!(!output.status.success(), "exhausted retries must fail");
+    assert_eq!(attempts, 4, "1 initial try + 3 retries");
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        stderr.contains("Install failed:") && stderr.contains("no plan check ran"),
+        "final failure must state install failed and no plan check ran: {stderr}"
+    );
+}
+
+#[test]
+fn action_release_download_never_retries_permanent_errors_and_action_verifies_without_retry() {
+    for message in [
+        "HTTP 404: Not Found (https://api.github.com/repos/asamarts/aplan/releases/tags/v0.9.9)",
+        "release not found",
+        "HTTP 403: Forbidden",
+    ] {
+        let script = format!(
+            "#!/usr/bin/env bash\nset -eu\ncount=$(( $(cat \"$ATTEMPT_FILE\") + 1 ))\nprintf '%s\\n' \"$count\" > \"$ATTEMPT_FILE\"\necho '{message}' >&2\nexit 1\n"
+        );
+        let (output, attempts) = run_release_downloader("v0.9.9", &script);
+        assert!(
+            !output.status.success(),
+            "permanent error `{message}` passed"
+        );
+        assert_eq!(
+            attempts, 1,
+            "permanent error `{message}` was retried ({attempts} attempts)"
+        );
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        assert!(
+            stderr.contains("Install failed:") && stderr.contains("no plan check ran"),
+            "permanent failure must state install failed and no plan check ran: {stderr}"
+        );
+    }
+
+    let action = read("action.yml");
+    let download = action
+        .find("download-action-release.sh")
+        .expect("action invokes retrying download helper");
+    let verify = action
+        .find("verify-action-release.sh")
+        .expect("action invokes release verifier");
+    let extract = action.find("tar -xzf").expect("action extracts archive");
+    assert!(
+        download < verify && verify < extract,
+        "action must download, then verify without retry, then extract"
+    );
+    assert!(
+        action.contains("no plan check ran"),
+        "action must tell the user no plan check ran when install verification fails"
+    );
+}
+
 /// Every top-level `.aplan.yml` key the pinned release knows.
 ///
 /// Read out of the released binary rather than out of this checkout, which is
