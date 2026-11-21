@@ -73,6 +73,28 @@ with short backoff, never retries HTTP 404 or verification failures, and verifie
 v0.6.0 onward against the publishing repository, `release.yml` and the exact release tag before
 executing the binary.
 
+### Self-hosted runners
+
+GitHub-hosted Linux runners ship with everything the Action's install step needs. On a self-hosted
+runner, make sure the following are available on `PATH` before the first run:
+
+- **Platform:** Linux x86_64 (the only platform the release assets provide).
+- **Shell:** `bash` (both Action steps run with `shell: bash`, and the install helpers run under
+  `env bash`).
+- **GitHub CLI (`gh`):** version **2.68.0** or newer, with **2.102.0** or newer recommended. The
+  install step downloads the archive with `gh release download` and verifies releases from v0.6.0
+  onward with `gh attestation verify --signer-workflow ... --source-ref ...`; both flags first
+  shipped together in `gh` 2.68.0, so older distro packages are not enough. `gh` 2.102.0 or newer
+  is recommended because 2.97.0 and 2.102.0 fixed matcher weaknesses in those flags and 2.102.0
+  fixed a symlink issue in `gh release download`.
+- **Standard tools:** coreutils (`sha256sum`, `uname`, `mkdir`, `chmod`, `wc`, `basename`, `tr`,
+  `sleep`), `tar` with `gzip`, and `awk`. `curl` is not required.
+
+If a prerequisite is missing, the job fails in the install step before any plan check runs. An
+unsupported platform or a missing `gh` produces an explicit install-step error; another missing
+command fails with command-not-found, and a `gh` older than 2.68.0 fails during verification with
+an unknown-flag error.
+
 ## Other interfaces
 
 `aplan tui` opens the terminal interface. `aplan mcp` exposes the same guarded plan operations to
