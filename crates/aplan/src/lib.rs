@@ -6364,11 +6364,17 @@ fn finish_capture_promotion_with(
             aplan_output::CaptureActionOutcome::Unchanged,
             format,
         ),
-        aplan_app::CommitOutcome::Denied(_) => {
+        aplan_app::CommitOutcome::Denied(change) => {
             // Nothing was written, so report the capture's real state on disk
-            // (`open`) and label the unreached target state separately (`A2-022`).
-            report.capture = original_capture;
-            report.would_become = Some(predicted_state);
+            // (`open`), label the unreached target state separately (`A2-022`),
+            // and refresh publishability and findings from the denied change
+            // (`A2-190`).
+            apply_refused_capture_promotion(
+                &mut report,
+                original_capture,
+                predicted_state,
+                &change,
+            );
             let code =
                 render_capture_report(report, aplan_output::CaptureActionOutcome::Refused, format)?;
             debug_assert_eq!(code, EXIT_OK);
@@ -6385,6 +6391,19 @@ fn finish_capture_promotion_with(
             report.state()
         ),
     }
+}
+
+fn apply_refused_capture_promotion(
+    report: &mut aplan_output::CaptureActionReport,
+    original_capture: aplan_core::capture::Capture,
+    predicted_state: aplan_core::capture::CaptureState,
+    change: &aplan_app::ChangeSet,
+) {
+    report.outcome = aplan_output::CaptureActionOutcome::Refused;
+    report.publishable = false;
+    report.capture = original_capture;
+    report.would_become = Some(predicted_state);
+    report.findings = change.diagnostics().lines();
 }
 
 fn capture_promotion_report(
@@ -18890,6 +18909,58 @@ mod tests {
     }
 
     #[test]
+    fn capture_promotion_adapter_reports_real_state_on_late_denied_commit() {
+        let (_directory, context, preview) = capture_promotion_adapter_fixture();
+        let original_capture = preview.original_capture().clone();
+        let predicted_state = preview.capture().state;
+        assert_eq!(
+            original_capture.state,
+            aplan_core::capture::CaptureState::Open
+        );
+        assert_eq!(predicted_state, aplan_core::capture::CaptureState::Promoted);
+
+        let mut report =
+            capture_promotion_report(&preview, aplan_output::CaptureActionOutcome::Predicted)
+                .expect("predicted promotion report");
+        assert!(report.publishable);
+        assert_eq!(
+            report.capture.state,
+            aplan_core::capture::CaptureState::Promoted
+        );
+        assert!(report.would_become.is_none());
+
+        apply_refused_capture_promotion(
+            &mut report,
+            original_capture,
+            predicted_state,
+            preview.change_set(),
+        );
+        assert_eq!(report.outcome, aplan_output::CaptureActionOutcome::Refused);
+        assert!(!report.publishable);
+        assert_eq!(
+            report.capture.state,
+            aplan_core::capture::CaptureState::Open
+        );
+        assert!(report.capture.promoted_to.is_none());
+        assert!(report.capture.disposed_at.is_none());
+        assert_eq!(
+            report.would_become,
+            Some(aplan_core::capture::CaptureState::Promoted)
+        );
+        assert_eq!(report.findings, preview.change_set().diagnostics().lines());
+
+        let code = finish_capture_promotion_with(
+            &context,
+            preview,
+            false,
+            Format::Json,
+            |_context, change| aplan_app::CommitOutcome::Denied(change),
+        )
+        .expect("injected denied commit renders refusal and returns EXIT_VIOLATIONS");
+        assert_eq!(code, EXIT_VIOLATIONS);
+    }
+
+    #[test]
     fn graph_presentation_defaults_and_refusals_are_explicit() {
         assert_eq!(graph_format_for_terminal(None, true), "text");
         assert_eq!(graph_format_for_terminal(None, false), "mermaid");
@@ -19773,6 +19844,7 @@ mod tests {
 
         let mut static_row = CliProgressRenderer::new(epoch, operation, false, false);
         static_row.row = ProgressRowState::Painted;
+        static_row.ever_painted = true;
         assert!(!static_row.message(ProgressMessage::Stop(None)));
 
         let mut hidden = CliProgressRenderer::new(

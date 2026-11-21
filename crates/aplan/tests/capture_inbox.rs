@@ -801,30 +801,7 @@ fn refused_inbox_promotion_reports_open_state_for_dry_run_and_apply() {
         }
 
         for format in ["json", "agent"] {
-            let mut machine_args = vec!["inbox", "promote", id, "--format", format];
-            if dry_run {
-                machine_args.push("--dry-run");
-            }
-            let machine = common::run(dir.path(), &machine_args);
-            assert_eq!(
-                machine.code,
-                1,
-                "dry_run={dry_run} format={format}: {}",
-                machine.text()
-            );
-            let doc: serde_json::Value =
-                serde_json::from_str(&machine.stdout).expect("machine json");
-            assert_eq!(doc["outcome"], "refused", "{doc}");
-            assert_eq!(doc["publishable"], false, "{doc}");
-            assert_eq!(doc["capture"]["state"], "open", "{doc}");
-            assert_eq!(doc["would_become"], "promoted", "{doc}");
-            assert!(doc["capture"].get("disposed_at").is_none(), "{doc}");
-            assert!(doc["capture"].get("promoted_to").is_none(), "{doc}");
-            assert!(
-                doc["capture"].get("promotion_fingerprint").is_none(),
-                "{doc}"
-            );
-            assert_eq!(doc["task_id"], "A-2", "{doc}");
+            assert_refused_machine_promotion(dir.path(), id, dry_run, format);
         }
 
         assert_eq!(
@@ -835,6 +812,43 @@ fn refused_inbox_promotion_reports_open_state_for_dry_run_and_apply() {
         assert!(
             !dir.path().join("aplan/A-2.md").exists(),
             "refused promotion wrote task file (dry_run={dry_run})"
+        );
+    }
+}
+
+fn assert_refused_machine_promotion(root: &std::path::Path, id: &str, dry_run: bool, format: &str) {
+    let mut machine_args = vec!["inbox", "promote", id, "--format", format];
+    if dry_run {
+        machine_args.push("--dry-run");
+    }
+    let machine = common::run(root, &machine_args);
+    assert_eq!(
+        machine.code,
+        1,
+        "dry_run={dry_run} format={format}: {}",
+        machine.text()
+    );
+    let doc: serde_json::Value = serde_json::from_str(&machine.stdout).expect("machine json");
+    assert_eq!(doc["outcome"], "refused", "{doc}");
+    assert_eq!(doc["publishable"], false, "{doc}");
+    assert_eq!(doc["capture"]["state"], "open", "{doc}");
+    assert_eq!(doc["would_become"], "promoted", "{doc}");
+    assert!(doc["capture"].get("disposed_at").is_none(), "{doc}");
+    assert!(doc["capture"].get("promoted_to").is_none(), "{doc}");
+    assert!(
+        doc["capture"].get("promotion_fingerprint").is_none(),
+        "{doc}"
+    );
+    assert_eq!(doc["task_id"], "A-2", "{doc}");
+    if format == "agent" {
+        let instruction = doc["agent_instruction"]
+            .as_str()
+            .expect("agent_instruction on refused agent report");
+        assert!(
+            instruction.contains("Nothing was written")
+                && instruction.contains("was not created")
+                && !instruction.contains("Use the reported full capture id and task id"),
+            "refused agent_instruction must not treat uncreated task_id as existing: {instruction}"
         );
     }
 }

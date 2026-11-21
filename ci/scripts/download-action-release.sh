@@ -18,16 +18,18 @@ asset="$3"
 dest_dir="$4"
 
 # Three retries (four total attempts) with short exponential backoff by default.
-# Tests may override APLAN_DOWNLOAD_BACKOFF_SECONDS (e.g. "0 0 0") to exercise
-# the retry loop without sleeping.
-backoff_spec="${APLAN_DOWNLOAD_BACKOFF_SECONDS:-2 4 8}"
+# Tests may override APLAN_DOWNLOAD_BACKOFF_SECONDS (e.g. "0 0 0" to exercise
+# retries without sleeping, or "" for a single attempt with no retries).
+backoff_spec="${APLAN_DOWNLOAD_BACKOFF_SECONDS-2 4 8}"
 read -r -a delays <<< "$backoff_spec"
-for delay in "${delays[@]}"; do
-    if [[ ! "$delay" =~ ^[0-9]+$ ]]; then
-        echo "ERROR: invalid backoff delay '${delay}'" >&2
-        exit 2
-    fi
-done
+if (( ${#delays[@]} > 0 )); then
+    for delay in "${delays[@]}"; do
+        if [[ ! "$delay" =~ ^[0-9]+$ ]]; then
+            echo "ERROR: invalid backoff delay '${delay}'" >&2
+            exit 2
+        fi
+    done
+fi
 max_attempts=$(( ${#delays[@]} + 1 ))
 
 is_transient_download_error() {
@@ -53,6 +55,8 @@ is_transient_download_error() {
         || "$lowered" == *"connection reset"* \
         || "$lowered" == *"connection refused"* \
         || "$lowered" == *"connection timed out"* \
+        || "$lowered" == *"error connecting to"* \
+        || "$lowered" == *"failed to connect"* \
         || "$lowered" == *"i/o timeout"* \
         || "$lowered" == *"tls handshake timeout"* \
         || "$lowered" == *"timeout awaiting response headers"* \
