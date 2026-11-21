@@ -25,6 +25,10 @@
       "what": "a refused `inbox promote` (both `--dry-run` and applied) reports the capture's actual `open` state on disk in human, JSON and agent output, labelling the unreached target state separately as `would become` / `would_become`"
     },
     {
+      "name": "capture.inbox_orders_same_second_newest_first",
+      "what": "`inbox` orders captures newest first with full ULID id descending as its same-second tie breaker, preserving millisecond newest-first order"
+    },
+    {
       "name": "tui.capture_forms_are_record_bound",
       "what": "every native TUI form populated from a retained capture carries that record's immutable fingerprint and refuses preview if the capture changes or the visible id is redirected before review"
     },
@@ -1431,7 +1435,7 @@
     "version.require_impact"
   ],
   "counts": {
-    "behaviours": 231,
+    "behaviours": 232,
     "build_capabilities": 1,
     "commands": 48,
     "config_keys": 124,

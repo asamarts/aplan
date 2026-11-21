@@ -748,7 +748,7 @@ impl Inbox {
         matching.sort_by(|left, right| {
             parse_capture_instant(&right.captured_at)
                 .cmp(&parse_capture_instant(&left.captured_at))
-                .then(left.id.cmp(&right.id))
+                .then(right.id.cmp(&left.id))
         });
         matching.truncate(query.limit);
         Ok(CaptureList {
@@ -1908,6 +1908,10 @@ mod tests {
         );
     }
 
+    /// Proof for `capture.inbox_orders_same_second_newest_first` (`A2-023`, #24):
+    /// newest-first ordering breaks equal whole-second `captured_at` instants
+    /// by full ULID id descending so same-second captures keep true millisecond
+    /// newest-first order.
     #[test]
     fn projections_are_bounded_filtered_and_newest_first_with_stable_ties() {
         let inbox = projection_inbox();
@@ -1938,8 +1942,8 @@ mod tests {
                 .iter()
                 .map(|row| row.id.as_str())
                 .collect::<Vec<_>>(),
-            vec![SECOND, THIRD, FIRST],
-            "equal instants use full id ascending as the total-order tie breaker"
+            vec![THIRD, SECOND, FIRST],
+            "equal instants use full id descending as the total-order tie breaker"
         );
 
         let body_search = inbox

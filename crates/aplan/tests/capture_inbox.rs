@@ -839,6 +839,97 @@ fn refused_inbox_promotion_reports_open_state_for_dry_run_and_apply() {
     }
 }
 
+/// Proof for `capture.inbox_orders_same_second_newest_first` (`A2-023`, #24):
+/// multiple captures created within one second list newest first (descending
+/// full ULID tie-break) in both human and JSON `aplan inbox` output.
+#[test]
+fn same_second_captures_list_newest_first() {
+    let dir = repository("root: aplan\n");
+    let mut created_ids = Vec::new();
+    for index in 1..=4 {
+        let created = capture_json(
+            dir.path(),
+            &[
+                "capture",
+                &format!("c{index}"),
+                "--kind",
+                "idea",
+                "--format",
+                "json",
+            ],
+        );
+        created_ids.push(
+            created["capture"]["id"]
+                .as_str()
+                .expect("capture id")
+                .to_string(),
+        );
+        // Ensure distinct millisecond ULID timestamps while remaining well
+        // inside a single wall-clock second.
+        std::thread::sleep(std::time::Duration::from_millis(5));
+    }
+
+    let expected_live: Vec<String> = created_ids.iter().rev().cloned().collect();
+    let list_json = capture_json(dir.path(), &["inbox", "--format", "json"]);
+    let actual_live: Vec<String> = list_json["captures"]
+        .as_array()
+        .expect("captures array")
+        .iter()
+        .map(|row| row["id"].as_str().expect("id").to_string())
+        .collect();
+    assert_eq!(
+        actual_live, expected_live,
+        "rapid captures must list newest first: {list_json}"
+    );
+    let list_human = common::run(dir.path(), &["inbox"]);
+    assert_eq!(list_human.code, 0, "{}", list_human.text());
+    let positions: Vec<usize> = expected_live
+        .iter()
+        .map(|id| {
+            list_human
+                .stdout
+                .find(id)
+                .unwrap_or_else(|| panic!("missing {id}:\n{}", list_human.stdout))
+        })
+        .collect();
+    assert!(
+        positions.windows(2).all(|pair| pair[0] < pair[1]),
+        "human inbox must preserve newest-first order:\n{}",
+        list_human.stdout
+    );
+
+    // Deterministic same-second fixture: guarantee identical `captured_at`
+    // even if a wall-clock second ticked during the live CLI loop above.
+    let tied_dir = repository("root: aplan\n");
+    let tied = [
+        ("I-01K8Z3A4H00000000000000001", "first"),
+        ("I-01K8Z3A4H00000000000000002", "second"),
+        ("I-01K8Z3A4H00000000000000003", "third"),
+        ("I-01K8Z3A4H00000000000000004", "fourth"),
+    ];
+    for (id, title) in tied {
+        std::fs::write(
+            tied_dir.path().join(format!("aplan/.inbox/{id}.yml")),
+            format!(
+                "schema: aplan/capture/v1\nid: {id}\ntitle: {title}\nkind: idea\nstate: open\ncaptured_at: '2026-01-01T00:00:00Z'\norigin: cli\n"
+            ),
+        )
+        .expect("tied capture");
+    }
+    let tied_json = capture_json(tied_dir.path(), &["inbox", "--format", "json"]);
+    let tied_titles: Vec<&str> = tied_json["captures"]
+        .as_array()
+        .expect("captures array")
+        .iter()
+        .map(|row| row["title"].as_str().expect("title"))
+        .collect();
+    assert_eq!(
+        tied_titles,
+        vec!["fourth", "third", "second", "first"],
+        "equal whole-second captured_at must break ties by full id descending: {tied_json}"
+    );
+}
+
 #[test]
 fn capture_promotion_refuses_invalid_selected_configuration_without_writes() {
     let dir = promotion_repository();

@@ -76,6 +76,12 @@ to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Fixed
 
+- **`aplan inbox` now lists same-second captures newest first** (`A2-023`, `--require
+  capture.inbox_orders_same_second_newest_first`). Because `captured_at` has one-second resolution
+  and the tie-break compared full ULID ids ascending, captures recorded within the same second
+  appeared oldest first inside a newest-first list. The tie-break is now full id descending (true
+  millisecond newest-first order), and `HLD.md` section 4 and ADR-0063 state the direction.
+
 - **A refused `aplan inbox promote` now reports the capture's real `open` state on disk instead
   of `state: promoted`** (`A2-022`, `--require capture.refused_promotion_reports_real_state`).
   Previously, both `--dry-run` and applied refusals rendered the predicted `promoted` capture

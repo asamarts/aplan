@@ -117,6 +117,18 @@ pub const ALL: &[Behaviour] = &[
                unreached target state separately as `would become` / `would_become`",
         proof: &["capture_inbox::refused_inbox_promotion_reports_open_state_for_dry_run_and_apply"],
     },
+    // `A2-023`. `inbox` previously broke equal whole-second `captured_at`
+    // instants by full ULID ascending, so same-second captures appeared oldest
+    // first inside a newest-first list (#24).
+    Behaviour {
+        name: "capture.inbox_orders_same_second_newest_first",
+        what: "`inbox` orders captures newest first with full ULID id descending as its \
+               same-second tie breaker, preserving millisecond newest-first order",
+        proof: &[
+            "projections_are_bounded_filtered_and_newest_first_with_stable_ties",
+            "capture_inbox::same_second_captures_list_newest_first",
+        ],
+    },
     // `A1-518`. Native capture forms and the guarded lifecycle operations
     // already existed, but the plan input identity deliberately excludes the
     // inbox. An older build could therefore seed editable defaults from one

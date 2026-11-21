@@ -100,8 +100,8 @@ times. `revisit_at` is different: it is optional user intent saying not to put a
 the actionable list before that instant. It causes no transition, notification, task due date or
 task `revisit_at`.
 
-The default inbox lists non-deferred open captures newest first, with id as a total-order tie
-breaker, and reports the count of deferred open captures even when that count is zero. An explicit
+The default inbox lists non-deferred open captures newest first, with full id descending as a
+total-order tie breaker, and reports the count of deferred open captures even when that count is zero. An explicit
 filter exposes deferred items, and focused show always does. Crossing the instant changes only list
 eligibility. Machine results carry the evaluation instant and deferred count so a client does not
 have to infer why an item is absent.
