@@ -8,7 +8,7 @@
 
 | cut | status | done/total | ready | blocked | effort | weeks | critical path |
 | --- | --- | --- | --- | --- | --- | --- | --- |
-| v0.7 | todo | 16/26 | 9 | 1 | 21.5d | 0.8 (0.2 left) | 3.5d |
+| v0.7 | todo | 17/26 | 8 | 1 | 21.5d | 0.8 (0.2 left) | 3.5d |
 | v0.8 | todo | 0/30 | 0 | 30 | 43.8d | 1.6 (1.6 left) | 4.5d |
 | adoption | todo | 0/81 | 0 | 81 | 105.8d | 3.9 (3.9 left) | 10.0d |
 | backlog | todo | 0/1 | 0 | 1 | 1.0d | <0.1 (<0.1 left) | 1.0d |
@@ -46,7 +46,7 @@
 | A2-178 | Draw the progress row a pause held back, so a slow run never shows only its end | todo | - | - |
 | A2-179 | Close what an audit of the tag rule found in A2-169 | done | - | commit:1a2a56a41133, test:yaml::tests::a_tagged_document_keeps_the_strict_grammar, test:yaml::tests::an_enum_written_without_a_tag_reads_exactly_as_ayaml_reads_it, test:yaml::tests::a_global_tag_over_an_enum_is_dropped_and_adds_nothing_to_the_path, test:yaml::tests::a_scalar_beneath_a_tag_in_yamls_namespace_is_refused_by_naming_the_tag, test:yaml::tests::a_local_tag_is_named_as_it_can_be_written_back, test:yaml::tests::every_request_reads_beneath_a_local_tag_as_the_bridge_did_but_a_unit, test:tests::the_unknown_key_scan_reads_a_tag_as_the_load_does, test:yaml_differential::hostile_inputs_meet_the_same_outcome_under_both_parsers |
 | A2-181 | Keep test.timeout_seconds discovery-only and handle execution timeouts without panicking | done | - | commit:2f20b7b864a8, test:published_schema_tests::command_policy_without_timeout_preserves_other_limits, test:tests::test_timeout_seconds_bounds_discovery_without_cutting_off_single_or_batch_execution, test:resolve::tests::timed_out_execution_outcome_reports_structured_finding_and_ledger_state_without_panicking |
-| A2-188 | Read CARGO_MANIFEST_DIR at runtime in aplan-attest build script so facts --identity retains source across relocated checkouts | todo | - | - |
+| A2-188 | Read CARGO_MANIFEST_DIR at runtime in aplan-attest build script so facts --identity retains source across relocated checkouts | done | - | commit:375b80b269d8, test:build_identity::relocated_checkout_retains_and_refreshes_source_identity |
 
 ## v0.8 Correctness and the most reported adoption failures
 
