@@ -2177,6 +2177,17 @@ pub const ALL: &[Behaviour] = &[
             "build_identity::source_identity_ignores_all_inherited_git_context",
         ],
     },
+    // `A2-188` (#61). Older builds baked `CARGO_MANIFEST_DIR` into the build
+    // script at compile time with `env!`, so moving a checkout while reusing
+    // `target/` left `APLAN_SOURCE_REV` permanently empty and caused
+    // `facts --identity` to omit `source`.
+    Behaviour {
+        name: "facts.source_identity_survives_relocated_checkout",
+        what: "the build-time source identity reads `CARGO_MANIFEST_DIR` at runtime and \
+               watches it for changes, so relocating a checkout while reusing `target/` \
+               retains `source` and keeps refreshing on subsequent commits",
+        proof: &["build_identity::relocated_checkout_retains_and_refreshes_source_identity"],
+    },
     // `A1-421`. The `tui` command is deliberately present in both builds: the
     // headless one keeps an enablement stub, so the command inventory cannot
     // answer whether the interactive implementation exists. This names the

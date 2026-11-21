@@ -22,14 +22,24 @@
 //! identifies the artifact, and it cannot go stale, because it is computed from
 //! the artifact.
 
-use std::path::Path;
+use std::path::PathBuf;
 
 mod build_support;
 
 fn main() {
     println!("cargo:rerun-if-env-changed=APLAN_SOURCE_REV");
-    let manifest_dir = Path::new(env!("CARGO_MANIFEST_DIR"));
-    for path in build_support::script_watch_paths(manifest_dir) {
+    println!("cargo:rerun-if-env-changed=CARGO_MANIFEST_DIR");
+    // Read `CARGO_MANIFEST_DIR` at runtime rather than baking it in with
+    // `env!`: when a checkout or `target/` directory is moved, or when a
+    // build cache shares the compiled build script across checkouts, a baked
+    // path to the old checkout fails silently and poisons `APLAN_SOURCE_REV`
+    // with an empty value (`A2-188`).
+    let manifest_dir = std::env::var_os("CARGO_MANIFEST_DIR")
+        .filter(|value| !value.is_empty())
+        .map(PathBuf::from)
+        .or_else(|| std::env::current_dir().ok())
+        .unwrap_or_else(|| PathBuf::from("."));
+    for path in build_support::script_watch_paths(&manifest_dir) {
         if let Some(path) = build_support::directive_path(&path) {
             println!("cargo:rerun-if-changed={path}");
         }
@@ -41,7 +51,7 @@ fn main() {
     if override_rev.is_none() {
         // Rebuild when this checkout's HEAD can have moved. Every selected path
         // exists, and none is the shared refs directory (`A1-629`).
-        for path in build_support::git_watch_paths(manifest_dir) {
+        for path in build_support::git_watch_paths(&manifest_dir) {
             if let Some(path) = build_support::directive_path(&path) {
                 println!("cargo:rerun-if-changed={path}");
             }
@@ -49,7 +59,7 @@ fn main() {
     }
 
     let rev = override_rev
-        .or_else(|| build_support::git_head(manifest_dir))
+        .or_else(|| build_support::git_head(&manifest_dir))
         .unwrap_or_default();
     println!("cargo:rustc-env=APLAN_SOURCE_REV={rev}");
 }

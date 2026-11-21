@@ -485,6 +485,125 @@ fn linked_worktree_and_non_git_builds_have_stable_existing_inputs() {
     ));
 }
 
+fn compiled_build_script(target: &Path) -> std::path::PathBuf {
+    let exe = format!("build-script-build{}", std::env::consts::EXE_SUFFIX);
+    let build_dir = target.join("debug/build");
+    for entry in std::fs::read_dir(&build_dir).expect("read debug/build") {
+        let path = entry.expect("build entry").path();
+        if path
+            .file_name()
+            .and_then(|name| name.to_str())
+            .is_some_and(|name| name.starts_with("identity-fixture-"))
+        {
+            let candidate = path.join(&exe);
+            if candidate.is_file() {
+                return candidate;
+            }
+        }
+    }
+    panic!(
+        "compiled {exe} for identity-fixture not found under {}",
+        build_dir.display()
+    );
+}
+
+fn run_compiled_build_script(script: &Path, manifest_dir: &Path) -> String {
+    let mut command = std::process::Command::new(script);
+    command
+        .current_dir(manifest_dir)
+        .env("CARGO_MANIFEST_DIR", manifest_dir)
+        .env_remove("APLAN_SOURCE_REV");
+    for (name, _) in std::env::vars_os().filter(|(name, _)| {
+        name.to_string_lossy()
+            .get(..4)
+            .is_some_and(|prefix| prefix.eq_ignore_ascii_case("GIT_"))
+    }) {
+        command.env_remove(name);
+    }
+    let output = command.output().expect("run compiled build script");
+    assert!(
+        output.status.success(),
+        "compiled build script failed:\n{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    String::from_utf8(output.stdout).expect("build script stdout is UTF-8")
+}
+
+/// Relocating a checkout or reusing a cached `build-script-build` binary across
+/// checkouts must not leave `APLAN_SOURCE_REV` empty or stale (`A2-188`, #61).
+/// Proves `facts.source_identity_survives_relocated_checkout`.
+#[test]
+fn relocated_checkout_retains_and_refreshes_source_identity() {
+    let root = scratch();
+    let original = root.path().join("checkout-before");
+    let relocated = root.path().join("checkout-after");
+    let sibling = root.path().join("checkout-sibling");
+    let target = root.path().join("shared-target");
+    std::fs::create_dir(&original).expect("create original checkout");
+    init_build_identity_fixture(&original);
+
+    let first_rev = git_text(&original, &["rev-parse", "HEAD"]);
+    assert_build_succeeds(&cargo_build(&original, &target, None));
+    assert_eq!(built_revision(&target), first_rev);
+    assert_fresh(&cargo_build(&original, &target, None));
+    let cached_script = compiled_build_script(&target);
+
+    // Move the checkout to a new path, removing `original` so any compile-time
+    // `env!("CARGO_MANIFEST_DIR")` baked into `cached_script` fails with ENOENT.
+    std::fs::rename(&original, &relocated).expect("relocate checkout");
+    let relocated_output = run_compiled_build_script(&cached_script, &relocated);
+    assert!(
+        relocated_output
+            .lines()
+            .any(|line| line == "cargo:rerun-if-env-changed=CARGO_MANIFEST_DIR"),
+        "build script must watch CARGO_MANIFEST_DIR:\n{relocated_output}"
+    );
+    let expected_first = format!("cargo:rustc-env=APLAN_SOURCE_REV={first_rev}");
+    assert!(
+        relocated_output.lines().any(|line| line == expected_first),
+        "cached build script lost source revision after checkout move:\n{relocated_output}"
+    );
+    assert!(
+        !relocated_output.contains("checkout-before"),
+        "cached build script watched the deleted checkout path:\n{relocated_output}"
+    );
+
+    // Executing the exact same cached build script against a second live
+    // checkout at a different commit must report that checkout's revision.
+    std::fs::create_dir(&sibling).expect("create sibling checkout");
+    init_build_identity_fixture(&sibling);
+    git(
+        &sibling,
+        &["commit", "--allow-empty", "-q", "-m", "sibling commit"],
+    );
+    let sibling_rev = git_text(&sibling, &["rev-parse", "HEAD"]);
+    assert_ne!(sibling_rev, first_rev);
+    let sibling_output = run_compiled_build_script(&cached_script, &sibling);
+    let expected_sibling = format!("cargo:rustc-env=APLAN_SOURCE_REV={sibling_rev}");
+    assert!(
+        sibling_output.lines().any(|line| line == expected_sibling),
+        "cached build script read the wrong checkout's HEAD:\n{sibling_output}"
+    );
+
+    // Full Cargo rebuild in the relocated checkout stays fresh and tracks new commits.
+    assert_build_succeeds(&cargo_build(&relocated, &target, None));
+    assert_eq!(built_revision(&target), first_rev);
+    assert_fresh(&cargo_build(&relocated, &target, None));
+
+    git(
+        &relocated,
+        &["commit", "--allow-empty", "-q", "-m", "after relocate"],
+    );
+    let second_rev = git_text(&relocated, &["rev-parse", "HEAD"]);
+    assert_ne!(second_rev, first_rev);
+    assert_build_succeeds(&cargo_build(&relocated, &target, None));
+    assert_eq!(
+        built_revision(&target),
+        second_rev,
+        "relocated checkout stopped refreshing its source revision"
+    );
+}
+
 /// **It answers where nothing else will.**
 ///
 /// No plan and no repository: an adopter asking "is this the build whose output

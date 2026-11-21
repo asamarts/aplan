@@ -64,6 +64,13 @@ to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Fixed
 
+- **`aplan facts --identity` no longer omits `source` after relocating a checkout while reusing
+  `target/`** (`A2-188`, `--require facts.source_identity_survives_relocated_checkout`).
+  `crates/aplan-attest/build.rs` previously baked `env!("CARGO_MANIFEST_DIR")` at build-script
+  compile time and did not watch `CARGO_MANIFEST_DIR`, so moving a checkout caused the cached build
+  script to fail silently against the old path and permanently cache an empty `APLAN_SOURCE_REV`.
+  The build script now reads `CARGO_MANIFEST_DIR` at runtime and emits
+  `cargo:rerun-if-env-changed=CARGO_MANIFEST_DIR`.
 - **Setting `test.timeout_seconds` no longer cuts off or panics `verify --execute`** (`A2-181`,
   `--require verify.test_timeout_bounds_discovery_only`). `test.timeout_seconds` is specified to
   bound discovery (`test.list` and `test.skipped`) rather than execution (ADR-0054), while
