@@ -70,6 +70,14 @@ impl RuleReach {
 /// one joins without anybody remembering (`A1-269`).
 type Switch = (&'static str, fn(&mut crate::validate::Options));
 
+/// The strongest set a repository steers toward, used as "on" when probing
+/// `evidence.require_min_strength` in [`SWITCHES`].
+const MIN_STRENGTH_ON: &[crate::task::EvidenceKind] = &[
+    crate::task::EvidenceKind::Commit,
+    crate::task::EvidenceKind::File,
+    crate::task::EvidenceKind::Test,
+];
+
 const SWITCHES: &[Switch] = &[
     ("require_effort", |o| o.require_effort = true),
     ("detect_drift", |o| o.detect_drift = true),
@@ -79,11 +87,12 @@ const SWITCHES: &[Switch] = &[
     // Any non-empty list turns `APLAN017` on; the strongest set is the one a
     // repository steers toward, so it is what "on" means here.
     ("evidence.require_min_strength", |o| {
-        o.require_min_strength = Some(vec![
-            crate::task::EvidenceKind::Commit,
-            crate::task::EvidenceKind::File,
-            crate::task::EvidenceKind::Test,
-        ]);
+        if o.require_min_strength.as_deref() != Some(MIN_STRENGTH_ON) {
+            o.require_min_strength = Some(MIN_STRENGTH_ON.to_vec());
+            // Measuring whether `APLAN017` was switched off must not fabricate
+            // an `APLAN059` finding for the synthetic `Test` kind above.
+            o.configured_resolvers = None;
+        }
     }),
     // On means the shipped floors, which is what an adopter who sets
     // `require_impact` and nothing else gets. Choosing stricter floors here
@@ -476,6 +485,23 @@ mod switched_off_tests {
         assert!(
             bare.iter().all(|r| r.off.is_none()),
             "nothing is off when nothing was measured as off"
+        );
+    }
+
+    /// Flipping `evidence.require_min_strength` on during a vacuity probe must
+    /// not fabricate an `APLAN059` finding for a repository that has no `test`
+    /// runner configured and never asked for `test` evidence (`A2-025`).
+    #[test]
+    fn probing_min_strength_does_not_report_policy_evidence_unresolvable_as_off() {
+        let plan = plan_of(vec![live("A-1")]);
+        let opts = crate::validate::Options {
+            configured_resolvers: Some(std::collections::BTreeSet::new()),
+            ..crate::validate::Options::default()
+        };
+        let off = switched_off(&plan, &opts);
+        assert!(
+            !off.contains_key("APLAN059"),
+            "APLAN059 is not switched off by evidence.require_min_strength: {off:?}"
         );
     }
 }

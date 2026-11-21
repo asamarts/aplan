@@ -698,6 +698,7 @@ empty cut must be surfaced, not swallowed.
 | `APLAN056` | A task's owner belongs to the declared owner vocabulary | warning | L0 | done (`A1-190`, opt-in) |
 | `APLAN057` | Every inbox entry is one canonical, valid and cross-record-consistent V1 capture | error | L0 | done (`A1-514`) |
 | `APLAN058` | Every cut and tag in `policy[].when` can match this plan | warning | L0 | done (`A2-024`) |
+| `APLAN059` | Every evidence kind required by policy has a configured resolver | warning | L0 | done (`A2-025`) |
 | `APLAN044` | A closed task claims less of the released version than its level implies, without saying why | warning | L0 | done (`A1-312`) |
 
 Every diagnostic carries a stable code, a severity, an optional task id, an optional

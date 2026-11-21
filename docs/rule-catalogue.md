@@ -500,3 +500,16 @@ every cut and tag in policy[].when can match this plan
 - **says:** `policy[0].when.tag` names `unknown-tag`, which no task carries and no `tag_families` entry declares
   - **fix:** Correct `policy[0].when.tag` in `.aplan.yml`, or declare `unknown-tag` in `tag_families` if it is an intended tag that no task carries yet.
 
+## APLAN059 (warning)
+
+every evidence kind required by policy has a configured resolver
+
+- **says:** `evidence.require_min_strength` accepts `test` evidence, but `test` is not configured in `.aplan.yml`, so `test` citations cannot be resolved
+  - **fix:** Configure a `test` runner in `.aplan.yml`, or remove `test` from `evidence.require_min_strength` if tests are not resolved here.
+- **says:** `evidence.require_min_strength` requires `test` evidence, but `test` is not configured in `.aplan.yml`, so `test` citations cannot be resolved
+  - **fix:** Configure a `test` runner in `.aplan.yml`, or remove `test` from `evidence.require_min_strength` if tests are not resolved here.
+- **says:** `policy[0].evidence.require_min_strength` requires `test` evidence, but `test` is not configured in `.aplan.yml`, so `test` citations cannot be resolved
+  - **fix:** Configure a `test` runner in `.aplan.yml`, or remove `test` from `policy[0].evidence.require_min_strength` if tests are not resolved here.
+- **says:** `policy[0].evidence.require_min_strength` requires `url` evidence, but `url.check` is not configured in `.aplan.yml`, so `url` citations cannot be resolved
+  - **fix:** Configure `url.check` in `.aplan.yml`, or remove `url` from `policy[0].evidence.require_min_strength` if URLs are not resolved here.
+

@@ -148,12 +148,27 @@ pub enum EvidenceGitResolver {
 }
 
 /// The configured resolver that opens an evidence reference.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize)]
+#[serde(rename_all = "snake_case")]
 pub enum EvidenceConfiguredResolver {
     /// Run the configured URL checker.
     Url,
     /// Query the configured test runners.
     Test,
+}
+
+impl EvidenceConfiguredResolver {
+    /// The `.aplan.yml` configuration key that enables this resolver.
+    ///
+    /// Shared by `APLAN059` (`check`) and `vacuity` so the missing-configuration
+    /// explanation cannot drift between commands.
+    #[must_use]
+    pub const fn config_key(self) -> &'static str {
+        match self {
+            Self::Url => "url.check",
+            Self::Test => "test",
+        }
+    }
 }
 
 /// What detects that an evidence *reference* stopped resolving.

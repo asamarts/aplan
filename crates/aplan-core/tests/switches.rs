@@ -37,8 +37,16 @@ const NOT_A_SWITCH: &[(&str, &str)] = &[
     (
         "evidence_scopes",
         "a list of scoped policy rules rather than an on/off switch. `APLAN058` checks each \
-         declared `policy[].when` selector against the plan's milestones, tags and tag families; \
-         turning it `on` means inventing policy rules the repository never wrote",
+         declared `policy[].when` selector against the plan's milestones, tags and tag families, \
+         and `APLAN059` checks each `policy[].evidence.require_min_strength` against configured \
+         resolvers; turning it `on` means inventing policy rules the repository never wrote",
+    ),
+    (
+        "configured_resolvers",
+        "the set of configured evidence resolvers declared in `.aplan.yml` (`test`, `url.check`), \
+         not an on/off switch. `APLAN059` warns when a policy requires a kind whose resolver is \
+         absent, while `vacuity` reports resolver-gated verification rules through \
+         `resolver_side_off` using the same keys",
     ),
     (
         "tag_families",

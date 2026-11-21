@@ -5,7 +5,7 @@
 //! boundary between the configuration document and the core/evidence options
 //! consumed by the CLI, MCP, and interactive application layers.
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::path::{Path, PathBuf};
 
 use aplan_config::{Cardinality, Config, MilestoneScope, StatusScope};
@@ -540,6 +540,14 @@ pub fn configured_options(config: &Config, inputs: ConfigurationInputs<'_>) -> O
         })
         .collect();
 
+    let mut configured_resolvers = BTreeSet::new();
+    if config.test.is_some() {
+        configured_resolvers.insert(aplan_core::task::EvidenceConfiguredResolver::Test);
+    }
+    if config.url.is_some() {
+        configured_resolvers.insert(aplan_core::task::EvidenceConfiguredResolver::Url);
+    }
+
     Options {
         require_effort,
         require_impact: config
@@ -553,6 +561,7 @@ pub fn configured_options(config: &Config, inputs: ConfigurationInputs<'_>) -> O
         require_min_strength,
         evidence_scopes,
         exempt_tags,
+        configured_resolvers: Some(configured_resolvers),
         agents_block: None,
         detect_drift: config.detect_drift.unwrap_or(false),
         require_cut_membership: config.require_cut_membership.unwrap_or(false),
@@ -668,6 +677,25 @@ mod tests {
         );
         assert_eq!(options.traces_repository, Some(PathBuf::from("/repo")));
         assert_eq!(options.config_file, Some(PathBuf::from("/repo/.aplan.yml")));
+        assert_eq!(options.configured_resolvers, Some(BTreeSet::new()));
+
+        let with_resolvers = aplan_config::parse_config(
+            "test:\n  list: [echo, t]\n  run: [\"true\", \"{test}\"]\nurl:\n  check: [\"true\", \"{url}\"]\n",
+            Path::new("/repo/.aplan.yml"),
+        )
+        .expect("config with resolvers");
+        let resolved_options = configured_options(&with_resolvers, ConfigurationInputs::default());
+        assert_eq!(
+            resolved_options.configured_resolvers,
+            Some(
+                [
+                    aplan_core::task::EvidenceConfiguredResolver::Test,
+                    aplan_core::task::EvidenceConfiguredResolver::Url,
+                ]
+                .into_iter()
+                .collect()
+            )
+        );
     }
 
     #[test]

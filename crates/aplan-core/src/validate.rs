@@ -10,7 +10,10 @@ use std::path::{Path, PathBuf};
 use crate::diagnostic::{Diagnostic, Report, code};
 use crate::graph::Graph;
 use crate::load::{LoadedTask, Plan};
-use crate::task::{EvidenceCapture, EvidenceKind, Status, is_vacuous_ref};
+use crate::task::{
+    EvidenceCapture, EvidenceConfiguredResolver, EvidenceKind, EvidenceResolution, Status,
+    is_vacuous_ref,
+};
 
 /// Deterministic traced-document work accumulated on the current thread.
 ///
@@ -367,6 +370,15 @@ pub struct Options {
     /// Tags that exempt a task from [`code::WEAK_EVIDENCE`], for work where
     /// nothing stronger than a note exists (a phone call, a regulator letter).
     pub exempt_tags: Vec<String>,
+    /// Configured evidence resolvers declared in `.aplan.yml` (`test`,
+    /// `url.check`), for [`code::POLICY_EVIDENCE_UNRESOLVABLE`] (`APLAN059`).
+    ///
+    /// `None` means the caller did not supply resolver configuration (the
+    /// library default when testing other rules in isolation), so `APLAN059`
+    /// stays silent. Repository adapters (`aplan_app::configured_options`)
+    /// always supply `Some(...)`, so CLI, MCP and TUI evaluate `APLAN059`
+    /// consistently for every `.aplan.yml`.
+    pub configured_resolvers: Option<BTreeSet<EvidenceConfiguredResolver>>,
     /// Turn on drift detection ([`code::TRACE_DRIFT`], `APLAN018`): compare a
     /// `done` task's stored `trace_fingerprints` against the live traced
     /// sections. Off by default; needs `traces_root` to read the documents.
@@ -394,11 +406,11 @@ pub struct Options {
     pub agents_block: Option<AgentsBlock>,
     /// The `.aplan.yml` the options came from, when there was one.
     ///
-    /// Config-level rules (`APLAN029`, `APLAN058`) read it to point at the file
-    /// their finding is about. Every other rule concerns a task and names that
-    /// task's file; config-level findings concern a declaration, and without the
-    /// path they would point nowhere and render without a location (`A1-085`,
-    /// `A1-086`, `A2-024`).
+    /// Config-level rules (`APLAN029`, `APLAN058`, `APLAN059`) read it to point
+    /// at the file their finding is about. Every other rule concerns a task and
+    /// names that task's file; config-level findings concern a declaration, and
+    /// without the path they would point nowhere and render without a location
+    /// (`A1-085`, `A1-086`, `A2-024`, `A2-025`).
     pub config_file: Option<std::path::PathBuf>,
 }
 
@@ -413,6 +425,7 @@ impl Default for Options {
             require_min_strength: None,
             evidence_scopes: Vec::new(),
             exempt_tags: Vec::new(),
+            configured_resolvers: None,
             detect_drift: false,
             require_cut_membership: false,
             tag_families: BTreeMap::new(),
@@ -670,6 +683,7 @@ pub fn validate_with_graph(plan: &Plan, opts: &Options, graph: &Graph<'_>) -> Re
     }
     check_vocabularies(plan, opts, &mut report.diagnostics);
     check_policy_selectors(plan, opts, &mut report.diagnostics);
+    check_policy_evidence_resolvers(opts, &mut report.diagnostics);
     check_agents_block(opts, &mut report.diagnostics);
     check_cancelled_cuts(plan, graph, &mut report.diagnostics);
     check_preference_cycles(plan, graph, &mut report.diagnostics);
@@ -1626,6 +1640,102 @@ fn check_policy_tag_selectors(
             }
         };
         let mut d = Diagnostic::warning(code::POLICY_SELECTOR_UNMATCHED, message)
+            .with_agent_instruction(instruction);
+        if let Some(path) = &opts.config_file {
+            d = d.with_file(path);
+        }
+        out.push(d);
+    }
+}
+
+/// `APLAN059`: every evidence kind required by `evidence.require_min_strength`
+/// or `policy[].evidence.require_min_strength` that needs a configured resolver
+/// has one declared in `.aplan.yml` (`A2-025`).
+///
+/// Built-in Git-resolved kinds (`commit`, `file`) always have a resolver and
+/// never warn. `note` is recorded for human readers by design rather than
+/// machine-resolved (`EvidenceResolution::None`), so it has no missing
+/// configuration to name. An empty `require_min_strength: []` requires nothing
+/// and stays silent.
+fn check_policy_evidence_resolvers(opts: &Options, out: &mut Vec<Diagnostic>) {
+    let Some(configured) = &opts.configured_resolvers else {
+        return;
+    };
+    if let Some(kinds) = &opts.require_min_strength {
+        check_required_evidence_resolvers(
+            "evidence.require_min_strength",
+            kinds,
+            configured,
+            opts,
+            out,
+        );
+    }
+    for (idx, scope) in opts.evidence_scopes.iter().enumerate() {
+        if let Some(kinds) = &scope.require_min_strength {
+            check_required_evidence_resolvers(
+                &format!("policy[{idx}].evidence.require_min_strength"),
+                kinds,
+                configured,
+                opts,
+                out,
+            );
+        }
+    }
+}
+
+fn check_required_evidence_resolvers(
+    policy_key: &str,
+    kinds: &[EvidenceKind],
+    configured: &BTreeSet<EvidenceConfiguredResolver>,
+    opts: &Options,
+    out: &mut Vec<Diagnostic>,
+) {
+    let mut unique: Vec<EvidenceKind> = Vec::new();
+    for &kind in kinds {
+        if !unique.contains(&kind) {
+            unique.push(kind);
+        }
+    }
+    if unique.is_empty() {
+        return;
+    }
+
+    let has_other_satisfied = unique
+        .iter()
+        .any(|kind| match kind.capabilities().resolution {
+            EvidenceResolution::Git(_) | EvidenceResolution::None => true,
+            EvidenceResolution::Configured(resolver) => configured.contains(&resolver),
+        });
+    let verb = if has_other_satisfied {
+        "accepts"
+    } else {
+        "requires"
+    };
+
+    for kind in unique {
+        let EvidenceResolution::Configured(resolver) = kind.capabilities().resolution else {
+            continue;
+        };
+        if configured.contains(&resolver) {
+            continue;
+        }
+        let config_key = resolver.config_key();
+        let kind_name = kind.as_str();
+        let message = format!(
+            "`{policy_key}` {verb} `{kind_name}` evidence, but `{config_key}` is not configured \
+             in `.aplan.yml`, so `{kind_name}` citations cannot be resolved"
+        );
+        let instruction = match resolver {
+            EvidenceConfiguredResolver::Test => format!(
+                "Configure a `{config_key}` runner in `.aplan.yml`, or remove `{kind_name}` from \
+                 `{policy_key}` if tests are not resolved here."
+            ),
+            EvidenceConfiguredResolver::Url => format!(
+                "Configure `{config_key}` in `.aplan.yml`, or remove `{kind_name}` from \
+                 `{policy_key}` if URLs are not resolved here."
+            ),
+        };
+        let mut d = Diagnostic::warning(code::POLICY_EVIDENCE_UNRESOLVABLE, message)
             .with_agent_instruction(instruction);
         if let Some(path) = &opts.config_file {
             d = d.with_file(path);
@@ -8871,6 +8981,144 @@ mod tests {
                 .iter()
                 .any(|d| d.message.contains("`policy[0].when.tag` names `kind-imql`")),
             "unmatched sibling tag must still be reported: {findings:#?}"
+        );
+    }
+
+    #[test]
+    fn policy_evidence_warns_for_unconfigured_top_level_and_scoped_resolvers() {
+        let mut a1 = t("A-1", Status::Todo);
+        a1.tags = vec!["kind-impl".into()];
+        let plan = plan_of(vec![a1]);
+
+        let mut scope_test = policy_scope(&[], &["kind-impl"]);
+        scope_test.require_min_strength = Some(vec![EvidenceKind::Test, EvidenceKind::Test]);
+        let mut scope_empty = policy_scope(&[], &["kind-impl"]);
+        scope_empty.require_min_strength = Some(vec![]);
+
+        let opts = Options {
+            require_effort: false,
+            require_min_strength: Some(vec![EvidenceKind::Commit, EvidenceKind::Url]),
+            evidence_scopes: vec![scope_test, scope_empty],
+            configured_resolvers: Some(BTreeSet::new()),
+            config_file: Some(PathBuf::from(".aplan.yml")),
+            ..Default::default()
+        };
+
+        let report = validate(&plan, &opts);
+        let findings: Vec<&Diagnostic> = report
+            .diagnostics
+            .iter()
+            .filter(|d| d.code == code::POLICY_EVIDENCE_UNRESOLVABLE)
+            .collect();
+        assert_eq!(findings.len(), 2, "{findings:#?}");
+
+        let url_finding = findings
+            .iter()
+            .find(|d| d.message.contains("`evidence.require_min_strength`"))
+            .expect("top-level url finding");
+        assert_eq!(url_finding.severity, crate::Severity::Warning);
+        assert_eq!(url_finding.file, Some(PathBuf::from(".aplan.yml")));
+        assert!(url_finding.message.contains("accepts `url` evidence"));
+        assert!(
+            url_finding
+                .message
+                .contains("`url.check` is not configured")
+        );
+        assert!(
+            url_finding
+                .agent_instruction
+                .as_deref()
+                .expect("instruction")
+                .contains("Configure `url.check`")
+        );
+
+        let test_finding = findings
+            .iter()
+            .find(|d| {
+                d.message
+                    .contains("`policy[0].evidence.require_min_strength`")
+            })
+            .expect("scoped test finding");
+        assert_eq!(test_finding.severity, crate::Severity::Warning);
+        assert_eq!(test_finding.file, Some(PathBuf::from(".aplan.yml")));
+        assert!(test_finding.message.contains("requires `test` evidence"));
+        assert!(test_finding.message.contains("`test` is not configured"));
+        assert!(
+            test_finding
+                .agent_instruction
+                .as_deref()
+                .expect("instruction")
+                .contains("Configure a `test` runner")
+        );
+    }
+
+    #[test]
+    fn policy_evidence_is_silent_when_resolvers_are_configured_or_kinds_need_none() {
+        let mut a1 = t("A-1", Status::Todo);
+        a1.tags = vec!["kind-impl".into()];
+        let plan = plan_of(vec![a1]);
+
+        let mut scope = policy_scope(&[], &["kind-impl"]);
+        scope.require_min_strength = Some(vec![EvidenceKind::Test, EvidenceKind::Url]);
+
+        // Both resolvers configured -> silent.
+        let configured = Options {
+            require_effort: false,
+            require_min_strength: Some(vec![
+                EvidenceKind::Commit,
+                EvidenceKind::File,
+                EvidenceKind::Note,
+                EvidenceKind::Test,
+            ]),
+            evidence_scopes: vec![scope.clone()],
+            configured_resolvers: Some(
+                [
+                    EvidenceConfiguredResolver::Test,
+                    EvidenceConfiguredResolver::Url,
+                ]
+                .into_iter()
+                .collect(),
+            ),
+            ..Default::default()
+        };
+        assert!(
+            validate(&plan, &configured)
+                .diagnostics
+                .iter()
+                .all(|d| d.code != code::POLICY_EVIDENCE_UNRESOLVABLE)
+        );
+
+        // Git-backed kinds and notes need no configured resolver -> silent even with empty set.
+        let builtin_only = Options {
+            require_effort: false,
+            require_min_strength: Some(vec![
+                EvidenceKind::Commit,
+                EvidenceKind::File,
+                EvidenceKind::Note,
+            ]),
+            configured_resolvers: Some(BTreeSet::new()),
+            ..Default::default()
+        };
+        assert!(
+            validate(&plan, &builtin_only)
+                .diagnostics
+                .iter()
+                .all(|d| d.code != code::POLICY_EVIDENCE_UNRESOLVABLE)
+        );
+
+        // Library callers leaving `configured_resolvers: None` stay silent.
+        let omitted = Options {
+            require_effort: false,
+            require_min_strength: Some(vec![EvidenceKind::Test]),
+            evidence_scopes: vec![scope],
+            configured_resolvers: None,
+            ..Default::default()
+        };
+        assert!(
+            validate(&plan, &omitted)
+                .diagnostics
+                .iter()
+                .all(|d| d.code != code::POLICY_EVIDENCE_UNRESOLVABLE)
         );
     }
 }

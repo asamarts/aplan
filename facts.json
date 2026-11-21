@@ -1418,7 +1418,7 @@
     "evidence_kinds": 5,
     "formats": 9,
     "mcp_tools": 13,
-    "rules": 58
+    "rules": 59
   },
   "evidence_kinds": [
     "commit",
@@ -1788,6 +1788,11 @@
       "code": "APLAN058",
       "severity": "warning",
       "title": "every cut and tag in policy[].when can match this plan"
+    },
+    {
+      "code": "APLAN059",
+      "severity": "warning",
+      "title": "every evidence kind required by policy has a configured resolver"
     }
   ],
   "schema_version": "v1",
