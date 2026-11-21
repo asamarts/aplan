@@ -31,6 +31,7 @@ blocked_by:
 - A2-181
 - A2-187
 - A2-188
+- A2-189
 tags:
 - milestone
 - v0.7
