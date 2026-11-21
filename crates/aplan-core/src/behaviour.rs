@@ -357,6 +357,21 @@ pub const ALL: &[Behaviour] = &[
                finding retains the complete referenced id and recommends the exact source family",
         proof: &["overlapping_near_prefixes_are_matched_longest_first"],
     },
+    // `A2-026`. `check-docs` previously learned only numeric-core families, so
+    // non-numeric prefixed milestones and releases such as `M-one` or `R-a`
+    // taught no prefix and typos like `M-oen` or unknown `R-v9` passed
+    // silently.
+    Behaviour {
+        name: "check_docs.recognises_non_numeric_prefixed_ids",
+        what: "`check-docs` learns uppercase-prefixed non-numeric id families (including \
+               milestone and release ids such as `M-one`, `M-tui-quality` and `R-a`), reports \
+               unknown ids of those shapes with did-you-mean suggestions, and leaves bare words \
+               and lowercase hyphenated prose untouched",
+        proof: &[
+            "non_numeric_prefixed_ids_are_checked_while_ordinary_words_stay_silent",
+            "docs::check_docs_recognises_non_numeric_prefixed_ids_end_to_end",
+        ],
+    },
     // `A1-557`. The `check-docs` command already existed, but its plan-learned
     // scanner stopped a reference at the numeric core even when the same plan
     // used hyphenated suffixes in that family. The command name cannot tell an

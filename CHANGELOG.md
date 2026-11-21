@@ -21,6 +21,18 @@ to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Changed
 
+- **`aplan check-docs` now checks non-numeric uppercase-prefixed task, milestone and release ids
+  by default** (`A2-026`, `--require check_docs.recognises_non_numeric_prefixed_ids`). Previously,
+  `check-docs` learned only families with a numeric core, so non-numeric milestone and release ids
+  such as `M-one`, `M-tui-quality` or `R-a` taught no prefix and typos like `M-oen` or unknown
+  siblings like `R-v9` passed silently. `check-docs` now learns uppercase code-style prefixes
+  before the first hyphen (`M-`, `R-`, `OPS-`, `A1B-`, including multi-hyphen shapes where the plan
+  uses them) directly from the plan, reports unknown ids of those shapes with did-you-mean
+  suggestions, and leaves bare words (`alpha`) and lowercase or title-case hyphenated prose
+  (`auth-login`, `Pre-flight`) untouched. **This change is enabled by default (not opt-in) and can
+  fail a document that passed before** if it mentions an unknown word matching a non-numeric
+  uppercase prefix your plan uses.
+
 - **YAML is parsed by the safe Rust `ayaml` 0.2.2** (`A2-009`, `A2-166`, `A2-169`, `A2-179`,
   `A2-187`). The
   C-derived `yaml_serde` / `libyaml-rs` bridge leaves the dependency graphs of the product and of

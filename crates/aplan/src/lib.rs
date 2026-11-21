@@ -1076,8 +1076,10 @@ enum Command {
     /// project with a plan document ends up writing this check; here it is.
     ///
     /// Ids come from the plan, never from a pattern: the prefixes its own ids
-    /// use are what a word has to carry to be read as a reference. Exits 1 when
-    /// a document names a task the plan does not have.
+    /// use -- numeric-core families like `T-042` or `M-v0.8`, and uppercase
+    /// non-numeric prefixes like `M-one` or `R-a` -- are what a word has to
+    /// carry to be read as a reference. Exits 1 when a document names a task,
+    /// milestone or release the plan does not have.
     ///
     /// A second check, off unless `docs.membership` in `.aplan.yml` turns it on:
     /// where a document lists a cut's tasks beside a `M-<cut>` milestone, those
@@ -15939,9 +15941,10 @@ fn cmd_check_docs(
     // to prevent, arriving from the tool itself (`A1-148`).
     if aplan_interop::docs::Vocabulary::of(&ids).is_empty() {
         anyhow::bail!(
-            "this plan's ids teach no prefix (an id with a numeric core, like `T-042` or \
-             `M-p0-design`, teaches its family), so nothing in a document can be told from an \
-             ordinary word; `check-docs` checked nothing"
+            "this plan's ids teach no prefix (an id with a numeric core like `T-042` or \
+             `M-p0-design`, or an uppercase prefix like `M-one` or `R-a`, teaches its family), \
+             so nothing in a document can be told from an ordinary word; `check-docs` checked \
+             nothing"
         );
     }
 

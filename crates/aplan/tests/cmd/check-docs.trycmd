@@ -186,6 +186,6 @@ gate that cannot fire says so instead: reporting `ok` here would be the same
 ```
 $ aplan --root wordy check-docs wordy/NOTES.md
 ? 2
-aplan: this plan's ids teach no prefix (an id with a numeric core, like `T-042` or `M-p0-design`, teaches its family), so nothing in a document can be told from an ordinary word; `check-docs` checked nothing
+aplan: this plan's ids teach no prefix (an id with a numeric core like `T-042` or `M-p0-design`, or an uppercase prefix like `M-one` or `R-a`, teaches its family), so nothing in a document can be told from an ordinary word; `check-docs` checked nothing
 
 ```
