@@ -131,20 +131,19 @@ runs:
         mkdir -p "$dir"
 
         echo "==> Installing aplan ${tag} from ${SOURCE_REPO}"
-        gh release download "$tag" \
-          --repo "$SOURCE_REPO" \
-          --pattern "$asset" \
-          --pattern "${asset}.sha256" \
-          --dir "$dir" \
-          --clobber
+        "$ACTION_PATH/ci/scripts/download-action-release.sh" \
+          "$tag" "$SOURCE_REPO" "$asset" "$dir"
 
         # Verify the checksum names these exact bytes, then authenticate every
         # release from v0.6.0 onward to this repository's release workflow and
         # exact tag before anything is extracted or executed. The helper keeps
         # the finite pre-attestation release set explicit rather than turning a
         # failed provenance lookup into a silent checksum-only fallback.
-        "$ACTION_PATH/ci/scripts/verify-action-release.sh" \
-          "$tag" "$SOURCE_REPO" "${dir}/${asset}" "${dir}/${asset}.sha256"
+        if ! "$ACTION_PATH/ci/scripts/verify-action-release.sh" \
+          "$tag" "$SOURCE_REPO" "${dir}/${asset}" "${dir}/${asset}.sha256"; then
+          echo "::error::Install failed: release verification failed for aplan ${tag} from ${SOURCE_REPO}; no plan check ran." >&2
+          exit 1
+        fi
 
         tar -xzf "${dir}/${asset}" -C "$dir"
         chmod +x "${dir}/aplan"
