@@ -239,8 +239,8 @@ The V1 reader validates canonical regular-file membership, filename/id agreement
 whole-second instants, configured kinds, terminal-field combinations and source uniqueness under
 `APLAN057`. It retains a deterministic typed snapshot separate from `Plan`: focused reads may show
 the complete record, while list projections omit source keys, bound search and result count, filter
-kind/state/label/revisit eligibility, and order parsed `captured_at` newest first with full id as the
-tie breaker. Every time-dependent projection takes an injected clock and reports its evaluation
+kind/state/label/revisit eligibility, and order parsed `captured_at` newest first with full id
+descending as the tie breaker. Every time-dependent projection takes an injected clock and reports its evaluation
 instant and deferred count. Source retry resolution compares the proposed effective values with the
 stored snapshot, not with configuration that may have changed later.
 
