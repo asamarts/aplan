@@ -8,6 +8,12 @@ to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Added
 
+- **Policies requiring an evidence kind with no configured resolver now warn (`APLAN059`,
+  `A2-025`)**. `aplan check` warns when `evidence.require_min_strength` or
+  `policy[].evidence.require_min_strength` names `test` without a configured `test` runner or
+  `url` without `url.check`, pointing at `.aplan.yml` and naming the same configuration key that
+  `aplan vacuity` reports as off.
+
 - **Policy selectors naming an unmatched cut or tag now warn with a suggestion (`APLAN058`,
   `A2-024`)**. `aplan check` warns when `policy[].when.cut` matches neither an existing milestone
   id nor a cut label, or when `policy[].when.tag` names a tag that no task carries and no

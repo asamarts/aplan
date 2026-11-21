@@ -1419,6 +1419,29 @@ define_rules! {
     PolicySelectorUnmatched => POLICY_SELECTOR_UNMATCHED = "APLAN058", Warning,
         "every cut and tag in policy[].when can match this plan",
         points_at: None;
+    /// Every evidence kind named by `evidence.require_min_strength` or
+    /// `policy[].evidence.require_min_strength` that requires a configured
+    /// resolver has one declared in `.aplan.yml`.
+    ///
+    /// Requiring `test` evidence without a `test` runner (or `url` evidence
+    /// without `url.check`) leaves the policy unenforced: `close` accepts an
+    /// arbitrary citation with an informational note, `vacuity` reports the
+    /// resolver-gated rules as not run because that configuration key is off,
+    /// and under `deny_warnings` nothing blocks. A repository that believes it
+    /// requires tests does not learn that nothing resolves them.
+    ///
+    /// Built-in Git-resolved kinds (`commit`, `file`) always have a resolver
+    /// and never trigger this rule. `note` is recorded for human readers by
+    /// design rather than machine-resolved, so it is not flagged as missing a
+    /// resolver. An empty `require_min_strength: []` requires nothing and stays
+    /// silent.
+    ///
+    /// A warning, matching `APLAN029` and `APLAN058`: a repository may stage
+    /// its evidence policy before wiring a runner, and `deny_warnings` makes
+    /// the finding block the gate.
+    PolicyEvidenceUnresolvable => POLICY_EVIDENCE_UNRESOLVABLE = "APLAN059", Warning,
+        "every evidence kind required by policy has a configured resolver",
+        points_at: None;
 }
 
 /// A repository's verdict policy: what makes a report fail its build.
@@ -1767,7 +1790,7 @@ mod tests {
         // Every rule's `code()` is one of the module constants and vice versa is
         // structurally guaranteed by the macro; this pins the count so dropping
         // a row is a visible change.
-        assert_eq!(Rule::ALL.len(), 58);
+        assert_eq!(Rule::ALL.len(), 59);
     }
 
     /// Severity is declared per rule in the macro. Pin the warnings so a
@@ -1786,7 +1809,8 @@ mod tests {
                 "APLAN009", "APLAN016", "APLAN018", "APLAN019", "APLAN021", "APLAN023", "APLAN024",
                 "APLAN025", "APLAN026", "APLAN027", "APLAN029", "APLAN035", "APLAN036", "APLAN037",
                 "APLAN038", "APLAN039", "APLAN040", "APLAN041", "APLAN042", "APLAN043", "APLAN044",
-                "APLAN045", "APLAN051", "APLAN052", "APLAN053", "APLAN054", "APLAN056", "APLAN058"
+                "APLAN045", "APLAN051", "APLAN052", "APLAN053", "APLAN054", "APLAN056", "APLAN058",
+                "APLAN059"
             ]
         );
     }
@@ -1874,6 +1898,11 @@ mod points_at_tests {
                 // about a `policy[].when` selector in `.aplan.yml`, not about a
                 // task; the diagnostic carries the config file path when known
                 "APLAN058",
+                // about `evidence.require_min_strength` or
+                // `policy[].evidence.require_min_strength` in `.aplan.yml`, not
+                // about a task; the diagnostic carries the config file path
+                // when known
+                "APLAN059",
             ],
             "the set of rules with no location changed; if that is deliberate, say so here"
         );

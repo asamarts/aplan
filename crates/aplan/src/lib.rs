@@ -14195,6 +14195,7 @@ fn resolver_side_off(
         .map(|e| e.reference.clone())
         .collect();
 
+    let test_key = aplan_core::task::EvidenceConfiguredResolver::Test.config_key();
     match &config.test {
         // No runner at all: nothing resolves a `test` citation, so every rule
         // over one is inert.
@@ -14203,11 +14204,11 @@ fn resolver_side_off(
             // that asks which crate *raises* a rule reads `insert(code::X,` as
             // the read-only idiom it is, and a code buried in an array literal
             // reads as raising one (`A1-274`).
-            out.insert(aplan_core::diagnostic::code::TEST_UNRESOLVED, "test");
-            out.insert(aplan_core::diagnostic::code::TEST_FAILED, "test");
-            out.insert(aplan_core::diagnostic::code::TEST_IRRELEVANT, "test");
-            out.insert(aplan_core::diagnostic::code::RUNNER_LISTS_NOTHING, "test");
-            out.insert(aplan_core::diagnostic::code::RUN_PROVES_NOTHING, "test");
+            out.insert(aplan_core::diagnostic::code::TEST_UNRESOLVED, test_key);
+            out.insert(aplan_core::diagnostic::code::TEST_FAILED, test_key);
+            out.insert(aplan_core::diagnostic::code::TEST_IRRELEVANT, test_key);
+            out.insert(aplan_core::diagnostic::code::RUNNER_LISTS_NOTHING, test_key);
+            out.insert(aplan_core::diagnostic::code::RUN_PROVES_NOTHING, test_key);
         }
         // A runner that claims no locality cannot demonstrate a mismatch, which
         // is `APLAN025`'s own early return. `p00002` is the case: its single
@@ -14220,7 +14221,10 @@ fn resolver_side_off(
         }
     }
     if config.url.is_none() {
-        out.insert(aplan_core::diagnostic::code::URL_UNREACHABLE, "url.check");
+        out.insert(
+            aplan_core::diagnostic::code::URL_UNREACHABLE,
+            aplan_core::task::EvidenceConfiguredResolver::Url.config_key(),
+        );
     }
     out
 }

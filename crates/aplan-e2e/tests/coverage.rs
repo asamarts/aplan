@@ -66,6 +66,11 @@ struct Scenario {
     owners: &'static [&'static str],
     /// Declare scoped evidence policies (enables `APLAN058`).
     evidence_scopes: Vec<aplan_core::validate::EvidenceScope>,
+    /// Explicit top-level `evidence.require_min_strength` override (for `APLAN059`).
+    min_strength: Option<Vec<EvidenceKind>>,
+    /// Configured evidence resolvers declared in `.aplan.yml` (enables `APLAN059`).
+    configured_resolvers:
+        Option<std::collections::BTreeSet<aplan_core::task::EvidenceConfiguredResolver>>,
     /// The generated block `export-agents-md` would write now, compared against
     /// the scenario's own `AGENTS.md` (enables `APLAN041`). `None` is a caller
     /// that cannot render one, which switches the rule off.
@@ -124,6 +129,16 @@ impl Scenario {
         self
     }
 
+    fn min_strength(mut self, kinds: &[EvidenceKind]) -> Self {
+        self.min_strength = Some(kinds.to_vec());
+        self
+    }
+
+    fn resolvers(mut self, resolvers: &[aplan_core::task::EvidenceConfiguredResolver]) -> Self {
+        self.configured_resolvers = Some(resolvers.iter().copied().collect());
+        self
+    }
+
     /// What the contract would say now, for `APLAN041` (`A1-273`). The file it
     /// is compared against is an ordinary scenario file at `AGENTS.md`.
     fn agents_block(mut self, current: &'static str) -> Self {
@@ -147,6 +162,8 @@ fn scen(name: &'static str, rule: Rule, expect: Expect, files: Vec<(String, Stri
         tag_families: None,
         owners: &[],
         evidence_scopes: Vec::new(),
+        min_strength: None,
+        configured_resolvers: None,
         agents_block: None,
     }
 }
@@ -479,6 +496,7 @@ fn corpus() -> Vec<Scenario> {
     all.extend(tag_family_rules());
     all.extend(owner_vocabulary_rules());
     all.extend(policy_selector_rules());
+    all.extend(policy_evidence_rules());
     all.extend(drift_rules());
     all.extend(interpolated_reason_branches());
     all.extend(partial_stamp_rules());
@@ -1853,6 +1871,98 @@ fn policy_selector_rules() -> Vec<Scenario> {
     ]
 }
 
+fn policy_evidence_rules() -> Vec<Scenario> {
+    use aplan_core::task::EvidenceConfiguredResolver;
+
+    let mut scoped_test = policy_scope_for(&[], &["kind-impl"]);
+    scoped_test.require_min_strength = Some(vec![EvidenceKind::Test]);
+
+    let mut scoped_url = policy_scope_for(&[], &["kind-impl"]);
+    scoped_url.require_min_strength = Some(vec![EvidenceKind::Url]);
+
+    vec![
+        scen(
+            "policy-evidence-scoped-test-fires",
+            Rule::PolicyEvidenceUnresolvable,
+            Fires,
+            vec![
+                tf(
+                    "a",
+                    "id: A-1\ntitle: A-1\nphase: 0\nstatus: todo\ntags: [kind-impl]",
+                ),
+                doc(
+                    ".aplan.yml",
+                    "policy:\n  - when: { tag: [kind-impl] }\n    evidence:\n      require_min_strength: [test]\n",
+                ),
+            ],
+        )
+        .policy_scope(scoped_test.clone())
+        .resolvers(&[]),
+        scen(
+            "policy-evidence-top-level-test-fires",
+            Rule::PolicyEvidenceUnresolvable,
+            Fires,
+            vec![
+                tf("a", "id: A-1\ntitle: A-1\nphase: 0\nstatus: todo"),
+                doc(
+                    ".aplan.yml",
+                    "evidence:\n  require_min_strength: [test]\n",
+                ),
+            ],
+        )
+        .min_strength(&[EvidenceKind::Test])
+        .resolvers(&[]),
+        scen(
+            "policy-evidence-mixed-test-fires",
+            Rule::PolicyEvidenceUnresolvable,
+            Fires,
+            vec![
+                tf("a", "id: A-1\ntitle: A-1\nphase: 0\nstatus: todo"),
+                doc(
+                    ".aplan.yml",
+                    "evidence:\n  require_min_strength: [commit, test]\n",
+                ),
+            ],
+        )
+        .min_strength(&[EvidenceKind::Commit, EvidenceKind::Test])
+        .resolvers(&[]),
+        scen(
+            "policy-evidence-url-fires",
+            Rule::PolicyEvidenceUnresolvable,
+            Fires,
+            vec![
+                tf(
+                    "a",
+                    "id: A-1\ntitle: A-1\nphase: 0\nstatus: todo\ntags: [kind-impl]",
+                ),
+                doc(
+                    ".aplan.yml",
+                    "policy:\n  - when: { tag: [kind-impl] }\n    evidence:\n      require_min_strength: [url]\n",
+                ),
+            ],
+        )
+        .policy_scope(scoped_url.clone())
+        .resolvers(&[]),
+        scen(
+            "policy-evidence-silent",
+            Rule::PolicyEvidenceUnresolvable,
+            Silent,
+            vec![
+                tf(
+                    "a",
+                    "id: A-1\ntitle: A-1\nphase: 0\nstatus: todo\ntags: [kind-impl]",
+                ),
+            ],
+        )
+        .min_strength(&[EvidenceKind::Commit, EvidenceKind::Test])
+        .policy_scope(scoped_url)
+        .resolvers(&[
+            EvidenceConfiguredResolver::Test,
+            EvidenceConfiguredResolver::Url,
+        ]),
+    ]
+}
+
 /// `APLAN027`, split out because `milestone_rules` outgrew the line limit when
 /// this arrived: the gate noticing a function had become a list.
 fn cancelled_cut_rules() -> Vec<Scenario> {
@@ -1943,9 +2053,10 @@ fn options_for(s: &Scenario, dir: &std::path::Path) -> Options {
             release: aplan_core::task::VersionImpact::None,
         }),
         traces_root: s.traces_root.then(|| dir.to_path_buf()),
-        require_min_strength: s
-            .require_strong
-            .then(|| vec![EvidenceKind::Commit, EvidenceKind::Test, EvidenceKind::File]),
+        require_min_strength: s.min_strength.clone().or_else(|| {
+            s.require_strong
+                .then(|| vec![EvidenceKind::Commit, EvidenceKind::Test, EvidenceKind::File])
+        }),
         detect_drift: s.detect_drift,
         require_cut_membership: s.require_cut_membership,
         tag_families: if let Some(members) = &s.tag_families {
@@ -1957,6 +2068,12 @@ fn options_for(s: &Scenario, dir: &std::path::Path) -> Options {
         },
         owners: s.owners.iter().map(|owner| (*owner).to_string()).collect(),
         evidence_scopes: s.evidence_scopes.clone(),
+        configured_resolvers: s.configured_resolvers.clone(),
+        config_file: s
+            .files
+            .iter()
+            .any(|(rel, _)| rel == ".aplan.yml")
+            .then(|| dir.join(".aplan.yml")),
         agents_block: s.agents_block.map(|current| aplan_core::AgentsBlock {
             path: dir.join("AGENTS.md"),
             current: current.to_string(),

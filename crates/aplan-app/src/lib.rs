@@ -3397,6 +3397,11 @@ fn validation_policy_digest(options: &Options, verdict: &Verdict) -> String {
     );
     hash_json_part(&mut digest, b"evidence_scopes", &options.evidence_scopes);
     hash_json_part(&mut digest, b"exempt_tags", &options.exempt_tags);
+    hash_json_part(
+        &mut digest,
+        b"configured_resolvers",
+        &options.configured_resolvers,
+    );
     hash_part(
         &mut digest,
         b"detect_drift",

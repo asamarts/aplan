@@ -323,3 +323,224 @@ fn a_scope_naming_an_unknown_cut_or_tag_warns_with_a_suggestion() {
     assert_eq!(clean.code, 0, "valid selectors must pass:\n{clean_all}");
     assert!(!clean_all.contains("APLAN058"), "{clean_all}");
 }
+
+fn assert_aplan059_findings(dir: &std::path::Path) {
+    let out = common::run(dir, &["check", "--format", "json"]);
+    assert_eq!(
+        out.code,
+        1,
+        "deny_warnings must block on APLAN059:\n{}",
+        out.text()
+    );
+    let doc: serde_json::Value = serde_json::from_str(&out.stdout).expect("json report");
+    let aplan059: Vec<&serde_json::Value> = doc["diagnostics"]
+        .as_array()
+        .expect("diagnostics")
+        .iter()
+        .filter(|d| d["code"].as_str() == Some("APLAN059"))
+        .collect();
+    assert_eq!(aplan059.len(), 2, "{doc:#}");
+    assert!(
+        aplan059.iter().any(|d| {
+            let msg = d["message"].as_str().unwrap_or_default();
+            msg.contains("`evidence.require_min_strength`")
+                && msg.contains("`url`")
+                && msg.contains("`url.check`")
+        }),
+        "missing top-level url warning: {aplan059:#?}"
+    );
+    assert!(
+        aplan059.iter().any(|d| {
+            let msg = d["message"].as_str().unwrap_or_default();
+            msg.contains("`policy[0].evidence.require_min_strength`")
+                && msg.contains("`test`")
+                && msg.contains("not configured")
+        }),
+        "missing scoped test warning: {aplan059:#?}"
+    );
+    for d in &aplan059 {
+        assert_eq!(d["severity"].as_str(), Some("warning"), "{d:#}");
+        assert!(
+            d["file"]
+                .as_str()
+                .is_some_and(|f| f.ends_with(".aplan.yml")),
+            "APLAN059 should point at .aplan.yml: {d:#}"
+        );
+    }
+}
+
+/// `APLAN059` (`A2-025`, #33 item 6): requiring an evidence kind with no
+/// configured resolver warns in `check` (blocking under `deny_warnings`),
+/// names the policy entry and the missing `.aplan.yml` key consistently with
+/// `vacuity`, and clears once the resolver is configured.
+#[test]
+fn a_policy_requiring_an_unconfigured_resolver_warns_and_agrees_with_vacuity() {
+    let dir = tempfile::Builder::new()
+        .tempdir_in(aplan_core::fixture::fixture_root())
+        .expect("tempdir");
+    plan(
+        dir.path(),
+        "deny_warnings: true\n\
+         evidence:\n  require_min_strength: [commit, url]\n\
+         policy:\n  - when: { tag: [spike] }\n    evidence:\n      require_min_strength: [test]\n",
+    );
+    // Add a task citing a test and url so `vacuity` has subjects for both
+    // resolver-gated rules and names the exact config keys `test` and `url.check`.
+    std::fs::write(
+        dir.path().join("aplan/tasks/T-3.md"),
+        "---\nid: T-3\ntitle: cited test and url\nphase: 1\nstatus: done\neffort_days: 1\n\
+         paths: [a.txt]\ntags: [spike]\nevidence:\n  - kind: test\n    ref: bogus_test\n\
+         \x20 - kind: url\n    ref: https://example.invalid/\n---\n\n## Why\n\nx\n",
+    )
+    .expect("task");
+
+    assert_aplan059_findings(dir.path());
+
+    // `vacuity` uses the same `test` and `url.check` keys and never reports
+    // `APLAN059` as switched off.
+    let vac = common::run(dir.path(), &["vacuity"]);
+    let vac_text = vac.text();
+    assert!(
+        vac_text.contains("APLAN013") && vac_text.contains("`test` is off"),
+        "vacuity should report `test` off: {vac_text}"
+    );
+    assert!(
+        vac_text.contains("APLAN016") && vac_text.contains("`url.check` is off"),
+        "vacuity should report `url.check` off: {vac_text}"
+    );
+    assert!(
+        !vac_text.contains("APLAN059"),
+        "vacuity must not report APLAN059 as switched off: {vac_text}"
+    );
+
+    // Configure both resolvers (and update T-2 to cite a test so APLAN017 is
+    // satisfied); `APLAN059` disappears cleanly.
+    std::fs::write(
+        dir.path().join("aplan/tasks/T-2.md"),
+        "---\nid: T-2\ntitle: spike with test\nphase: 1\nstatus: done\nowner: t\n\
+         effort_days: 1\npaths: [a.txt]\ntags: [spike]\nevidence:\n  - kind: test\n    ref: ok_test\n\
+         ---\n\n## Why\n\nx\n",
+    )
+    .expect("T-2");
+    std::fs::write(
+        dir.path().join(".aplan.yml"),
+        "deny_warnings: true\n\
+         test:\n  list: [echo, ok_test]\n  run: [\"true\", \"{test}\"]\n\
+         url:\n  check: [\"true\", \"{url}\"]\n\
+         evidence:\n  require_min_strength: [commit, url]\n\
+         policy:\n  - when: { tag: [spike] }\n    evidence:\n      require_min_strength: [test]\n",
+    )
+    .expect("config with resolvers");
+
+    let clean = common::run(dir.path(), &["check"]);
+    assert_eq!(
+        clean.code,
+        0,
+        "configured resolvers must clear APLAN059:\n{}",
+        clean.text()
+    );
+    assert!(!clean.text().contains("APLAN059"), "{}", clean.text());
+}
+
+/// The #33 item 6 end-to-end flow: with a scoped `require_min_strength: [test]`
+/// and no `test` runner under `deny_warnings: true`, both `verify` and MCP
+/// `check` block on `APLAN059`; once a runner is configured, `check` passes and
+/// `close --evidence test:no_such_test_anywhere` is refused with `APLAN013`.
+#[test]
+fn unconfigured_test_policy_blocks_verify_and_mcp_until_a_runner_is_added() {
+    let dir = tempfile::Builder::new()
+        .tempdir_in(aplan_core::fixture::fixture_root())
+        .expect("tempdir");
+    let root = dir.path();
+    std::fs::create_dir_all(root.join("aplan/tasks")).expect("tasks");
+    std::fs::write(
+        root.join(".aplan.yml"),
+        "deny_warnings: true\n\
+         policy:\n  - when: { tag: [kind-impl] }\n    evidence:\n      require_min_strength: [test]\n",
+    )
+    .expect("config");
+    std::fs::write(
+        root.join("aplan/tasks/T-1.md"),
+        "---\nid: T-1\ntitle: impl task\nphase: 1\nstatus: todo\neffort_days: 1\n\
+         paths: [a.txt]\ntags: [kind-impl]\n---\n\n## Why\n\nx\n",
+    )
+    .expect("task");
+    std::fs::write(root.join("a.txt"), "hello\n").expect("file");
+    for args in [
+        &["init", "-q"][..],
+        &["config", "user.email", "t@example.invalid"],
+        &["config", "user.name", "t"],
+        &["add", "-A"],
+        &["commit", "-qm", "init"],
+    ] {
+        let out = std::process::Command::new("git")
+            .args(args)
+            .current_dir(root)
+            .output()
+            .expect("git");
+        assert!(out.status.success(), "git {args:?}");
+    }
+
+    let verified = common::run(root, &["verify"]);
+    assert_eq!(
+        verified.code,
+        1,
+        "verify must deny on APLAN059:\n{}",
+        verified.text()
+    );
+    assert!(verified.text().contains("APLAN059"), "{}", verified.text());
+
+    let resolved = aplan_app::resolve_explicit_root(root.to_str().expect("utf8")).expect("root");
+    let options = aplan_app::configured_options(
+        &resolved.config,
+        aplan_app::ConfigurationInputs {
+            directory: resolved.configuration_directory.as_deref(),
+            file: resolved.configuration_file.clone(),
+            traces_repository: Some(resolved.repository_root.clone()),
+            ..Default::default()
+        },
+    );
+    let policy = aplan_mcp::Policy {
+        id_strategy: resolved.config.id_strategy.unwrap_or_default(),
+        options: options.clone(),
+        verdict: aplan_app::configured_verdict(&resolved.config),
+        verify: aplan_app::configured_verification(
+            &resolved.config,
+            resolved.configuration_file.clone(),
+            options.traces_root.clone(),
+        ),
+        repo_root: resolved.repository_root.clone(),
+    };
+    let mcp = aplan_mcp::tools::check(&resolved.plan_root, &policy).expect("mcp check");
+    assert_eq!(mcp["denied"], serde_json::json!(true), "{mcp:#}");
+    assert!(
+        mcp["diagnostics"]
+            .as_array()
+            .expect("diagnostics")
+            .iter()
+            .any(|d| d["code"].as_str() == Some("APLAN059")),
+        "MCP check must report APLAN059: {mcp:#}"
+    );
+
+    // Wire a runner: APLAN059 clears, and closing with an unresolvable test is refused.
+    std::fs::write(
+        root.join(".aplan.yml"),
+        "deny_warnings: true\n\
+         test:\n  list: [echo, real_test]\n  run: [\"true\", \"{test}\"]\n\
+         policy:\n  - when: { tag: [kind-impl] }\n    evidence:\n      require_min_strength: [test]\n",
+    )
+    .expect("config with runner");
+    let ok = common::run(root, &["check"]);
+    assert_eq!(ok.code, 0, "{}", ok.text());
+    let refused = common::run(
+        root,
+        &["close", "T-1", "--evidence", "test:no_such_test_anywhere"],
+    );
+    assert_ne!(
+        refused.code,
+        0,
+        "bogus test must be refused:\n{}",
+        refused.text()
+    );
+    assert!(refused.text().contains("APLAN013"), "{}", refused.text());
+}

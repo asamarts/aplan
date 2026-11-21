@@ -928,13 +928,14 @@ fn resolver_side_off(
         .filter(|evidence| evidence.kind == EvidenceKind::Test)
         .map(|evidence| evidence.reference.clone())
         .collect::<Vec<_>>();
+    let test_key = aplan_core::task::EvidenceConfiguredResolver::Test.config_key();
     match &config.test {
         None => {
-            out.insert(aplan_core::code::TEST_UNRESOLVED, "test");
-            out.insert(aplan_core::code::TEST_FAILED, "test");
-            out.insert(aplan_core::code::TEST_IRRELEVANT, "test");
-            out.insert(aplan_core::code::RUNNER_LISTS_NOTHING, "test");
-            out.insert(aplan_core::code::RUN_PROVES_NOTHING, "test");
+            out.insert(aplan_core::code::TEST_UNRESOLVED, test_key);
+            out.insert(aplan_core::code::TEST_FAILED, test_key);
+            out.insert(aplan_core::code::TEST_IRRELEVANT, test_key);
+            out.insert(aplan_core::code::RUNNER_LISTS_NOTHING, test_key);
+            out.insert(aplan_core::code::RUN_PROVES_NOTHING, test_key);
         }
         Some(runners) if !aplan_evidence::claims_locality(runners, &cited) => {
             out.insert(aplan_core::code::TEST_IRRELEVANT, "test.covers");
@@ -942,7 +943,10 @@ fn resolver_side_off(
         Some(_) => {}
     }
     if config.url.is_none() {
-        out.insert(aplan_core::code::URL_UNREACHABLE, "url.check");
+        out.insert(
+            aplan_core::code::URL_UNREACHABLE,
+            aplan_core::task::EvidenceConfiguredResolver::Url.config_key(),
+        );
     }
     out
 }
