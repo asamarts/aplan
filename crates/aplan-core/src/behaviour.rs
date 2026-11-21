@@ -357,6 +357,21 @@ pub const ALL: &[Behaviour] = &[
                finding retains the complete referenced id and recommends the exact source family",
         proof: &["overlapping_near_prefixes_are_matched_longest_first"],
     },
+    // `A2-079`. `aplan critical-path` previously formatted the re-walked
+    // remaining chain's total as `"<N>d of it not yet done"` on the full
+    // chain's header even when the remaining chain was a different chain not
+    // listed in the table beneath it.
+    Behaviour {
+        name: "critical_path.reconciles_remaining_chain",
+        what: "`critical-path` reconciles its opening `of it` clause strictly against the \
+               unfinished rows of the printed critical path, prints a separate `longest remaining \
+               chain` table whenever the re-walked remaining chain differs, and carries matching \
+               `path_remaining_effort_days`, `path_remaining` and `remaining_tasks` fields in JSON",
+        proof: &[
+            "critical_path_to::a_divergent_remaining_chain_is_named_separately_from_the_printed_path",
+            "critical_path_to::a_fully_done_critical_path_still_prints_a_separate_live_remaining_chain",
+        ],
+    },
     // `A2-026`. `check-docs` previously learned only numeric-core families, so
     // non-numeric prefixed milestones and releases such as `M-one` or `R-a`
     // taught no prefix and typos like `M-oen` or unknown `R-v9` passed

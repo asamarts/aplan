@@ -76,6 +76,17 @@ to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Fixed
 
+- **`aplan critical-path` no longer attributes a separate remaining chain as `"of it"` on the
+  full chain's header** (`A2-079`, `--require critical_path.reconciles_remaining_chain`). When
+  the re-walked remaining-work chain differed from the unfinished rows of the printed critical
+  path, the opening sentence reported the separate chain's effort and task count as `"of it"`
+  without listing its rows. The opening `"of it not yet done"` (or `"and none of it is left"`)
+  clause now always measures the unfinished rows of the printed critical path itself; when the
+  re-walked longest remaining chain differs, it is printed below as its own `longest remaining
+  chain` section with its rows. `aplan critical-path --format json` retains all existing
+  `aplan/critical-path/v1` keys and adds `path_remaining_effort_days`, `path_remaining` and
+  `remaining_tasks` for parity with the human surface.
+
 - **`aplan facts --identity` no longer omits `source` after relocating a checkout while reusing
   `target/`** (`A2-188`, `--require facts.source_identity_survives_relocated_checkout`).
   `crates/aplan-attest/build.rs` previously baked `env!("CARGO_MANIFEST_DIR")` at build-script

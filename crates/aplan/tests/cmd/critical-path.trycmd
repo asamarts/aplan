@@ -26,12 +26,38 @@ critical path to `B`: 4.0 days across 2 task(s)
 ```
 $ aplan critical-path --format json
 {
+  "path_remaining": [
+    "A",
+    "B",
+    "C"
+  ],
+  "path_remaining_effort_days": 6.0,
   "remaining": [
     "A",
     "B",
     "C"
   ],
   "remaining_effort_days": 6.0,
+  "remaining_tasks": [
+    {
+      "effort_days": 1.0,
+      "id": "A",
+      "status": "todo",
+      "title": "Alpha"
+    },
+    {
+      "effort_days": 3.0,
+      "id": "B",
+      "status": "todo",
+      "title": "Beta"
+    },
+    {
+      "effort_days": 2.0,
+      "id": "C",
+      "status": "todo",
+      "title": "Gamma"
+    }
+  ],
   "schema": "aplan/critical-path/v1",
   "tasks": [
     {
@@ -79,10 +105,22 @@ questions apart. It is `null` above and named here:
 ```
 $ aplan critical-path D --format json
 {
+  "path_remaining": [
+    "D"
+  ],
+  "path_remaining_effort_days": 5.0,
   "remaining": [
     "D"
   ],
   "remaining_effort_days": 5.0,
+  "remaining_tasks": [
+    {
+      "effort_days": 5.0,
+      "id": "D",
+      "status": "todo",
+      "title": "Delta"
+    }
+  ],
   "schema": "aplan/critical-path/v1",
   "tasks": [
     {
