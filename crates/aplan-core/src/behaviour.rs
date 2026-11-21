@@ -355,7 +355,10 @@ pub const ALL: &[Behaviour] = &[
         name: "check_docs.near_prefixes_prefer_longest_family",
         what: "`check-docs` matches overlapping one-digit-typo families longest-first, so the \
                finding retains the complete referenced id and recommends the exact source family",
-        proof: &["overlapping_near_prefixes_are_matched_longest_first"],
+        proof: &[
+            "overlapping_near_prefixes_are_matched_longest_first",
+            "overlapping_named_and_numeric_near_prefixes_report_the_longest_source_family",
+        ],
     },
     // `A2-137`. `export-agents-md` previously derived its id-family examples
     // from live tasks, so closing or dropping the last live task in an
@@ -383,6 +386,7 @@ pub const ALL: &[Behaviour] = &[
                chain` table whenever the re-walked remaining chain differs, and carries matching \
                `path_remaining_effort_days`, `path_remaining` and `remaining_tasks` fields in JSON",
         proof: &[
+            "critical_path_remaining_clause_and_matching_reconcile_printed_rows",
             "critical_path_to::a_divergent_remaining_chain_is_named_separately_from_the_printed_path",
             "critical_path_to::a_fully_done_critical_path_still_prints_a_separate_live_remaining_chain",
         ],
@@ -399,6 +403,7 @@ pub const ALL: &[Behaviour] = &[
                and lowercase hyphenated prose untouched",
         proof: &[
             "non_numeric_prefixed_ids_are_checked_while_ordinary_words_stay_silent",
+            "a_prefix_with_both_numeric_and_named_ids_checks_every_shape_and_membership",
             "docs::check_docs_recognises_non_numeric_prefixed_ids_end_to_end",
         ],
     },

@@ -8,7 +8,7 @@
 
 | cut | status | done/total | ready | blocked | effort | weeks | critical path |
 | --- | --- | --- | --- | --- | --- | --- | --- |
-| v0.7 | todo | 21/27 | 5 | 1 | 22.0d | 0.8 (0.1 left) | 3.5d |
+| v0.7 | todo | 21/28 | 6 | 1 | 22.2d | 0.8 (0.1 left) | 3.5d |
 | v0.8 | todo | 0/30 | 0 | 30 | 43.8d | 1.6 (1.6 left) | 4.5d |
 | adoption | todo | 0/81 | 0 | 81 | 105.8d | 3.9 (3.9 left) | 10.0d |
 | backlog | todo | 0/1 | 0 | 1 | 1.0d | <0.1 (<0.1 left) | 1.0d |
@@ -26,7 +26,7 @@
 | A2-017 | Keep the workspace clean under Rust 1.100 without moving the pinned toolchain | done | - | commit:cc6d669cd006, commit:c09603f6606a |
 | A2-018 | Diagnose the large-fixture TUI latency regression on the current hosted image | done | - | commit:73eeb5472dac, test:graph::ranking::the_preference_pass_matches_its_one_task_at_a_time_definition |
 | A2-019 | Migrate the open pre-public backlog and every open issue into the public plan | done | - | commit:4420b69c4fe9, commit:02d6c3c9c1ed |
-| A2-020 | Publish v0.7.0 | todo | A2-009, A2-016, A2-017, A2-018, A2-019, A2-021, A2-022, A2-023, A2-024, A2-025, A2-026, A2-027, A2-028, A2-079, A2-137, A2-164, A2-166, A2-167, A2-168, A2-169, A2-177, A2-178, A2-179, A2-181, A2-187, A2-188 | - |
+| A2-020 | Publish v0.7.0 | todo | A2-009, A2-016, A2-017, A2-018, A2-019, A2-021, A2-022, A2-023, A2-024, A2-025, A2-026, A2-027, A2-028, A2-079, A2-137, A2-164, A2-166, A2-167, A2-168, A2-169, A2-177, A2-178, A2-179, A2-181, A2-187, A2-188, A2-189 | - |
 | A2-021 | Report APLAN045 when traces_root has a dot component or is left at its default | done | - | commit:f00e34faea21, test:tests::stale_premise_fires_for_relative_and_dotted_traces_roots, test:verify_policy::stale_premise_reports_for_default_dotted_and_subdirectory_traces_roots, test:verify_policy::stale_premise_treats_docs_dot_spellings_identically |
 | A2-022 | Report a refused inbox promotion with the capture's real state | todo | - | - |
 | A2-023 | List same-second captures newest first, as the inbox documents | todo | - | - |
@@ -48,6 +48,7 @@
 | A2-181 | Keep test.timeout_seconds discovery-only and handle execution timeouts without panicking | done | - | commit:2f20b7b864a8, test:published_schema_tests::command_policy_without_timeout_preserves_other_limits, test:tests::test_timeout_seconds_bounds_discovery_without_cutting_off_single_or_batch_execution, test:resolve::tests::timed_out_execution_outcome_reports_structured_finding_and_ledger_state_without_panicking |
 | A2-187 | Upgrade ayaml to 0.2.2 and adopt native global-tag dropping and strict seed reading | done | A2-179 | commit:fb8c159dc13b, test:dependency_audit::tests::yaml_parser_is_exactly_pinned, test:yaml::tests::every_request_reads_beneath_a_global_tag_as_the_bridge_did, test:yaml::tests::an_error_inside_a_variant_named_without_a_mapping_names_the_variant, test:yaml::tests::the_strict_reader_drops_a_global_tag_and_keeps_its_own_refusals, test:yaml_differential::hostile_inputs_meet_the_same_outcome_under_both_parsers |
 | A2-188 | Read CARGO_MANIFEST_DIR at runtime in aplan-attest build script so facts --identity retains source across relocated checkouts | done | - | commit:375b80b269d8, test:build_identity::relocated_checkout_retains_and_refreshes_source_identity |
+| A2-189 | Close what an audit found in A2-026 and A2-079 | todo | - | - |
 
 ## v0.8 Correctness and the most reported adoption failures
 

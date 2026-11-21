@@ -2021,7 +2021,11 @@ fn unfinished_on_path(path: &CriticalPath) -> (f64, Vec<&aplan_core::graph::Crit
         .iter()
         .filter(|t| t.status != aplan_core::Status::Done)
         .collect();
-    let effort = tasks.iter().map(|t| t.effort_days).sum();
+    // Fold from `+0.0` rather than `Iterator::sum`: Rust's `Sum` for `f64`
+    // seeds at `-0.0`, which serialises as `"path_remaining_effort_days": -0.0`
+    // in JSON whenever every row on the critical path is `done` (`A2-189`).
+    let effort: f64 = tasks.iter().fold(0.0, |acc, t| acc + t.effort_days);
+    let effort = if effort == 0.0 { 0.0 } else { effort };
     (effort, tasks)
 }
 
@@ -4453,6 +4457,71 @@ mod tests {
             .expect("critical-path JSON renders");
         let error = "unsupported".parse::<Format>().expect_err("unknown format");
         assert!(error.contains("expected human, json, agent"), "{error}");
+    }
+
+    /// Proof for `critical_path.reconciles_remaining_chain` (`A2-079`,
+    /// `A2-189`): `unfinished_on_path`, `remaining_matches_path_tail`, and
+    /// `remaining_clause` reconcile strictly against the printed rows and emit
+    /// positive `0.0` (never `-0.0`) when every row is `done`.
+    #[test]
+    fn critical_path_remaining_clause_and_matching_reconcile_printed_rows() {
+        let task = |id: &str, effort_days: f64, status: Status| aplan_core::graph::CriticalTask {
+            id: id.to_string(),
+            title: format!("task {id}"),
+            effort_days,
+            status,
+        };
+        let all_live = CriticalPath {
+            total_effort_days: 4.0,
+            tasks: vec![task("A-1", 4.0, Status::Todo)],
+        };
+        assert_eq!(remaining_clause(&all_live, Some(&all_live)), "");
+
+        let partial = CriticalPath {
+            total_effort_days: 6.0,
+            tasks: vec![
+                task("A-1", 5.0, Status::Done),
+                task("A-2", 1.0, Status::Todo),
+            ],
+        };
+        let matching_tail = CriticalPath {
+            total_effort_days: 1.0,
+            tasks: vec![task("A-2", 1.0, Status::Todo)],
+        };
+        let divergent = CriticalPath {
+            total_effort_days: 3.0,
+            tasks: vec![task("B-1", 3.0, Status::Todo)],
+        };
+        let (left_days, left_tasks) = unfinished_on_path(&partial);
+        assert!((left_days - 1.0).abs() < f64::EPSILON);
+        assert_eq!(left_tasks.len(), 1);
+        assert!(remaining_matches_path_tail(&left_tasks, &matching_tail));
+        assert!(!remaining_matches_path_tail(&left_tasks, &divergent));
+        // Even when the re-walked remaining chain diverges, `"of it"` still
+        // measures strictly the printed chain's unfinished rows (`A2-079`).
+        assert_eq!(
+            remaining_clause(&partial, Some(&divergent)),
+            ", 1.0d of it not yet done across 1 task(s)"
+        );
+
+        let all_done = CriticalPath {
+            total_effort_days: 7.0,
+            tasks: vec![
+                task("A-1", 5.0, Status::Done),
+                task("A-2", 2.0, Status::Done),
+            ],
+        };
+        let (done_left_days, done_left_tasks) = unfinished_on_path(&all_done);
+        assert_eq!(done_left_days.to_bits(), 0.0_f64.to_bits());
+        assert!(done_left_tasks.is_empty());
+        assert_eq!(
+            remaining_clause(&all_done, Some(&divergent)),
+            ", and none of it is left"
+        );
+        render_critical_path(&partial, Some(&divergent), Some("M-x"), Format::Human)
+            .expect("divergent human renders");
+        render_critical_path(&all_done, Some(&divergent), None, Format::Json)
+            .expect("all-done divergent json renders");
     }
 
     #[test]

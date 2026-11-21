@@ -471,6 +471,17 @@ fn scan_named_tail(chars: &[char], start: usize, shape: NamedShape) -> Option<us
 /// behind punctuation is the one failure a gate like this cannot have.
 #[must_use]
 pub fn references(text: &str, vocabulary: &Vocabulary) -> Vec<Reference> {
+    scan_references(text, vocabulary)
+        .into_iter()
+        .map(|(reference, _)| reference)
+        .collect()
+}
+
+/// Scan `text` for references under `vocabulary`, retaining the exact winning
+/// `family.prefix` for each match so the near-prefix pass attributes the exact
+/// longest-matching source family without re-searching by lexical order
+/// (`A2-189`).
+fn scan_references(text: &str, vocabulary: &Vocabulary) -> Vec<(Reference, String)> {
     let mut out = Vec::new();
     let chars: Vec<char> = text.chars().collect();
     let mut line = 1;
@@ -494,7 +505,27 @@ pub fn references(text: &str, vocabulary: &Vocabulary) -> Vec<Reference> {
                 .is_some_and(|c| c.is_ascii_digit() || (numeric.dotted && *c == '.'))
         {
             match scan_numeric_tail(&chars, start, numeric) {
-                NumericScan::Matched(end) => end,
+                NumericScan::Matched(end) => {
+                    // When the same prefix also teaches multi-hyphen named ids
+                    // (e.g. `R-1` beside `R-foo-bar`), a numeric-leading token
+                    // followed by `-<alphanumeric>` (such as `R-1-alpha` or
+                    // `R-1-alpha_suffix`) must scan as a hyphenated named tail
+                    // instead of silently truncating to `R-1` (`A2-189`).
+                    if let Some(named) = family.named
+                        && named.hyphenated
+                        && !numeric.hyphenated_suffix
+                        && !chars[start..end].contains(&'.')
+                        && chars.get(end) == Some(&'-')
+                        && chars.get(end + 1).is_some_and(|c| c.is_alphanumeric())
+                    {
+                        let Some(named_end) = scan_named_tail(&chars, start, named) else {
+                            continue;
+                        };
+                        named_end
+                    } else {
+                        end
+                    }
+                }
                 NumericScan::NoMatch if family.named.is_some() => {
                     let Some(named) = family.named else {
                         continue;
@@ -518,12 +549,15 @@ pub fn references(text: &str, vocabulary: &Vocabulary) -> Vec<Reference> {
         if crate::ids::contains_a_ulid(&id) {
             continue;
         }
-        out.push(Reference {
-            mistyped_prefix: Vec::new(),
-            id,
-            line,
-            column: i - line_start + 1,
-        });
+        out.push((
+            Reference {
+                mistyped_prefix: Vec::new(),
+                id,
+                line,
+                column: i - line_start + 1,
+            },
+            family.prefix.clone(),
+        ));
     }
     out
 }
@@ -551,14 +585,13 @@ pub fn dangling(text: &str, ids: &BTreeSet<String>) -> Vec<Reference> {
         let mut entries: Vec<Family> = near.values().map(|(family, _)| family.clone()).collect();
         sort_families(&mut entries);
         let variants = Vocabulary { entries };
-        for mut r in references(text, &variants) {
+        for (mut r, matched_prefix) in scan_references(text, &variants) {
             if ids.contains(&r.id) || !seen.insert((r.id.clone(), r.line)) {
                 continue;
             }
             r.mistyped_prefix = near
-                .iter()
-                .find(|(v, _)| r.id.starts_with(v.as_str()))
-                .map(|(_, (_, taught))| taught.clone())
+                .get(&matched_prefix)
+                .map(|(_, taught)| taught.clone())
                 .unwrap_or_default();
             out.push(r);
         }
@@ -1564,15 +1597,41 @@ mod tests {
         );
     }
 
+    /// Proof for `check_docs.near_prefixes_prefer_longest_family` (`A2-189`):
+    /// when a shorter near-prefix (`A2B-`, from named `A3B-`) is a lexical
+    /// prefix of a longer near-prefix (`A2B-v`, from dotted numeric `A1B-v`),
+    /// `dangling` must attribute the exact longest-matching family that scanned
+    /// the reference rather than the first lexical key in `near`.
+    #[test]
+    fn overlapping_named_and_numeric_near_prefixes_report_the_longest_source_family() {
+        let plan = ids(&["A1B-v0.8", "A3B-alpha"]);
+        let found = dangling("Mistyped: A2B-v0.9 and A2B-beta.", &plan);
+        assert_eq!(found.len(), 2, "{found:#?}");
+        assert_eq!(found[0].id, "A2B-v0.9");
+        assert_eq!(
+            found[0].mistyped_prefix,
+            vec!["A1B-v".to_string()],
+            "A2B-v0.9 came from A1B-v, not the shorter lexical prefix A2B- (A3B-)"
+        );
+        assert_eq!(found[1].id, "A2B-beta");
+        assert_eq!(found[1].mistyped_prefix, vec!["A3B-".to_string()]);
+    }
+
+    /// Proof for `check_docs.recognises_non_numeric_prefixed_ids` (`A2-026`,
+    /// `A2-189`): a prefix teaching both numeric ids (`R-1`) and multi-hyphen
+    /// named ids (`R-foo-bar`) checks every shape and cut membership without
+    /// silently truncating numeric-leading hyphenated tokens (`R-1-alpha`,
+    /// `R-1-alpha_suffix`) to the known numeric id.
     #[test]
     fn a_prefix_with_both_numeric_and_named_ids_checks_every_shape_and_membership() {
-        let plan = ids(&["R-1", "R-a", "T-init", "T-setup", "M-cut"]);
+        let plan = ids(&["R-1", "R-a", "R-foo-bar", "T-init", "T-setup", "M-cut"]);
         let found = dangling(
-            "Known: R-1, R-a, R-1_suffix. Unknown: R-2, R-beta, R-1a.",
+            "Known: R-1, R-a, R-foo-bar, R-1--clause, R-1_suffix, R-1-alpha_suffix. \
+             Unknown: R-2, R-beta, R-1a, R-1-alpha.",
             &plan,
         );
         let found_ids: Vec<&str> = found.iter().map(|r| r.id.as_str()).collect();
-        assert_eq!(found_ids, vec!["R-2", "R-beta", "R-1a"]);
+        assert_eq!(found_ids, vec!["R-2", "R-beta", "R-1a", "R-1-alpha"]);
 
         let doc = "### cut, Named work\n\n**Tasks:** `T-init`\n";
         let problems = membership(
