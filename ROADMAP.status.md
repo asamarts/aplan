@@ -9,7 +9,7 @@
 | cut | status | done/total | ready | blocked | effort | weeks | critical path |
 | --- | --- | --- | --- | --- | --- | --- | --- |
 | v0.7 | done | 30/30 | 0 | 0 | 22.8d | 0.8 (0.0 left) | 3.5d |
-| v0.8 | todo | 0/31 | 27 | 4 | 44.2d | 1.6 (1.6 left) | 4.5d |
+| v0.8 | todo | 0/33 | 27 | 6 | 47.8d | 1.8 (1.8 left) | 4.5d |
 | adoption | todo | 0/81 | 0 | 81 | 105.8d | 3.9 (3.9 left) | 10.0d |
 | backlog | todo | 0/1 | 0 | 1 | 1.0d | <0.1 (<0.1 left) | 1.0d |
 | hardening | todo | 0/15 | 0 | 15 | 14.8d | 0.5 (0.5 left) | 3.0d |
@@ -87,6 +87,8 @@
 | A2-182 | Stop refused mutation commands from advising --format agent when they do not accept --format | todo | - | - |
 | A2-183 | Fix APLAN015 file-evidence fix text and warn at close when a commit deletes a cited file | todo | - | - |
 | A2-192 | Scope aplan build script cache identity to product sources and handle bind-mounted worktrees | todo | - | - |
+| A2-193 | Implement pre-schema requires build-contract declaration in .aplan.yml | todo | A2-081 | - |
+| A2-194 | Direct unknown config and frontmatter diagnostics to aplan facts --identity | todo | A2-081 | - |
 
 ## adoption Adoption and ergonomics
 

@@ -300,6 +300,12 @@ The path set binds a task's claim to a specific artifact: this cited commit or f
 overlap this task's declared responsibility. Execution alone cannot establish that
 relationship. The binding is verified deterministically and persisted in the plan.
 
+Live unmatched paths follow `ADR-0071`: prospective literal paths that have never been tracked
+remain silent in `check` and `verify` so forward planning works under `deny_warnings`, while
+provably stranded historical literal paths and bare tracked directories are reported early in
+`verify` (`A2-101`), complementing `APLAN053` (`in_progress`) and `APLAN019` (evidence-bearing
+tasks, `A2-091`).
+
 ### 5.3 Command split, and why
 
 `aplan check` stays **hermetic**: no git, no network, no subprocess. It is what runs
@@ -464,6 +470,20 @@ use the canonical addressed value. The fingerprint is content-addressed, so it i
 of commit ids and file location. `aplan close --restamp` takes a new stamp after deliberate
 re-review. `APLAN028` reports a closed task that could have stamped a trace
 but did not, so trace adoption is explicit rather than silently unverifiable.
+
+Two follow-up trace-integrity decisions tighten this boundary for `v0.8`:
+
+- **Element-kind retargeting (`ADR-0069`, `A2-050`, `A2-051`):** `ADR-0015`'s heading-first
+  precedence stands, and renaming a heading onto a same-slug table row (or vice versa) becomes a
+  blocking error rather than an advisory-capable drift warning -- checked from Git history on open
+  tasks (`verify`) and from additive kind-tagged `trace_fingerprints` (`heading:<hex>`,
+  `row:<hex>`, `node:<hex>`) on closed tasks (`check`), with legacy bare hex stamps remaining valid
+  without migration churn.
+- **Open-task review baselines (`ADR-0070`, `A2-052`, `A2-053`):** `APLAN045` clears only when a
+  task's substantive definition (`title`, `body`, `paths`, or `traces`) changes in Git history or
+  the working tree, or when an explicit `aplan review <ID>` (and MCP `aplan_review`) records a
+  matching trace stamp in `trace_fingerprints`. Mechanical metadata edits (`status`, `tags`,
+  `owner`, `blocked_by`, `effort_days`) never silence `APLAN045`.
 
 **The evidence half landed** in `A1-196`, behind the same switch. A mutable `file`
 citation is the evidence kind whose reference can keep resolving while its referent changes.
@@ -1033,7 +1053,11 @@ wrong subcommand **errors loudly** rather than being ignored.
 
 **Planned keys**, each shipping with the rule or command that reads it, never before, so
 the tool never carries a key it ignores: a `url` reachability switch (`APLAN016`, network
-off by default), a `root` key so `--root` need not be repeated, and a `version` field.
+off by default), a `root` key so `--root` need not be repeated, a `version` field, and a
+pre-schema `requires` build-contract block (`min_version`, `capabilities`, `source`,
+`facts_sha256`; `ADR-0068`, `A2-193`) that fails closed on build skew before full config schema
+validation while leaving exact `binary_sha256` and provenance authentication to external wrappers
+and CI (`ADR-0066`).
 
 **No `extends:` in v1.** `alint` needs remote ruleset composition; a plan validator does
 not, and the SRI/SSRF hardening that comes with it is cost we should not pay yet.
