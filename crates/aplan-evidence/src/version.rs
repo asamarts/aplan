@@ -1199,17 +1199,28 @@ mod tests {
         std::fs::create_dir_all(&nested).expect("nested");
         std::fs::create_dir_all(&unrelated).expect("unrelated");
 
+        let mounted_canon = mounted.canonicalize().expect("canonical mounted");
+
         // Normal checkout and subdirectory invocation keep the recorded workdir.
-        assert_eq!(resolve_plan_base(Some(mounted.clone()), &mounted), mounted);
-        assert_eq!(resolve_plan_base(Some(mounted.clone()), &nested), mounted);
+        assert_eq!(
+            resolve_plan_base(Some(mounted.clone()), &mounted),
+            mounted_canon
+        );
+        assert_eq!(
+            resolve_plan_base(Some(mounted.clone()), &nested),
+            mounted_canon
+        );
 
         // Bare repository has no workdir.
-        assert_eq!(resolve_plan_base(None, &mounted), mounted);
+        assert_eq!(resolve_plan_base(None, &mounted), mounted_canon);
 
         // Missing host workdir (linked worktree bind-mounted inside container)
         // or unrelated directory falls back to `repo_root`.
         let host_missing = dir.path().join("host-only-worktree");
-        assert_eq!(resolve_plan_base(Some(host_missing), &mounted), mounted);
-        assert_eq!(resolve_plan_base(Some(unrelated), &mounted), mounted);
+        assert_eq!(
+            resolve_plan_base(Some(host_missing), &mounted),
+            mounted_canon
+        );
+        assert_eq!(resolve_plan_base(Some(unrelated), &mounted), mounted_canon);
     }
 }
