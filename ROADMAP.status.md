@@ -9,7 +9,7 @@
 | cut | status | done/total | ready | blocked | effort | weeks | critical path |
 | --- | --- | --- | --- | --- | --- | --- | --- |
 | v0.7 | done | 30/30 | 0 | 0 | 22.8d | 0.8 (0.0 left) | 3.5d |
-| v0.8 | todo | 6/34 | 27 | 1 | 48.2d | 1.8 (1.6 left) | 4.5d |
+| v0.8 | todo | 9/34 | 24 | 1 | 48.2d | 1.8 (1.4 left) | 4.5d |
 | adoption | todo | 0/81 | 0 | 81 | 105.8d | 3.9 (3.9 left) | 10.0d |
 | backlog | todo | 0/1 | 0 | 1 | 1.0d | <0.1 (<0.1 left) | 1.0d |
 | hardening | todo | 0/15 | 0 | 15 | 14.8d | 0.5 (0.5 left) | 3.0d |
@@ -74,7 +74,7 @@
 | A2-099 | A live catch-all paths claim fails only after the work is finished | todo | - | - |
 | A2-101 | File renames silently strand paths on live tasks | todo | A2-056 | - |
 | A2-106 | Duplicate evidence citations are accepted and stored silently | todo | - | - |
-| A2-122 | Stop build-only AGENTS.md provenance drift from blocking a correct contract | todo | A2-081 | - |
+| A2-122 | Stop build-only AGENTS.md provenance drift from blocking a correct contract | done | A2-081 | commit:bacb6ab, file:docs/adr/0072-agent-contract-policy-drift-is-separate-from-build-provenance-and-live-tools.md, test:contract::tests::duplicate_and_malformed_provenance_lines_are_classified_as_malformed, test:validate::tests::agents_block::a_block_written_by_another_build_is_reported_as_a_build_difference, test:validate::tests::agents_block::malformed_or_duplicate_provenance_still_fires_aplan041, test:agent_contract_drift::provenance_only_drift_does_not_block_check_verify_or_mcp, test:agent_contract_drift::policy_only_drift_still_blocks_with_exact_repair, test:agent_contract_drift::malformed_or_duplicate_provenance_blocks_check, test:agents_md::two_builds_with_different_mcp_catalogues_keep_one_policy_body, test:agents_md::malformed_or_duplicate_provenance_still_fails_export_agents_md_check |
 | A2-140 | Let generated agent contracts name a repository launcher | todo | - | - |
 | A2-142 | Claim usage errors can publish claim state | todo | - | - |
 | A2-147 | Close a live task that already carries partial evidence without a hand edit | todo | - | - |
@@ -87,8 +87,8 @@
 | A2-182 | Stop refused mutation commands from advising --format agent when they do not accept --format | todo | - | - |
 | A2-183 | Fix APLAN015 file-evidence fix text and warn at close when a commit deletes a cited file | todo | - | - |
 | A2-192 | Scope aplan build script cache identity to product sources and handle bind-mounted worktrees | done | - | commit:f4bc3bc99434, test:build_identity::cache_identity_inputs_ignore_nested_targets_and_non_product_trees, test:build_identity::cache_identity_inputs_stay_inside_packaged_crates_io_manifest, test:version::tests::resolve_plan_base_falls_back_when_workdir_does_not_contain_repo_root |
-| A2-193 | Implement pre-schema requires build-contract declaration in .aplan.yml | todo | A2-081 | - |
-| A2-194 | Direct unknown config and frontmatter diagnostics to aplan facts --identity | todo | A2-081 | - |
+| A2-193 | Implement pre-schema requires build-contract declaration in .aplan.yml | done | A2-081 | commit:bacb6ab, test:published_schema_tests::build_contract_tests::pre_schema_mismatch_fires_before_unknown_future_top_level_keys, test:published_schema_tests::build_contract_tests::min_version_refuses_prerelease_pins_and_applies_semver_precedence_to_running_dev_builds, test:published_schema_tests::build_contract_tests::same_version_different_commit_and_headless_vs_tui_are_caught_precisely, test:published_schema_tests::build_contract_tests::requires_source_fails_closed_when_running_build_source_is_unknown, test:published_schema_tests::build_contract_tests::binary_sha256_unknown_subkeys_and_empty_requires_are_refused_and_schema_excludes_binary_sha256, test:server::tests::explicit_root_enforces_requires_against_injected_running_build_before_unknown_keys, test:tests::tui_launch_fails_closed_on_requires_mismatch_before_unknown_keys, test:config_error::requires_mismatch_fails_closed_before_unknown_keys_and_leaves_inspection_reachable, test:config_error::requires_refuses_prerelease_min_version_and_binary_sha256 |
+| A2-194 | Direct unknown config and frontmatter diagnostics to aplan facts --identity | done | A2-081 | commit:bacb6ab, test:load::field_line_tests::unknown_frontmatter_field_points_to_schema_facts_and_build_identity, test:load::field_line_tests::nested_unknown_frontmatter_field_carries_its_path, test:config_error::the_commands_the_note_names_still_work_with_the_config_broken, test:config_error::unknown_task_frontmatter_field_points_to_facts_identity |
 | A2-195 | Close post-merge audit gaps in build identity, bind-mounted worktrees, ADR-0068, and task specs | done | - | commit:0a903ce, commit:7b9c9a1, test:build_identity::build_script_cache_identity_ignores_tools_target_and_tracks_product_sources, test:repo::incremental_change_tests::resolve_effective_workdir_handles_bind_mounted_subdirectories, test:version::tests::resolve_plan_base_falls_back_when_workdir_does_not_contain_repo_root |
 
 ## adoption Adoption and ergonomics
