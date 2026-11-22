@@ -506,6 +506,8 @@ fn trace_retargeting_between_heading_and_row_blocks_check_and_verify_even_when_d
     }
     assert!(task(dir.path(), "A-2").contains("DOC1.md#beta: heading:"));
     assert!(task(dir.path(), "A-5").contains("DOC2.md#gamma: row:"));
+    // Quote both hex scalars so a commit SHA made only of digits or
+    // `<digits>e<digits>` is always parsed by YAML 1.2 as a string.
     std::fs::write(
         dir.path().join("aplan/tasks/A-3.md"),
         format!(
