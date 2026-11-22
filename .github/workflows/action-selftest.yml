@@ -53,21 +53,21 @@ jobs:
         id: check
         uses: ./
         with:
-          version: v0.6.0
+          version: v0.7.0
           command: check
           working-directory: ci/fixtures/action-selftest
 
       - name: the installed version is the one that was asked for
         run: |
-          test "${{ steps.check.outputs.version }}" = "v0.6.0" \
-            || { echo "installed '${{ steps.check.outputs.version }}', expected v0.6.0" >&2; exit 1; }
+          test "${{ steps.check.outputs.version }}" = "v0.7.0" \
+            || { echo "installed '${{ steps.check.outputs.version }}', expected v0.7.0" >&2; exit 1; }
 
       # A second run exercising the other command and an explicit root, so the
       # inputs are covered rather than assumed.
       - name: verify, with an explicit root
         uses: ./
         with:
-          version: v0.6.0
+          version: v0.7.0
           command: verify
           root: tasks
           format: human
