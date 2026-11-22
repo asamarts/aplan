@@ -9,7 +9,7 @@
 | cut | status | done/total | ready | blocked | effort | weeks | critical path |
 | --- | --- | --- | --- | --- | --- | --- | --- |
 | v0.7 | done | 30/30 | 0 | 0 | 22.8d | 0.8 (0.0 left) | 3.5d |
-| v0.8 | todo | 5/34 | 28 | 1 | 48.2d | 1.8 (1.7 left) | 4.5d |
+| v0.8 | todo | 6/34 | 27 | 1 | 48.2d | 1.8 (1.6 left) | 4.5d |
 | adoption | todo | 0/81 | 0 | 81 | 105.8d | 3.9 (3.9 left) | 10.0d |
 | backlog | todo | 0/1 | 0 | 1 | 1.0d | <0.1 (<0.1 left) | 1.0d |
 | hardening | todo | 0/15 | 0 | 15 | 14.8d | 0.5 (0.5 left) | 3.0d |
@@ -89,7 +89,7 @@
 | A2-192 | Scope aplan build script cache identity to product sources and handle bind-mounted worktrees | done | - | commit:f4bc3bc99434, test:build_identity::cache_identity_inputs_ignore_nested_targets_and_non_product_trees, test:build_identity::cache_identity_inputs_stay_inside_packaged_crates_io_manifest, test:version::tests::resolve_plan_base_falls_back_when_workdir_does_not_contain_repo_root |
 | A2-193 | Implement pre-schema requires build-contract declaration in .aplan.yml | todo | A2-081 | - |
 | A2-194 | Direct unknown config and frontmatter diagnostics to aplan facts --identity | todo | A2-081 | - |
-| A2-195 | Close post-merge audit gaps in build identity, bind-mounted worktrees, ADR-0068, and task specs | todo | - | - |
+| A2-195 | Close post-merge audit gaps in build identity, bind-mounted worktrees, ADR-0068, and task specs | done | - | commit:0a903ce, commit:7b9c9a1, test:build_identity::build_script_cache_identity_ignores_tools_target_and_tracks_product_sources, test:repo::incremental_change_tests::resolve_effective_workdir_handles_bind_mounted_subdirectories, test:version::tests::resolve_plan_base_falls_back_when_workdir_does_not_contain_repo_root |
 
 ## adoption Adoption and ergonomics
 
