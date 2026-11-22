@@ -167,6 +167,15 @@ pub const TOOLS: &[ToolSpec] = &[
                       `aplan_close` is for. Refuses a task that is not `in_progress`, since \
                       there is then nothing to stop.",
     },
+    ToolSpec {
+        name: "aplan_review",
+        description: "Record that a live task's traced sections were re-reviewed and still hold \
+                      as written, stamping kind-tagged `trace_fingerprints` without altering \
+                      status, evidence, or body and without creating a commit. Clears `APLAN045` \
+                      only while the stored stamp matches the traced section and re-arms if the \
+                      section changes again. Refuses terminal tasks and tasks without resolvable \
+                      anchored traces.",
+    },
 ];
 
 /// One tool's identity, kept minimal for the same reason the surface is.
@@ -352,6 +361,7 @@ pub const MCP_COMMAND_POLICY: &[McpCommandPolicy] = &[
     McpCommandPolicy::mirrored("release", &["aplan_release"]),
     McpCommandPolicy::mirrored("start", &["aplan_start"]),
     McpCommandPolicy::mirrored("stop", &["aplan_stop"]),
+    McpCommandPolicy::mirrored("review", &["aplan_review"]),
     McpCommandPolicy::excluded("mv", CliOnlyReason::HumanJudgement),
     McpCommandPolicy::excluded("rekey", CliOnlyReason::HumanJudgement),
     McpCommandPolicy::excluded("tasks", CliOnlyReason::AlternateView),
@@ -1573,6 +1583,51 @@ pub fn working(
     }))
 }
 
+/// `aplan_review`: stamp kind-tagged `trace_fingerprints` on a live task after
+/// re-reviewing its traced sections (`ADR-0069`, `ADR-0070`, `A2-053`).
+pub fn review(
+    root: &Path,
+    id: &str,
+    policy: &crate::Policy,
+) -> Result<serde_json::Value, ToolError> {
+    let plan = load_plan(root);
+    if !plan.load_diagnostics.is_empty() {
+        return Err(ToolError::Plan(
+            "the plan does not load cleanly; fix it before recording a trace review".to_string(),
+        ));
+    }
+    let target = locate(&plan, id)?;
+    let original = std::fs::read_to_string(&target.path)
+        .map_err(|e| ToolError::Plan(format!("reading {}: {e}", target.path.display())))?;
+    let current = aplan_core::mutation::task_of(&original)
+        .map_err(|e| ToolError::Plan(format!("`{id}`: {e}")))?;
+    let fingerprints =
+        aplan_core::trace_fingerprints(&current, policy.options.traces_root.as_deref());
+    let updated = aplan_core::review(&original, &fingerprints).map_err(|e| {
+        let detail = match aplan_core::close::advice(&e, id) {
+            Some(advice) => format!("cannot review `{id}`: {e}. {advice}"),
+            None => format!("cannot review `{id}`: {e}"),
+        };
+        match e {
+            aplan_core::CloseError::Produced(_) => ToolError::Plan(detail),
+            _ => ToolError::Refused(detail),
+        }
+    })?;
+    let notes = refuse_if_worse(&plan, id, &updated, policy, &format!("review `{id}`"))?;
+    let changed = current.trace_fingerprints != fingerprints;
+    if changed {
+        save_task(&target.path, &original, &updated, "aplan_review")?;
+    }
+    Ok(serde_json::json!({
+        "id": id,
+        "changed": changed,
+        "stamped": fingerprints.len(),
+        "trace_fingerprints": fingerprints,
+        "file": target.path.display().to_string(),
+        "notes": notes,
+    }))
+}
+
 /// The post-state gate for status coordination (`A1-359`).
 ///
 /// Run the rules against the plan this edit would produce and refuse one that
@@ -1958,7 +2013,7 @@ mod tests {
     /// status is fine, which is true of an actor with an editor and false of
     /// one reaching aplan through this server.
     #[test]
-    fn the_tool_surface_is_exactly_these_thirteen() {
+    fn the_tool_surface_is_exactly_these_fourteen() {
         let names: Vec<&str> = TOOLS.iter().map(|t| t.name).collect();
         assert_eq!(
             names,
@@ -1976,6 +2031,7 @@ mod tests {
                 "aplan_release",
                 "aplan_start",
                 "aplan_stop",
+                "aplan_review",
             ],
             "the MCP tool surface changed; that is a deliberate decision, not a refactor"
         );

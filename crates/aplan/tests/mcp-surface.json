@@ -403,5 +403,26 @@
       "type": "object"
     },
     "name": "aplan_stop"
+  },
+  {
+    "description": "Record that a live task's traced sections were re-reviewed and still hold as written, stamping kind-tagged `trace_fingerprints` without altering status, evidence, or body and without creating a commit. Clears `APLAN045` only while the stored stamp matches the traced section and re-arms if the section changes again. Refuses terminal tasks and tasks without resolvable anchored traces.",
+    "inputSchema": {
+      "additionalProperties": false,
+      "properties": {
+        "id": {
+          "description": "The live task whose traced sections were re-reviewed and still hold.",
+          "type": "string"
+        },
+        "root": {
+          "description": "Repository root containing `.aplan.yml`, or that repository's configured plan directory. The server resolves plan, configuration, traces, evidence providers and Git as one context; an ambiguous partial directory is refused. Omit this field to use the server's launch context. An explicit selection returns `{context, result}` so the resolved frame is auditable.",
+          "type": "string"
+        }
+      },
+      "required": [
+        "id"
+      ],
+      "type": "object"
+    },
+    "name": "aplan_review"
   }
 ]

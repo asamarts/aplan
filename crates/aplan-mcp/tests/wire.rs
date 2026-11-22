@@ -28,6 +28,7 @@ fn the_wire_surface_is_exactly_its_tools() {
             "aplan_release",
             "aplan_start",
             "aplan_stop",
+            "aplan_review",
         ],
         "the MCP surface changed; growing it is a decision, not a refactor. \
          `aplan_verify` was that decision (`A1-102`): `check` is hermetic, so an \

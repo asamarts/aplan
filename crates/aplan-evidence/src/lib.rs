@@ -969,6 +969,133 @@ fn historical_trace_path(
 /// Silent for a task file with no commit -- a task written and not yet committed
 /// has no baseline, and inventing one would report every new task on the day it
 /// is written.
+fn trace_retargeted_diagnostic(
+    task_id: &str,
+    path: &Path,
+    trace: &str,
+    was: aplan_core::AnchorKind,
+    now: aplan_core::AnchorKind,
+) -> aplan_core::Diagnostic {
+    aplan_core::Diagnostic::error(
+        aplan_core::diagnostic::code::TRACE_RETARGETED,
+        format!(
+            "traced anchor `{trace}` silently retargeted from a {} to a {}",
+            was.label(),
+            now.label()
+        ),
+    )
+    .with_task(task_id)
+    .with_file(path)
+    .with_agent_instruction(format!(
+        "Update `traces` to the renamed {} target, or if tracing the {} is intentional, run \
+         `aplan review {task_id}` to confirm it.",
+        was.label(),
+        now.label(),
+    ))
+}
+
+fn has_uncommitted_substantive_edit(
+    repo: &Repo,
+    repo_root: &Path,
+    lt: &aplan_core::load::LoadedTask,
+    task_path: &Path,
+) -> bool {
+    let on_disk_path = if lt.path.is_absolute() || lt.path.exists() {
+        lt.path.clone()
+    } else {
+        repo_root.join(&lt.path)
+    };
+    let on_disk = std::fs::read_to_string(on_disk_path).ok();
+    let at_head = repo
+        .text_at(None, &task_path.to_string_lossy())
+        .ok()
+        .flatten();
+    match (&on_disk, &at_head) {
+        (Some(disk), Some(head)) if disk != head => match (
+            aplan_core::substantive_content(disk),
+            aplan_core::substantive_content(head),
+        ) {
+            (Some(d), Some(h)) => d != h,
+            _ => true,
+        },
+        _ => false,
+    }
+}
+
+/// Evaluate one live task's anchored trace against its stored stamp (if any)
+/// and its last substantive Git baseline (`APLAN060` and `APLAN045`).
+fn check_live_task_trace(
+    repo: &Repo,
+    repository_root: &Path,
+    opts: &VerifyOptions,
+    lt: &aplan_core::load::LoadedTask,
+    rev: &str,
+    uncommitted_substantive: bool,
+    trace: &str,
+) -> Option<aplan_core::Diagnostic> {
+    let (doc, anchor) = trace.split_once('#')?;
+    let at = historical_trace_path(doc, opts.traces_root.as_deref(), repository_root)?;
+    let now = repo.text_at(None, &at).ok()??;
+
+    if let Some(stamp) = lt.task.trace_fingerprints.get(trace) {
+        match aplan_core::anchor::check_stamp_in(doc, &now, anchor, stamp) {
+            Some(aplan_core::StampCheck::Retargeted { was, now: now_kind }) => {
+                return Some(trace_retargeted_diagnostic(
+                    &lt.task.id,
+                    &lt.path,
+                    trace,
+                    was,
+                    now_kind,
+                ));
+            }
+            Some(aplan_core::StampCheck::Holds) => return None,
+            Some(aplan_core::StampCheck::Drifted { .. }) | None => {}
+        }
+    }
+
+    if uncommitted_substantive {
+        return None;
+    }
+    let then = repo.text_at(Some(rev), &at).ok()??;
+    let (Some(a), Some(b)) = (
+        aplan_core::anchor::resolve_in(doc, &then, anchor),
+        aplan_core::anchor::resolve_in(doc, &now, anchor),
+    ) else {
+        return None;
+    };
+    if a.kind != b.kind {
+        return Some(trace_retargeted_diagnostic(
+            &lt.task.id,
+            &lt.path,
+            trace,
+            a.kind,
+            b.kind,
+        ));
+    }
+    if a.hash == b.hash {
+        return None;
+    }
+    Some(
+        aplan_core::Diagnostic::warning(
+            aplan_core::diagnostic::code::STALE_PREMISE,
+            format!(
+                "is still open and `{trace}` has changed since this task was last \
+                 substantively updated: the ground it was written on has moved"
+            ),
+        )
+        .with_task(&lt.task.id)
+        .with_file(&lt.path)
+        .with_agent_instruction(format!(
+            "Re-read `{trace}` against this task. If the work is already done, close it \
+             with the evidence; if the task needs changes, update its body, `paths`, or \
+             `traces`; if it still holds as written, run `aplan review {}`.",
+            lt.task.id
+        )),
+    )
+}
+
+/// `APLAN045`: a live task whose traced section has changed since its last
+/// substantive edit or explicit review (`A1-301`, `ADR-0069`, `ADR-0070`).
 fn report_stale_premises(
     repo: &Repo,
     repo_root: &Path,
@@ -985,24 +1112,13 @@ fn report_stale_premises(
     if live.is_empty() {
         return Ok(());
     }
-    // The filesystem loader preserves how its root was spelled, so a root
-    // resolved from `.aplan.yml` gives every task an absolute path. Git tree
-    // paths are repository-relative. Keeping the filesystem spelling here made
-    // every configured-root invocation silently find no baseline even though
-    // the hand-built unit fixture used relative paths (`A1-604`, audit).
     let workdir = repo.effective_workdir(repo_root);
     let paths: Vec<std::path::PathBuf> = live
         .iter()
         .map(|loaded| repository_relative_path(&loaded.path, workdir.as_deref()))
         .collect();
-    let born = repo.last_touched_commit(&paths)?;
+    let born = repo.last_substantive_commit(&paths)?;
 
-    // A shallow clone cannot answer when a task was last touched: every path is
-    // "added" by the graft commit, so the baseline is HEAD and nothing can ever
-    // differ from it. Measured: a depth-1 clone of a repository where this fires
-    // reports nothing at all. Said once, because a gate that cannot run is worse
-    // when it is silent about it than when it is absent -- the same sentence the
-    // commit resolver makes about the same checkout (`A1-253`, `A1-301`).
     if repo.is_shallow() {
         out.push(
             aplan_core::Diagnostic::warning(
@@ -1022,87 +1138,26 @@ fn report_stale_premises(
         return Ok(());
     }
 
+    let repository_root = workdir.as_deref().unwrap_or(repo_root);
     for lt in live {
         let task_path = repository_relative_path(&lt.path, workdir.as_deref());
         let Some(rev) = born.get(&task_path) else {
             continue;
         };
-        // Being edited right now counts as having been looked at. Without this
-        // the instruction below is false where it matters most: an author who
-        // re-reads the task and records it, then re-runs, would still be told
-        // the ground had moved, because the baseline is a commit and their edit
-        // is not one yet (`A1-301`, found by dogfooding it).
-        let on_disk_path = if lt.path.is_absolute() || lt.path.exists() {
-            lt.path.clone()
-        } else {
-            repo_root.join(&lt.path)
-        };
-        let on_disk = std::fs::read_to_string(on_disk_path).ok();
-        let at_head = repo
-            .text_at(None, &task_path.to_string_lossy())
-            .ok()
-            .flatten();
-        if let (Some(disk), Some(head)) = (&on_disk, &at_head)
-            && disk != head
-        {
-            continue;
-        }
+        let uncommitted_substantive =
+            has_uncommitted_substantive_edit(repo, repo_root, lt, &task_path);
         for trace in &lt.task.traces {
-            let Some((doc, anchor)) = trace.split_once('#') else {
-                continue;
-            };
-            // What the document said when the task was last touched, and what it
-            // says now. A trace that does not resolve at either end is
-            // `APLAN008`'s to report, not this one's.
-            // Joined onto `traces_root`, the way `APLAN018` joins it: under
-            // `traces_root: docs` a trace of `d.md#x` is `docs/d.md` in the
-            // repository, and reading `d.md` would find nothing and report
-            // nothing (`A1-301`, audit).
-            // `traces_root` arrives absolute, and git wants a repository-relative
-            // path, so the repository root is stripped back off. Where the two
-            // are the same -- which is every plan measured so far -- this is the
-            // trace's own spelling.
-            // Compare in Git's canonical worktree frame rather than against the
-            // caller's spelling (`.` is the CLI default). An absolute configured
-            // root cannot be stripped from `.`, which used to collapse it to the
-            // repository root and miss the finding (`A1-604`, audit). An external
-            // root has no historical bytes in this tree, so it has no answer.
-            let repository_root = workdir.as_deref().unwrap_or(repo_root);
-            let Some(at) = historical_trace_path(doc, opts.traces_root.as_deref(), repository_root)
-            else {
-                continue;
-            };
-            let Ok(Some(then)) = repo.text_at(Some(rev), &at) else {
-                continue;
-            };
-            let Ok(Some(now)) = repo.text_at(None, &at) else {
-                continue;
-            };
-            let (Some(a), Some(b)) = (
-                aplan_core::anchor::fingerprint_in(doc, &then, anchor),
-                aplan_core::anchor::fingerprint_in(doc, &now, anchor),
-            ) else {
-                continue;
-            };
-            if a == b {
-                continue;
+            if let Some(diag) = check_live_task_trace(
+                repo,
+                repository_root,
+                opts,
+                lt,
+                rev,
+                uncommitted_substantive,
+                trace,
+            ) {
+                out.push(diag);
             }
-            out.push(
-                aplan_core::Diagnostic::warning(
-                    aplan_core::diagnostic::code::STALE_PREMISE,
-                    format!(
-                        "is still open and `{trace}` has changed since this task was last \
-                         touched: the ground it was written on has moved"
-                    ),
-                )
-                .with_task(&lt.task.id)
-                .with_file(&lt.path)
-                .with_agent_instruction(format!(
-                    "Re-read `{trace}` against this task. If the work is already done, close \
-                     it with the evidence; if the task still holds, editing it records that \
-                     somebody looked and clears this."
-                )),
-            );
         }
     }
     Ok(())
@@ -2882,15 +2937,15 @@ mod tests {
             .expect("the premise moved and nothing said so");
         assert_eq!(d.severity, aplan_core::diagnostic::Severity::Warning);
         assert!(
-            d.message.contains("DOC.md#intro") && d.message.contains("last touched"),
+            d.message.contains("DOC.md#intro") && d.message.contains("last substantively updated"),
             "it names the trace and what it is measured against: {}",
             d.message
         );
         assert!(
-            d.agent_instruction
-                .as_deref()
-                .is_some_and(|i| i.contains("close it with the evidence")),
-            "and offers the reading this exists for -- it may already be done: {:?}",
+            d.agent_instruction.as_deref().is_some_and(|i| {
+                i.contains("close it with the evidence") && i.contains("aplan review A-1")
+            }),
+            "and offers both legitimate remedies: {:?}",
             d.agent_instruction
         );
 
@@ -3156,6 +3211,201 @@ mod tests {
         assert_eq!(
             historical_trace_path("DOC.md", Some(Path::new("../elsewhere")), dir.path()),
             None
+        );
+    }
+
+    /// Proves `A2-051` (`ADR-0069`) on open tasks: renaming a traced heading
+    /// when a same-slug table row exists (`heading` -> `row`), or adding a
+    /// heading that captures a traced table row (`row` -> `heading`), emits
+    /// blocking error `APLAN060` (`TRACE_RETARGETED`), not `APLAN045`.
+    #[test]
+    fn trace_retargeting_between_heading_and_row_emits_blocking_aplan060_on_open_tasks() {
+        let (dir, repo) = init();
+        let both =
+            "## Beta\n\nHeading text.\n\n| Key | Val |\n| --- | --- |\n| Beta | Row text |\n";
+        let renamed_heading =
+            "## Beta Prime\n\nHeading text.\n\n| Key | Val |\n| --- | --- |\n| Beta | Row text |\n";
+        let task_md = "---\nid: A-1\ntitle: Traced task\nphase: 1\nstatus: todo\neffort_days: 1\n\
+                       traces:\n  - DESIGN.md#beta\n---\n\nbody\n";
+
+        commit(
+            &repo,
+            &[("DESIGN.md", both), ("plan/tasks/x.md", task_md)],
+            "heading + colliding table row",
+        );
+        commit(
+            &repo,
+            &[("DESIGN.md", renamed_heading)],
+            "rename heading; leave table row",
+        );
+
+        let mut task = done_task("A-1", Vec::new(), Vec::new());
+        task.status = Status::Todo;
+        task.traces = vec!["DESIGN.md#beta".to_string()];
+        let report = verify(
+            &plan_of(task.clone()),
+            dir.path(),
+            &VerifyOptions::default(),
+        )
+        .expect("verify runs");
+        let err = report
+            .diagnostics
+            .iter()
+            .find(|d| d.code == code::TRACE_RETARGETED)
+            .expect("expected APLAN060 blocking error on heading -> row retargeting");
+        assert_eq!(err.severity, aplan_core::diagnostic::Severity::Error);
+        assert!(err.message.contains("heading") && err.message.contains("table row"));
+        assert!(
+            !report
+                .diagnostics
+                .iter()
+                .any(|d| d.code == code::STALE_PREMISE),
+            "retargeting must not also emit APLAN045: {:?}",
+            report.diagnostics
+        );
+
+        // Symmetric case: `row` -> `heading`.
+        let (dir2, repo2) = init();
+        let row_only = "| Key | Val |\n| --- | --- |\n| Beta | Row text |\n";
+        commit(
+            &repo2,
+            &[("DESIGN.md", row_only), ("plan/tasks/x.md", task_md)],
+            "row only",
+        );
+        commit(&repo2, &[("DESIGN.md", both)], "add colliding heading");
+        let report2 =
+            verify(&plan_of(task), dir2.path(), &VerifyOptions::default()).expect("verify runs");
+        let err2 = report2
+            .diagnostics
+            .iter()
+            .find(|d| d.code == code::TRACE_RETARGETED)
+            .expect("expected APLAN060 on row -> heading retargeting");
+        assert_eq!(err2.severity, aplan_core::diagnostic::Severity::Error);
+        assert!(err2.message.contains("table row") && err2.message.contains("heading"));
+    }
+
+    /// Proves `traces.stale_premise_requires_substantive_edit_or_review`
+    /// (`A2-053`, `ADR-0070`): committed and uncommitted metadata edits
+    /// (`status`, `tags`, `owner`, `blocked_by`, `effort_days`, formatting) and
+    /// bogus hand-edited `trace_fingerprints` never clear `APLAN045`; only a
+    /// substantive edit (`title`, `body`, `paths`, `traces`) or a valid review
+    /// stamp clears it, and a later spec edit re-arms `APLAN045`.
+    #[test]
+    fn stale_premise_ignores_metadata_edits_and_clears_on_substantive_edit_or_review() {
+        let (dir, repo) = init();
+        let task_file = dir.path().join("plan/tasks/x.md");
+        let base_task = "---\nid: A-1\ntitle: Traced task\nphase: 1\nstatus: todo\n\
+                         effort_days: 1\npaths:\n  - src/a.rs\ntraces:\n  - DOC.md#intro\n---\n\n\
+                         Initial body.\n";
+        commit(
+            &repo,
+            &[
+                ("DOC.md", "# Intro\n\nSpec v1.\n"),
+                ("plan/tasks/x.md", base_task),
+            ],
+            "initial task and spec",
+        );
+        commit(&repo, &[("DOC.md", "# Intro\n\nSpec v2.\n")], "spec moved");
+
+        let check_has_045 = |dir: &std::path::Path| -> bool {
+            let plan = aplan_core::load_plan(&dir.join("plan"));
+            verify(&plan, dir, &VerifyOptions::default())
+                .expect("verify runs")
+                .diagnostics
+                .iter()
+                .any(|d| d.code == code::STALE_PREMISE)
+        };
+        assert!(
+            check_has_045(dir.path()),
+            "baseline drift must fire APLAN045"
+        );
+
+        // Uncommitted metadata-only edit (status, tags, owner, effort, formatting)
+        // must NOT clear APLAN045.
+        let metadata_only = base_task
+            .replace(
+                "status: todo",
+                "status: in_progress\ntags: [cli]\nowner: ada",
+            )
+            .replace("effort_days: 1", "effort_days: 2");
+        std::fs::write(&task_file, &metadata_only).expect("uncommitted metadata edit");
+        assert!(
+            check_has_045(dir.path()),
+            "uncommitted metadata edit must NOT clear APLAN045"
+        );
+
+        // Committing that metadata-only edit must STILL NOT clear APLAN045.
+        commit(
+            &repo,
+            &[("plan/tasks/x.md", &metadata_only)],
+            "metadata churn",
+        );
+        assert!(
+            check_has_045(dir.path()),
+            "committed metadata edit must NOT clear APLAN045"
+        );
+
+        // Bogus hand-edited `trace_fingerprints` must NOT clear APLAN045.
+        let bogus = metadata_only.replace(
+            "traces:\n  - DOC.md#intro",
+            "traces:\n  - DOC.md#intro\ntrace_fingerprints:\n  DOC.md#intro: heading:0000000000000000",
+        );
+        std::fs::write(&task_file, &bogus).expect("bogus stamp");
+        assert!(
+            check_has_045(dir.path()),
+            "bogus hand-edited trace_fingerprints must NOT clear APLAN045"
+        );
+
+        // Explicit review stamp matching Spec v2 clears APLAN045 without a commit.
+        let v2_stamp =
+            aplan_core::stamp_in("DOC.md", "# Intro\n\nSpec v2.\n", "intro").expect("stamp");
+        let reviewed = aplan_core::review(
+            &metadata_only,
+            &std::collections::BTreeMap::from([("DOC.md#intro".to_string(), v2_stamp)]),
+        )
+        .expect("review");
+        std::fs::write(&task_file, &reviewed).expect("write reviewed");
+        assert!(
+            !check_has_045(dir.path()),
+            "matching review stamp must clear APLAN045"
+        );
+        commit(
+            &repo,
+            &[("plan/tasks/x.md", &reviewed)],
+            "commit review stamp",
+        );
+        assert!(
+            !check_has_045(dir.path()),
+            "committed matching review stamp must stay clear"
+        );
+
+        // A later edit to the traced section re-arms APLAN045.
+        commit(
+            &repo,
+            &[("DOC.md", "# Intro\n\nSpec v3.\n")],
+            "spec moved again",
+        );
+        assert!(
+            check_has_045(dir.path()),
+            "later spec edit after review must re-arm APLAN045"
+        );
+
+        // An uncommitted substantive body edit clears APLAN045, and committing
+        // it advances the substantive baseline so APLAN045 stays clear.
+        let substantive = reviewed.replace("Initial body.", "Updated body for Spec v3.");
+        std::fs::write(&task_file, &substantive).expect("uncommitted substantive edit");
+        assert!(
+            !check_has_045(dir.path()),
+            "uncommitted substantive body edit must clear APLAN045"
+        );
+        commit(
+            &repo,
+            &[("plan/tasks/x.md", &substantive)],
+            "substantive edit",
+        );
+        assert!(
+            !check_has_045(dir.path()),
+            "committed substantive edit must keep APLAN045 clear"
         );
     }
 

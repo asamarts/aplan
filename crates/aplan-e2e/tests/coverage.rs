@@ -75,6 +75,9 @@ struct Scenario {
     /// the scenario's own `AGENTS.md` (enables `APLAN041`). `None` is a caller
     /// that cannot render one, which switches the rule off.
     agents_block: Option<&'static str>,
+    /// Load tasks from `<dir>/tasks` instead of `<dir>` so a traced Markdown
+    /// document carrying YAML frontmatter outside `tasks/` is not parsed as a task.
+    plan_root_tasks: bool,
 }
 
 impl Scenario {
@@ -145,6 +148,11 @@ impl Scenario {
         self.agents_block = Some(current);
         self
     }
+
+    fn plan_root_tasks(mut self) -> Self {
+        self.plan_root_tasks = true;
+        self
+    }
 }
 
 fn scen(name: &'static str, rule: Rule, expect: Expect, files: Vec<(String, String)>) -> Scenario {
@@ -165,6 +173,7 @@ fn scen(name: &'static str, rule: Rule, expect: Expect, files: Vec<(String, Stri
         min_strength: None,
         configured_resolvers: None,
         agents_block: None,
+        plan_root_tasks: false,
     }
 }
 
@@ -782,6 +791,62 @@ fn drift_rules() -> Vec<Scenario> {
             vec![tf("a", &stamped(&good)), doc("DOC.md", doc_body)],
         )
         .drift(),
+        // APLAN060 (`ADR-0069`, `A2-051`): a kind-tagged heading stamp whose
+        // anchor now resolves to a table row after the heading was renamed
+        // fires blocking error `APLAN060` (not `APLAN018`).
+        scen(
+            "trace-retargeted-heading-to-row-fires",
+            Rule::TraceRetargeted,
+            Fires,
+            vec![
+                tf(
+                    "a",
+                    &format!(
+                        "id: A-1\ntitle: A-1\nphase: 0\nstatus: done\n\
+                         evidence:\n  - kind: commit\n    ref: abc1234\n\
+                         traces:\n  - DESIGN.md#beta\n\
+                         trace_fingerprints:\n  DESIGN.md#beta: '{}'",
+                        aplan_core::stamp_in(
+                            "DESIGN.md",
+                            "## Beta\n\nHeading.\n\n| Key | Val |\n| --- | --- |\n| Beta | Row |\n",
+                            "beta"
+                        )
+                        .expect("heading stamp")
+                    ),
+                ),
+                doc(
+                    "DESIGN.md",
+                    "## Beta Prime\n\nHeading.\n\n| Key | Val |\n| --- | --- |\n| Beta | Row |\n",
+                ),
+            ],
+        )
+        .drift(),
+        // Near miss for APLAN060: a kind-tagged heading stamp whose anchor
+        // still resolves to the heading (even if its content drifted) is silent
+        // for APLAN060 (content drift is APLAN018's job).
+        scen(
+            "trace-retargeted-same-kind-silent",
+            Rule::TraceRetargeted,
+            Silent,
+            vec![
+                tf(
+                    "a",
+                    &format!(
+                        "id: A-1\ntitle: A-1\nphase: 0\nstatus: done\n\
+                         evidence:\n  - kind: commit\n    ref: abc1234\n\
+                         traces:\n  - DESIGN.md#beta\n\
+                         trace_fingerprints:\n  DESIGN.md#beta: '{}'",
+                        aplan_core::stamp_in("DESIGN.md", "## Beta\n\nHeading.\n", "beta")
+                            .expect("heading stamp")
+                    ),
+                ),
+                doc(
+                    "DESIGN.md",
+                    "## Beta\n\nHeading.\n\n| Key | Val |\n| --- | --- |\n| Beta | Row |\n",
+                ),
+            ],
+        )
+        .drift(),
         // The same rule over a structured document, which says `node` rather
         // than `section` (`A1-191`). Its own scenario because a rule with two
         // wordings and one scenario leaves the less-travelled one unpinned,
@@ -993,6 +1058,25 @@ fn structured_trace_rules() -> Vec<Scenario> {
             ],
         )
         .traces(),
+        // A2-085: YAML frontmatter closing `---` is metadata, not a setext h2
+        // underline, so tracing a frontmatter key fires APLAN008.
+        scen(
+            "frontmatter-delimiter-not-a-heading-fires",
+            Rule::DanglingTrace,
+            Fires,
+            vec![
+                tf(
+                    "a",
+                    "id: A-1\ntitle: A-1\nphase: 0\nstatus: todo\ntraces:\n  - docs/plan.md#last_updated-2026-11-22",
+                ),
+                doc(
+                    "docs/plan.md",
+                    "---\nid: ABC\nlast_updated: 2026-11-22\n---\n\n# Real Heading\n\nBody.\n",
+                ),
+            ],
+        )
+        .traces()
+        .plan_root_tasks(),
         // And the pair's silent half in both spellings, since a resolver that
         // refused everything would pass the three above on its own.
         scen(
@@ -2147,7 +2231,12 @@ fn scenario_run(s: &Scenario) -> (Vec<aplan_core::Diagnostic>, std::path::PathBu
         std::fs::write(&path, contents).expect("write fixture");
     }
     let opts = options_for(s, dir.path());
-    let mut diagnostics = validate(&load_plan(dir.path()), &opts).diagnostics;
+    let plan_root = if s.plan_root_tasks {
+        dir.path().join("tasks")
+    } else {
+        dir.path().to_path_buf()
+    };
+    let mut diagnostics = validate(&load_plan(&plan_root), &opts).diagnostics;
     diagnostics.extend(
         aplan_core::capture::load_inbox(
             dir.path(),

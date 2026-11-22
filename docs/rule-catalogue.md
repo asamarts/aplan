@@ -69,12 +69,14 @@ a done task does not depend on an unfinished one
 
 ## APLAN008 (error)
 
-traces anchors resolve to a real heading or node
+traces anchors resolve to a real heading, table row or node (YAML frontmatter delimiters are metadata, not headings)
 
 - **says:** `traces` anchor `#$.states[*]` is not an address into `spec.yaml`: `[*]` cannot be part of one, because a wildcard selects every member, and an anchor addresses one node
   - **fix:** Address one node of `spec.yaml`: a JSON Pointer (`#/states/provisioning`, RFC 6901) or a JSONPath (`#$.states.provisioning`, RFC 9535). Only the singular subset of JSONPath is accepted, names and whole-number indices, because a fingerprint is taken of one node, and this tool resolves an address rather than running a query.
 - **says:** `traces` anchor `#/states/provisionng` addresses no node in `spec.yaml`
   - **fix:** Add that node to `spec.yaml`, or did you mean `#/states/provisioning`? An address is checked against the document as it is now, so a key that was renamed is reported here rather than silently tracing nothing.
+- **says:** `traces` anchor `#last_updated-2026-11-22` matches no heading or table row in `docs/plan.md`
+  - **fix:** Add to `docs/plan.md` a heading, or a table row, whose text slugifies to `last_updated-2026-11-22`; or correct the anchor to one the document already has. A **list item is not an anchor**, deliberately: a bullet's identity would be its whole text, so rewording it would break the reference rather than report drift. Give the item a heading or a table row, which is what an author tracking items one by one wants anyway.
 - **says:** `traces` anchor `#renamed` matches no heading or table row in `DOC.md`
   - **fix:** Add to `DOC.md` a heading, or a table row, whose text slugifies to `renamed`; or correct the anchor to one the document already has. A **list item is not an anchor**, deliberately: a bullet's identity would be its whole text, so rewording it would break the reference rather than report drift. Give the item a heading or a table row, which is what an author tracking items one by one wants anyway.
 - **says:** `traces` target `NOPE.md` does not exist
@@ -167,6 +169,8 @@ a closed task's traced section is unchanged since closure
 
 - **says:** traced node `spec.yaml#/states/provisioning` has changed since this task was closed
   - **fix:** See what moved with `git diff <sha> -- <tmp>/spec.yaml`, then re-review the task; if it still holds, re-stamp with `aplan close --restamp`, otherwise `aplan supersede` it with the task that now needs doing.
+- **says:** traced section `DESIGN.md#beta` has changed since this task was closed
+  - **fix:** See what moved with `git diff <sha> -- <tmp>/DESIGN.md`, then re-review the task; if it still holds, re-stamp with `aplan close --restamp`, otherwise `aplan supersede` it with the task that now needs doing.
 - **says:** traced section `DOC.md#intro` has changed since this task was closed
   - **fix:** See what moved with `git diff <sha> -- <tmp>/DOC.md`, then re-review the task; if it still holds, re-stamp with `aplan close --restamp`, otherwise `aplan supersede` it with the task that now needs doing.
 
@@ -394,10 +398,10 @@ a closed task claims less of the released version than its level implies, withou
 
 ## APLAN045 (warning)
 
-a live task's traced section is unchanged since the task was last touched
+a live task's traced section is unchanged since the task's last substantive edit or explicit review
 
-- **says:** is still open and `DOC.md#intro` has changed since this task was last touched: the ground it was written on has moved
-  - **fix:** Re-read `DOC.md#intro` against this task. If the work is already done, close it with the evidence; if the task still holds, editing it records that somebody looked and clears this.
+- **says:** is still open and `DOC.md#intro` has changed since this task was last substantively updated: the ground it was written on has moved
+  - **fix:** Re-read `DOC.md#intro` against this task. If the work is already done, close it with the evidence; if the task needs changes, update its body, `paths`, or `traces`; if it still holds as written, run `aplan review A`.
 
 ## APLAN046 (error)
 
@@ -514,4 +518,11 @@ every evidence kind required by policy has a configured resolver
   - **fix:** Configure a `test` runner in `.aplan.yml`, or remove `test` from `policy[0].evidence.require_min_strength` if tests are not resolved here.
 - **says:** `policy[0].evidence.require_min_strength` requires `url` evidence, but `url.check` is not configured in `.aplan.yml`, so `url` citations cannot be resolved
   - **fix:** Configure `url.check` in `.aplan.yml`, or remove `url` from `policy[0].evidence.require_min_strength` if URLs are not resolved here.
+
+## APLAN060 (error)
+
+a traced anchor resolves to the same element kind it was written or stamped against
+
+- **says:** traced anchor `DESIGN.md#beta` silently retargeted from a heading to a table row
+  - **fix:** Update `traces` to the renamed heading target, or if tracing the table row is intentional, run `aplan close A-1 --restamp` to re-stamp against it.
 

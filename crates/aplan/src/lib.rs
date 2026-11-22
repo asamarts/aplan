@@ -1211,6 +1211,17 @@ enum Command {
         #[command(flatten)]
         verdict: VerdictFlags,
     },
+    /// Record that a live task's traced sections were re-reviewed and still hold
+    /// as written, stamping kind-tagged `trace_fingerprints` without creating a
+    /// commit. Clears `APLAN045` while the stamp matches and re-arms if a traced
+    /// section changes again.
+    Review {
+        /// The live task whose traced sections were re-reviewed.
+        id: String,
+        /// Whether a warning blocks this write, as `check` and `verify` take it.
+        #[command(flatten)]
+        verdict: VerdictFlags,
+    },
     /// Move tasks between cuts, editing both milestones or neither.
     Mv {
         /// The tasks to move. Several are one move: every refusal runs before
@@ -1412,7 +1423,7 @@ enum Command {
     Add(AddArgs),
     /// Run an MCP server over stdio, exposing a deliberately small tool set
     /// (`identity`, `ready`, `why`, `check`, `verify`, `add`, `show`, `dep`,
-    /// `close`, `claim`, `release`, `start`, `stop`) to an agent. `close` goes through the
+    /// `close`, `claim`, `release`, `start`, `stop`, `review`) to an agent. `close` goes through the
     /// same evidence gate as the CLI, in both directions: an agent cannot close
     /// through MCP what it could not close here, and is not refused what this
     /// command records.
@@ -1565,6 +1576,7 @@ fn command_progress_profile(command: &Command) -> CommandProgressProfile {
         | Command::Release { .. }
         | Command::Start { .. }
         | Command::Stop { .. }
+        | Command::Review { .. }
         | Command::Add(_)
         | Command::Supersede(_)
         | Command::Tag(_)
@@ -5964,13 +5976,10 @@ fn dispatch(command: Command, cli_root: Option<PathBuf>) -> Result<u8> {
             format,
             select,
         } => cmd_paths(&resolve_root(cli_root)?, &repo, sample, &format, &select),
-
         Command::Deprecations { format } => cmd_deprecations(&resolve_root(cli_root)?, &format),
-
         Command::Vacuity { format, select } => {
             cmd_vacuity(&resolve_root(cli_root)?, &format, &select)
         }
-
         Command::Stale {
             older_than,
             as_of,
@@ -5985,7 +5994,6 @@ fn dispatch(command: Command, cli_root: Option<PathBuf>) -> Result<u8> {
             &format,
             &select,
         ),
-
         Command::Attest {
             repo,
             attach_note,
@@ -5997,12 +6005,8 @@ fn dispatch(command: Command, cli_root: Option<PathBuf>) -> Result<u8> {
             execute,
         ),
 
-        Command::ExportRoadmapJson { file, check } => export_roadmap_json(cli_root, &file, check),
-
-        Command::Export(args) => cmd_export(&resolve_root(cli_root)?, &args),
-
-        Command::ExportAgentsMd { write, check } => {
-            cmd_export_agents_md(&resolve_root(cli_root)?, write.as_deref(), check.as_deref())
+        Command::ExportRoadmapJson { .. } | Command::Export(_) | Command::ExportAgentsMd { .. } => {
+            dispatch_export(command, cli_root)
         }
 
         Command::CheckDocs { paths, format } => {
@@ -6023,7 +6027,8 @@ fn dispatch(command: Command, cli_root: Option<PathBuf>) -> Result<u8> {
         | Command::Claim { .. }
         | Command::Release { .. }
         | Command::Start { .. }
-        | Command::Stop { .. } => dispatch_placement(command, cli_root),
+        | Command::Stop { .. }
+        | Command::Review { .. } => dispatch_placement(command, cli_root),
         Command::Tasks { format, select } => cmd_tasks(&resolve_root(cli_root)?, &format, &select),
         Command::Roadmap(args) => cmd_roadmap(&resolve_root(cli_root)?, &args),
 
@@ -6061,6 +6066,17 @@ fn dispatch_build_metadata(command: Command) -> Result<u8> {
         Command::Schema => cmd_schema(),
         Command::Facts { require, identity } => cmd_facts(&require, identity),
         _ => unreachable!("dispatch_build_metadata receives only metadata commands"),
+    }
+}
+
+fn dispatch_export(command: Command, cli_root: Option<PathBuf>) -> Result<u8> {
+    match command {
+        Command::ExportRoadmapJson { file, check } => export_roadmap_json(cli_root, &file, check),
+        Command::Export(args) => cmd_export(&resolve_root(cli_root)?, &args),
+        Command::ExportAgentsMd { write, check } => {
+            cmd_export_agents_md(&resolve_root(cli_root)?, write.as_deref(), check.as_deref())
+        }
+        _ => unreachable!("dispatch_export receives only export commands"),
     }
 }
 
@@ -12752,6 +12768,53 @@ fn restamp_task(
     Ok(EXIT_OK)
 }
 
+/// `aplan review <ID>`: stamp kind-tagged `trace_fingerprints` on a live task
+/// after re-reviewing its traced sections (`ADR-0069`, `ADR-0070`, `A2-053`).
+fn cmd_review(root: &std::path::Path, id: &str, verdict: VerdictFlags) -> Result<u8> {
+    let plan = load_checked(root)?;
+    if !loaded_cleanly(&plan) {
+        return Ok(EXIT_VIOLATIONS);
+    }
+    let lt = locate(&plan, id)?;
+    let (config, config_dir) = config_at(root)?;
+    let opts = resolve_check_options(
+        &config,
+        config_dir.as_deref(),
+        false,
+        None,
+        false,
+        Some(plan_repository(root)),
+    );
+    refuse_absent_external_roots(&opts)?;
+
+    let original = std::fs::read_to_string(&lt.path)
+        .with_context(|| format!("reading {}", lt.path.display()))?;
+    let source_task = task_of(&original, id)?;
+    ensure_restamp_source_matches_loaded(&lt.task, &source_task)?;
+
+    let fingerprints = aplan_core::trace_fingerprints(&lt.task, opts.traces_root.as_deref());
+    let updated =
+        aplan_core::review(&original, &fingerprints).map_err(|e| close_err("review", id, &e))?;
+    let after = aplan_core::mutation::with_replaced(&plan, id, task_of(&updated, id)?);
+    refuse_bad_mutation(root, &format!("review `{id}`"), &plan, &after, verdict)?;
+
+    let changes = fingerprint_changes(&lt.task.trace_fingerprints, &fingerprints);
+    if changes.changed == 0 {
+        write_stdout(&format!(
+            "review {id}: trace fingerprints already current; no task file written ({} trace(s) unchanged)\n",
+            changes.unchanged
+        ))?;
+    } else {
+        save_one(&lt.path, &original, &updated, "review")?;
+        write_stdout(&format!(
+            "reviewed {id}: stamped {} trace(s) in {}\n",
+            fingerprints.len(),
+            lt.path.display()
+        ))?;
+    }
+    Ok(EXIT_OK)
+}
+
 /// Refuse a result computed from a task snapshot other than the one about to
 /// be reported or rewritten. The guarded writer catches edits after the source
 /// reread; this closes the earlier window between loading the plan and that
@@ -16566,6 +16629,7 @@ fn dispatch_placement(command: Command, cli_root: Option<PathBuf>) -> Result<u8>
         Command::Release { id } => cmd_release(&resolve_root(cli_root)?, &id),
         Command::Start { id, verdict } => cmd_working(&resolve_root(cli_root)?, &id, true, verdict),
         Command::Stop { id, verdict } => cmd_working(&resolve_root(cli_root)?, &id, false, verdict),
+        Command::Review { id, verdict } => cmd_review(&resolve_root(cli_root)?, &id, verdict),
         // Unreachable by construction: the caller matches these four before
         // routing here. A refusal rather than `unreachable!`, so a fifth arm
         // added to that pattern cannot panic in a consumer's terminal.

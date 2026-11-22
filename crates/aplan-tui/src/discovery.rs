@@ -386,6 +386,17 @@ pub const COMMANDS: &[CommandDiscovery] = &[
     mutation("release", "Release a task claim", RELEASE),
     mutation("start", "Start a task", START),
     mutation("stop", "Stop a task", STOP),
+    CommandDiscovery {
+        name: "review",
+        title: "Record trace review on a live task",
+        disposition: CommandDisposition::CliOnly {
+            reason: "recording a live trace-review stamp asserts that the author re-read each traced section outside the TUI and confirmed the task still holds without substantive edits, so it remains an explicit CLI and MCP command",
+            example: "aplan review T-123",
+        },
+        surfaces: &[],
+        mutations: &[],
+        boundaries: &[],
+    },
     mutation("mv", "Move tasks", MOVE),
     mutation("rekey", "Rekey a task", REKEY),
     native("tasks", "Browse tasks", &[NativeSurface::Tasks]),

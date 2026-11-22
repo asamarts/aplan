@@ -527,6 +527,7 @@ fn writes(command: &str) -> bool {
             | "park"
             | "rekey"
             | "release"
+            | "review"
             | "start"
             | "stop"
             | "supersede"

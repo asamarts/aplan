@@ -87,16 +87,33 @@ impl TraceDocument {
         }
     }
 
-    fn holds(&self, anchor: &str, stored: &str) -> Option<bool> {
+    fn check_stamp(&self, anchor: &str, stored: &str) -> Option<crate::anchor::StampCheck> {
         match self {
             Self::Unreadable | Self::Structured { document: None, .. } => None,
-            Self::Markdown(document) => document.holds(anchor, stored),
+            Self::Markdown(document) => document.check_stamp(anchor, stored),
             Self::Structured {
                 document: Some(document),
                 ..
-            } => Some(
-                document.fingerprint(&crate::structured::parse_anchor(anchor).ok()?)? == stored,
-            ),
+            } => {
+                let current_hash =
+                    document.fingerprint(&crate::structured::parse_anchor(anchor).ok()?)?;
+                let (stored_kind, stored_hash) = crate::anchor::AnchorKind::parse_stamp(stored);
+                if let Some(was) = stored_kind
+                    && was != crate::anchor::AnchorKind::Node
+                {
+                    return Some(crate::anchor::StampCheck::Retargeted {
+                        was,
+                        now: crate::anchor::AnchorKind::Node,
+                    });
+                }
+                if current_hash == stored_hash {
+                    Some(crate::anchor::StampCheck::Holds)
+                } else {
+                    Some(crate::anchor::StampCheck::Drifted {
+                        kind: crate::anchor::AnchorKind::Node,
+                    })
+                }
+            }
         }
     }
 }
@@ -131,9 +148,14 @@ impl TraceDocuments {
         self.get(root, rel).fingerprint(anchor)
     }
 
-    fn holds(&mut self, root: &Path, trace: &str, stored: &str) -> Option<bool> {
+    fn check_stamp(
+        &mut self,
+        root: &Path,
+        trace: &str,
+        stored: &str,
+    ) -> Option<crate::anchor::StampCheck> {
         let (rel, anchor) = trace.split_once('#')?;
-        self.get(root, rel).holds(anchor, stored)
+        self.get(root, rel).check_stamp(anchor, stored)
     }
 }
 
@@ -835,14 +857,15 @@ fn check_task(
             if let Some(diag) = check_trace(root, tr, &mut context.traces) {
                 out.push(diag.with_task(&t.id).with_file(&lt.path));
             }
-            // APLAN018: a closed task whose traced section has drifted from the
-            // fingerprint it stamped at close time. Advisory, and only where a
-            // stamp exists (no stamp is unverifiable, not a violation).
+            // APLAN060 / APLAN018: a closed task whose traced section has
+            // retargeted to a different element kind (blocking error, ADR-0069)
+            // or drifted in content (APLAN018 warning). Only where a stamp
+            // exists (no stamp is unverifiable, not a violation).
             if opts.detect_drift
                 && t.status == Status::Done
                 && let Some(stamp) = t.trace_fingerprints.get(tr)
                 && let Some(diag) =
-                    check_drift(root, tr, stamp, sole_commit(t), &mut context.traces)
+                    check_drift(root, &t.id, tr, stamp, sole_commit(t), &mut context.traces)
             {
                 out.push(diag.with_task(&t.id).with_file(&lt.path));
             }
@@ -1276,17 +1299,38 @@ fn check_trace_stamp(
 /// job, not a drift), or the trace names no anchor (only sections are stamped).
 fn check_drift(
     root: &Path,
+    task_id: &str,
     trace: &str,
     stamp: &str,
     closed_at: Option<&str>,
     documents: &mut TraceDocuments,
 ) -> Option<Diagnostic> {
     let (rel, _) = trace.split_once('#')?;
-    // Markdown accepts the pre-`A1-122` form as well as the current one, so a
-    // plan whose stamps predate the trailing-blank fix is not re-flagged
-    // wholesale. Structured documents compare their canonical node directly.
-    if documents.holds(root, trace, stamp)? {
-        return None;
+    // Kind-tagged stamps (`ADR-0069`, `A2-051`) detect silent element-kind
+    // retargeting (`heading` <-> `row`) as blocking `APLAN060` error; legacy
+    // bare 16-hex stamps keep zero-churn content comparison including the
+    // pre-`A1-122` trailing-blank compatibility form.
+    match documents.check_stamp(root, trace, stamp)? {
+        crate::anchor::StampCheck::Holds => return None,
+        crate::anchor::StampCheck::Retargeted { was, now } => {
+            return Some(
+                Diagnostic::error(
+                    code::TRACE_RETARGETED,
+                    format!(
+                        "traced anchor `{trace}` silently retargeted from a {} to a {}",
+                        was.label(),
+                        now.label()
+                    ),
+                )
+                .with_agent_instruction(format!(
+                    "Update `traces` to the renamed {} target, or if tracing the {} is \
+                     intentional, run `aplan close {task_id} --restamp` to re-stamp against it.",
+                    was.label(),
+                    now.label(),
+                )),
+            );
+        }
+        crate::anchor::StampCheck::Drifted { .. } => {}
     }
     // Where to look, when the task cites a commit to look *from*. The reader is
     // otherwise told a section moved and left to work out which of its lines did,
@@ -9234,5 +9278,118 @@ mod tests {
                 .iter()
                 .all(|d| d.code != code::POLICY_EVIDENCE_UNRESOLVABLE)
         );
+    }
+
+    fn stamped_done_task(id: &str, stamp: &str) -> Task {
+        let mut task = t(id, Status::Done);
+        task.paths = vec!["D.md".to_string()];
+        task.traces = vec!["D.md#beta".to_string()];
+        task.trace_fingerprints = [("D.md#beta".to_string(), stamp.to_string())]
+            .into_iter()
+            .collect();
+        task.evidence = vec![Evidence {
+            kind: EvidenceKind::Commit,
+            reference: "abc1234".into(),
+            captured: None,
+        }];
+        task
+    }
+
+    #[test]
+    fn trace_retargeting_between_heading_and_row_blocks_closed_tasks_even_when_drift_is_advisory() {
+        let dir = tempfile::Builder::new()
+            .tempdir_in(crate::fixture::fixture_root())
+            .expect("tempdir");
+        let doc = dir.path().join("D.md");
+        let both =
+            "## Beta\n\nHeading prose.\n\n| Name | State |\n|---|---|\n| Beta | row prose |\n";
+        let renamed_heading = "## Beta Prime\n\nHeading prose.\n\n| Name | State |\n|---|---|\n| Beta | row prose |\n";
+        let edited_heading = "## Beta\n\nHeading prose revised.\n\n| Name | State |\n|---|---|\n| Beta | row prose |\n";
+        let row_only = "| Name | State |\n|---|---|\n| Beta | row prose |\n";
+
+        std::fs::write(&doc, both).expect("write both");
+        let heading_stamp = crate::anchor::stamp_in("D.md", both, "beta").expect("heading stamp");
+        let bare_stamp = crate::anchor::anchor_fingerprint(both, "beta").expect("bare stamp");
+        let row_stamp = crate::anchor::stamp_in("D.md", row_only, "beta").expect("row stamp");
+        assert!(heading_stamp.starts_with("heading:"), "{heading_stamp}");
+        assert!(row_stamp.starts_with("row:"), "{row_stamp}");
+
+        let opts = Options {
+            require_effort: false,
+            detect_drift: true,
+            traces_root: Some(dir.path().to_path_buf()),
+            ..Default::default()
+        };
+
+        // Same document: heading stamp and legacy bare stamp both hold;
+        // row stamp is already retargeted to heading (`row -> heading`).
+        let r = validate(
+            &plan_of(vec![
+                stamped_done_task("A-1", &heading_stamp),
+                stamped_done_task("A-2", &bare_stamp),
+            ]),
+            &opts,
+        );
+        assert!(
+            r.diagnostics.is_empty(),
+            "unchanged must be clean: {:?}",
+            r.diagnostics
+        );
+
+        let r = validate(&plan_of(vec![stamped_done_task("A-3", &row_stamp)]), &opts);
+        assert!(!r.is_clean(), "APLAN060 must block: {:?}", r.diagnostics);
+        let d = pick(&r, code::TRACE_RETARGETED);
+        assert_eq!(d.severity, crate::Severity::Error);
+        assert!(d.message.contains("table row") && d.message.contains("heading"));
+
+        // Same-kind heading edit remains advisory `APLAN018`, never `APLAN060`.
+        std::fs::write(&doc, edited_heading).expect("write edited");
+        let r = validate(
+            &plan_of(vec![stamped_done_task("A-1", &heading_stamp)]),
+            &opts,
+        );
+        assert!(
+            r.is_clean(),
+            "same-kind edit stays APLAN018 warning: {:?}",
+            r.diagnostics
+        );
+        assert!(r.diagnostics.iter().any(|d| d.code == code::TRACE_DRIFT));
+        assert!(
+            !r.diagnostics
+                .iter()
+                .any(|d| d.code == code::TRACE_RETARGETED)
+        );
+
+        // Renaming the heading retargets `heading -> row`: kind-tagged stamp emits
+        // blocking `APLAN060`, while legacy bare stamp keeps zero-churn `APLAN018`.
+        std::fs::write(&doc, renamed_heading).expect("write renamed");
+        let r = validate(
+            &plan_of(vec![
+                stamped_done_task("A-1", &heading_stamp),
+                stamped_done_task("A-2", &bare_stamp),
+            ]),
+            &opts,
+        );
+        assert!(
+            !r.is_clean(),
+            "heading -> row must fail check: {:?}",
+            r.diagnostics
+        );
+        let a1: Vec<_> = r
+            .diagnostics
+            .iter()
+            .filter(|d| d.task.as_deref() == Some("A-1"))
+            .collect();
+        assert_eq!(a1.len(), 1, "{a1:?}");
+        assert_eq!(a1[0].code, code::TRACE_RETARGETED);
+        assert_eq!(a1[0].severity, crate::Severity::Error);
+        assert!(a1[0].message.contains("heading") && a1[0].message.contains("table row"));
+        let a2: Vec<_> = r
+            .diagnostics
+            .iter()
+            .filter(|d| d.task.as_deref() == Some("A-2"))
+            .collect();
+        assert_eq!(a2.len(), 1, "{a2:?}");
+        assert_eq!(a2[0].code, code::TRACE_DRIFT);
     }
 }

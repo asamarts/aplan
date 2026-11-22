@@ -931,6 +931,14 @@
     {
       "name": "tui.refresh_rebuilds_only_the_visible_projection",
       "what": "refresh adopts the coherent shared snapshot and reconciles the visible destination plus shared work and inspector state; hidden Tasks, Graph and Reports projections defer source-sized work until route entry, where they rebuild from the adopted snapshot"
+    },
+    {
+      "name": "traces.frontmatter_delimiters_mint_no_heading_anchors",
+      "what": "leading YAML frontmatter blocks and nested `---`-fenced YAML metadata mappings mint no Markdown heading anchors, so `APLAN008` rejects traces targeting metadata keys while keeping real setext headings intact"
+    },
+    {
+      "name": "traces.stale_premise_requires_substantive_edit_or_review",
+      "what": "`APLAN045` clears only when a live task's substantive content (`title`, `body`, `paths`, or `traces`) changes or when its `trace_fingerprints` stamp recorded via `aplan review` / `aplan_review` matches the current traced section; metadata-only and formatting edits never clear it"
     }
   ],
   "build_capabilities": [
@@ -1189,6 +1197,12 @@
       "name": "stop"
     },
     {
+      "about": "Record that a live task's traced sections were re-reviewed and still hold as written, stamping kind-tagged `trace_fingerprints` without creating a commit. Clears `APLAN045` while the stamp matches and re-arms if a traced section changes again",
+      "default_format": null,
+      "formats": [],
+      "name": "review"
+    },
+    {
       "about": "Move tasks between cuts, editing both milestones or neither",
       "default_format": null,
       "formats": [],
@@ -1288,7 +1302,7 @@
       "name": "add"
     },
     {
-      "about": "Run an MCP server over stdio, exposing a deliberately small tool set (`identity`, `ready`, `why`, `check`, `verify`, `add`, `show`, `dep`, `close`, `claim`, `release`, `start`, `stop`) to an agent. `close` goes through the same evidence gate as the CLI, in both directions: an agent cannot close through MCP what it could not close here, and is not refused what this command records",
+      "about": "Run an MCP server over stdio, exposing a deliberately small tool set (`identity`, `ready`, `why`, `check`, `verify`, `add`, `show`, `dep`, `close`, `claim`, `release`, `start`, `stop`, `review`) to an agent. `close` goes through the same evidence gate as the CLI, in both directions: an agent cannot close through MCP what it could not close here, and is not refused what this command records",
       "default_format": null,
       "formats": [],
       "name": "mcp"
@@ -1444,14 +1458,14 @@
     "version.require_impact"
   ],
   "counts": {
-    "behaviours": 233,
+    "behaviours": 235,
     "build_capabilities": 1,
-    "commands": 48,
+    "commands": 49,
     "config_keys": 129,
     "evidence_kinds": 5,
     "formats": 9,
-    "mcp_tools": 13,
-    "rules": 59
+    "mcp_tools": 14,
+    "rules": 60
   },
   "evidence_kinds": [
     "commit",
@@ -1529,6 +1543,10 @@
     {
       "description": "Record that work on a task has stopped, returning it to `todo`. Not a closure: it claims nothing about what was done, which is what `aplan_close` is for. Refuses a task that is not `in_progress`, since there is then nothing to stop.",
       "name": "aplan_stop"
+    },
+    {
+      "description": "Record that a live task's traced sections were re-reviewed and still hold as written, stamping kind-tagged `trace_fingerprints` without altering status, evidence, or body and without creating a commit. Clears `APLAN045` only while the stored stamp matches the traced section and re-arms if the section changes again. Refuses terminal tasks and tasks without resolvable anchored traces.",
+      "name": "aplan_review"
     }
   ],
   "rules": [
@@ -1570,7 +1588,7 @@
     {
       "code": "APLAN008",
       "severity": "error",
-      "title": "traces anchors resolve to a real heading or node"
+      "title": "traces anchors resolve to a real heading, table row or node (YAML frontmatter delimiters are metadata, not headings)"
     },
     {
       "code": "APLAN009",
@@ -1755,7 +1773,7 @@
     {
       "code": "APLAN045",
       "severity": "warning",
-      "title": "a live task's traced section is unchanged since the task was last touched"
+      "title": "a live task's traced section is unchanged since the task's last substantive edit or explicit review"
     },
     {
       "code": "APLAN046",
@@ -1826,6 +1844,11 @@
       "code": "APLAN059",
       "severity": "warning",
       "title": "every evidence kind required by policy has a configured resolver"
+    },
+    {
+      "code": "APLAN060",
+      "severity": "error",
+      "title": "a traced anchor resolves to the same element kind it was written or stamped against"
     }
   ],
   "schema_version": "v1",
