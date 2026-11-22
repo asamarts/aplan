@@ -89,13 +89,16 @@ pub mod validate;
 pub mod version;
 pub mod yaml;
 
-pub use anchor::{anchor_fingerprint, fingerprint_holds, heading_anchors, resolvable_anchors};
+pub use anchor::{
+    AnchorKind, ResolvedAnchor, StampCheck, anchor_fingerprint, check_stamp_in, fingerprint_holds,
+    heading_anchors, resolvable_anchors, resolve_in, stamp_in,
+};
 pub use capture::{Capture, CapturePolicy, CaptureSchema, CaptureState, Inbox, load_inbox};
 pub use claim::{ClaimOrigin, ClaimRecord, ClaimScope, ClaimSnapshot};
 pub use close::trace_fingerprints;
 pub use close::{
     CloseError, add_evidence, apply_repair, close, remove_evidence, replace_evidence, restamp,
-    set_evidence_fingerprints,
+    review, set_evidence_fingerprints,
 };
 pub use diagnostic::{
     AgentContractProvenance, Diagnostic, Repair, Report, Rule, Severity, Verdict, code,
@@ -116,7 +119,7 @@ pub use load::{Unopened, Unresolved, unresolved_by_check};
 pub use roadmap::{Cut, Roadmap, RoadmapTask, cut_label, parse_cut_version};
 pub use show::{Show, ShowSources};
 pub use summary::{GroupSummary, GroupedSummary, PhaseSummary, Summary};
-pub use task::{Evidence, EvidenceKind, Status, Task};
+pub use task::{Evidence, EvidenceKind, Status, SubstantiveContent, Task, substantive_content};
 pub use validate::{
     AgentsBlock, Cardinality, MilestoneScope, Options, StatusScope, TagFamily, TraceDocumentWork,
     is_iso_date, is_one_edit_apart, trace_document_work, validate, validate_with_graph,

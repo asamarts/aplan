@@ -471,19 +471,19 @@ of commit ids and file location. `aplan close --restamp` takes a new stamp after
 re-review. `APLAN028` reports a closed task that could have stamped a trace
 but did not, so trace adoption is explicit rather than silently unverifiable.
 
-Two follow-up trace-integrity decisions tighten this boundary for `v0.8`:
+Two trace-integrity mechanisms tighten this boundary in `v0.8`:
 
-- **Element-kind retargeting (`ADR-0069`, `A2-050`, `A2-051`):** `ADR-0015`'s heading-first
-  precedence stands, and renaming a heading onto a same-slug table row (or vice versa) becomes a
-  blocking error rather than an advisory-capable drift warning -- checked from Git history on open
-  tasks (`verify`) and from additive kind-tagged `trace_fingerprints` (`heading:<hex>`,
-  `row:<hex>`, `node:<hex>`) on closed tasks (`check`), with legacy bare hex stamps remaining valid
-  without migration churn.
+- **Element-kind retargeting (`ADR-0069`, `A2-050`, `A2-051`, `APLAN060`):** `ADR-0015`'s heading-first
+  precedence stands, and renaming a heading onto a same-slug table row (or vice versa) emits the
+  blocking error `APLAN060` rather than an advisory-capable drift warning -- checked from Git
+  history on open tasks (`verify`) and from additive kind-tagged `trace_fingerprints`
+  (`heading:<hex>`, `row:<hex>`, `node:<hex>`) on closed tasks (`check`), with legacy bare hex
+  stamps remaining valid without migration churn.
 - **Open-task review baselines (`ADR-0070`, `A2-052`, `A2-053`):** `APLAN045` clears only when a
   task's substantive definition (`title`, `body`, `paths`, or `traces`) changes in Git history or
   the working tree, or when an explicit `aplan review <ID>` (and MCP `aplan_review`) records a
-  matching trace stamp in `trace_fingerprints`. Mechanical metadata edits (`status`, `tags`,
-  `owner`, `blocked_by`, `effort_days`) never silence `APLAN045`.
+  matching kind-tagged trace stamp in `trace_fingerprints`. Mechanical metadata edits (`status`,
+  `tags`, `owner`, `blocked_by`, `effort_days`) never silence `APLAN045`.
 
 **The evidence half landed** in `A1-196`, behind the same switch. A mutable `file`
 citation is the evidence kind whose reference can keep resolving while its referent changes.
@@ -719,6 +719,7 @@ empty cut must be surfaced, not swallowed.
 | `APLAN057` | Every inbox entry is one canonical, valid and cross-record-consistent V1 capture | error | L0 | done (`A1-514`) |
 | `APLAN058` | Every cut and tag in `policy[].when` can match this plan | warning | L0 | done (`A2-024`) |
 | `APLAN059` | Every evidence kind required by policy has a configured resolver | warning | L0 | done (`A2-025`) |
+| `APLAN060` | A traced anchor resolves to the same element kind it was written or stamped against | error | L0/L1 | done (`A2-051`) |
 | `APLAN044` | A closed task claims less of the released version than its level implies, without saying why | warning | L0 | done (`A1-312`) |
 
 Every diagnostic carries a stable code, a severity, an optional task id, an optional
@@ -936,6 +937,7 @@ around every ordinary output write and on every terminal outcome without hiding 
 | `aplan release` | `<id>`: drop a local claim, naming the displaced record. Any caller may run it, including when the task is absent, because a claim with no expiry needs an explicit recovery path independent of the holder | exists (`A1-359`, `A1-531`) |
 | `aplan start` | `<id>`: record that work has begun, setting `in_progress`. `APLAN053` checks that durable status against repository paths; the independent local claim is reported when observable but never gates the transition. Refused on a terminal task because nothing reopens finished work | exists (`A1-359`, `A1-531`, ADR-0051) |
 | `aplan stop` | `<id>`: record that work has stopped, returning the task to `todo`. Not a closure: it claims nothing about what was done | exists (`A1-359`, ADR-0044) |
+| `aplan review` | `<id>`: record that a live task's traced sections were re-reviewed and still hold without editing task prose, stamping current kind-tagged `trace_fingerprints` to clear `APLAN045` without committing. Refuses terminal tasks (use `aplan close <id> --restamp`) and tasks without resolvable anchored traces | exists (`A2-053`, ADR-0070) |
 | `aplan critical-path` | `[<ID>]`: longest path over `effort_days`, **advisory, never a gate**. With an id, the longest chain that *ends at* that task, cut, container or release: what must finish before that checkpoint can. The whole graph is kept and only the endpoint is chosen, which is why this is sound where the refused `--cut` is not -- filtering first turns a fragment into a false path | exists (`A1-013`, `A1-345`) |
 | `aplan init` | scaffold `.aplan.yml`; refuses to overwrite | exists (`A1-009`) |
 | `aplan close` | `<id>`: set `done` + attach evidence; derives `HEAD`; resolves the evidence and refuses what `verify` would reject (`--no-resolve` opts out); with `detect_drift`, stamps traces and mutable file evidence from committed content; `--restamp` refreshes both after review. Fingerprint replacement accepts ordinary string mappings and refuses anchors, aliases, tags, multiline values and structural keys before constructing a candidate; never commits | exists (`A1-008`, `A1-109`, `A1-196`, `A1-716`) |
@@ -950,7 +952,7 @@ around every ordinary output write and on every terminal outcome without hiding 
 | `aplan import` | `<source>`: read another tool's plan. `--format kep`, `checklist`, `roadmap-json`, `spec-kit`, and `openspec` exist; further ecosystems remain candidates, not claimed formats. `--phase` assigns the destination reporting coordinate rather than translating a similarly named source hierarchy. `--cut` places what it writes and `--tag` gives it the vocabulary the plan requires, because a source document supplies neither; the run names any declared `tag_families` member the import would leave missing, as it already names cut membership and effort | partial (`A1-019`, `A1-030`, `A1-031`, `A1-039`, `A1-357`) |
 | `aplan mirror` | one-way push to a forge | planned |
 | `aplan lsp` | editor server | planned |
-| `aplan mcp` | agent server: `identity`, `ready`, `why`, `check`, `verify`, `add`, `show`, `dep`, `close`, `claim`, `release`, `start`, `stop` over stdio | exists (`A1-024`, `A1-102`, `A1-103`, `A1-124`, `A1-118`, `A1-359`) |
+| `aplan mcp` | agent server: `identity`, `ready`, `why`, `check`, `verify`, `add`, `show`, `dep`, `close`, `claim`, `release`, `start`, `stop`, `review` over stdio | exists (`A1-024`, `A1-102`, `A1-103`, `A1-124`, `A1-118`, `A1-359`, `A2-053`) |
 | `aplan tui` | interactive terminal interface in the standard binary: Overview, Tasks, Diagnostics, a multiscale layered Graph, Reports and the complete guarded mutation catalogue consume the same typed application boundary as CLI/MCP. It restores raw, alternate-screen, cursor, mouse, focus and paste modes on every supported exit. A feature-free source build keeps an enablement stub; `facts --require build.tui` asserts the package shape | exists (`A1-421`, `A1-444`, `A1-448`, `A1-679`, `A1-680`) |
 | `aplan roadmap` | render the plan grouped by cut: rollups, per-cut critical path, `--format markdown` companion (ADR-0009) | exists (`A1-015`) |
 | `aplan migrate` | schema version upgrades | when `v2` exists |

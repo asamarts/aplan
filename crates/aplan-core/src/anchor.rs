@@ -25,15 +25,93 @@ struct Heading {
     level: u8,
 }
 
+/// Whether `line` is a bare YAML frontmatter fence (`---` at column 0 with
+/// optional trailing horizontal whitespace).
+fn is_frontmatter_fence(line: &str) -> bool {
+    line.trim_end() == "---"
+}
+
+/// If `lines[start..]` opens a `---`-fenced YAML metadata mapping block, return
+/// the 0-based index of its closing `---` line (`A2-085`).
+///
+/// `CommonMark` treats a `---` line immediately after a paragraph as a setext h2
+/// underline, whereas YAML frontmatter and nested `---`-fenced metadata blocks
+/// are non-rendered metadata whose closing `---` is never a heading underline.
+/// Requiring the enclosed lines to parse as a non-empty YAML mapping with
+/// identifier-shaped keys (and rejecting an opening `---` followed immediately
+/// by a blank line) preserves ordinary `<hr>` thematic breaks followed by real
+/// setext headings (`---\n\nTitle\n---`).
+fn fenced_metadata_close(lines: &[&str], start: usize, at_document_start: bool) -> Option<usize> {
+    if !is_frontmatter_fence(lines.get(start)?) {
+        return None;
+    }
+    // A thematic break followed by a blank line and then a setext heading
+    // (`---\n\nHeading\n---`) must keep its real setext heading.
+    let first_inner = *lines.get(start + 1)?;
+    if first_inner.trim().is_empty() && !at_document_start {
+        return None;
+    }
+    let mut close = None;
+    for (idx, line) in lines.iter().enumerate().skip(start + 1) {
+        if code_fence(line).is_some() {
+            return None;
+        }
+        if is_frontmatter_fence(line) {
+            close = Some(idx);
+            break;
+        }
+        // An ATX heading inside a supposed metadata block means the opening
+        // `---` was just a thematic break before ordinary prose.
+        if !at_document_start && atx_heading(line).is_some() {
+            return None;
+        }
+    }
+    let close = close?;
+    let inner_lines = &lines[start + 1..close];
+    if inner_lines.iter().all(|l| l.trim().is_empty()) {
+        return at_document_start.then_some(close);
+    }
+    // Require the last line before the closing `---` to be non-blank only for
+    // nested blocks (a blank line before `---` already cannot be a setext
+    // heading anyway, and rejecting blank-terminated nested blocks avoids
+    // swallowing unrelated prose between two horizontal rules).
+    if !at_document_start && inner_lines.last().is_some_and(|l| l.trim().is_empty()) {
+        return None;
+    }
+    let inner = inner_lines.join("\n");
+    let Ok(value) = crate::yaml::from_str::<yaml_compat::Value>(&inner) else {
+        return None;
+    };
+    let map = value.as_mapping()?;
+    if map.is_empty() {
+        return at_document_start.then_some(close);
+    }
+    // Every top-level key in a nested metadata block must look like a metadata
+    // identifier (`key` with no spaces) so ordinary prose containing a colon
+    // between two thematic breaks is never swallowed.
+    if !at_document_start
+        && !map.keys().all(|k| {
+            k.as_str().is_some_and(|s| {
+                !s.is_empty()
+                    && s.chars()
+                        .all(|c| c.is_ascii_alphanumeric() || matches!(c, '_' | '-' | '.'))
+            })
+        })
+    {
+        return None;
+    }
+    Some(close)
+}
+
 /// Every heading in `text`, in document order, with GitHub's anchors,
 /// disambiguated exactly as `github-slugger` does (a repeated slug gains a `-1`,
 /// `-2`, ... suffix keyed on the base slug).
 ///
 /// Both forms GitHub anchors are recognised: ATX (`# Title`) and setext (a text
 /// line underlined by `===` for h1 or `---` for h2). Fenced code blocks
-/// (```` ``` ````/`~~~`) are tracked and their contents skipped, so a `#` line
-/// inside a code sample is not mistaken for a heading, GitHub does not anchor
-/// those.
+/// (```` ``` ````/`~~~`) and `---`-fenced YAML frontmatter / metadata blocks
+/// (`A2-085`) are skipped, so neither `#` lines inside code nor closing `---`
+/// metadata fences mint phantom headings.
 fn headings(text: &str) -> Vec<Heading> {
     // Strip a leading BOM the way GitHub (and the task loader) does; without this
     // a `\u{feff}# Title` first line is not seen as a heading, so a valid anchor
@@ -44,6 +122,9 @@ fn headings(text: &str) -> Vec<Heading> {
     let lines: Vec<&str> = text.lines().collect();
     let mut fence: Option<(char, usize)> = None; // (marker, run length) when open
     let mut i = 0;
+    if let Some(close) = fenced_metadata_close(&lines, 0, true) {
+        i = close + 1;
+    }
     while i < lines.len() {
         let line = lines[i];
         if let Some((ch, len, bare)) = code_fence(line) {
@@ -59,6 +140,13 @@ fn headings(text: &str) -> Vec<Heading> {
         }
         if fence.is_some() {
             i += 1;
+            continue;
+        }
+        // Skip nested `---`-fenced YAML metadata blocks (`A2-085`) when opened
+        // at a block boundary (start of body or after a blank line).
+        let after_blank = i == 0 || lines[i - 1].trim().is_empty();
+        if after_blank && let Some(close) = fenced_metadata_close(&lines, i, false) {
+            i = close + 1;
             continue;
         }
         if let Some((title, level)) = atx_heading(line) {
@@ -278,6 +366,82 @@ fn table_rows(text: &str) -> Vec<Row> {
     out
 }
 
+/// The kind of document element a resolved trace anchor targets (`ADR-0069`, `A2-051`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum AnchorKind {
+    /// A Markdown heading (ATX or setext).
+    Heading,
+    /// A Markdown table row addressed by its first cell (`ADR-0015`).
+    Row,
+    /// A structured YAML or JSON document node (`ADR-0035`).
+    Node,
+}
+
+impl AnchorKind {
+    /// Stable wire prefix stored inside kind-tagged `trace_fingerprints` values.
+    #[must_use]
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::Heading => "heading",
+            Self::Row => "row",
+            Self::Node => "node",
+        }
+    }
+
+    /// Human-readable noun for diagnostics (`heading`, `table row`, `node`).
+    #[must_use]
+    pub const fn label(self) -> &'static str {
+        match self {
+            Self::Heading => "heading",
+            Self::Row => "table row",
+            Self::Node => "node",
+        }
+    }
+
+    /// Parse a kind-tagged stamp prefix (`heading:<hash>`, `row:<hash>`, `node:<hash>`).
+    #[must_use]
+    pub fn parse_stamp(stored: &str) -> (Option<Self>, &str) {
+        if let Some(rest) = stored.strip_prefix("heading:") {
+            (Some(Self::Heading), rest)
+        } else if let Some(rest) = stored.strip_prefix("row:") {
+            (Some(Self::Row), rest)
+        } else if let Some(rest) = stored.strip_prefix("node:") {
+            (Some(Self::Node), rest)
+        } else {
+            (None, stored)
+        }
+    }
+}
+
+/// A resolved trace anchor paired with its element kind and 16-hex content hash
+/// (`ADR-0069`, `A2-051`).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ResolvedAnchor {
+    pub kind: AnchorKind,
+    pub hash: String,
+}
+
+impl ResolvedAnchor {
+    /// Encode as the additive kind-tagged `trace_fingerprints` stamp string
+    /// (`heading:<16-hex>`, `row:<16-hex>`, or `node:<16-hex>`).
+    #[must_use]
+    pub fn to_stamp(&self) -> String {
+        format!("{}:{}", self.kind.as_str(), self.hash)
+    }
+}
+
+/// Outcome of comparing a stored `trace_fingerprints` stamp against a live document
+/// (`ADR-0069`, `A2-051`).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum StampCheck {
+    /// Stamp matches the current target (same kind if recorded, matching current or legacy hash).
+    Holds,
+    /// Kind-tagged stamp resolved to a different element kind (for example `heading` <-> `row`).
+    Retargeted { was: AnchorKind, now: AnchorKind },
+    /// Same element kind (or legacy untagged stamp), but the target's content hash changed.
+    Drifted { kind: AnchorKind },
+}
+
 /// One parsed Markdown trace document, reused throughout one validation run.
 ///
 /// The source text remains owned beside its heading and row indexes. Resolving
@@ -323,45 +487,67 @@ impl MarkdownDocument {
             || self.rows.iter().any(|r| r.anchor == anchor)
     }
 
-    pub(crate) fn fingerprint(&self, anchor: &str) -> Option<String> {
+    pub(crate) fn resolve(&self, anchor: &str) -> Option<ResolvedAnchor> {
         let anchor = anchor.to_lowercase();
         let Some(idx) = self.headings.iter().position(|h| h.anchor == anchor) else {
             let row = self.rows.iter().find(|r| r.anchor == anchor)?;
-            return Some(fnv1a_hex(self.line(row.line)?.trim_end()));
+            return Some(ResolvedAnchor {
+                kind: AnchorKind::Row,
+                hash: fnv1a_hex(self.line(row.line)?.trim_end()),
+            });
         };
         let heading = &self.headings[idx];
         let end = self.headings[idx + 1..]
             .iter()
             .find(|next| next.level <= heading.level)
             .map_or(self.lines.len(), |next| next.line);
-        Some(fnv1a_hex(&section_text(
-            &self.section_lines(heading.line, end),
-        )))
+        Some(ResolvedAnchor {
+            kind: AnchorKind::Heading,
+            hash: fnv1a_hex(&section_text(&self.section_lines(heading.line, end))),
+        })
     }
 
-    /// `None` means the anchor itself does not resolve; `Some` answers whether
-    /// the stored current or legacy fingerprint still describes it.
-    pub(crate) fn holds(&self, anchor: &str, stored: &str) -> Option<bool> {
-        let current = self.fingerprint(anchor)?;
-        if current == stored {
-            return Some(true);
+    pub(crate) fn fingerprint(&self, anchor: &str) -> Option<String> {
+        self.resolve(anchor).map(|resolved| resolved.hash)
+    }
+
+    /// `None` means the anchor itself does not resolve; `Some` classifies
+    /// whether the stored stamp holds, retargeted to a different element kind,
+    /// or drifted in content (`ADR-0069`, `A2-051`).
+    pub(crate) fn check_stamp(&self, anchor: &str, stored: &str) -> Option<StampCheck> {
+        let current = self.resolve(anchor)?;
+        let (stored_kind, stored_hash) = AnchorKind::parse_stamp(stored);
+        if let Some(was) = stored_kind
+            && was != current.kind
+        {
+            return Some(StampCheck::Retargeted {
+                was,
+                now: current.kind,
+            });
         }
-        let anchor = anchor.to_lowercase();
-        let Some(idx) = self.headings.iter().position(|h| h.anchor == anchor) else {
-            return Some(false);
-        };
-        let heading = &self.headings[idx];
-        let end = self.headings[idx + 1..]
-            .iter()
-            .find(|next| next.level <= heading.level)
-            .map_or(self.lines.len(), |next| next.line);
-        let legacy = self
-            .section_lines(heading.line, end)
-            .iter()
-            .map(|line| line.trim_end())
-            .collect::<Vec<_>>()
-            .join("\n");
-        Some(fnv1a_hex(&legacy) == stored)
+        if current.hash == stored_hash {
+            return Some(StampCheck::Holds);
+        }
+        if stored_kind.is_none() && current.kind == AnchorKind::Heading {
+            let folded = anchor.to_lowercase();
+            if let Some(idx) = self.headings.iter().position(|h| h.anchor == folded) {
+                let heading = &self.headings[idx];
+                let end = self.headings[idx + 1..]
+                    .iter()
+                    .find(|next| next.level <= heading.level)
+                    .map_or(self.lines.len(), |next| next.line);
+                let legacy = self
+                    .section_lines(heading.line, end)
+                    .iter()
+                    .map(|line| line.trim_end())
+                    .collect::<Vec<_>>()
+                    .join("\n");
+                if fnv1a_hex(&legacy) == stored_hash {
+                    return Some(StampCheck::Holds);
+                }
+            }
+        }
+        Some(StampCheck::Drifted { kind: current.kind })
     }
 
     fn line(&self, index: usize) -> Option<&str> {
@@ -459,10 +645,10 @@ fn fingerprint_indexed(
 /// trimmed form, so a plan converges as tasks are re-reviewed for other reasons.
 #[must_use]
 pub fn fingerprint_holds(text: &str, anchor: &str, stored: &str) -> bool {
-    if anchor_fingerprint(text, anchor).as_deref() == Some(stored) {
-        return true;
-    }
-    legacy_fingerprint(text, anchor).as_deref() == Some(stored)
+    matches!(
+        check_stamp_in("doc.md", text, anchor, stored),
+        Some(StampCheck::Holds)
+    )
 }
 
 /// The fingerprint this tool wrote before `A1-122`: the same section text with
@@ -828,16 +1014,31 @@ other content
         }
 
         let current = anchor_fingerprint(&text, "section-a").expect("current stamp");
-        assert_eq!(document.holds("section-a", &current), Some(true));
-        assert_eq!(document.holds("section-a", "0000000000000000"), Some(false));
-        assert_eq!(document.holds("missing", &current), None);
+        assert_eq!(
+            document.check_stamp("section-a", &current),
+            Some(StampCheck::Holds)
+        );
+        assert_eq!(
+            document.check_stamp("section-a", "0000000000000000"),
+            Some(StampCheck::Drifted {
+                kind: AnchorKind::Heading,
+            })
+        );
+        assert_eq!(
+            document.check_stamp("section-a", &format!("row:{current}")),
+            Some(StampCheck::Retargeted {
+                was: AnchorKind::Row,
+                now: AnchorKind::Heading,
+            })
+        );
+        assert_eq!(document.check_stamp("missing", &current), None);
 
         let grown = "# Doc\n\n## Item\n\nThe text.\n\n## Later\n\nAdded afterwards.\n";
         let legacy = super::fnv1a_hex("## Item\n\nThe text.\n");
         let document = MarkdownDocument::parse(grown.to_string());
         assert_eq!(
-            document.holds("item", &legacy),
-            Some(true),
+            document.check_stamp("item", &legacy),
+            Some(StampCheck::Holds),
             "the cached path must retain the legacy-stamp compatibility"
         );
     }
@@ -1278,8 +1479,57 @@ mod normalise_tests {
     }
 }
 
-/// The fingerprint of `anchor` in a document, whichever kind of document it is
-/// (`A1-191`).
+/// Resolve `anchor` in `text` (Markdown or structured YAML/JSON) and return
+/// both its element kind (`heading`, `row`, `node`) and bare 16-hex content
+/// hash (`ADR-0069`, `A2-051`).
+///
+/// Preserves `ADR-0015`'s heading-first precedence on Markdown documents.
+#[must_use]
+pub fn resolve_in(rel: &str, text: &str, anchor: &str) -> Option<ResolvedAnchor> {
+    if let Some(format) = crate::structured::format_for(rel) {
+        let value = crate::structured::parse(text, format)?;
+        let steps = crate::structured::parse_anchor(anchor).ok()?;
+        let node = crate::structured::resolve(&value, &steps)?;
+        return Some(ResolvedAnchor {
+            kind: AnchorKind::Node,
+            hash: crate::structured::fingerprint(node),
+        });
+    }
+    let text = text.trim_start_matches('\u{feff}');
+    let hs = headings(text);
+    let rows = table_rows(text);
+    let folded = anchor.to_lowercase();
+    if let Some(idx) = hs.iter().position(|h| h.anchor == folded) {
+        let level = hs[idx].level;
+        let start = hs[idx].line;
+        let lines: Vec<&str> = text.lines().collect();
+        let end = hs[idx + 1..]
+            .iter()
+            .find(|h| h.level <= level)
+            .map_or(lines.len(), |h| h.line);
+        return Some(ResolvedAnchor {
+            kind: AnchorKind::Heading,
+            hash: fnv1a_hex(&section_text(&lines[start..end])),
+        });
+    }
+    let row = rows.iter().find(|r| r.anchor == folded)?;
+    let line = text.lines().nth(row.line)?;
+    Some(ResolvedAnchor {
+        kind: AnchorKind::Row,
+        hash: fnv1a_hex(line.trim_end()),
+    })
+}
+
+/// Kind-tagged `trace_fingerprints` stamp string (`heading:<16-hex>`,
+/// `row:<16-hex>`, or `node:<16-hex>`) for `anchor` in `text` (`ADR-0069`,
+/// `A2-051`).
+#[must_use]
+pub fn stamp_in(rel: &str, text: &str, anchor: &str) -> Option<String> {
+    resolve_in(rel, text, anchor).map(|resolved| resolved.to_stamp())
+}
+
+/// The bare 16-hex content fingerprint of `anchor` in a document, whichever kind
+/// of document it is (`A1-191`).
 ///
 /// One dispatch point, so the three callers that stamp, compare and resolve
 /// cannot disagree about which resolver a path gets. `None` where the anchor
@@ -1287,24 +1537,170 @@ mod normalise_tests {
 /// heading that is not there.
 #[must_use]
 pub fn fingerprint_in(rel: &str, text: &str, anchor: &str) -> Option<String> {
-    if let Some(format) = crate::structured::format_for(rel) {
-        let value = crate::structured::parse(text, format)?;
-        let steps = crate::structured::parse_anchor(anchor).ok()?;
-        let node = crate::structured::resolve(&value, &steps)?;
-        return Some(crate::structured::fingerprint(node));
+    resolve_in(rel, text, anchor).map(|resolved| resolved.hash)
+}
+
+/// Compare a stored `trace_fingerprints` stamp (kind-tagged or legacy bare
+/// 16-hex) against the live document (`ADR-0069`, `A2-051`).
+///
+/// Returns `None` when `anchor` does not resolve (`APLAN008`'s job).
+#[must_use]
+pub fn check_stamp_in(rel: &str, text: &str, anchor: &str, stored: &str) -> Option<StampCheck> {
+    let current = resolve_in(rel, text, anchor)?;
+    let (stored_kind, stored_hash) = AnchorKind::parse_stamp(stored);
+    if let Some(was) = stored_kind
+        && was != current.kind
+    {
+        return Some(StampCheck::Retargeted {
+            was,
+            now: current.kind,
+        });
     }
-    anchor_fingerprint(text, anchor)
+    if current.hash == stored_hash {
+        return Some(StampCheck::Holds);
+    }
+    // Zero migration churn for legacy bare `<16-hex>` Markdown stamps, including
+    // the pre-`A1-122` trailing-blank compatibility path.
+    if stored_kind.is_none()
+        && current.kind == AnchorKind::Heading
+        && legacy_fingerprint(text, anchor).as_deref() == Some(stored_hash)
+    {
+        return Some(StampCheck::Holds);
+    }
+    Some(StampCheck::Drifted { kind: current.kind })
 }
 
 /// Whether a stored fingerprint still holds, whichever kind of document it is.
 ///
-/// Markdown keeps its own comparison because it accepts the pre-`A1-122` form as
-/// well as the current one; a structured address has no legacy spelling to
-/// forgive, so equality is the whole of it.
+/// Accepts both kind-tagged (`ADR-0069`) and legacy bare 16-hex stamps (including
+/// the pre-`A1-122` trailing-blank form on Markdown headings).
 #[must_use]
 pub fn holds_in(rel: &str, text: &str, anchor: &str, stored: &str) -> bool {
-    if crate::structured::format_for(rel).is_some() {
-        return fingerprint_in(rel, text, anchor).is_some_and(|f| f == stored);
+    matches!(
+        check_stamp_in(rel, text, anchor, stored),
+        Some(StampCheck::Holds)
+    )
+}
+
+#[cfg(test)]
+mod adr0069_and_frontmatter_tests {
+    use super::*;
+
+    /// Proves `traces.frontmatter_delimiters_mint_no_heading_anchors` (`A2-085`):
+    /// leading YAML frontmatter (even when its last key is a date) and nested
+    /// `---`-fenced YAML metadata blocks mint no heading anchors, while real
+    /// setext headings and thematic breaks before setext headings remain intact.
+    #[test]
+    fn frontmatter_and_nested_metadata_delimiters_mint_no_heading_anchors() {
+        let doc = "\
+---
+id: ABC
+public_readable: false
+last_updated: 2026-11-22
+---
+
+# Real Plan
+
+Body prose.
+
+---
+section_owner: platform
+last_verified: 2026-11-22
+---
+
+Setext Title
+---
+
+---
+
+After Thematic Break
+---
+";
+        let anchors = heading_anchors(doc);
+        assert!(anchors.contains("real-plan"), "{anchors:?}");
+        assert!(anchors.contains("setext-title"), "{anchors:?}");
+        assert!(anchors.contains("after-thematic-break"), "{anchors:?}");
+        assert!(
+            !anchors.contains("last_updated-2026-11-22"),
+            "leading frontmatter minted phantom anchor: {anchors:?}"
+        );
+        assert!(
+            !anchors.contains("public_readable-false"),
+            "leading frontmatter minted phantom anchor: {anchors:?}"
+        );
+        assert!(
+            !anchors.contains("last_verified-2026-11-22"),
+            "nested metadata block minted phantom anchor: {anchors:?}"
+        );
+        assert_eq!(anchors.len(), 3, "unexpected anchors: {anchors:?}");
     }
-    fingerprint_holds(text, anchor, stored)
+
+    /// Proves `A2-051` (`ADR-0069`): element-kind classification, kind-tagged
+    /// stamps (`heading:`, `row:`, `node:`), symmetric retargeting detection
+    /// (`heading` <-> `row`), and zero-churn legacy bare-hex compatibility.
+    #[test]
+    fn element_kind_stamps_detect_retargeting_and_keep_legacy_bare_stamps_valid() {
+        let both = "## Beta\n\nHeading content.\n\n| Key | Value |\n| --- | --- |\n| Beta | Row content |\n";
+        let renamed_heading = "## Beta Prime\n\nHeading content.\n\n| Key | Value |\n| --- | --- |\n| Beta | Row content |\n";
+        let row_only = "| Key | Value |\n| --- | --- |\n| Beta | Row content |\n";
+
+        // Heading-first precedence (`ADR-0015`) is preserved.
+        let resolved = resolve_in("DESIGN.md", both, "beta").expect("resolves");
+        assert_eq!(resolved.kind, AnchorKind::Heading);
+        let heading_stamp = stamp_in("DESIGN.md", both, "beta").expect("stamp");
+        assert!(heading_stamp.starts_with("heading:"), "{heading_stamp}");
+        assert_eq!(
+            check_stamp_in("DESIGN.md", both, "beta", &heading_stamp),
+            Some(StampCheck::Holds)
+        );
+
+        // Renaming the heading retargets `#beta` from `heading` to `row`.
+        assert_eq!(
+            check_stamp_in("DESIGN.md", renamed_heading, "beta", &heading_stamp),
+            Some(StampCheck::Retargeted {
+                was: AnchorKind::Heading,
+                now: AnchorKind::Row,
+            })
+        );
+
+        // Symmetric: a `row` stamp silently captured by a newly added heading
+        // reports `Retargeted { was: Row, now: Heading }`.
+        let row_stamp = stamp_in("DESIGN.md", row_only, "beta").expect("row stamp");
+        assert!(row_stamp.starts_with("row:"), "{row_stamp}");
+        assert_eq!(
+            check_stamp_in("DESIGN.md", both, "beta", &row_stamp),
+            Some(StampCheck::Retargeted {
+                was: AnchorKind::Row,
+                now: AnchorKind::Heading,
+            })
+        );
+
+        // Legacy bare `<16-hex>` stamp still holds on unchanged content and
+        // reports ordinary `Drifted` (never `Retargeted`) without migration churn.
+        let bare = &resolved.hash;
+        assert_eq!(
+            check_stamp_in("DESIGN.md", both, "beta", bare),
+            Some(StampCheck::Holds)
+        );
+        assert_eq!(
+            check_stamp_in("DESIGN.md", renamed_heading, "beta", bare),
+            Some(StampCheck::Drifted {
+                kind: AnchorKind::Row,
+            })
+        );
+
+        // Structured documents carry `node:` stamps and still accept legacy bare hex.
+        let yaml = "states:\n  ready: true\n";
+        let node_stamp = stamp_in("spec.yaml", yaml, "/states/ready").expect("node stamp");
+        assert!(node_stamp.starts_with("node:"), "{node_stamp}");
+        assert_eq!(
+            check_stamp_in("spec.yaml", yaml, "/states/ready", &node_stamp),
+            Some(StampCheck::Holds)
+        );
+        let bare_node = node_stamp.strip_prefix("node:").expect("prefix");
+        assert_eq!(
+            check_stamp_in("spec.yaml", yaml, "/states/ready", bare_node),
+            Some(StampCheck::Holds)
+        );
+    }
 }

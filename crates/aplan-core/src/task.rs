@@ -985,6 +985,51 @@ impl Task {
     }
 }
 
+/// The substantive definition of a task for `APLAN045` open-task drift
+/// baselines (`ADR-0070`, `A2-053`).
+///
+/// Only changes to `title`, `body`, `paths`, or `traces` move a live task's
+/// review baseline. Routine metadata mutations (`status`, `tags`, `owner`,
+/// `blocked_by`, `prefer_after`, `effort_days`, `phase`, `revisit_at`,
+/// `version_impact`, `ratified_by`, `contains`, `evidence`, fingerprints, and
+/// frontmatter formatting/comment churn) leave this value unchanged.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SubstantiveContent {
+    pub title: String,
+    pub body: String,
+    pub paths: Vec<String>,
+    pub traces: Vec<String>,
+}
+
+/// Extract a task file's normalized [`SubstantiveContent`] (`ADR-0070`,
+/// `A2-053`).
+///
+/// Normalizes line endings (`\r\n` -> `\n`) and trims only leading and trailing
+/// blank lines around the Markdown body fence, preserving real internal body
+/// content and indentation edits. Returns `None` if the file does not parse as
+/// a task.
+#[must_use]
+pub fn substantive_content(file_text: &str) -> Option<SubstantiveContent> {
+    let text = file_text.strip_prefix('\u{feff}').unwrap_or(file_text);
+    let (frontmatter, body) = crate::load::split_frontmatter(text)?;
+    let task: Task = crate::yaml::from_str(frontmatter).ok()?;
+    let lines: Vec<&str> = body.lines().collect();
+    let start = lines
+        .iter()
+        .position(|line| !line.trim().is_empty())
+        .unwrap_or(lines.len());
+    let end = lines
+        .iter()
+        .rposition(|line| !line.trim().is_empty())
+        .map_or(start, |idx| idx + 1);
+    Some(SubstantiveContent {
+        title: task.title,
+        body: lines[start..end].join("\n"),
+        paths: task.paths,
+        traces: task.traces,
+    })
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1339,5 +1384,75 @@ mod tests {
         let (reference, rev) = split_rev("docs/x.md#result@abc123");
         assert_eq!(rev, Some("abc123"));
         assert_eq!(split_anchor(reference), ("docs/x.md", Some("result")));
+    }
+
+    /// Proves `traces.stale_premise_requires_substantive_edit_or_review` (`A2-053`):
+    /// substantive content captures only `title`, `body`, `paths`, and `traces`;
+    /// every metadata or formatting edit leaves `substantive_content` identical.
+    #[test]
+    fn substantive_content_ignores_metadata_and_formatting_churn() {
+        let base = "\
+---
+id: T-1
+title: Implement widget
+phase: 1
+status: todo
+effort_days: 1.0
+paths:
+  - src/widget.rs
+traces:
+  - DESIGN.md#widget
+---
+
+## Why
+
+Build the widget cleanly.
+";
+        let metadata_churn = "\
+---
+# reordered frontmatter with comments and workflow metadata edits
+status: in_progress
+tags: [backend, urgent]
+owner: ada
+blocked_by: [T-0]
+prefer_after: [T-9]
+effort_days: 2.5
+phase: 2
+revisit_at: 2026-12-01
+version_impact: feature
+version_impact_reason: ships widget
+ratified_by: [R-1]
+contains: [C-1]
+traces: ['DESIGN.md#widget']
+paths: ['src/widget.rs']
+title: 'Implement widget'
+id: T-1
+---
+
+
+## Why
+
+Build the widget cleanly.
+
+
+";
+        assert_eq!(
+            substantive_content(base),
+            substantive_content(metadata_churn),
+            "non-substantive metadata or formatting churn must not change substantive content"
+        );
+
+        for changed in [
+            base.replace("Implement widget", "Implement better widget"),
+            base.replace("Build the widget cleanly.", "Build the widget safely."),
+            base.replace("src/widget.rs", "src/widget/mod.rs"),
+            base.replace("DESIGN.md#widget", "DESIGN.md#widget-v2"),
+        ] {
+            assert_ne!(
+                substantive_content(base),
+                substantive_content(&changed),
+                "substantive edit must change substantive_content:\n{changed}"
+            );
+        }
     }
 }

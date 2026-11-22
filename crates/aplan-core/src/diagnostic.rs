@@ -268,7 +268,7 @@ define_rules! {
     /// is not addressable, the anchor is not an address, or it addresses nothing
     /// (`A1-191`).
     DanglingTrace => DANGLING_TRACE = "APLAN008", Error,
-        "traces anchors resolve to a real heading or node",
+        "traces anchors resolve to a real heading, table row or node (YAML frontmatter delimiters are metadata, not headings)",
         points_at: Some("traces");
     /// An active task carries no effort estimate.
     MissingEffort => MISSING_EFFORT = "APLAN009", Warning,
@@ -1108,7 +1108,7 @@ define_rules! {
     /// because it needs the repository (`A1-290` asks that a new code be argued
     /// for; this is the argument).
     StalePremise => STALE_PREMISE = "APLAN045", Warning,
-        "a live task's traced section is unchanged since the task was last touched",
+        "a live task's traced section is unchanged since the task's last substantive edit or explicit review",
         points_at: Some("traces");
     /// A `done` task whose ratifier has not finished (`A1-306`, ADR-0036).
     ///
@@ -1442,6 +1442,20 @@ define_rules! {
     PolicyEvidenceUnresolvable => POLICY_EVIDENCE_UNRESOLVABLE = "APLAN059", Warning,
         "every evidence kind required by policy has a configured resolver",
         points_at: None;
+    /// A traced anchor silently retargeted from one element kind to another
+    /// (for example a renamed Markdown heading falling through to a same-slug
+    /// table row, or a table row captured by a newly added heading; `ADR-0069`,
+    /// `A2-051`).
+    ///
+    /// A blocking error on both open tasks (`verify`) and closed kind-stamped
+    /// tasks (`check` under `detect_drift`), distinct from advisory-capable
+    /// `APLAN045` and `APLAN018`, so placing content-drift rules in `advisory`
+    /// cannot hide a renamed heading behind a colliding table row. Legacy bare
+    /// 16-hex stamps without a kind prefix stay compatible and never trigger
+    /// this rule.
+    TraceRetargeted => TRACE_RETARGETED = "APLAN060", Error,
+        "a traced anchor resolves to the same element kind it was written or stamped against",
+        points_at: Some("traces");
 }
 
 /// A repository's verdict policy: what makes a report fail its build.
@@ -1812,7 +1826,7 @@ mod tests {
         // Every rule's `code()` is one of the module constants and vice versa is
         // structurally guaranteed by the macro; this pins the count so dropping
         // a row is a visible change.
-        assert_eq!(Rule::ALL.len(), 59);
+        assert_eq!(Rule::ALL.len(), 60);
     }
 
     /// Severity is declared per rule in the macro. Pin the warnings so a

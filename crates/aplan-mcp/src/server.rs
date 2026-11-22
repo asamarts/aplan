@@ -485,6 +485,10 @@ impl AplanServer {
                 let id = str_arg("id").ok_or("`id` is required")?;
                 tools::working(root, &id, false, policy).map_err(|e| e.to_string())
             }
+            "aplan_review" => {
+                let id = str_arg("id").ok_or("`id` is required")?;
+                tools::review(root, &id, policy).map_err(|e| e.to_string())
+            }
             "aplan_dep" => {
                 let id = str_arg("id").ok_or("`id` is required")?;
                 let after = str_arg("after").ok_or("`after` is required")?;
@@ -685,18 +689,22 @@ fn add_schema(root: &serde_json::Value) -> serde_json::Value {
     })
 }
 
+fn id_schema(description: &str, root: &serde_json::Value) -> serde_json::Value {
+    serde_json::json!({
+        "type": "object",
+        "properties": {
+            "id": { "type": "string", "description": description },
+            "root": root,
+        },
+        "required": ["id"],
+        "additionalProperties": false,
+    })
+}
+
 /// Every other tool's schema.
 fn other_schema(name: &str, root: &serde_json::Value) -> serde_json::Value {
     match name {
-        "aplan_show" => serde_json::json!({
-            "type": "object",
-            "properties": {
-                "id": { "type": "string", "description": "The task to show." },
-                "root": root,
-            },
-            "required": ["id"],
-            "additionalProperties": false,
-        }),
+        "aplan_show" => id_schema("The task to show.", root),
         "aplan_dep" => serde_json::json!({
             "type": "object",
             "properties": {
@@ -755,27 +763,15 @@ fn other_schema(name: &str, root: &serde_json::Value) -> serde_json::Value {
             "required": ["id"],
             "additionalProperties": false,
         }),
-        "aplan_release" => serde_json::json!({
-            "type": "object",
-            "properties": {
-                "id": { "type": "string", "description": "The task to release." },
-                "root": root,
-            },
-            "required": ["id"],
-            "additionalProperties": false,
-        }),
-        "aplan_start" | "aplan_stop" => serde_json::json!({
-            "type": "object",
-            "properties": {
-                "id": {
-                    "type": "string",
-                    "description": "The task whose `in_progress` status is being set or cleared.",
-                },
-                "root": root,
-            },
-            "required": ["id"],
-            "additionalProperties": false,
-        }),
+        "aplan_release" => id_schema("The task to release.", root),
+        "aplan_start" | "aplan_stop" => id_schema(
+            "The task whose `in_progress` status is being set or cleared.",
+            root,
+        ),
+        "aplan_review" => id_schema(
+            "The live task whose traced sections were re-reviewed and still hold.",
+            root,
+        ),
         // `ready`, `check` and `verify` take only the optional root.
         _ => serde_json::json!({
             "type": "object",

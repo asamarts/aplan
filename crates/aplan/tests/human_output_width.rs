@@ -238,6 +238,7 @@ const NOT_PROSE: &[(&str, &str)] = &[
     ("release", "writes a task and prints its path"),
     ("start", "writes a task and prints its path"),
     ("stop", "writes a task and prints its path"),
+    ("review", "writes a task and prints its path"),
     (
         "attest",
         "prints a signed digest, which must not be re-flowed",

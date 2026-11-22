@@ -113,6 +113,7 @@ pub const RUNS: &[(&str, &[&str], Start)] = &[
     ("ready", &["ready"], Start::Populated),
     ("rekey", &["rekey", "W-1", "W-9"], Start::Populated),
     ("release", &["release", "W-4"], Start::Populated),
+    ("review", &["review", "W-3"], Start::Populated),
     ("roadmap", &["roadmap"], Start::Populated),
     ("schema", &["schema"], Start::Populated),
     ("show", &["show", "W-1"], Start::Populated),
@@ -213,7 +214,7 @@ pub fn a_plan_to_act_on(dir: &Path) {
             "done",
             "evidence:\n  - kind: note\n    ref: reviewed\n    captured: 2026-08-14\n",
         ),
-        ("W-3", "todo", ""),
+        ("W-3", "todo", "traces:\n  - NOTES.md#notes\n"),
         // Held and under way, so `release` and `stop` have something to act on
         // (`A1-359`). Without it the measurement would run them against a task
         // in neither state, they would correctly write nothing, and the census

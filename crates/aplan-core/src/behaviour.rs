@@ -3111,4 +3111,26 @@ pub const ALL: &[Behaviour] = &[
             "tui_performance_gate_render_interaction_and_graph_work",
         ],
     },
+    // `A2-085`. Setext heading recognition previously read a YAML frontmatter
+    // or nested metadata block's closing `---` as an h2 underline, minting
+    // phantom anchors that GitHub never renders and causing false drift on
+    // metadata date updates.
+    Behaviour {
+        name: "traces.frontmatter_delimiters_mint_no_heading_anchors",
+        what: "leading YAML frontmatter blocks and nested `---`-fenced YAML metadata mappings mint no Markdown heading anchors, so `APLAN008` rejects traces targeting metadata keys while keeping real setext headings intact",
+        proof: &["frontmatter_and_nested_metadata_delimiters_mint_no_heading_anchors"],
+    },
+    // `A2-053` / `ADR-0070`. `APLAN045` previously cleared whenever any byte of
+    // a live task file changed in Git or the working tree, so routine workflow
+    // commands (`tag`, `start`, `stop`, `mv`, `dep`, owner/effort/formatting
+    // edits) silently silenced spec-drift warnings.
+    Behaviour {
+        name: "traces.stale_premise_requires_substantive_edit_or_review",
+        what: "`APLAN045` clears only when a live task's substantive content (`title`, `body`, `paths`, or `traces`) changes or when its `trace_fingerprints` stamp recorded via `aplan review` / `aplan_review` matches the current traced section; metadata-only and formatting edits never clear it",
+        proof: &[
+            "substantive_content_ignores_metadata_and_formatting_churn",
+            "stale_premise_ignores_metadata_edits_and_clears_on_substantive_edit_or_review",
+            "drift::review_clears_stale_premise_and_rearms_when_section_moves_again",
+        ],
+    },
 ];

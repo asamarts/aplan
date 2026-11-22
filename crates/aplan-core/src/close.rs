@@ -109,6 +109,15 @@ pub enum CloseError {
     NoEvidenceReplacement,
     #[error("only a `done` task can be repaired (this one is `{0}`)")]
     NotDone(Status),
+    #[error(
+        "only a live (`todo`, `in_progress`, or `blocked`) task can be reviewed (this one is `{0}`)"
+    )]
+    ReviewTerminal(Status),
+    #[error(
+        "this task has no resolvable anchored `traces` to stamp: add an anchored `file#anchor` \
+         trace or fix broken traces before running `review`"
+    )]
+    ReviewNoResolvableTraces,
     #[error("internal: `close` produced invalid frontmatter ({0}) and refused to write it")]
     Produced(String),
 }
@@ -158,6 +167,9 @@ pub fn advice(error: &CloseError, id: &str) -> Option<String> {
             "To add a citation to it: `aplan amend {id} --add-evidence <kind>:<ref>`, which \
              resolves it the way `close` does and does not reopen the task. To replace one \
              that was wrong, `--replace-evidence <from> <to>`."
+        )),
+        CloseError::ReviewTerminal(Status::Done) => Some(format!(
+            "To refresh a `done` task's trace stamps after review, run `aplan close {id} --restamp`."
         )),
         _ => None,
     }
@@ -1623,6 +1635,52 @@ pub fn restamp(file: &str, fingerprints: &BTreeMap<String, String>) -> Result<St
     Ok(format!("{bom}---{nl}{new_frontmatter}---{nl}{body}"))
 }
 
+/// Record explicit review trace fingerprints on a live (`todo`, `in_progress`,
+/// or `blocked`) task (`ADR-0070`, `A2-053`), writing kind-tagged
+/// `trace_fingerprints:` (`ADR-0069`) surgically without altering status,
+/// evidence, or body.
+///
+/// Refuses terminal tasks (`done` uses `aplan close --restamp`, `dropped` is
+/// cancelled) and refuses empty `fingerprints` (tasks without resolvable
+/// anchored traces).
+pub fn review(file: &str, fingerprints: &BTreeMap<String, String>) -> Result<String, CloseError> {
+    let bom = leading_bom(file);
+    let (frontmatter, body) = split_frontmatter(file).ok_or(CloseError::NotATask)?;
+    let task: Task =
+        crate::yaml::from_str(frontmatter).map_err(|e| CloseError::Frontmatter(e.to_string()))?;
+    if task.status.is_terminal() {
+        return Err(CloseError::ReviewTerminal(task.status));
+    }
+    if fingerprints.is_empty() {
+        return Err(CloseError::ReviewNoResolvableTraces);
+    }
+
+    let nl = newline(file, bom);
+    let new_frontmatter = replace_fingerprint_mapping(
+        frontmatter,
+        "trace_fingerprints",
+        &fingerprint_block("trace_fingerprints", fingerprints, nl)?,
+        &task.trace_fingerprints,
+        nl,
+        true,
+    )?;
+
+    let parsed = reparse(&new_frontmatter)?;
+    if parsed.status != task.status
+        || parsed.title != task.title
+        || parsed.paths != task.paths
+        || parsed.traces != task.traces
+        || parsed.evidence != task.evidence
+        || parsed.evidence_fingerprints != task.evidence_fingerprints
+        || &parsed.trace_fingerprints != fingerprints
+    {
+        return Err(CloseError::Produced(
+            "review altered fields other than trace_fingerprints".to_string(),
+        ));
+    }
+    Ok(format!("{bom}---{nl}{new_frontmatter}---{nl}{body}"))
+}
+
 /// Replace a `done` task's `evidence_fingerprints:` mapping, leaving its
 /// citations, trace stamps, status and body untouched.
 ///
@@ -2776,7 +2834,7 @@ pub fn trace_fingerprints(
     for trace in &task.traces {
         if let Some((rel, anchor)) = trace.split_once('#')
             && let Ok(text) = std::fs::read_to_string(root.join(rel))
-            && let Some(fp) = crate::anchor::fingerprint_in(rel, &text, anchor)
+            && let Some(fp) = crate::anchor::stamp_in(rel, &text, anchor)
         {
             out.insert(trace.clone(), fp);
         }

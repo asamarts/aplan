@@ -1463,6 +1463,11 @@ const UNSTYLED: &[(&str, &str, Option<&[&str]>)] = &[
         Some(&["stop", "T-001"]),
     ),
     (
+        "review",
+        "a sentence about the trace stamps just written, naming the id and path",
+        Some(&["review", "T-001"]),
+    ),
+    (
         "rekey",
         "a migration confirmation and review locations, whose ids and paths carry no semantic role",
         Some(&["rekey", "T-001", "T-900"]),
