@@ -44,8 +44,14 @@ fewer keys than the one above it, and the key it is refusing is one of the ones 
 of.
 
 Both are hints rather than proofs -- a typo far enough from any real key also gets no suggestion,
-and a count tells you two builds differ without telling you how. `aplan facts` settles it, and it is
-the one command that reads no config, so it still answers while everything else refuses.
+and a count tells you two builds differ without telling you how. `aplan facts` settles what keys
+and schema the running build accepts, and on builds that support it, `aplan facts --identity`
+prints the build's `version`, `source` commit, `facts_sha256`, and `binary_sha256` without reading
+`.aplan.yml` or task frontmatter. When two development builds print the same `-dev` version and one
+rejects an unknown config key or task frontmatter field, compare `aplan facts --identity` across
+both builds. An older binary that predates `--identity` cannot diagnose a capability invented after
+it -- it exits **2** on `--identity` -- so `aplan facts` remains the fallback that lists what that
+binary accepts.
 
 So: stage the new binary, confirm `aplan check` still passes on your existing config, and only then
 add the new keys.
@@ -55,6 +61,41 @@ and says what it did not apply, and `aplan --config ./older.yml ready` reads a f
 of discovering yours. Neither is a fix and neither belongs in a gate -- the first skips the policy your
 repository declared -- but `aplan why`, `ready` and `show` will answer under them while the binary
 is still the old one.
+
+## Staged upgrade procedure
+
+Upgrading `aplan` is a reviewed gate transition, never an implicit "whatever is newest on `PATH`".
+A newer build can introduce stricter diagnostics or updated generated output; adopting it without
+first checking it against the unchanged plan causes sudden CI failures or oscillating generated
+files (`ADR-0068`). Follow these five steps in order:
+
+1. **Identify both builds.** Record the exact identity of the current pinned build and the
+   candidate build with `aplan facts --identity` (version, `source` commit, `facts_sha256`, and
+   `binary_sha256`). For a published Linux release archive, also authenticate the archive's
+   checksum and keyless build provenance (`ADR-0066`) before running it.
+2. **Compare the relevant facts.** Diff `aplan facts` between the pinned build and the candidate
+   (rules, config keys, commands, behaviours, and `build_capabilities`) and review the corresponding
+   rows in `CHANGELOG.md` and this guide.
+3. **Run the candidate read-only on the unchanged plan.** Before modifying `.aplan.yml`, task
+   frontmatter, or generated files, run `aplan check`, `aplan verify`, and
+   `aplan export-agents-md --check` with the candidate binary against the unchanged checkout.
+4. **Disposition every newly introduced finding.** Fix real defects the candidate caught, add an
+   explicit `advisory` entry only where a warning is intentionally non-blocking for your repository,
+   or defer the upgrade if the repository is not ready for the stricter rule.
+5. **Move the authoritative pin first, then adopt new keys or generated output.** Update your
+   pinned GitHub Action tag (`uses: asamarts/aplan@v0.7.0`), installer checksum, or repository
+   wrapper pin (and, once `A2-193` ships, `.aplan.yml`'s `requires` block) so every actor and CI
+   job runs the new build. Only after the pin moves should you add new config keys, adopt new
+   frontmatter fields, or regenerate committed `AGENTS.md` / `ROADMAP.status.md` blocks.
+
+**External artifact pinning (wrapper contract).** `.aplan.yml`'s planned `requires` block
+(`ADR-0068`, `A2-193`) can declare portable `min_version`, `capabilities`, `source`, and
+`facts_sha256` constraints, deliberately admitting same-source rebuilds across platforms without
+assuming universal binary reproducibility. A repository that requires exact executable bytes
+(`binary_sha256`) -- refusing even a same-source rebuild whose bytes differ -- must enforce that
+digest **outside** `aplan` before executing it (via a repository wrapper script checking `sha256sum`
+of the binary, or via the pinned GitHub Action and `gh attestation verify` for published Linux
+musl archives). An in-process self-check is a skew guard, not an external authenticity boundary.
 
 ## Knowing which build you have, and what it can do
 

@@ -36,6 +36,8 @@ blocked_by:
 - A2-182
 - A2-183
 - A2-192
+- A2-193
+- A2-194
 tags:
 - milestone
 - v0.8
