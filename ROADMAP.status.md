@@ -8,7 +8,7 @@
 
 | cut | status | done/total | ready | blocked | effort | weeks | critical path |
 | --- | --- | --- | --- | --- | --- | --- | --- |
-| v0.7 | todo | 28/30 | 1 | 1 | 22.8d | 0.8 (<0.1 left) | 3.5d |
+| v0.7 | todo | 29/30 | 1 | 0 | 22.8d | 0.8 (<0.1 left) | 3.5d |
 | v0.8 | todo | 0/30 | 0 | 30 | 43.8d | 1.6 (1.6 left) | 4.5d |
 | adoption | todo | 0/81 | 0 | 81 | 105.8d | 3.9 (3.9 left) | 10.0d |
 | backlog | todo | 0/1 | 0 | 1 | 1.0d | <0.1 (<0.1 left) | 1.0d |
@@ -50,7 +50,7 @@
 | A2-188 | Read CARGO_MANIFEST_DIR at runtime in aplan-attest build script so facts --identity retains source across relocated checkouts | done | - | commit:375b80b269d8, test:build_identity::relocated_checkout_retains_and_refreshes_source_identity |
 | A2-189 | Close what an audit found in A2-026 and A2-079 | done | - | commit:04e8c8247517, test:docs::tests::overlapping_named_and_numeric_near_prefixes_report_the_longest_source_family, test:docs::tests::a_prefix_with_both_numeric_and_named_ids_checks_every_shape_and_membership, test:tests::critical_path_remaining_clause_and_matching_reconcile_printed_rows |
 | A2-190 | Close what an audit found in A2-022, A2-178 and A2-027 | done | - | commit:bab2467e366d, test:capture_inbox::refused_inbox_promotion_reports_open_state_for_dry_run_and_apply, test:tests::capture_promotion_adapter_reports_real_state_on_late_denied_commit, test:inbox::tests::denied_promotion_review_rows_report_open_state_and_would_become, test:tests::progress_renderer_control_messages_acknowledge_and_restore_rows, test:action_selftest::action_release_download_retries_transient_5xx_and_network_errors_with_backoff |
-| A2-191 | Close pre-release audit gaps in capture dry-run guidance, changelog and A2-020 scope | todo | - | - |
+| A2-191 | Close pre-release audit gaps in capture dry-run guidance, changelog and A2-020 scope | done | - | commit:b90dfb760f53, test:tests::capture_human_documents_expose_complete_lifecycle_and_input_identity, test:capture_inbox::capture_promotion_is_validated_atomic_and_idempotent |
 
 ## v0.8 Correctness and the most reported adoption failures
 
