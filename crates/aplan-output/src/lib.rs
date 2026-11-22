@@ -195,16 +195,22 @@ const fn capture_action_agent_instruction(
     has_task_id: bool,
 ) -> &'static str {
     match (outcome, has_task_id) {
+        (CaptureActionOutcome::Predicted, true) => {
+            "Review the proposed task id, capture state and affected files, then run the promotion without --dry-run using the reported full capture id; never shorten it to the human prefix. Nothing was written yet."
+        }
+        (CaptureActionOutcome::Predicted, false) => {
+            "Review the proposed capture change and affected files, then apply it without --dry-run using the reported full capture id; never shorten it to the human prefix. Nothing was written yet."
+        }
         (CaptureActionOutcome::Refused, true) => {
             "Fix the reported findings or change the promotion inputs, then preview or promote again using the reported full capture id; never shorten it to the human prefix. Nothing was written and the reported task id was not created."
         }
         (CaptureActionOutcome::Refused, false) => {
             "Fix the reported findings or change the request inputs, then preview or apply again using the reported full capture id; never shorten it to the human prefix. Nothing was written."
         }
-        (_, true) => {
+        (CaptureActionOutcome::Applied | CaptureActionOutcome::Unchanged, true) => {
             "Use the reported full capture id and task id for later machine requests; never shorten the capture id to the human prefix."
         }
-        (_, false) => {
+        (CaptureActionOutcome::Applied | CaptureActionOutcome::Unchanged, false) => {
             "Use the reported full capture id for any later machine request; never shorten it to the human prefix."
         }
     }
@@ -4342,8 +4348,24 @@ mod tests {
                 "refused promotion falsely printed `{forbidden}`:\n{refused_rendered}"
             );
         }
-        // Refused `--format agent` output must never tell an agent to reuse a
-        // task id that was never created (`A2-190`).
+        // Dry-run and refused `--format agent` outputs must never tell an agent
+        // to reuse a task id that has not been written (`A2-190`, `A2-191`).
+        let predicted_promo_instruction =
+            capture_action_agent_instruction(CaptureActionOutcome::Predicted, true);
+        assert!(
+            predicted_promo_instruction.contains("task id")
+                && predicted_promo_instruction.contains("Nothing was written yet")
+                && !predicted_promo_instruction
+                    .contains("Use the reported full capture id and task id"),
+            "{predicted_promo_instruction}"
+        );
+        let predicted_plain_instruction =
+            capture_action_agent_instruction(CaptureActionOutcome::Predicted, false);
+        assert!(
+            predicted_plain_instruction.contains("Nothing was written yet")
+                && !predicted_plain_instruction.contains("task id"),
+            "{predicted_plain_instruction}"
+        );
         let refused_promo_instruction =
             capture_action_agent_instruction(CaptureActionOutcome::Refused, true);
         assert!(
@@ -4360,14 +4382,19 @@ mod tests {
                 && !refused_plain_instruction.contains("task id"),
             "{refused_plain_instruction}"
         );
-        assert!(
-            capture_action_agent_instruction(CaptureActionOutcome::Applied, true)
-                .contains("full capture id and task id")
-        );
-        assert!(
-            capture_action_agent_instruction(CaptureActionOutcome::Applied, false)
-                .contains("full capture id for any later machine request")
-        );
+        for outcome in [
+            CaptureActionOutcome::Applied,
+            CaptureActionOutcome::Unchanged,
+        ] {
+            assert!(
+                capture_action_agent_instruction(outcome, true)
+                    .contains("full capture id and task id")
+            );
+            assert!(
+                capture_action_agent_instruction(outcome, false)
+                    .contains("full capture id for any later machine request")
+            );
+        }
 
         let report = CaptureActionReport {
             input: serde_json::json!({

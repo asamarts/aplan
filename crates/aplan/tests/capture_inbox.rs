@@ -401,11 +401,14 @@ fn capture_promotion_is_validated_atomic_and_idempotent() {
         ],
     );
     assert_eq!(preview["schema"], "aplan/agent-capture-action/v1");
+    let preview_instruction = preview["agent_instruction"]
+        .as_str()
+        .expect("agent_instruction on dry-run promotion");
     assert!(
-        preview["agent_instruction"]
-            .as_str()
-            .unwrap()
-            .contains("task id")
+        preview_instruction.contains("task id")
+            && preview_instruction.contains("Nothing was written yet")
+            && !preview_instruction.contains("Use the reported full capture id and task id"),
+        "{preview_instruction}"
     );
     assert_eq!(preview["outcome"], "predicted");
     assert_eq!(preview["task_id"], "A-2");
