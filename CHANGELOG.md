@@ -6,6 +6,20 @@ to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+### Fixed
+
+- **Build-script cache-writer identity stays inside product sources and packaged crates (`A2-192`)**.
+  `crates/aplan/build.rs` now collects only root `Cargo.toml`, `Cargo.lock` and product crates
+  under `crates/` when building in a workspace checkout, skipping `target`, `tests`, `benches`,
+  `examples`, `dist`, `llvm-cov-target` and `.git` at every depth, so ignored nested directories
+  such as `tools/tui-eval/target/` no longer perturb reproducible release artifacts. In packaged
+  `crates.io` installs outside the workspace layout, it stays strictly inside `CARGO_MANIFEST_DIR`
+  rather than walking parent registry directories.
+- **Bind-mounted linked Git worktrees resolve release-window and trace-history bases cleanly (`A2-192`)**.
+  When libgit2 reports a host worktree path that does not contain the mounted repository root (such
+  as a linked worktree bind-mounted inside the release builder container), `aplan-evidence` now
+  falls back to the selected repository root instead of failing to strip the path prefix.
+
 ## [0.7.0] - 2026-11-21
 
 ### Added
