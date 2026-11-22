@@ -1064,6 +1064,20 @@ impl Repo {
         Some(std::fs::canonicalize(dir).unwrap_or_else(|_| dir.to_path_buf()))
     }
 
+    /// The repository's working directory usable from this process, resolving
+    /// bind-mounted linked Git worktrees (`A2-192`, `A2-195`).
+    ///
+    /// A linked worktree bind-mounted at another path (for example inside a
+    /// release builder container) keeps the host path in
+    /// `.git/worktrees/<name>/gitdir`, so [`Self::workdir`] can name a path that
+    /// does not exist here or does not contain `fallback`. When that happens,
+    /// walk `fallback`'s ancestors for the mounted `.git` marker, falling back
+    /// to `fallback` itself. Bare repositories still return `None`.
+    #[must_use]
+    pub fn effective_workdir(&self, fallback: &Path) -> Option<PathBuf> {
+        resolve_effective_workdir(self.workdir(), fallback)
+    }
+
     /// A tracked file's text at a rev, or `None` when it is absent or not UTF-8.
     ///
     /// Read at the rev rather than off disk, because a citation is checked
@@ -1288,6 +1302,30 @@ fn normalize_repository_path(path: &Path) -> Option<PathBuf> {
         }
     }
     Some(out)
+}
+
+/// Resolve a usable working directory from libgit2's recorded `workdir` and a
+/// caller-observed `fallback` path inside the checkout (`A2-192`, `A2-195`).
+pub(crate) fn resolve_effective_workdir(
+    workdir: Option<PathBuf>,
+    fallback: &Path,
+) -> Option<PathBuf> {
+    let workdir = workdir?;
+    let canonical_fallback =
+        std::fs::canonicalize(fallback).unwrap_or_else(|_| fallback.to_path_buf());
+    if workdir.is_dir() {
+        let canonical_workdir = std::fs::canonicalize(&workdir).unwrap_or_else(|_| workdir.clone());
+        if canonical_fallback.starts_with(&canonical_workdir) {
+            return Some(canonical_workdir);
+        }
+    }
+    if let Some(mounted_root) = canonical_fallback
+        .ancestors()
+        .find(|ancestor| ancestor.join(".git").exists())
+    {
+        return Some(mounted_root.to_path_buf());
+    }
+    Some(canonical_fallback)
 }
 
 #[cfg(test)]
@@ -1519,5 +1557,33 @@ mod incremental_change_tests {
             .changed_paths_to_worktree(&base)
             .expect_err("non-UTF-8 path must refuse");
         assert!(error.contains("not UTF-8"), "{error}");
+    }
+
+    #[test]
+    fn resolve_effective_workdir_handles_bind_mounted_subdirectories() {
+        let dir = tempfile::Builder::new()
+            .tempdir_in(aplan_core::fixture::fixture_root())
+            .expect("tempdir");
+        let mounted = dir.path().join("mounted");
+        let subdir = mounted.join("aplan/tasks");
+        std::fs::create_dir_all(&subdir).expect("subdir");
+        std::fs::write(mounted.join(".git"), "gitdir: /host/only/path\n").expect("git file");
+
+        let canonical_mounted = std::fs::canonicalize(&mounted).expect("canonical mounted");
+        let host_missing = dir.path().join("host-only-worktree");
+
+        // Bare repository stays None.
+        assert_eq!(resolve_effective_workdir(None, &subdir), None);
+
+        // Bind-mounted linked worktree from root or nested plan subdirectory
+        // resolves to the mounted checkout root owning `.git`.
+        assert_eq!(
+            resolve_effective_workdir(Some(host_missing.clone()), &mounted),
+            Some(canonical_mounted.clone())
+        );
+        assert_eq!(
+            resolve_effective_workdir(Some(host_missing), &subdir),
+            Some(canonical_mounted)
+        );
     }
 }

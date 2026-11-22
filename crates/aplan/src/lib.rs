@@ -16175,9 +16175,10 @@ fn cmd_summary_at(
     let (repo, commit, config, root) = match source {
         aplan_config::ConfigSource::Discover => {
             let probe = cli_root.unwrap_or_else(|| std::path::Path::new("."));
-            let repo = aplan_evidence::Repo::discover(&revision_plan_repository(probe))?;
+            let repo_probe = revision_plan_repository(probe);
+            let repo = aplan_evidence::Repo::discover(&repo_probe)?;
             let workdir = repo
-                .workdir()
+                .effective_workdir(&repo_probe)
                 .ok_or_else(|| anyhow::anyhow!("a historical plan needs a Git worktree"))?;
             let commit = repo.resolve_revision(revision).ok_or_else(|| {
                 anyhow::anyhow!("revision `{revision}` does not resolve to a commit")
@@ -16204,7 +16205,7 @@ fn cmd_summary_at(
         }
     };
     let workdir = repo
-        .workdir()
+        .effective_workdir(&revision_plan_repository(&root))
         .ok_or_else(|| anyhow::anyhow!("a historical plan needs a Git worktree"))?;
     let relative_root = repository_relative(&workdir, &root, "plan root")?;
     let snapshot = repo

@@ -35,8 +35,9 @@ pub(crate) fn workspace_root_for(manifest: &Path) -> Option<PathBuf> {
     }
     let workspace = crates_dir.parent()?;
     let root_manifest = fs::read_to_string(workspace.join("Cargo.toml")).ok()?;
-    (root_manifest.contains("[workspace]") && root_manifest.contains("crates/aplan"))
-        .then(|| workspace.to_path_buf())
+    let lists_aplan =
+        root_manifest.contains("\"crates/aplan\"") || root_manifest.contains("'crates/aplan'");
+    (root_manifest.contains("[workspace]") && lists_aplan).then(|| workspace.to_path_buf())
 }
 
 /// Collect the deterministic, sorted set of source/manifest paths relative to
