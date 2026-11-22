@@ -60,11 +60,13 @@ requires:
 
 Every sub-key under `requires` is optional, and all present sub-keys are ANDed:
 
-- **`requires.min_version`** (SemVer `X.Y.Z` or `X.Y.Z-pre`): minimum semantic version for
-  repositories pinning released builds. Pre-release builds (`X.Y.Z-dev`) satisfy a floor strictly
-  below `X.Y.Z` (for example `0.8.0-dev` satisfies `0.7.0`, not `0.8.0`), following SemVer
-  precedence. A pre-release floor never implies that two builds printing the same `-dev` version
-  are equivalent.
+- **`requires.min_version`** (bare released SemVer `X.Y.Z`, no pre-release suffix): minimum
+  semantic version for repositories pinning released builds. Pre-release values (such as
+  `"0.8.0-dev"`) are refused at config load because two development builds sharing one `-dev`
+  string can have incompatible schemas and rules, making a pre-release version floor vacuous; the
+  refusal directs authors to `requires.capabilities`, `requires.source`, or
+  `requires.facts_sha256`. A running pre-release binary (`0.8.0-dev`) still satisfies any released
+  floor strictly below `X.Y.Z` (for example `0.7.0`, not `0.8.0`) under SemVer precedence.
 - **`requires.capabilities`** (list of exact `aplan facts --require` names): every named config
   key, rule code, command, output format, evidence kind, named behaviour, MCP tool, or build
   capability must be advertised by the running build. Works identically for released and

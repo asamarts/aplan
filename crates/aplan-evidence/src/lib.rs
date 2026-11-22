@@ -990,9 +990,7 @@ fn report_stale_premises(
     // paths are repository-relative. Keeping the filesystem spelling here made
     // every configured-root invocation silently find no baseline even though
     // the hand-built unit fixture used relative paths (`A1-604`, audit).
-    let workdir = repo
-        .workdir()
-        .map(|dir| version::resolve_plan_base(Some(dir), repo_root));
+    let workdir = repo.effective_workdir(repo_root);
     let paths: Vec<std::path::PathBuf> = live
         .iter()
         .map(|loaded| repository_relative_path(&loaded.path, workdir.as_deref()))

@@ -9,7 +9,7 @@
 | cut | status | done/total | ready | blocked | effort | weeks | critical path |
 | --- | --- | --- | --- | --- | --- | --- | --- |
 | v0.7 | done | 30/30 | 0 | 0 | 22.8d | 0.8 (0.0 left) | 3.5d |
-| v0.8 | todo | 5/33 | 28 | 0 | 47.8d | 1.8 (1.6 left) | 4.5d |
+| v0.8 | todo | 5/34 | 28 | 1 | 48.2d | 1.8 (1.7 left) | 4.5d |
 | adoption | todo | 0/81 | 0 | 81 | 105.8d | 3.9 (3.9 left) | 10.0d |
 | backlog | todo | 0/1 | 0 | 1 | 1.0d | <0.1 (<0.1 left) | 1.0d |
 | hardening | todo | 0/15 | 0 | 15 | 14.8d | 0.5 (0.5 left) | 3.0d |
@@ -60,7 +60,7 @@
 | A2-050 | Decide how a trace reports retargeting to a different element kind | done | - | commit:d84c89db8489, file:docs/adr/0069-a-trace-anchor-retargeting-to-another-element-kind-is-an-error.md |
 | A2-051 | Report a trace that silently retargets from a heading to a table row | todo | A2-050 | - |
 | A2-052 | Decide what counts as review that clears APLAN045 | done | - | commit:d84c89db8489, file:docs/adr/0070-open-trace-drift-clears-only-on-substantive-edit-or-explicit-review.md |
-| A2-053 | Clear APLAN045 only on an edit that shows somebody reviewed the task | todo | A2-052 | - |
+| A2-053 | Clear APLAN045 only on an edit that shows somebody reviewed the task | todo | A2-052, A2-051 | - |
 | A2-054 | Keep an evidence observation proven current from reading stale on the next read | todo | - | - |
 | A2-055 | Stop aplan_add reporting a concurrent change against an unchanged plan | todo | - | - |
 | A2-056 | Decide whether a live task's exact path that matches nothing is reported | done | - | commit:d84c89db8489, file:docs/adr/0071-live-unmatched-paths-report-only-provably-stranded-targets-and-bare-directories.md |
@@ -89,6 +89,7 @@
 | A2-192 | Scope aplan build script cache identity to product sources and handle bind-mounted worktrees | done | - | commit:f4bc3bc99434, test:build_identity::cache_identity_inputs_ignore_nested_targets_and_non_product_trees, test:build_identity::cache_identity_inputs_stay_inside_packaged_crates_io_manifest, test:version::tests::resolve_plan_base_falls_back_when_workdir_does_not_contain_repo_root |
 | A2-193 | Implement pre-schema requires build-contract declaration in .aplan.yml | todo | A2-081 | - |
 | A2-194 | Direct unknown config and frontmatter diagnostics to aplan facts --identity | todo | A2-081 | - |
+| A2-195 | Close post-merge audit gaps in build identity, bind-mounted worktrees, ADR-0068, and task specs | todo | - | - |
 
 ## adoption Adoption and ergonomics
 

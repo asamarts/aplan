@@ -194,34 +194,15 @@ fn is_under(path: &str, root: &str) -> bool {
         .is_some_and(|rest| rest.starts_with('/'))
 }
 
-/// What plan paths are made relative to: the repository's working directory
-/// when it actually contains `repo_root`, falling back to `repo_root` (`A1-313`,
-/// `A2-192`).
-///
-/// The fallback covers both a bare repository (which has no working tree) and a
-/// linked Git worktree bind-mounted at another path (for example inside a
-/// release builder container), where `.git/worktrees/<name>/gitdir` still names
-/// the host worktree path outside the container.
-pub(crate) fn resolve_plan_base(
-    workdir: Option<std::path::PathBuf>,
-    repo_root: &Path,
-) -> std::path::PathBuf {
-    let Some(workdir) = workdir else {
-        return repo_root.to_path_buf();
-    };
-    if workdir.is_dir() {
-        let canonical_workdir = std::fs::canonicalize(&workdir).unwrap_or_else(|_| workdir.clone());
-        let canonical_root =
-            std::fs::canonicalize(repo_root).unwrap_or_else(|_| repo_root.to_path_buf());
-        if canonical_root.starts_with(&canonical_workdir) {
-            return workdir;
-        }
-    }
-    repo_root.to_path_buf()
+#[cfg(test)]
+fn resolve_plan_base(workdir: Option<std::path::PathBuf>, repo_root: &Path) -> std::path::PathBuf {
+    crate::repo::resolve_effective_workdir(workdir, repo_root)
+        .unwrap_or_else(|| repo_root.to_path_buf())
 }
 
 fn plan_base(repo: &Repo, repo_root: &Path) -> std::path::PathBuf {
-    resolve_plan_base(repo.workdir(), repo_root)
+    repo.effective_workdir(repo_root)
+        .unwrap_or_else(|| repo_root.to_path_buf())
 }
 
 /// A repository-relative path, whatever spelling the loader recorded.

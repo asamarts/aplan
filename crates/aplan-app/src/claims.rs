@@ -531,7 +531,7 @@ fn location(root: &Path) -> Result<Option<Location>, ClaimError> {
         source,
     })?;
     let worktree = repo
-        .workdir()
+        .effective_workdir(root)
         .map(|path| {
             std::fs::canonicalize(&path).map_err(|source| ClaimError::Io {
                 path: path.clone(),

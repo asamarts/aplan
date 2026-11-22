@@ -15,10 +15,12 @@ to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   such as `tools/tui-eval/target/` no longer perturb reproducible release artifacts. In packaged
   `crates.io` installs outside the workspace layout, it stays strictly inside `CARGO_MANIFEST_DIR`
   rather than walking parent registry directories.
-- **Bind-mounted linked Git worktrees resolve release-window and trace-history bases cleanly (`A2-192`)**.
-  When libgit2 reports a host worktree path that does not contain the mounted repository root (such
-  as a linked worktree bind-mounted inside the release builder container), `aplan-evidence` now
-  falls back to the selected repository root instead of failing to strip the path prefix.
+- **Bind-mounted linked Git worktrees resolve release-window, claim, revision-summary, and
+  trace-history bases cleanly (`A2-192`, `A2-195`)**. When libgit2 reports a host worktree path
+  that does not contain the mounted repository root (such as a linked worktree bind-mounted inside
+  the release builder container), `Repo::effective_workdir` now resolves the mounted checkout root
+  (including from a subdirectory via `.git` ancestor lookup) instead of failing to strip or
+  canonicalize the host path.
 
 ## [0.7.0] - 2026-11-21
 

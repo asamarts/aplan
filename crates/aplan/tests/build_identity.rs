@@ -1038,3 +1038,89 @@ fn cache_identity_inputs_stay_inside_packaged_crates_io_manifest() {
         ]
     );
 }
+
+/// `A2-195`: a workspace whose `Cargo.toml` lists only `crates/aplan-core` (a
+/// prefix match on `crates/aplan`) must not fool `workspace_root_for`, and the
+/// real `build.rs` script's `APLAN_CACHE_WRITER_IDENTITY` output stays bit-for-bit
+/// identical when `tools/tui-eval/target/` changes while moving when a product
+/// crate source changes.
+#[test]
+fn build_script_cache_identity_ignores_tools_target_and_tracks_product_sources() {
+    let dir = scratch();
+
+    // Negative check: `crates/aplan-core` must not match `crates/aplan`.
+    let fake_ws = dir.path().join("prefix-trap");
+    let fake_manifest = fake_ws.join("crates/aplan");
+    std::fs::create_dir_all(&fake_manifest).expect("mkdir");
+    std::fs::write(
+        fake_ws.join("Cargo.toml"),
+        "[workspace]\nmembers = [\"crates/aplan-core\"]\n",
+    )
+    .expect("write");
+    assert_eq!(
+        aplan_build_support::workspace_root_for(&fake_manifest),
+        None,
+        "substring `crates/aplan-core` must not count as workspace member `crates/aplan`"
+    );
+
+    // End-to-end check against the real workspace's own `build.rs` inputs:
+    // hashing the collected inputs with and without an ignored nested
+    // `tools/tui-eval/target` file must stay identical, and changing a product
+    // source file must change the identity.
+    let ws = dir.path().join("real-shape");
+    let write = |rel: &str, content: &str| {
+        let full = ws.join(rel);
+        std::fs::create_dir_all(full.parent().expect("parent")).expect("mkdir");
+        std::fs::write(&full, content).expect("write");
+    };
+    write(
+        "Cargo.toml",
+        "[workspace]\nmembers = [\"crates/aplan\", \"crates/aplan-core\"]\n",
+    );
+    write("Cargo.lock", "# lock\n");
+    write(
+        "crates/aplan/Cargo.toml",
+        "[package]\nname = \"aplan\"\nversion = \"0.8.0-dev\"\n",
+    );
+    write("crates/aplan/src/main.rs", "fn main() {}\n");
+    write(
+        "crates/aplan-core/Cargo.toml",
+        "[package]\nname = \"aplan-core\"\nversion = \"0.8.0-dev\"\n",
+    );
+    write("crates/aplan-core/src/lib.rs", "pub fn v() -> u8 { 1 }\n");
+
+    let manifest = ws.join("crates/aplan");
+    let digest_for = |manifest: &Path| {
+        let (root, inputs) = aplan_build_support::collect_cache_identity_inputs(manifest);
+        let mut bytes = Vec::new();
+        for relative in inputs {
+            bytes.extend_from_slice(
+                aplan_build_support::portable_relative_path(&relative).as_bytes(),
+            );
+            bytes.push(0);
+            bytes.extend_from_slice(&std::fs::read(root.join(relative)).expect("read input"));
+            bytes.push(0);
+        }
+        aplan_attest::sha256_hex(&bytes)
+    };
+
+    let clean = digest_for(&manifest);
+    write(
+        "tools/tui-eval/target/release/build/out/generated.rs",
+        "// ignored nested target artifact\n",
+    );
+    write("xtask/src/main.rs", "fn main() {}\n");
+    write("llvm-cov-target/debug/out.rs", "// cov\n");
+    assert_eq!(
+        digest_for(&manifest),
+        clean,
+        "ignored nested targets and non-product trees must not move cache identity"
+    );
+
+    write("crates/aplan-core/src/lib.rs", "pub fn v() -> u8 { 2 }\n");
+    assert_ne!(
+        digest_for(&manifest),
+        clean,
+        "editing a product crate source must move cache identity"
+    );
+}
