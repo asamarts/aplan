@@ -9,7 +9,7 @@
 | cut | status | done/total | ready | blocked | effort | weeks | critical path |
 | --- | --- | --- | --- | --- | --- | --- | --- |
 | v0.7 | done | 30/30 | 0 | 0 | 22.8d | 0.8 (0.0 left) | 3.5d |
-| v0.8 | todo | 0/33 | 27 | 6 | 47.8d | 1.8 (1.8 left) | 4.5d |
+| v0.8 | todo | 1/33 | 26 | 6 | 47.8d | 1.8 (1.8 left) | 4.5d |
 | adoption | todo | 0/81 | 0 | 81 | 105.8d | 3.9 (3.9 left) | 10.0d |
 | backlog | todo | 0/1 | 0 | 1 | 1.0d | <0.1 (<0.1 left) | 1.0d |
 | hardening | todo | 0/15 | 0 | 15 | 14.8d | 0.5 (0.5 left) | 3.0d |
@@ -86,7 +86,7 @@
 | A2-161 | A withdrawn delivery has no named route: a hand reopen of a done task passes, and supersede and amend describe other cases | todo | - | - |
 | A2-182 | Stop refused mutation commands from advising --format agent when they do not accept --format | todo | - | - |
 | A2-183 | Fix APLAN015 file-evidence fix text and warn at close when a commit deletes a cited file | todo | - | - |
-| A2-192 | Scope aplan build script cache identity to product sources and handle bind-mounted worktrees | todo | - | - |
+| A2-192 | Scope aplan build script cache identity to product sources and handle bind-mounted worktrees | done | - | commit:f4bc3bc99434, test:build_identity::cache_identity_inputs_ignore_nested_targets_and_non_product_trees, test:build_identity::cache_identity_inputs_stay_inside_packaged_crates_io_manifest, test:version::tests::resolve_plan_base_falls_back_when_workdir_does_not_contain_repo_root |
 | A2-193 | Implement pre-schema requires build-contract declaration in .aplan.yml | todo | A2-081 | - |
 | A2-194 | Direct unknown config and frontmatter diagnostics to aplan facts --identity | todo | A2-081 | - |
 
