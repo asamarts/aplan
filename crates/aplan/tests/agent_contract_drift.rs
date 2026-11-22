@@ -362,14 +362,45 @@ fn provenance_only_drift_does_not_block_check_verify_or_mcp() {
     assert!(!verify_out.contains("APLAN041"), "{verify_out}");
     assert!(verify_out.contains(other_surface), "{verify_out}");
 
-    assert_mcp_check_reports_non_blocking_provenance(dir.path(), other_surface);
+    assert_machine_and_mcp_provenance_surfaces(dir.path(), other_surface, &surface);
 }
 
-fn assert_mcp_check_reports_non_blocking_provenance(root: &std::path::Path, other_surface: &str) {
-    // MCP `aplan_check` reports `denied: false`, `warnings: 0`, and carries
-    // `agent_contract_provenance`.
+fn assert_machine_and_mcp_provenance_surfaces(
+    root: &std::path::Path,
+    other_surface: &str,
+    my_surface: &str,
+) {
+    // `check --format agent` and `verify --format json` both emit clean JSON
+    // with 0 warnings and the structured `agent_contract_provenance` object.
+    for args in [
+        vec!["check", "--format", "agent"],
+        vec!["verify", "--format", "json"],
+    ] {
+        let raw = common::output(root, &args);
+        assert!(raw.status.success(), "`{args:?}` failed: {raw:?}");
+        let doc: serde_json::Value = serde_json::from_slice(&raw.stdout)
+            .unwrap_or_else(|e| panic!("`{args:?}` must emit pure JSON ({e})"));
+        assert_eq!(doc["warnings"], 0, "{args:?}: {doc}");
+        assert_eq!(doc["errors"], 0, "{args:?}: {doc}");
+        assert!(
+            doc["agent_contract_provenance"]["written_by"]
+                .as_str()
+                .is_some_and(|w| w.contains(other_surface)),
+            "{args:?}: {doc}"
+        );
+        assert!(
+            doc["agent_contract_provenance"]["checked_by"]
+                .as_str()
+                .is_some_and(|c| c.contains(my_surface)),
+            "{args:?}: {doc}"
+        );
+    }
+
+    // MCP `aplan_check` and `aplan_verify` both report `denied: false`,
+    // `warnings: 0`, and carry `agent_contract_provenance`.
     let init = r#"{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2024-11-05","capabilities":{},"clientInfo":{"name":"t","version":"1"}}}"#;
-    let call = r#"{"jsonrpc":"2.0","id":2,"method":"tools/call","params":{"name":"aplan_check","arguments":{}}}"#;
+    let check_call = r#"{"jsonrpc":"2.0","id":2,"method":"tools/call","params":{"name":"aplan_check","arguments":{}}}"#;
+    let verify_call = r#"{"jsonrpc":"2.0","id":3,"method":"tools/call","params":{"name":"aplan_verify","arguments":{}}}"#;
     let mut child = common::command(root, &["mcp"])
         .stdin(std::process::Stdio::piped())
         .stdout(std::process::Stdio::piped())
@@ -380,30 +411,95 @@ fn assert_mcp_check_reports_non_blocking_provenance(root: &std::path::Path, othe
         use std::io::Write as _;
         let stdin = child.stdin.as_mut().expect("stdin");
         writeln!(stdin, "{init}").expect("init");
-        writeln!(stdin, "{call}").expect("call");
+        writeln!(stdin, "{check_call}").expect("check");
+        writeln!(stdin, "{verify_call}").expect("verify");
     }
     let mcp_out = child.wait_with_output().expect("mcp exits");
     let stdout = String::from_utf8_lossy(&mcp_out.stdout);
-    let check_line = stdout
-        .lines()
-        .find(|line| line.contains(r#""id":2"#))
-        .unwrap_or_else(|| panic!("expected id:2 response:\n{stdout}"));
-    let rpc: serde_json::Value = serde_json::from_str(check_line).expect("jsonrpc response");
-    assert_eq!(rpc["result"]["isError"], serde_json::Value::Bool(false));
-    let text = rpc["result"]["content"][0]["text"]
-        .as_str()
-        .expect("mcp text content");
-    let payload: serde_json::Value = serde_json::from_str(text).expect("check json payload");
-    assert_eq!(payload["denied"], serde_json::Value::Bool(false), "{text}");
-    assert_eq!(payload["errors"], serde_json::json!(0), "{text}");
-    assert_eq!(payload["warnings"], serde_json::json!(0), "{text}");
-    assert!(!text.contains("APLAN041"), "{text}");
-    assert!(
-        payload["agent_contract_provenance"]["written_by"]
+    for id in [2, 3] {
+        let needle = format!(r#""id":{id}"#);
+        let line = stdout
+            .lines()
+            .find(|line| line.contains(&needle))
+            .unwrap_or_else(|| panic!("expected id:{id} response:\n{stdout}"));
+        let rpc: serde_json::Value = serde_json::from_str(line).expect("jsonrpc response");
+        assert_eq!(rpc["result"]["isError"], serde_json::Value::Bool(false));
+        let text = rpc["result"]["content"][0]["text"]
             .as_str()
-            .is_some_and(|w| w.contains(other_surface)),
-        "{text}"
+            .expect("mcp text content");
+        let payload: serde_json::Value = serde_json::from_str(text).expect("json payload");
+        assert_eq!(payload["denied"], serde_json::Value::Bool(false), "{text}");
+        assert_eq!(payload["errors"], serde_json::json!(0), "{text}");
+        assert_eq!(payload["warnings"], serde_json::json!(0), "{text}");
+        assert!(!text.contains("APLAN041"), "{text}");
+        assert!(
+            payload["agent_contract_provenance"]["written_by"]
+                .as_str()
+                .is_some_and(|w| w.contains(other_surface)),
+            "{text}"
+        );
+    }
+}
+
+/// `A2-122` / `A2-196`: a pre-ADR-0037 generated block carrying no provenance
+/// comment passes `check` and `export-agents-md --check` with a non-blocking
+/// note when repository policy matches, and still blocks with `APLAN041` when
+/// policy drifts.
+#[test]
+fn pre_adr0037_block_without_provenance_passes_when_policy_matches_and_blocks_on_policy_drift() {
+    let dir = stale_repo();
+    std::fs::write(
+        dir.path().join(".aplan.yml"),
+        "root: aplan\ndeny_warnings: true\nevidence:\n  require_min_strength: [commit]\n",
+    )
+    .expect("config");
+    regenerate(dir.path());
+
+    let agents_path = dir.path().join("AGENTS.md");
+    let stripped: String = std::fs::read_to_string(&agents_path)
+        .expect("read AGENTS.md")
+        .lines()
+        .filter(|line| {
+            !line
+                .trim_start()
+                .starts_with(aplan_core::contract::WRITTEN_BY_PREFIX)
+        })
+        .collect::<Vec<_>>()
+        .join("\n")
+        + "\n";
+    std::fs::write(&agents_path, stripped).expect("write pre-ADR-0037 AGENTS.md");
+
+    let (check_out, check_code) = aplan(dir.path(), &["check"]);
+    assert_eq!(
+        check_code, 0,
+        "absent provenance with matching policy must not block:\n{check_out}"
     );
+    assert!(!check_out.contains("APLAN041"), "{check_out}");
+    assert!(
+        check_out.contains("carries no writer provenance comment"),
+        "{check_out}"
+    );
+
+    let (export_out, export_code) =
+        aplan(dir.path(), &["export-agents-md", "--check", "AGENTS.md"]);
+    assert_eq!(export_code, 0, "{export_out}");
+    assert!(
+        export_out.contains("carries no writer provenance comment"),
+        "{export_out}"
+    );
+
+    // Real policy drift on the same pre-ADR-0037 block still fires APLAN041.
+    std::fs::write(
+        dir.path().join(".aplan.yml"),
+        "root: aplan\ndeny_warnings: true\nevidence:\n  require_min_strength: [file]\n",
+    )
+    .expect("drifted config");
+    let (drift_out, drift_code) = aplan(dir.path(), &["check"]);
+    assert_eq!(
+        drift_code, 1,
+        "policy drift must fire APLAN041:\n{drift_out}"
+    );
+    assert!(drift_out.contains("APLAN041"), "{drift_out}");
 }
 
 /// Proves `agent_contract.provenance_does_not_block_policy` (`A2-122`,

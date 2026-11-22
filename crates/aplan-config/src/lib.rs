@@ -2904,6 +2904,16 @@ pub fn parse_build_contract(text: &str) -> Result<Option<BuildContract>, Error> 
                 .into(),
         ));
     }
+    let accepted = REQUIRES_SUBKEYS
+        .iter()
+        .map(|k| format!("`{k}`"))
+        .collect::<Vec<_>>()
+        .join(", ");
+    if req_map.keys().any(|k| k.as_str().is_none()) {
+        return Err(Error::BadRequires(format!(
+            "`requires` keys must be strings; expected one of {accepted}"
+        )));
+    }
     let unknown_subkeys: Vec<String> = req_map
         .keys()
         .filter_map(|k| k.as_str())
@@ -2911,11 +2921,6 @@ pub fn parse_build_contract(text: &str) -> Result<Option<BuildContract>, Error> 
         .map(|k| format!("`requires.{k}`"))
         .collect();
     if !unknown_subkeys.is_empty() {
-        let accepted = REQUIRES_SUBKEYS
-            .iter()
-            .map(|k| format!("`{k}`"))
-            .collect::<Vec<_>>()
-            .join(", ");
         return Err(Error::BadRequires(format!(
             "unknown key(s) {} under `requires`; expected one of {accepted}",
             unknown_subkeys.join(", ")
@@ -6793,6 +6798,10 @@ future_top_level_key_from_v09:
             for bad in [
                 "requires: {}\n",
                 "requires:\n",
+                "requires: '0.8.0'\n",
+                "requires: ['0.8.0']\n",
+                "requires:\n  123: '0.8.0'\n",
+                "requires:\n  true: '0.8.0'\n",
                 "requires:\n  unknown_key: 1\n",
                 "requires:\n  capabilities: []\n",
                 "requires:\n  source: 'abc123'\n",
@@ -6802,6 +6811,45 @@ future_top_level_key_from_v09:
                     .expect_err(&format!("expected BadRequires for:\n{bad}"));
                 assert!(matches!(err, Error::BadRequires(_)), "{bad} -> {err:?}");
             }
+
+            // Duplicate sub-keys inside `requires` fail closed with exact YAML line/column
+            // diagnostics even alongside unknown future top-level keys.
+            let dup_subkey = parse_config_for_build(
+                "requires:\n  min_version: '0.7.0'\n  min_version: '0.8.0'\nfuture_v09: true\n",
+                Path::new(".aplan.yml"),
+                Some(&running),
+            )
+            .expect_err("duplicate sub-key inside requires must fail closed");
+            assert!(
+                matches!(dup_subkey, Error::Parse(_))
+                    && dup_subkey.to_string().contains("min_version"),
+                "unexpected error for duplicate requires sub-key: {dup_subkey:?}"
+            );
+
+            // A duplicate top-level key outside `requires` fails cleanly as a YAML parse error
+            // rather than misattributing the fault to `requires`.
+            let dup_other = parse_config_for_build(
+                "requires:\n  min_version: '0.7.0'\nroot: a\nroot: b\n",
+                Path::new(".aplan.yml"),
+                Some(&running),
+            )
+            .expect_err("duplicate root key must fail");
+            assert!(
+                matches!(dup_other, Error::Parse(_)),
+                "expected Error::Parse for unrelated duplicate key, got: {dup_other:?}"
+            );
+
+            // Duplicate top-level `requires` also fails closed.
+            let dup_requires = parse_config_for_build(
+                "requires:\n  min_version: '0.7.0'\nrequires:\n  min_version: '0.8.0'\n",
+                Path::new(".aplan.yml"),
+                Some(&running),
+            )
+            .expect_err("duplicate top-level requires must fail closed");
+            assert!(
+                matches!(dup_requires, Error::Parse(_) | Error::BadRequires(_)),
+                "unexpected error for duplicate requires: {dup_requires:?}"
+            );
 
             let schema = derived_schema();
             let props = schema["$defs"]["BuildContract"]["properties"]

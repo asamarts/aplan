@@ -2663,4 +2663,71 @@ mod tests {
         fs::set_permissions(&unreadable, fs::Permissions::from_mode(0o600))
             .expect("restore cleanup permissions");
     }
+
+    #[test]
+    fn structural_report_cache_persists_agent_contract_provenance_and_isolates_checking_builds() {
+        let (temporary, root, cache) = fixture();
+        let agents_path = temporary.path().join("AGENTS.md");
+        let policy = "## The plan is the source of truth\n\n- a rule\n";
+        let file_block = format!(
+            "{}\n<!-- written by aplan 0.8.0-dev, surface 000000000000 -->\n\n{policy}{}\n",
+            aplan_core::contract::BEGIN,
+            aplan_core::contract::END
+        );
+        fs::write(&agents_path, &file_block).expect("write AGENTS.md");
+
+        let opts_build_a = aplan_core::Options {
+            agents_block: Some(aplan_core::AgentsBlock {
+                path: agents_path.clone(),
+                current: format!(
+                    "<!-- written by aplan 0.8.0-dev, surface 111111111111 -->\n\n{policy}"
+                ),
+            }),
+            ..aplan_core::Options::default()
+        };
+        let opts_build_b = aplan_core::Options {
+            agents_block: Some(aplan_core::AgentsBlock {
+                path: agents_path,
+                current: format!(
+                    "<!-- written by aplan 0.8.0-dev, surface 222222222222 -->\n\n{policy}"
+                ),
+            }),
+            ..aplan_core::Options::default()
+        };
+
+        let mut cold = PlanStore::open(&root, &options(&cache)).expect("cold store");
+        let key_a = cold
+            .structural_report_key(&opts_build_a)
+            .expect("build A key");
+        let report_a = aplan_core::validate(&cold.snapshot().plan, &opts_build_a);
+        assert!(report_a.diagnostics.is_empty(), "{report_a:?}");
+        let expected_prov = report_a
+            .agent_contract_provenance
+            .clone()
+            .expect("provenance must be recorded on build-only skew");
+        assert_eq!(
+            expected_prov.written_by.as_deref(),
+            Some("aplan 0.8.0-dev (surface 000000000000)")
+        );
+        assert_eq!(
+            expected_prov.checked_by,
+            "aplan 0.8.0-dev (surface 111111111111)"
+        );
+        cold.remember_structural_report(&key_a, &opts_build_a, &report_a);
+
+        // Reloading from disk returns the exact persisted provenance for build A.
+        let warm = PlanStore::open(&root, &options(&cache)).expect("warm store");
+        let restored = warm
+            .cached_structural_report(&key_a)
+            .expect("cached report for build A");
+        assert_eq!(restored.agent_contract_provenance, Some(expected_prov));
+
+        // A second checking build (different surface in `agents_block.current`)
+        // gets a distinct cache key and never borrows build A's provenance note.
+        let key_b = warm
+            .structural_report_key(&opts_build_b)
+            .expect("build B key");
+        assert_ne!(key_a, key_b);
+        assert!(warm.cached_structural_report(&key_b).is_none());
+    }
 }

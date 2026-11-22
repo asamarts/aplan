@@ -576,7 +576,7 @@ fn unknown_frontmatter_field(
         return None;
     }
     let prefix = at.trim_start_matches('/').replace('/', ".");
-    let fields: Vec<String> = unexpected
+    let mut fields: Vec<String> = unexpected
         .iter()
         .map(|field| {
             if prefix.is_empty() {
@@ -586,6 +586,7 @@ fn unknown_frontmatter_field(
             }
         })
         .collect();
+    fields.sort();
     let plural = if fields.len() == 1 { "field" } else { "fields" };
     let list = fields.join(", ");
     let location = if at.is_empty() {
@@ -2522,6 +2523,39 @@ mod field_line_tests {
             diag.message
                 .contains("unknown frontmatter field `evidence.0.future_nested_key`"),
             "unexpected nested message: {}",
+            diag.message
+        );
+        assert!(
+            diag.agent_instruction
+                .as_deref()
+                .is_some_and(|fix| fix.contains("aplan facts --identity")),
+            "{:?}",
+            diag.agent_instruction
+        );
+    }
+
+    #[test]
+    fn multiple_unknown_frontmatter_fields_are_sorted_deterministically() {
+        let dir = tempfile::Builder::new()
+            .tempdir_in(crate::fixture::fixture_root())
+            .expect("tempdir");
+        std::fs::write(
+            dir.path().join("A-3.md"),
+            "---\nid: A-3\ntitle: Multiple unknown fields\nphase: 1\nstatus: todo\n\
+             zeta_field: 1\nalpha_field: 2\n---\n\nbody\n",
+        )
+        .expect("task");
+
+        let plan = load_plan(dir.path());
+        let diag = plan
+            .load_diagnostics
+            .iter()
+            .find(|d| d.code == code::SCHEMA)
+            .expect("APLAN001 diagnostic");
+        assert!(
+            diag.message
+                .contains("unknown frontmatter fields `alpha_field`, `zeta_field`"),
+            "unexpected sorted message: {}",
             diag.message
         );
         assert!(

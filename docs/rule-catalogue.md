@@ -364,6 +364,8 @@ the generated `AGENTS.md` block says what this repository's policy says
 
 - **says:** 1 `aplan:begin` and 0 `aplan:end` marker(s), so the generated block cannot be read and nothing can say whether it is current
   - **fix:** Leave one `aplan:begin` and one `aplan:end`, in that order, then run `aplan export-agents-md --write <tmp>/AGENTS.md`.
+- **says:** the generated block carries malformed provenance (block carries 2 `written by aplan` provenance lines; expected at most one): provenance lines are never silently normalized away
+  - **fix:** Repair the `<!-- written by aplan ... -->` provenance line or regenerate `<tmp>/AGENTS.md` with the repository's required `aplan` build via `aplan export-agents-md --write <tmp>/AGENTS.md` (see `.aplan.yml` `requires` and `docs/upgrading.md`).
 - **says:** the generated block is not what this repository's policy produces now: it is what an agent reads before touching the plan, so a stale one teaches a rule the tool would refuse
   - **fix:** Run `aplan export-agents-md --write <tmp>/AGENTS.md`.
 
