@@ -611,6 +611,7 @@ pub fn validate_with_graph(plan: &Plan, opts: &Options, graph: &Graph<'_>) -> Re
     let mut report = Report {
         diagnostics: plan.load_diagnostics.clone(),
         tasks_checked: plan.tasks.len(),
+        agent_contract_provenance: None,
     };
 
     // Duplicate ids. Detected before building the graph, which dedupes.
@@ -684,7 +685,11 @@ pub fn validate_with_graph(plan: &Plan, opts: &Options, graph: &Graph<'_>) -> Re
     check_vocabularies(plan, opts, &mut report.diagnostics);
     check_policy_selectors(plan, opts, &mut report.diagnostics);
     check_policy_evidence_resolvers(opts, &mut report.diagnostics);
-    check_agents_block(opts, &mut report.diagnostics);
+    check_agents_block(
+        opts,
+        &mut report.diagnostics,
+        &mut report.agent_contract_provenance,
+    );
     check_cancelled_cuts(plan, graph, &mut report.diagnostics);
     check_preference_cycles(plan, graph, &mut report.diagnostics);
 
@@ -846,12 +851,18 @@ fn check_task(
 }
 
 /// `APLAN041`: the generated block in `AGENTS.md` no longer says what the policy
-/// says.
+/// says, or its markers/provenance comment are malformed (`A1-273`, `ADR-0072`,
+/// `A2-122`).
 ///
-/// The comparison is on the text between the markers, trimmed at both ends, so a
-/// trailing newline the writer does or does not leave is not a finding: what an
-/// agent reads is the block, and whitespace around it is the file's.
-fn check_agents_block(opts: &Options, out: &mut Vec<Diagnostic>) {
+/// Build-only provenance differences (where repository policy matches and the
+/// provenance comment is well-formed or pre-ADR-0037 absent) do **not** fire
+/// `APLAN041`; instead they populate `provenance_out` as a non-blocking
+/// diagnostic naming both builds and `.aplan.yml`'s `requires` route.
+fn check_agents_block(
+    opts: &Options,
+    out: &mut Vec<Diagnostic>,
+    provenance_out: &mut Option<crate::diagnostic::AgentContractProvenance>,
+) {
     let Some(want) = &opts.agents_block else {
         return;
     };
@@ -874,41 +885,89 @@ fn check_agents_block(opts: &Options, out: &mut Vec<Diagnostic>) {
             "Leave one `aplan:begin` and one `aplan:end`, in that order, then run `aplan \
              export-agents-md --write {file}`."
         )),
-        // A block that says the same thing and names a different build is not a
-        // stale policy, and saying so sends the reader looking for a policy that
-        // did not change (`A1-325`). It is still reported: two builds writing
-        // one committed artifact is how the pilot got a thirty-line diff that
-        // could not be reproduced where it was made.
-        crate::contract::Block::Present(found)
-            if crate::contract::differs_only_by_build(found, &want.current) =>
-        {
-            Diagnostic::warning(
-                code::STALE_AGENT_CONTRACT,
-                "the generated block says what this repository's policy says, and names a \
-                 different build as its author: the block was written by one `aplan` and is \
-                 being checked by another",
-            )
-            .with_agent_instruction(format!(
-                "Run `aplan export-agents-md --write {file}` with the build this repository \
-                 pins, so the committed block and the one CI generates come from the same \
-                 `aplan`. If you run mixed builds deliberately, put `APLAN041` in `advisory` \
-                 so this reports without failing."
-            ))
-        }
-        crate::contract::Block::Present(found) if found.trim() != want.current.trim() => {
-            Diagnostic::warning(
-                code::STALE_AGENT_CONTRACT,
-                "the generated block is not what this repository's policy produces now: it is \
-                 what an agent reads before touching the plan, so a stale one teaches a rule \
-                 the tool would refuse",
-            )
-            .with_agent_instruction(format!("Run `aplan export-agents-md --write {file}`."))
+        crate::contract::Block::Present(found) => {
+            let (found_prov, found_policy) = crate::contract::parse_provenance(found);
+            let (want_prov, want_policy) = crate::contract::parse_provenance(&want.current);
+            match (&found_prov, &want_prov) {
+                // Malformed or duplicate provenance lines are never silently
+                // normalized away (`ADR-0072`, `A2-122`).
+                (crate::contract::ProvenanceState::Malformed(reason), _) => Diagnostic::warning(
+                    code::STALE_AGENT_CONTRACT,
+                    format!(
+                        "the generated block carries malformed provenance ({reason}): provenance \
+                         lines are never silently normalized away"
+                    ),
+                )
+                .with_agent_instruction(format!(
+                    "Repair the `<!-- written by aplan ... -->` provenance line or regenerate \
+                     `{file}` with the repository's required `aplan` build via `aplan \
+                     export-agents-md --write {file}` (see `.aplan.yml` `requires` and \
+                     `docs/upgrading.md`)."
+                )),
+                _ if found_policy != want_policy => {
+                    let instruction = match (&found_prov, &want_prov) {
+                        (
+                            crate::contract::ProvenanceState::Valid(fp),
+                            crate::contract::ProvenanceState::Valid(wp),
+                        ) if fp != wp => format!(
+                            "Run `aplan export-agents-md --write {file}` with the repository's \
+                             required `aplan` build (block was written by {}, checked by {}; \
+                             declare `requires` in `.aplan.yml` or see `docs/upgrading.md` to pin \
+                             the authoritative build rather than regenerating with an unpinned \
+                             `PATH` binary).",
+                            fp.display_label(),
+                            wp.display_label(),
+                        ),
+                        _ => format!("Run `aplan export-agents-md --write {file}`."),
+                    };
+                    Diagnostic::warning(
+                        code::STALE_AGENT_CONTRACT,
+                        "the generated block is not what this repository's policy produces now: \
+                         it is what an agent reads before touching the plan, so a stale one \
+                         teaches a rule the tool would refuse",
+                    )
+                    .with_agent_instruction(instruction)
+                }
+                // Policy matches and provenance is well-formed (or pre-ADR-0037 absent),
+                // but writer and checking build differ: non-blocking provenance signal,
+                // never `APLAN041` (`ADR-0072`, `A2-122`).
+                (fp, crate::contract::ProvenanceState::Valid(wp)) if *fp != want_prov => {
+                    let written_by = match fp {
+                        crate::contract::ProvenanceState::Valid(p) => Some(p.display_label()),
+                        crate::contract::ProvenanceState::Absent
+                        | crate::contract::ProvenanceState::Malformed(_) => None,
+                    };
+                    let checked_by = wp.display_label();
+                    let note = match &written_by {
+                        Some(writer) => format!(
+                            "{file} matches this repository's policy, but was written by {writer} \
+                             and checked by {checked_by}. Provenance alone does not block; do not \
+                             regenerate with an unpinned build just to move the comment. To pin \
+                             one authoritative build across contributors and CI, declare \
+                             `requires` in `.aplan.yml` (see `docs/upgrading.md`)."
+                        ),
+                        None => format!(
+                            "{file} matches this repository's policy, carries no writer \
+                             provenance comment, and was checked by {checked_by}. Provenance \
+                             alone does not block; to pin one authoritative build across \
+                             contributors and CI, declare `requires` in `.aplan.yml` (see \
+                             `docs/upgrading.md`)."
+                        ),
+                    };
+                    *provenance_out = Some(crate::diagnostic::AgentContractProvenance {
+                        file: want.path.clone(),
+                        written_by,
+                        checked_by,
+                        note,
+                    });
+                    return;
+                }
+                _ => return,
+            }
         }
         // `Absent`: the markers are the request, and this file makes none, so
-        // nothing here has standing. `Present`: it already says what the policy
-        // says. Both variants named rather than a wildcard, so a new one is a
-        // compile error and not a silent third silence.
-        crate::contract::Block::Absent | crate::contract::Block::Present(_) => return,
+        // nothing here has standing.
+        crate::contract::Block::Absent => return,
     };
     out.push(diag.with_file(&want.path));
 }
@@ -4622,14 +4681,13 @@ mod tests {
             );
         }
 
-        /// Two builds, one policy: reported, and reported as the build
-        /// (`A1-325`, ADR-0037).
+        /// Two builds, one policy: `APLAN041` does NOT fire and does NOT block,
+        /// while the non-blocking provenance signal names both builds and
+        /// `.aplan.yml`'s `requires` route without advising blind regeneration
+        /// (`A1-325`, `A2-122`, ADR-0072).
         ///
-        /// Proves the named behaviour `generated.names_the_build_that_wrote_it`.
-        ///
-        /// The pilot's case. Blaming the policy here sends the reader looking
-        /// for a policy change that did not happen, which is the same wasted
-        /// hour the thirty-line diff cost in the first place.
+        /// Proves `generated.names_the_build_that_wrote_it` and
+        /// `agent_contract.provenance_does_not_block_policy`.
         #[test]
         fn a_block_written_by_another_build_is_reported_as_a_build_difference() {
             let rule = "- A `done` task must cite `file` or `test` evidence.";
@@ -4644,35 +4702,87 @@ mod tests {
                 ),
             );
             let r = validate(&plan_of(vec![]), &o);
-            let d = pick(&r, code::STALE_AGENT_CONTRACT);
             assert!(
-                d.message.contains("names a different build as its author"),
-                "reported as a policy change: {}",
-                d.message
+                codes(&r).is_empty(),
+                "build-only provenance skew must not fire APLAN041: {:?}",
+                r.diagnostics
             );
             assert!(
-                !d.message
-                    .contains("is not what this repository's policy produces now"),
-                "still blaming the policy: {}",
-                d.message
+                !r.denied_by(&crate::Verdict {
+                    deny_warnings: true,
+                    advisory: Vec::new(),
+                }),
+                "build-only provenance skew must not block even under deny_warnings"
             );
-            // The remedy is not "regenerate", which is what the reader would
-            // have done anyway and would leave the two builds disagreeing
-            // again on the next run.
-            let fix = d.agent_instruction.clone().unwrap_or_default();
+            let prov = r
+                .agent_contract_provenance
+                .as_ref()
+                .expect("non-blocking provenance notice must remain visible");
+            assert_eq!(
+                prov.written_by.as_deref(),
+                Some("aplan 0.2.0 (surface aaaaaaaaaaaa)")
+            );
+            assert_eq!(prov.checked_by, "aplan 0.4.0 (surface bbbbbbbbbbbb)");
             assert!(
-                fix.contains("the build this repository pins"),
-                "the fix does not say which build to use: {fix}"
+                prov.note.contains("matches this repository's policy"),
+                "{}",
+                prov.note
             );
             assert!(
-                fix.contains("advisory"),
-                "no way out for a repository that runs mixed builds on purpose: {fix}"
+                prov.note.contains("0.2.0") && prov.note.contains("0.4.0"),
+                "{}",
+                prov.note
+            );
+            assert!(prov.note.contains("requires"), "{}", prov.note);
+            assert!(prov.note.contains("docs/upgrading.md"), "{}", prov.note);
+            assert!(
+                !prov.note.contains("Run `aplan export-agents-md --write"),
+                "must never tell a reader to regenerate with the currently running build: {}",
+                prov.note
             );
         }
 
-        /// The policy *and* the build differing is still a policy report: the
-        /// policy is the one the reader has to act on, and the build is noise
-        /// beside it.
+        /// Malformed or duplicate provenance lines still fire `APLAN041` and
+        /// are never silently normalized away (`A2-122`, ADR-0072).
+        ///
+        /// Proves `agent_contract.provenance_does_not_block_policy`.
+        #[test]
+        fn malformed_or_duplicate_provenance_still_fires_aplan041() {
+            let rule = "- A `done` task must cite `file` or `test` evidence.";
+            let want = format!(
+                "{}0.8.0-dev, surface bbbbbbbbbbbb -->\n{rule}",
+                crate::contract::WRITTEN_BY_PREFIX
+            );
+            for bad in [
+                format!(
+                    "{}0.7.0, surface aaaaaaaaaaaa -->\n{}0.8.0-dev, surface bbbbbbbbbbbb -->\n{rule}",
+                    crate::contract::WRITTEN_BY_PREFIX,
+                    crate::contract::WRITTEN_BY_PREFIX
+                ),
+                format!(
+                    "{}0.7.0, surface NOTHEX123456 -->\n{rule}",
+                    crate::contract::WRITTEN_BY_PREFIX
+                ),
+                format!(
+                    "{rule}\n{}0.7.0, surface aaaaaaaaaaaa -->",
+                    crate::contract::WRITTEN_BY_PREFIX
+                ),
+            ] {
+                let (_d, o) = repo(&fenced(&bad), &want);
+                let r = validate(&plan_of(vec![]), &o);
+                let d = pick(&r, code::STALE_AGENT_CONTRACT);
+                assert!(
+                    d.message.contains("malformed provenance"),
+                    "expected malformed provenance diagnostic for:\n{bad}\ngot: {}",
+                    d.message
+                );
+                assert!(r.agent_contract_provenance.is_none());
+            }
+        }
+
+        /// The policy *and* the build differing is still a policy report, and
+        /// names both builds + the `requires` pin route so a contributor on an
+        /// arbitrary `PATH` binary is warned not to regenerate blindly (`A2-122`).
         #[test]
         fn a_block_differing_in_policy_and_build_is_reported_as_the_policy() {
             let (_d, o) = repo(
@@ -4692,6 +4802,10 @@ mod tests {
                 "a real policy drift was reported as a build difference: {}",
                 d.message
             );
+            let fix = d.agent_instruction.as_deref().unwrap_or_default();
+            assert!(fix.contains("export-agents-md --write"), "{fix}");
+            assert!(fix.contains("0.2.0") && fix.contains("0.4.0"), "{fix}");
+            assert!(fix.contains("requires"), "{fix}");
         }
 
         /// Same policy, same build: the provenance line is not itself a

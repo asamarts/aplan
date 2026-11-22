@@ -6,7 +6,43 @@ to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+### Added
+
+- **Pre-schema `requires` build-contract declaration in `.aplan.yml` (`A2-081`, `A2-193`,
+  ADR-0068)**. Repositories may now declare `requires` with `min_version` (bare released `X.Y.Z`
+  only; pre-release strings such as `0.8.0-dev` are refused as vacuous pins), `capabilities`
+  (any `aplan facts --require` name), `source` (exact full lowercase Git commit SHA, failing
+  closed when the running build has no known source while admitting portable same-source rebuilds),
+  and `facts_sha256` (exact 64-hex SHA-256 of `aplan facts`). Exact executable byte digests
+  (`binary_sha256`) are deliberately excluded from `.aplan.yml` and remain external. A frozen
+  pre-schema reader evaluates `requires` before full `Config` `deny_unknown_fields` parsing across
+  CLI, MCP (including explicit-root calls), and TUI, failing closed with both declared requirements
+  and the running build's `version`, `source`, and `facts_sha256` while keeping `aplan facts`,
+  `aplan facts --identity`, `aplan facts --require`, `--version`, `schema`, `--no-config`, and MCP
+  `aplan_identity` reachable.
+
+### Changed
+
+- **`APLAN041` and `export-agents-md --check` separate repository policy from writer provenance
+  and live MCP tools (`A2-122`, ADR-0072, `--require
+  agent_contract.provenance_does_not_block_policy`)**. Generated `AGENTS.md` blocks now point
+  agents to live MCP discovery (`tools/list` and `aplan_identity`) instead of embedding a
+  build-specific static tool list, so two capable builds render one byte-identical policy body for
+  an unchanged `.aplan.yml`. Well-formed (or pre-ADR-0037 absent) build-only provenance skew no
+  longer fires `APLAN041` or fails `check`, `verify`, `aplan_check`, or `export-agents-md --check`
+  even under `deny_warnings: true`, and instead emits a non-blocking provenance diagnostic naming
+  both builds and `.aplan.yml`'s `requires` route without advising blind regeneration. Genuine
+  policy drift (including runner configuration changes) and malformed or duplicate provenance
+  comments still fire `APLAN041` and retain an exact repair. Repositories that put `APLAN041` in
+  `advisory` solely to tolerate mixed builds can retire that workaround.
+
 ### Fixed
+
+- **Unknown config-key and task-frontmatter diagnostics direct same-version development users to
+  `aplan facts --identity` (`A2-194`, ADR-0068)**. Unknown `.aplan.yml` keys retain their leading
+  typo suggestion, running version, accepted-key count, and `aplan facts` pointer while also
+  naming `aplan facts --identity`, and unknown task frontmatter fields (`APLAN001`) name the
+  offending field cleanly and point to `aplan schema`, `aplan facts`, and `aplan facts --identity`.
 
 - **Build-script cache-writer identity stays inside product sources and packaged crates (`A2-192`)**.
   `crates/aplan/build.rs` now collects only root `Cargo.toml`, `Cargo.lock` and product crates

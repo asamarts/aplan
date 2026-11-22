@@ -561,6 +561,49 @@ fn retyped_scalar(
     ))
 }
 
+/// Turn an `additionalProperties` rejection into an actionable unknown-field
+/// diagnostic that also directs same-version development users to build identity
+/// (`A2-194`, ADR-0068).
+fn unknown_frontmatter_field(
+    error: &jsonschema::ValidationError<'_>,
+    at: &str,
+) -> Option<(String, String)> {
+    let jsonschema::error::ValidationErrorKind::AdditionalProperties { unexpected } = error.kind()
+    else {
+        return None;
+    };
+    if unexpected.is_empty() {
+        return None;
+    }
+    let prefix = at.trim_start_matches('/').replace('/', ".");
+    let fields: Vec<String> = unexpected
+        .iter()
+        .map(|field| {
+            if prefix.is_empty() {
+                format!("`{field}`")
+            } else {
+                format!("`{prefix}.{field}`")
+            }
+        })
+        .collect();
+    let plural = if fields.len() == 1 { "field" } else { "fields" };
+    let list = fields.join(", ");
+    let location = if at.is_empty() {
+        String::new()
+    } else {
+        format!(" (at `{at}`)")
+    };
+    Some((
+        format!("unknown frontmatter {plural} {list}{location}"),
+        format!(
+            "Remove or fix the unknown frontmatter {plural} ({list}) to satisfy \
+             schemas/v1/task.json (`aplan schema`). If the field comes from a newer `aplan`, \
+             inspect this build with `aplan facts` and `aplan facts --identity` (to tell \
+             same-version development builds apart), then upgrade before adopting the field."
+        ),
+    ))
+}
+
 /// The text the author typed for a retyped scalar, when exactly one line in the
 /// frontmatter could have produced it.
 ///
@@ -760,7 +803,9 @@ fn load_one_source(
         .iter_errors(&value)
         .map(|e| {
             let at = e.instance_path();
-            let (message, instruction) = retyped_scalar(&e, &at.to_string(), frontmatter)
+            let at_str = at.to_string();
+            let (message, instruction) = retyped_scalar(&e, &at_str, frontmatter)
+                .or_else(|| unknown_frontmatter_field(&e, &at_str))
                 .unwrap_or_else(|| {
                     (
                         format!("{e} (at `{at}`)"),
@@ -2415,5 +2460,76 @@ mod field_line_tests {
         assert_eq!((c.total, c.ticked), (2, 2));
         assert!(!c.unanswered());
         assert_eq!(c.first_unticked, None);
+    }
+
+    /// `A2-194`: unknown task frontmatter fields name the offending field(s)
+    /// and direct same-version development users to `aplan schema`,
+    /// `aplan facts`, and `aplan facts --identity`.
+    #[test]
+    fn unknown_frontmatter_field_points_to_schema_facts_and_build_identity() {
+        let dir = tempfile::Builder::new()
+            .tempdir_in(crate::fixture::fixture_root())
+            .expect("tempdir");
+        std::fs::write(
+            dir.path().join("A-1.md"),
+            "---\nid: A-1\ntitle: Unknown field fixture\nphase: 1\nstatus: todo\n\
+             future_frontmatter_field: 42\n---\n\nbody\n",
+        )
+        .expect("task");
+
+        let plan = load_plan(dir.path());
+        assert_eq!(plan.tasks.len(), 0);
+        let diag = plan
+            .load_diagnostics
+            .iter()
+            .find(|d| d.code == code::SCHEMA)
+            .expect("APLAN001 diagnostic");
+        assert!(
+            diag.message
+                .contains("unknown frontmatter field `future_frontmatter_field`"),
+            "unexpected message: {}",
+            diag.message
+        );
+        let fix = diag
+            .agent_instruction
+            .as_deref()
+            .expect("agent instruction");
+        assert!(fix.contains("aplan schema"), "{fix}");
+        assert!(fix.contains("aplan facts"), "{fix}");
+        assert!(fix.contains("aplan facts --identity"), "{fix}");
+    }
+
+    #[test]
+    fn nested_unknown_frontmatter_field_carries_its_path() {
+        let dir = tempfile::Builder::new()
+            .tempdir_in(crate::fixture::fixture_root())
+            .expect("tempdir");
+        std::fs::write(
+            dir.path().join("A-2.md"),
+            "---\nid: A-2\ntitle: Nested unknown field\nphase: 1\nstatus: done\n\
+             evidence:\n  - kind: note\n    ref: ok\n    captured: 2026-01-01\n    \
+             future_nested_key: yes\n---\n\nbody\n",
+        )
+        .expect("task");
+
+        let plan = load_plan(dir.path());
+        let diag = plan
+            .load_diagnostics
+            .iter()
+            .find(|d| d.code == code::SCHEMA)
+            .expect("APLAN001 diagnostic");
+        assert!(
+            diag.message
+                .contains("unknown frontmatter field `evidence.0.future_nested_key`"),
+            "unexpected nested message: {}",
+            diag.message
+        );
+        assert!(
+            diag.agent_instruction
+                .as_deref()
+                .is_some_and(|fix| fix.contains("aplan facts --identity")),
+            "{:?}",
+            diag.agent_instruction
+        );
     }
 }

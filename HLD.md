@@ -1051,13 +1051,20 @@ the binary it runs is the one it pinned.
 (`if cli.flag { .. } else { config.field.unwrap_or(default) }`). A flag misused on the
 wrong subcommand **errors loudly** rather than being ignored.
 
+**Pre-schema build contract (`requires`, shipped in `A2-193`, `ADR-0068`).** Before strict full
+`Config` deserialization runs, `aplan-config` reads only top-level `requires` (`min_version`,
+`capabilities`, `source`, `facts_sha256`) using a frozen pre-schema parser that ignores unrelated
+top-level keys while strictly validating `requires` sub-keys. A mismatch fails closed (exit 2 /
+refusal) across CLI, MCP (including explicit-root calls), and TUI before reporting unknown config
+keys introduced after the running build, while `aplan facts`, `aplan facts --identity`,
+`aplan facts --require`, `--version`, `schema`, `--no-config`, and MCP `aplan_identity` remain
+reachable. Exact executable byte digests (`binary_sha256`) and SLSA provenance authentication
+(`ADR-0066`) stay strictly outside `.aplan.yml`.
+
 **Planned keys**, each shipping with the rule or command that reads it, never before, so
 the tool never carries a key it ignores: a `url` reachability switch (`APLAN016`, network
-off by default), a `root` key so `--root` need not be repeated, a `version` field, and a
-pre-schema `requires` build-contract block (`min_version`, `capabilities`, `source`,
-`facts_sha256`; `ADR-0068`, `A2-193`) that fails closed on build skew before full config schema
-validation while leaving exact `binary_sha256` and provenance authentication to external wrappers
-and CI (`ADR-0066`).
+off by default), a `root` key so `--root` need not be repeated, and a `version` field (all now
+shipped).
 
 **No `extends:` in v1.** `alint` needs remote ruleset composition; a plan validator does
 not, and the SRI/SSRF hardening that comes with it is cost we should not pay yet.

@@ -1602,6 +1602,14 @@ fn render_json(
                 .expect("an evidence observation is always serializable"),
         );
     }
+    if let (Some(provenance), Some(obj)) = (&report.agent_contract_provenance, doc.as_object_mut())
+    {
+        obj.insert(
+            "agent_contract_provenance".to_string(),
+            serde_json::to_value(provenance)
+                .expect("agent contract provenance is always serializable"),
+        );
+    }
     let mut out = std::io::stdout().lock();
     serde_json::to_writer_pretty(&mut out, &doc)?;
     writeln!(out)
@@ -4750,6 +4758,7 @@ mod tests {
         let report = Report {
             tasks_checked: 0,
             diagnostics: Vec::new(),
+            agent_contract_provenance: None,
         };
         for format in [Format::Markdown, Format::Mermaid, Format::Dot, Format::Text] {
             let error = render_kind(&report, format, Kind::Check, &Verdict::default())
@@ -4780,6 +4789,7 @@ mod tests {
         let report = Report {
             tasks_checked: 2,
             diagnostics: vec![first, second],
+            agent_contract_provenance: None,
         };
         let policy = Verdict {
             deny_warnings: true,
@@ -4795,6 +4805,7 @@ mod tests {
         let report = Report {
             tasks_checked: 0,
             diagnostics: Vec::new(),
+            agent_contract_provenance: None,
         };
         render_verified(
             &report,
@@ -6134,6 +6145,7 @@ mod sarif_tests {
                 Diagnostic::warning(code::MISSING_EFFORT, "no `effort_days` estimate")
                     .with_task("S-2"),
             ],
+            agent_contract_provenance: None,
         }
     }
 
@@ -6251,6 +6263,7 @@ mod sarif_tests {
         let clean = Report {
             diagnostics: vec![],
             tasks_checked: 5,
+            agent_contract_provenance: None,
         };
         let doc = sarif_document(&clean, &Verdict::default());
         assert_eq!(doc["runs"][0]["results"].as_array().unwrap().len(), 0);
@@ -6487,18 +6500,6 @@ fn wrap(text: &str) -> String {
     out
 }
 
-/// The first sentence of a tool's description.
-///
-/// The list is a *surface*, not a manual: `aplan_close` describes itself in five
-/// sentences, which is right in a tool listing an agent queries and wrong in a
-/// file a human reads to learn the rules. The tool itself still says everything.
-fn first_sentence(text: &str) -> &str {
-    match text.find(". ") {
-        Some(at) => &text[..=at],
-        None => text,
-    }
-}
-
 /// The blueprint workflow every generated contract teaches (`A1-393`).
 ///
 /// Kept as one renderer so the command, occasion and trust boundary cannot be
@@ -6632,23 +6633,22 @@ pub fn render_agents_md(c: &AgentContract, written_by: Option<&WrittenBy<'_>>) -
     let _ = writeln!(s, "{}", policy_lines(c));
 
     if !c.tools.is_empty() {
+        // Build-independent MCP guidance (`ADR-0072`, `A2-122`): never enumerate
+        // a build-specific static tool catalogue into committed `AGENTS.md`, so
+        // two capable builds serving different tool sets produce one byte-stable
+        // policy block and a block never promises tools the selected server lacks.
         let _ = writeln!(s, "## Through MCP\n");
         let _ = writeln!(
             s,
             "{}\n",
             wrap(
-                "`aplan mcp` serves these tools, and they go through the same gates as the CLI, \
-                 so they refuse what it refuses. Prefer them over shelling out."
+                "`aplan mcp` serves plan queries and mutations through the same gates as the CLI, \
+                 so it refuses what the CLI refuses. Prefer MCP tools over shelling out, and \
+                 discover the live tool catalogue and build identity from the running server \
+                 (`tools/list` and `aplan_identity`) rather than assuming a static tool list in \
+                 this file."
             )
         );
-        for (name, about) in &c.tools {
-            let _ = writeln!(
-                s,
-                "{}",
-                bullet(&format!("`{name}` -- {}", first_sentence(&one_line(about))))
-            );
-        }
-        let _ = writeln!(s);
     }
 
     let _ = writeln!(s, "{AGENTS_END}");
@@ -6925,9 +6925,31 @@ mod agents_tests {
             "the policy: {out}"
         );
         assert!(out.contains("`libs`, `cli`"), "the runners: {out}");
-        // One sentence per tool: the surface, not the manual.
-        assert!(out.contains("- `aplan_ready` -- List tasks whose blockers are done."));
-        assert!(!out.contains("Longer prose follows"), "truncated: {out}");
+        // Build-independent MCP guidance (`ADR-0072`, `A2-122`): points to live
+        // server discovery instead of hardcoding a build-specific tool list.
+        assert!(out.contains("## Through MCP"), "{out}");
+        assert!(out.contains("`tools/list`"), "{out}");
+        assert!(out.contains("`aplan_identity`"), "{out}");
+        assert!(
+            !out.contains("- `aplan_ready` --"),
+            "static build-specific MCP catalogue must not be embedded in AGENTS.md:\n{out}"
+        );
+        assert!(!out.contains("Longer prose follows"), "{out}");
+
+        // Two builds exposing different MCP tool catalogues render the exact
+        // same policy body for one unchanged repository policy.
+        let other_build = AgentContract {
+            tools: vec![
+                ("aplan_ready".into(), "Changed wording.".into()),
+                ("aplan_future_tool".into(), "A newer build's tool.".into()),
+            ],
+            ..contract()
+        };
+        assert_eq!(
+            out,
+            render_agents_md(&other_build, None),
+            "different build MCP tool catalogues must not diverge the policy block"
+        );
     }
 
     /// Proves `agent_contract.guides_explicit_blueprint_application`: an agent

@@ -136,12 +136,160 @@ pub fn block_in(text: &str) -> Block<'_> {
 /// which build is doing the checking.
 pub const WRITTEN_BY_PREFIX: &str = "<!-- written by aplan ";
 
+/// Parsed writer provenance from the opening line of a generated `AGENTS.md`
+/// block (`ADR-0037`, `ADR-0072`).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Provenance<'a> {
+    /// Package version recorded by the writer (for example `0.8.0-dev`).
+    pub version: &'a str,
+    /// Twelve-character lowercase hex rendered-surface digest.
+    pub surface: &'a str,
+    /// The trimmed provenance comment line as it appeared in the block.
+    pub raw: &'a str,
+}
+
+impl Provenance<'_> {
+    /// Human-readable build label (`aplan <version> (surface <surface>)`).
+    #[must_use]
+    pub fn display_label(&self) -> String {
+        format!("aplan {} (surface {})", self.version, self.surface)
+    }
+}
+
+/// Structural classification of the provenance comment inside a generated block
+/// (`ADR-0072`, `A2-122`).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ProvenanceState<'a> {
+    /// No provenance line was present (for example a block written before
+    /// `ADR-0037`).
+    Absent,
+    /// Exactly one well-formed provenance comment appeared first inside the
+    /// generated block.
+    Valid(Provenance<'a>),
+    /// Malformed, unclosed, misplaced, or duplicate provenance line(s). Never
+    /// silently normalized away.
+    Malformed(String),
+}
+
+/// Parse the writer provenance comment from a generated block's inner text and
+/// return both its structural [`ProvenanceState`] and the trimmed policy body
+/// beneath it (`ADR-0072`, `A2-122`).
+///
+/// Duplicate or malformed provenance lines are reported via
+/// [`ProvenanceState::Malformed`] rather than stripped quietly.
+#[must_use]
+pub fn parse_provenance(text: &str) -> (ProvenanceState<'_>, String) {
+    let lines: Vec<&str> = text.lines().collect();
+    let matches: Vec<(usize, &str)> = lines
+        .iter()
+        .enumerate()
+        .filter(|(_, line)| line.trim_start().starts_with(WRITTEN_BY_PREFIX))
+        .map(|(idx, line)| (idx, *line))
+        .collect();
+
+    if matches.is_empty() {
+        return (ProvenanceState::Absent, text.trim().to_string());
+    }
+    if matches.len() > 1 {
+        let body = lines
+            .iter()
+            .filter(|line| !line.trim_start().starts_with(WRITTEN_BY_PREFIX))
+            .copied()
+            .collect::<Vec<_>>()
+            .join("\n");
+        return (
+            ProvenanceState::Malformed(format!(
+                "block carries {} `written by aplan` provenance lines; expected at most one",
+                matches.len()
+            )),
+            body.trim().to_string(),
+        );
+    }
+
+    let (idx, line) = matches[0];
+    let body = lines
+        .iter()
+        .enumerate()
+        .filter(|(i, _)| *i != idx)
+        .map(|(_, l)| *l)
+        .collect::<Vec<_>>()
+        .join("\n")
+        .trim()
+        .to_string();
+
+    if lines[..idx].iter().any(|before| !before.trim().is_empty()) {
+        return (
+            ProvenanceState::Malformed(
+                "provenance comment must appear as the first line inside the generated block"
+                    .to_string(),
+            ),
+            body,
+        );
+    }
+
+    let trimmed = line.trim();
+    let Some(rest) = trimmed.strip_prefix(WRITTEN_BY_PREFIX) else {
+        return (
+            ProvenanceState::Malformed("provenance comment does not open cleanly".to_string()),
+            body,
+        );
+    };
+    let Some(payload) = rest.strip_suffix(" -->") else {
+        return (
+            ProvenanceState::Malformed(
+                "provenance comment must close with ` -->` at the end of the line".to_string(),
+            ),
+            body,
+        );
+    };
+    if payload.contains("-->") {
+        return (
+            ProvenanceState::Malformed(
+                "provenance comment contains trailing content after `-->`".to_string(),
+            ),
+            body,
+        );
+    }
+    let Some((version, surface)) = payload.split_once(", surface ") else {
+        return (
+            ProvenanceState::Malformed(
+                "provenance comment must match `<!-- written by aplan <version>, surface <12-hex> -->`"
+                    .to_string(),
+            ),
+            body,
+        );
+    };
+    let valid_version =
+        !version.is_empty() && !version.chars().any(|c| c.is_whitespace() || c.is_control());
+    let valid_surface = surface.len() == 12
+        && surface
+            .bytes()
+            .all(|b| b.is_ascii_digit() || matches!(b, b'a'..=b'f'));
+    if !valid_version || !valid_surface {
+        return (
+            ProvenanceState::Malformed(format!(
+                "provenance comment has invalid build identity (`version={version}`, `surface={surface}`); \
+                 expected non-empty version and 12 lowercase hex surface digits"
+            )),
+            body,
+        );
+    }
+
+    (
+        ProvenanceState::Valid(Provenance {
+            version,
+            surface,
+            raw: trimmed,
+        }),
+        body,
+    )
+}
+
 /// `text` with its provenance line removed, if it has one.
 ///
 /// Used to ask what two blocks disagree about *apart from* which build wrote
-/// them. Every line matching is dropped rather than only the first: a block that
-/// somehow carried two is a block whose difference is still not about policy,
-/// and reporting it as a policy change would be the wrong answer twice over.
+/// them. Callers validating a committed file should use [`parse_provenance`]
+/// so malformed or duplicate provenance lines are never normalized away.
 #[must_use]
 pub fn without_provenance(text: &str) -> String {
     text.lines()
@@ -150,15 +298,23 @@ pub fn without_provenance(text: &str) -> String {
         .join("\n")
 }
 
-/// Whether two blocks say the same thing and were written by different builds.
+/// Whether two blocks say the same repository policy and differ *only* in
+/// well-formed (or pre-ADR-0037 absent) writer provenance (`A1-325`, `A2-122`).
 ///
-/// The distinction `A1-325` exists to draw. A pinned binary in CI and a newer
-/// one locally produce blocks that differ in one line, and calling that a policy
-/// change sends the reader looking for a policy that did not change.
+/// Returns `false` when either side carries malformed or duplicate provenance
+/// lines, so structural provenance errors are never mistaken for ordinary
+/// build-only drift.
 #[must_use]
 pub fn differs_only_by_build(found: &str, want: &str) -> bool {
-    found.trim() != want.trim()
-        && without_provenance(found).trim() == without_provenance(want).trim()
+    let (found_prov, found_body) = parse_provenance(found);
+    let (want_prov, want_body) = parse_provenance(want);
+    if matches!(
+        (&found_prov, &want_prov),
+        (ProvenanceState::Malformed(_), _) | (_, ProvenanceState::Malformed(_))
+    ) {
+        return false;
+    }
+    found_body == want_body && found_prov != want_prov
 }
 
 #[cfg(test)]
@@ -334,5 +490,33 @@ mod tests {
     fn an_empty_block_is_present_and_empty() {
         let text = format!("{BEGIN}{END}");
         assert_eq!(block_in(&text), Block::Present(""));
+    }
+
+    /// `A2-122`: malformed or duplicate provenance lines are never silently
+    /// normalized away into build-only drift.
+    #[test]
+    fn duplicate_and_malformed_provenance_lines_are_classified_as_malformed() {
+        let want = format!("{WRITTEN_BY_PREFIX}0.8.0-dev, surface bbbbbbbbbbbb -->\n- a rule\n");
+        let cases = [
+            format!(
+                "{WRITTEN_BY_PREFIX}0.7.0, surface aaaaaaaaaaaa -->\n\
+                 {WRITTEN_BY_PREFIX}0.8.0-dev, surface bbbbbbbbbbbb -->\n- a rule\n"
+            ),
+            format!("{WRITTEN_BY_PREFIX}0.7.0, surface aaaaaaaaaaaa\n- a rule\n"),
+            format!("{WRITTEN_BY_PREFIX}0.7.0, surface NOTHEX123456 -->\n- a rule\n"),
+            format!("{WRITTEN_BY_PREFIX}0.7.0, surface aaaaaaaaaaaa --> trailing\n- a rule\n"),
+            format!("- a rule\n{WRITTEN_BY_PREFIX}0.7.0, surface aaaaaaaaaaaa -->\n"),
+        ];
+        for bad in cases {
+            let (state, _) = parse_provenance(&bad);
+            assert!(
+                matches!(state, ProvenanceState::Malformed(_)),
+                "expected Malformed for:\n{bad}\ngot: {state:?}"
+            );
+            assert!(
+                !differs_only_by_build(&bad, &want),
+                "malformed provenance must never look like harmless build-only drift:\n{bad}"
+            );
+        }
     }
 }

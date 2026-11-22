@@ -1,5 +1,47 @@
 {
   "$defs": {
+    "BuildContract": {
+      "additionalProperties": false,
+      "description": "Build contract this repository requires of the running `aplan` (`ADR-0068`, `A2-193`).\n\nEvaluated in a frozen pre-schema pass before full [`Config`] `deny_unknown_fields`\ndeserialization so an older or wrong build fails with an actionable build-contract\nrefusal instead of confusing `unknown key` errors for keys introduced later.\n\nExact executable byte digest pinning (`binary_sha256`) is deliberately excluded:\nartifact authenticity belongs outside the executable (CI Action, release checksum +\nSLSA attestation, or a repository wrapper script).",
+      "properties": {
+        "capabilities": {
+          "default": null,
+          "description": "Exact capability names from `aplan facts --require` (config keys, rule codes,\ncommands, output formats, evidence kinds, named behaviours, MCP tools, or\nbuild capabilities such as `build.tui`). Every named capability must be advertised.",
+          "items": {
+            "type": "string"
+          },
+          "type": [
+            "array",
+            "null"
+          ]
+        },
+        "facts_sha256": {
+          "default": null,
+          "description": "Exact 64-character lowercase hex SHA-256 of `aplan facts`.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "min_version": {
+          "default": null,
+          "description": "Minimum released semantic version (`X.Y.Z` only). Pre-release strings such as\n`0.8.0-dev` are refused at config load because two development builds share one\npre-release string; pin `capabilities`, `source`, or `facts_sha256` instead.\nA running pre-release build (`0.8.0-dev`) satisfies released floors strictly\nbelow `X.Y.Z` (for example `0.7.0`, not `0.8.0`) under `SemVer` precedence.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "source": {
+          "default": null,
+          "description": "Exact full lowercase hex Git source commit SHA (40-hex SHA-1 or 64-hex SHA-256)\nthe plan was reviewed against. Fails closed when the running build carries no\nknown `source`; admits same-source rebuilds without claiming byte reproducibility.",
+          "type": [
+            "string",
+            "null"
+          ]
+        }
+      },
+      "type": "object"
+    },
     "CaptureConfig": {
       "additionalProperties": false,
       "description": "Repository-owned capture organization and portable defaults.",
@@ -1273,6 +1315,18 @@
         "boolean",
         "null"
       ]
+    },
+    "requires": {
+      "anyOf": [
+        {
+          "$ref": "#/$defs/BuildContract"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": null,
+      "description": "Pre-schema build contract this repository requires of the running `aplan`\n(`ADR-0068`, `A2-193`). Evaluated before strict full-schema deserialization."
     },
     "roadmap": {
       "anyOf": [

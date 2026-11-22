@@ -1742,6 +1742,7 @@ fn verify_inner(
     Ok(Report {
         diagnostics,
         tasks_checked: plan.tasks.len(),
+        agent_contract_provenance: None,
     })
 }
 
@@ -1926,6 +1927,7 @@ pub fn resolve_proposed(
                 report: Report {
                     diagnostics: Vec::new(),
                     tasks_checked: 1,
+                    agent_contract_provenance: None,
                 },
                 unchecked,
                 repository_unreadable: true,

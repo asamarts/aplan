@@ -3842,6 +3842,7 @@ mod tests {
             Some(Report {
                 diagnostics: Vec::new(),
                 tasks_checked: 0,
+                agent_contract_provenance: None,
             }),
             |_| {},
         );
