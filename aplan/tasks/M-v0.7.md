@@ -2,7 +2,7 @@
 id: M-v0.7
 title: Security, safe parsing and gates that tell the truth
 phase: 2
-status: todo
+status: done
 blocked_by:
 - A2-009
 - A2-016
@@ -37,6 +37,9 @@ blocked_by:
 tags:
 - milestone
 - v0.7
+evidence:
+  - kind: commit
+    ref: 66ed9997c3ace3d55f64326b1a3bd78fbbf392f1
 ---
 
 ## Why
@@ -54,5 +57,5 @@ and the open pre-public backlog into this plan, and ends with the v0.7.0 release
 
 ## Exit criteria
 
-- [ ] every member is done and v0.7.0 is published from one validated source revision
-- [ ] scheduled CI, scale and latest-stable workflows are green on the current hosted images
+- [x] every member is done and v0.7.0 is published from one validated source revision
+- [x] scheduled CI, scale and latest-stable workflows are green on the current hosted images
