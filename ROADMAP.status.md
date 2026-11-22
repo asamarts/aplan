@@ -8,8 +8,8 @@
 
 | cut | status | done/total | ready | blocked | effort | weeks | critical path |
 | --- | --- | --- | --- | --- | --- | --- | --- |
-| v0.7 | todo | 29/30 | 1 | 0 | 22.8d | 0.8 (<0.1 left) | 3.5d |
-| v0.8 | todo | 0/30 | 0 | 30 | 43.8d | 1.6 (1.6 left) | 4.5d |
+| v0.7 | done | 30/30 | 0 | 0 | 22.8d | 0.8 (0.0 left) | 3.5d |
+| v0.8 | todo | 0/30 | 26 | 4 | 43.8d | 1.6 (1.6 left) | 4.5d |
 | adoption | todo | 0/81 | 0 | 81 | 105.8d | 3.9 (3.9 left) | 10.0d |
 | backlog | todo | 0/1 | 0 | 1 | 1.0d | <0.1 (<0.1 left) | 1.0d |
 | hardening | todo | 0/15 | 0 | 15 | 14.8d | 0.5 (0.5 left) | 3.0d |
@@ -26,7 +26,7 @@
 | A2-017 | Keep the workspace clean under Rust 1.100 without moving the pinned toolchain | done | - | commit:cc6d669cd006, commit:c09603f6606a |
 | A2-018 | Diagnose the large-fixture TUI latency regression on the current hosted image | done | - | commit:73eeb5472dac, test:graph::ranking::the_preference_pass_matches_its_one_task_at_a_time_definition |
 | A2-019 | Migrate the open pre-public backlog and every open issue into the public plan | done | - | commit:4420b69c4fe9, commit:02d6c3c9c1ed |
-| A2-020 | Publish v0.7.0 | todo | A2-009, A2-016, A2-017, A2-018, A2-019, A2-021, A2-022, A2-023, A2-024, A2-025, A2-026, A2-027, A2-028, A2-079, A2-137, A2-164, A2-166, A2-167, A2-168, A2-169, A2-177, A2-178, A2-179, A2-181, A2-187, A2-188, A2-189, A2-190, A2-191 | - |
+| A2-020 | Publish v0.7.0 | done | A2-009, A2-016, A2-017, A2-018, A2-019, A2-021, A2-022, A2-023, A2-024, A2-025, A2-026, A2-027, A2-028, A2-079, A2-137, A2-164, A2-166, A2-167, A2-168, A2-169, A2-177, A2-178, A2-179, A2-181, A2-187, A2-188, A2-189, A2-190, A2-191 | commit:66ed9997c3ac, commit:e2f3e22d5e71, test:facts::facts_json_is_up_to_date |
 | A2-021 | Report APLAN045 when traces_root has a dot component or is left at its default | done | - | commit:f00e34faea21, test:tests::stale_premise_fires_for_relative_and_dotted_traces_roots, test:verify_policy::stale_premise_reports_for_default_dotted_and_subdirectory_traces_roots, test:verify_policy::stale_premise_treats_docs_dot_spellings_identically |
 | A2-022 | Report a refused inbox promotion with the capture's real state | done | - | commit:3cedd1b19d6b, test:capture_inbox::refused_inbox_promotion_reports_open_state_for_dry_run_and_apply |
 | A2-023 | List same-second captures newest first, as the inbox documents | done | - | commit:f294e1a4500d, test:capture::tests::projections_are_bounded_filtered_and_newest_first_with_stable_ties, test:capture_inbox::same_second_captures_list_newest_first |
