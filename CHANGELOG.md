@@ -8,6 +8,14 @@ to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Added
 
+- **The README now documents the GitHub Action's self-hosted runner prerequisites (`A2-028`)**.
+  The **GitHub Actions -> Self-hosted runners** section lists the exact runtime requirements
+  invoked by `action.yml`, `ci/scripts/download-action-release.sh` and
+  `ci/scripts/verify-action-release.sh`: Linux x86_64, `bash`, GitHub CLI (`gh`) 2.68.0 minimum
+  (2.102.0 or newer recommended), coreutils (`sha256sum`, `uname`, `mkdir`, `chmod`, `wc`,
+  `basename`, `tr`, `sleep`), `tar` with `gzip`, and `awk` (`curl` is not required), along with how
+  missing tools and outdated `gh` versions fail during installation.
+
 - **Policies requiring an evidence kind with no configured resolver now warn (`APLAN059`,
   `A2-025`)**. `aplan check` warns when `evidence.require_min_strength` or
   `policy[].evidence.require_min_strength` names `test` without a configured `test` runner or
@@ -22,7 +30,7 @@ to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 ### Changed
 
 - **`aplan check-docs` now checks non-numeric uppercase-prefixed task, milestone and release ids
-  by default** (`A2-026`, `--require check_docs.recognises_non_numeric_prefixed_ids`). Previously,
+  by default** (`A2-026`, `A2-189`, `--require check_docs.recognises_non_numeric_prefixed_ids`). Previously,
   `check-docs` learned only families with a numeric core, so non-numeric milestone and release ids
   such as `M-one`, `M-tui-quality` or `R-a` taught no prefix and typos like `M-oen` or unknown
   siblings like `R-v9` passed silently. `check-docs` now learns uppercase code-style prefixes
@@ -77,14 +85,14 @@ to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 ### Fixed
 
 - **The GitHub Action now retries transient release download errors instead of failing the job on
-  a single HTTP 5xx or network blip** (`A2-027`). `action.yml` now downloads the release archive
+  a single HTTP 5xx or network blip** (`A2-027`, `A2-190`). `action.yml` now downloads the release archive
   and checksum sidecar through `ci/scripts/download-action-release.sh`, retrying up to three times
   with short backoff (`2s`, `4s`, `8s`) on HTTP 5xx or transport errors only. HTTP 404, auth
   failures, checksum mismatches and provenance failures are never retried, and any final install
   failure reports clearly that the install failed and no plan check ran.
 
 - **Static CLI progress no longer prints a terminal `complete` or `interrupted` line without an
-  active row when the grace period expires during an output pause** (`A2-178`). Previously,
+  active row when the grace period expires during an output pause** (`A2-178`, `A2-190`). Previously,
   `Resume` redrew a suppressed progress row only for animated terminal output, so under static
   output (such as `--progress always` in CI or an instrumented coverage run) a command that
   crossed the grace deadline inside its final report print pause could emit
@@ -99,11 +107,14 @@ to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   millisecond newest-first order), and `HLD.md` section 4 and ADR-0063 state the direction.
 
 - **A refused `aplan inbox promote` now reports the capture's real `open` state on disk instead
-  of `state: promoted`** (`A2-022`, `--require capture.refused_promotion_reports_real_state`).
+  of `state: promoted`** (`A2-022`, `A2-190`, `A2-191`, `--require capture.refused_promotion_reports_real_state`).
   Previously, both `--dry-run` and applied refusals rendered the predicted `promoted` capture
   record even though nothing was written. Refused promotions now report `capture.state: open`
-  without synthetic disposition/link fields, and label the unreached target state separately as
-  `would become: promoted` in human output and `"would_become": "promoted"` in JSON/agent output.
+  without synthetic disposition/link fields, label the unreached target state separately as
+  `would become: promoted` in human output and `"would_become": "promoted"` in JSON/agent output,
+  reflect the real `OPEN` state in TUI promotion review rows, and emit truthful `--format agent`
+  guidance for both `--dry-run` and refused promotions instead of advising reuse of an uncreated
+  task id.
 
 - **`aplan export-agents-md` no longer drops established id families when their final live task
   is closed or dropped** (`A2-137`, `--require agent_contract.keeps_completed_id_families`).
@@ -117,7 +128,7 @@ to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   kept a placeholder task open to avoid `APLAN041` can retire that workaround.
 
 - **`aplan critical-path` no longer attributes a separate remaining chain as `"of it"` on the
-  full chain's header** (`A2-079`, `--require critical_path.reconciles_remaining_chain`). When
+  full chain's header** (`A2-079`, `A2-189`, `--require critical_path.reconciles_remaining_chain`). When
   the re-walked remaining-work chain differed from the unfinished rows of the printed critical
   path, the opening sentence reported the separate chain's effort and task count as `"of it"`
   without listing its rows. The opening `"of it not yet done"` (or `"and none of it is left"`)
@@ -134,8 +145,9 @@ to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   script to fail silently against the old path and permanently cache an empty `APLAN_SOURCE_REV`.
   The build script now reads `CARGO_MANIFEST_DIR` at runtime and emits
   `cargo:rerun-if-env-changed=CARGO_MANIFEST_DIR`.
+
 - **Setting `test.timeout_seconds` no longer cuts off or panics `verify --execute`** (`A2-181`,
-  `--require verify.test_timeout_bounds_discovery_only`). `test.timeout_seconds` is specified to
+  #77, `--require verify.test_timeout_bounds_discovery_only`). `test.timeout_seconds` is specified to
   bound discovery (`test.list` and `test.skipped`) rather than execution (ADR-0054), while
   `test.run`, `test.batch.run` and the miss sentinel remain unbounded by it so slow test runs are
   owned by the test framework or adapter. Sharing `CommandPolicy` caused execution commands to
@@ -143,12 +155,14 @@ to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   it. Execution commands now clear `timeout_seconds` while retaining `max_memory`, `max_processes`,
   `max_output` and `wrap`, and both execution paths replace `unreachable!` with structured
   `APLAN014` / `CitationOutcome::TimedOut` / `TestBatchOutcome::TimedOut` handling.
+
 - **`APLAN045` now reports stale premises when `traces_root` is left at its default `.` or
   contains `.` / `..` components** (`A2-021`). `historical_trace_path` previously canonicalised
   only absolute roots, so `.`, `./docs`, `docs/.`, and subdirectory roots such as `..` or
   `../docs` joined into paths that matched no Git tree entry and stayed silently clean. Relative
   CLI trace roots are now anchored to the working directory before verification and normalised
   against the canonical repository root alongside task paths.
+
 - **Ranking ready work no longer costs quadratic time in the number of ready tasks** (`A2-018`).
   The pass that honours `prefer_after` placed each task by removing it from the front of a list,
   which on a plan with 10,000 ready tasks moved about 2 GB of memory per ranking even when no task
@@ -159,11 +173,13 @@ to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   `aplan tree`, `aplan show`, `aplan tasks`, `aplan summary`, any command given `--select`, and the
   MCP `ready` and `show` tools. The pass now keeps a heap of free positions and gives exactly the
   same order.
+
 - **Finding each task's cut no longer walks the whole roadmap once per task** (`A2-168`). Every
   task row looked up its cut by scanning each cut's members in turn, so `aplan tasks`,
   `aplan show`, any command given `--select`, the MCP `show` tool and each TUI load or refresh paid
   the number of tasks times the size of the roadmap. The rows now read one map built in a single
   pass over the cuts, and every task reports the same cut as before.
+
 - **The README's first-plan commands work as written** (`A2-167`). `aplan init` writes only
   `.aplan.yml`, so the `aplan add` after it refused with "plan root `aplan` is not a directory";
   the recipe now creates `aplan/tasks` first, and a test runs it line by line.
