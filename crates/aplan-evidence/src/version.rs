@@ -194,13 +194,34 @@ fn is_under(path: &str, root: &str) -> bool {
         .is_some_and(|rest| rest.starts_with('/'))
 }
 
-/// What plan paths are made relative to: the repository's working directory,
-/// falling back to what the caller named (`A1-313`, audit).
+/// What plan paths are made relative to: the repository's working directory
+/// when it actually contains `repo_root`, falling back to `repo_root` (`A1-313`,
+/// `A2-192`).
 ///
-/// The fallback is for a bare repository, which has no working tree. It is the
-/// old behaviour and it is not good enough on its own: see [`Repo::workdir`].
+/// The fallback covers both a bare repository (which has no working tree) and a
+/// linked Git worktree bind-mounted at another path (for example inside a
+/// release builder container), where `.git/worktrees/<name>/gitdir` still names
+/// the host worktree path outside the container.
+pub(crate) fn resolve_plan_base(
+    workdir: Option<std::path::PathBuf>,
+    repo_root: &Path,
+) -> std::path::PathBuf {
+    let Some(workdir) = workdir else {
+        return repo_root.to_path_buf();
+    };
+    if workdir.is_dir() {
+        let canonical_workdir = std::fs::canonicalize(&workdir).unwrap_or_else(|_| workdir.clone());
+        let canonical_root =
+            std::fs::canonicalize(repo_root).unwrap_or_else(|_| repo_root.to_path_buf());
+        if canonical_root.starts_with(&canonical_workdir) {
+            return workdir;
+        }
+    }
+    repo_root.to_path_buf()
+}
+
 fn plan_base(repo: &Repo, repo_root: &Path) -> std::path::PathBuf {
-    repo.workdir().unwrap_or_else(|| repo_root.to_path_buf())
+    resolve_plan_base(repo.workdir(), repo_root)
 }
 
 /// A repository-relative path, whatever spelling the loader recorded.
@@ -1180,5 +1201,34 @@ mod tests {
             vec!["A-2".to_string()],
             "A-1 was already done at the tag"
         );
+    }
+
+    /// `A2-192`: a bind-mounted linked Git worktree can expose a recorded host
+    /// `workdir()` that does not exist (or does not contain `repo_root`) inside
+    /// a container. Falling back to `repo_root` keeps release-window and trace
+    /// path stripping anchored to the mounted checkout.
+    #[test]
+    fn resolve_plan_base_falls_back_when_workdir_does_not_contain_repo_root() {
+        let dir = tempfile::Builder::new()
+            .tempdir_in(aplan_core::fixture::fixture_root())
+            .expect("tempdir");
+        let mounted = dir.path().join("mounted");
+        let nested = mounted.join("crates/aplan");
+        let unrelated = dir.path().join("unrelated");
+        std::fs::create_dir_all(&nested).expect("nested");
+        std::fs::create_dir_all(&unrelated).expect("unrelated");
+
+        // Normal checkout and subdirectory invocation keep the recorded workdir.
+        assert_eq!(resolve_plan_base(Some(mounted.clone()), &mounted), mounted);
+        assert_eq!(resolve_plan_base(Some(mounted.clone()), &nested), mounted);
+
+        // Bare repository has no workdir.
+        assert_eq!(resolve_plan_base(None, &mounted), mounted);
+
+        // Missing host workdir (linked worktree bind-mounted inside container)
+        // or unrelated directory falls back to `repo_root`.
+        let host_missing = dir.path().join("host-only-worktree");
+        assert_eq!(resolve_plan_base(Some(host_missing), &mounted), mounted);
+        assert_eq!(resolve_plan_base(Some(unrelated), &mounted), mounted);
     }
 }

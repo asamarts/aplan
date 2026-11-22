@@ -19,6 +19,9 @@
 use std::path::Path;
 
 #[allow(dead_code)]
+#[path = "../build_support.rs"]
+mod aplan_build_support;
+#[allow(dead_code)]
 #[path = "../../aplan-attest/build_support.rs"]
 mod attest_build_support;
 use crate::common;
@@ -888,4 +891,150 @@ fn the_conflict_is_symmetric() {
             out.text()
         );
     }
+}
+
+/// `A2-192`: workspace cache-writer identity inputs stay strictly within root
+/// manifests and product crates, so ignored nested `target/` trees (such as
+/// `tools/tui-eval/target/`) or non-product workspace directories cannot change
+/// a reproducible release artifact.
+#[test]
+fn cache_identity_inputs_ignore_nested_targets_and_non_product_trees() {
+    let dir = scratch();
+    let ws = dir.path().join("workspace");
+    let write = |rel: &str, content: &str| {
+        let full = ws.join(rel);
+        std::fs::create_dir_all(full.parent().expect("parent")).expect("mkdir");
+        std::fs::write(&full, content).expect("write");
+    };
+
+    write(
+        "Cargo.toml",
+        "[workspace]\nmembers = [\"crates/aplan\", \"crates/aplan-core\", \"crates/aplan-e2e\", \"xtask\"]\n",
+    );
+    write("Cargo.lock", "# lockfile\n");
+    write(
+        "crates/aplan/Cargo.toml",
+        "[package]\nname = \"aplan\"\nversion = \"0.8.0-dev\"\n",
+    );
+    write("crates/aplan/build.rs", "fn main() {}\n");
+    write("crates/aplan/build_support.rs", "// support\n");
+    write("crates/aplan/src/main.rs", "fn main() {}\n");
+    write("crates/aplan/tests/integration.rs", "// test only\n");
+    write(
+        "crates/aplan/target/debug/generated.rs",
+        "// nested target\n",
+    );
+    write(
+        "crates/aplan-core/Cargo.toml",
+        "[package]\nname = \"aplan-core\"\nversion = \"0.8.0-dev\"\n",
+    );
+    write("crates/aplan-core/src/lib.rs", "pub fn core() {}\n");
+    write(
+        "crates/aplan-attest/Cargo.toml",
+        "[package]\nname = \"aplan-attest\"\nversion = \"0.8.0-dev\"\n",
+    );
+    write(
+        "crates/aplan-attest/build_support.rs",
+        "// attest support\n",
+    );
+    write(
+        "crates/aplan-e2e/Cargo.toml",
+        "[package]\nname = \"aplan-e2e\"\nversion = \"0.8.0-dev\"\n",
+    );
+    write("crates/aplan-e2e/src/lib.rs", "// e2e only\n");
+    write(
+        "tools/tui-eval/Cargo.toml",
+        "[package]\nname = \"tui-eval\"\n",
+    );
+    write("tools/tui-eval/src/main.rs", "fn main() {}\n");
+    write(
+        "tools/tui-eval/target/debug/build/out/generated.rs",
+        "// local build artifact\n",
+    );
+    write("xtask/Cargo.toml", "[package]\nname = \"xtask\"\n");
+    write("xtask/src/main.rs", "fn main() {}\n");
+    write("llvm-cov-target/debug/cov.rs", "// cov\n");
+    write("dist/stage/extra.rs", "// dist\n");
+
+    let manifest = ws.join("crates/aplan");
+    assert_eq!(
+        aplan_build_support::workspace_root_for(&manifest).as_deref(),
+        Some(ws.as_path())
+    );
+    let (root, inputs) = aplan_build_support::collect_cache_identity_inputs(&manifest);
+    assert_eq!(root, ws);
+    let rendered: Vec<String> = inputs
+        .iter()
+        .map(|path| aplan_build_support::portable_relative_path(path))
+        .collect();
+    assert_eq!(
+        rendered,
+        vec![
+            "Cargo.lock",
+            "Cargo.toml",
+            "crates/aplan/Cargo.toml",
+            "crates/aplan/build.rs",
+            "crates/aplan/build_support.rs",
+            "crates/aplan/src/main.rs",
+            "crates/aplan-attest/Cargo.toml",
+            "crates/aplan-attest/build_support.rs",
+            "crates/aplan-core/Cargo.toml",
+            "crates/aplan-core/src/lib.rs",
+        ]
+    );
+}
+
+/// `A2-192`: a packaged `crates.io` install builds outside the workspace tree
+/// (`$CARGO_HOME/registry/src/index.../aplan-0.7.0`). Input discovery must stay
+/// strictly inside `CARGO_MANIFEST_DIR` and never walk sibling registry crates.
+#[test]
+fn cache_identity_inputs_stay_inside_packaged_crates_io_manifest() {
+    let dir = scratch();
+    let registry_src = dir.path().join("registry/src");
+    let manifest = registry_src.join("index.crates.io-deadbeef/aplan-0.7.0");
+    let sibling = registry_src.join("index.crates.io-deadbeef/unrelated-1.2.3");
+    let write = |base: &Path, rel: &str, content: &str| {
+        let full = base.join(rel);
+        std::fs::create_dir_all(full.parent().expect("parent")).expect("mkdir");
+        std::fs::write(&full, content).expect("write");
+    };
+
+    write(
+        &manifest,
+        "Cargo.toml",
+        "[package]\nname = \"aplan\"\nversion = \"0.7.0\"\n",
+    );
+    write(&manifest, "Cargo.lock", "# packaged lock\n");
+    write(&manifest, "build.rs", "fn main() {}\n");
+    write(&manifest, "build_support.rs", "// support\n");
+    write(&manifest, "src/main.rs", "fn main() {}\n");
+    write(&manifest, "tests/integration.rs", "// ignored test\n");
+    write(&manifest, "target/debug/out.rs", "// ignored target\n");
+
+    // Unrelated crates in the same registry cache must never enter the digest.
+    write(
+        &sibling,
+        "Cargo.toml",
+        "[package]\nname = \"unrelated\"\nversion = \"1.2.3\"\n",
+    );
+    write(&sibling, "src/lib.rs", "pub fn unrelated() {}\n");
+    write(&registry_src, "stray.rs", "// outer registry noise\n");
+
+    assert_eq!(aplan_build_support::workspace_root_for(&manifest), None);
+    let (root, inputs) = aplan_build_support::collect_cache_identity_inputs(&manifest);
+    assert_eq!(root, manifest);
+    let rendered: Vec<String> = inputs
+        .iter()
+        .map(|path| aplan_build_support::portable_relative_path(path))
+        .collect();
+    assert_eq!(
+        rendered,
+        vec![
+            "Cargo.lock",
+            "Cargo.toml",
+            "build.rs",
+            "build_support.rs",
+            "src/main.rs",
+        ]
+    );
 }
