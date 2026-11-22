@@ -391,6 +391,97 @@ fn requires_mismatch_fails_closed_before_unknown_keys_and_leaves_inspection_reac
         stdout.contains("does not satisfy `requires`") && stdout.contains("99.0.0"),
         "MCP plan tools must fail closed with the build-contract refusal:\n{stdout}"
     );
+    assert!(
+        !stdout.contains("reads exactly like a typo from an older one"),
+        "MCP requires refusal must not append the generic unknown-key typo footer:\n{stdout}"
+    );
+}
+
+/// `A2-193` / `A2-196`: verify `requires` end-to-end across the `build.tui`
+/// compile-time feature boundary (default vs `--no-default-features`),
+/// explicit-root MCP `aplan_check(root: ...)` over stdio, and revision-addressed
+/// `summary --rev HEAD`.
+#[test]
+fn requires_enforced_across_build_tui_feature_explicit_mcp_root_and_git_rev() {
+    // 1. `requires.capabilities: [build.tui]` tracks whether this binary was
+    // compiled with the `tui` feature.
+    let tui_req = repo("root: aplan\nrequires:\n  capabilities: [build.tui]\n");
+    let (tui_out, tui_code) = aplan(tui_req.path(), &["check"]);
+    #[cfg(feature = "tui")]
+    assert_eq!(
+        tui_code, 0,
+        "default build must satisfy build.tui:\n{tui_out}"
+    );
+    #[cfg(not(feature = "tui"))]
+    {
+        assert_eq!(
+            tui_code, 2,
+            "headless build must fail closed on build.tui:\n{tui_out}"
+        );
+        assert!(tui_out.contains("build.tui"), "{tui_out}");
+    }
+
+    // 2. Explicit-root MCP `aplan_check(root: ...)` over stdio enforces
+    // `requires` on the target repository before unknown future keys even when
+    // the server launched in an unconstrained repository.
+    let launch_repo = repo("root: aplan\n");
+    let strict_repo = repo("requires:\n  min_version: '99.0.0'\nfuture_v99_key: true\n");
+    let init = r#"{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2024-11-05","capabilities":{},"clientInfo":{"name":"t","version":"1"}}}"#;
+    let explicit_call = serde_json::json!({
+        "jsonrpc": "2.0",
+        "id": 2,
+        "method": "tools/call",
+        "params": {
+            "name": "aplan_check",
+            "arguments": { "root": strict_repo.path().to_string_lossy() }
+        }
+    });
+    let mut child = common::command(launch_repo.path(), &["mcp"])
+        .stdin(std::process::Stdio::piped())
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::piped())
+        .spawn()
+        .expect("spawn mcp");
+    {
+        use std::io::Write as _;
+        let stdin = child.stdin.as_mut().expect("stdin");
+        writeln!(stdin, "{init}").expect("write init");
+        writeln!(stdin, "{explicit_call}").expect("write explicit call");
+    }
+    let mcp_out = child.wait_with_output().expect("mcp exits");
+    let stdout = String::from_utf8_lossy(&mcp_out.stdout);
+    assert!(
+        stdout.contains("does not satisfy `requires`") && stdout.contains("99.0.0"),
+        "explicit-root MCP call must refuse unsatisfied requires:\n{stdout}"
+    );
+    assert!(
+        !stdout.contains("future_v99_key"),
+        "explicit-root MCP call must refuse requires before unknown keys:\n{stdout}"
+    );
+
+    // 3. Revision-addressed config reads (`summary --at HEAD`) enforce
+    // `requires` on committed `.aplan.yml` before unknown future keys.
+    for args in [
+        vec!["init", "-q"],
+        vec!["config", "user.email", "t@example.invalid"],
+        vec!["config", "user.name", "t"],
+        vec!["add", "-A"],
+        vec!["commit", "-qm", "committed requires"],
+    ] {
+        let out = std::process::Command::new("git")
+            .args(&args)
+            .current_dir(strict_repo.path())
+            .output()
+            .expect("git");
+        assert!(out.status.success(), "git {args:?}");
+    }
+    let (rev_out, rev_code) = aplan(strict_repo.path(), &["summary", "--at", "HEAD"]);
+    assert_eq!(
+        rev_code, 2,
+        "`summary --at HEAD` must fail closed on committed requires:\n{rev_out}"
+    );
+    assert!(rev_out.contains("does not satisfy `requires`"), "{rev_out}");
+    assert!(!rev_out.contains("future_v99_key"), "{rev_out}");
 }
 
 /// `A2-193`: `requires.min_version` refuses pre-release strings and

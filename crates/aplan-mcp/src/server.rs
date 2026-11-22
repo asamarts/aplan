@@ -375,6 +375,14 @@ impl AplanServer {
             return Ok((*self.identity).clone());
         }
         if let Some(said) = &self.unconfigured {
+            if said.contains("does not satisfy `requires`") {
+                return Err(format!(
+                    "{said}\n\nThis server does not satisfy this repository's `requires` build \
+                     contract, so it can do nothing but identify itself: call `aplan_identity` \
+                     to inspect this build and switch to the required build (see \
+                     `docs/upgrading.md`)."
+                ));
+            }
             return Err(format!(
                 "{said}\n\nThis server could not read its configuration, so it can do nothing \
                  but identify itself: call `aplan_identity` to see which build is refusing. A \

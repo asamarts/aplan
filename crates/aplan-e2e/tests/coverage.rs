@@ -322,6 +322,49 @@ fn body_criteria_rules() -> Vec<Scenario> {
             ],
         )
         .agents_block("- A `done` task must cite `file` or `test` evidence."),
+        // ADR-0072 / A2-122: matching policy with a different well-formed writer
+        // provenance comment is non-blocking and silent for APLAN041.
+        scen(
+            "stale-agent-contract-provenance-only-silent",
+            Rule::StaleAgentContract,
+            Silent,
+            vec![
+                tf(
+                    "a",
+                    "id: A-1\ntitle: A-1\nphase: 0\nstatus: todo\neffort_days: 1",
+                ),
+                agents_md(
+                    "<!-- written by aplan 0.8.0-dev, surface 000000000000 -->\n\n\
+                     - A `done` task must cite `file` or `test` evidence.",
+                ),
+            ],
+        )
+        .agents_block(
+            "<!-- written by aplan 0.8.0-dev, surface 111111111111 -->\n\n\
+             - A `done` task must cite `file` or `test` evidence.",
+        ),
+        // ADR-0072 / A2-122: duplicate or malformed provenance lines are never
+        // silently normalized away and continue to fire APLAN041.
+        scen(
+            "stale-agent-contract-malformed-provenance-fires",
+            Rule::StaleAgentContract,
+            Fires,
+            vec![
+                tf(
+                    "a",
+                    "id: A-1\ntitle: A-1\nphase: 0\nstatus: todo\neffort_days: 1",
+                ),
+                agents_md(
+                    "<!-- written by aplan 0.8.0-dev, surface 000000000000 -->\n\
+                     <!-- written by aplan 0.8.0-dev, surface 111111111111 -->\n\n\
+                     - A `done` task must cite `file` or `test` evidence.",
+                ),
+            ],
+        )
+        .agents_block(
+            "<!-- written by aplan 0.8.0-dev, surface 111111111111 -->\n\n\
+             - A `done` task must cite `file` or `test` evidence.",
+        ),
         // Half a marker pair: the quietest edit that would switch a
         // marker-scoped rule off, so it is a finding with its own sentence.
         scen(

@@ -44,7 +44,7 @@ generated agent contracts that refuse a correct plan, claims that outlive the wo
 passes before a commit and fails after it, and evidence or MCP refusals that contradict the state
 they report.
 
-**Tasks:** `A2-034`, `A2-050`, `A2-051`, `A2-052`, `A2-053`, `A2-054`, `A2-055`, `A2-056`, `A2-062`, `A2-081`, `A2-085`, `A2-091`, `A2-095`, `A2-096`, `A2-097`, `A2-099`, `A2-101`, `A2-106`, `A2-122`, `A2-140`, `A2-142`, `A2-147`, `A2-152`, `A2-153`, `A2-156`, `A2-157`, `A2-160`, `A2-161`, `A2-182`, `A2-183`, `A2-192`, `A2-193`, `A2-194`, `A2-195`
+**Tasks:** `A2-034`, `A2-050`, `A2-051`, `A2-052`, `A2-053`, `A2-054`, `A2-055`, `A2-056`, `A2-062`, `A2-081`, `A2-085`, `A2-091`, `A2-095`, `A2-096`, `A2-097`, `A2-099`, `A2-101`, `A2-106`, `A2-122`, `A2-140`, `A2-142`, `A2-147`, `A2-152`, `A2-153`, `A2-156`, `A2-157`, `A2-160`, `A2-161`, `A2-182`, `A2-183`, `A2-192`, `A2-193`, `A2-194`, `A2-195`, `A2-196`
 
 ### hardening, Integrity and hardening
 
