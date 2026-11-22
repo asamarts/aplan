@@ -93,6 +93,15 @@ pub enum RootResolutionError {
 /// selects its target's configuration and repository rather than mixing the
 /// link's lexical parent with the target's task bytes.
 pub fn resolve_explicit_root(root: &str) -> Result<ResolvedRoot, RootResolutionError> {
+    resolve_explicit_root_for_build(root, None)
+}
+
+/// Like [`resolve_explicit_root`], additionally enforcing `.aplan.yml`'s
+/// pre-schema `requires` contract against `build` when supplied (`ADR-0068`).
+pub fn resolve_explicit_root_for_build(
+    root: &str,
+    build: Option<&aplan_config::RunningBuild>,
+) -> Result<ResolvedRoot, RootResolutionError> {
     if root.trim().is_empty() {
         return Err(RootResolutionError::Blank);
     }
@@ -109,7 +118,7 @@ pub fn resolve_explicit_root(root: &str) -> Result<ResolvedRoot, RootResolutionE
     }
     let followed_symlink = selected != normalise_absolute(&absolute);
 
-    if let Some(resolved) = resolve_local_configuration(&selected, followed_symlink)? {
+    if let Some(resolved) = resolve_local_configuration(&selected, followed_symlink, build)? {
         return Ok(resolved);
     }
 
@@ -118,9 +127,10 @@ pub fn resolve_explicit_root(root: &str) -> Result<ResolvedRoot, RootResolutionE
         let belongs_to_worktree = git_root
             .as_ref()
             .is_none_or(|repository| configuration_file.starts_with(repository));
-        let (config, directory) = aplan_config::load_from(
+        let (config, directory) = aplan_config::load_from_for_build(
             &aplan_config::ConfigSource::File(configuration_file.clone()),
             &selected,
+            build,
         )
         .map_err(|source| RootResolutionError::Configuration {
             root: selected.clone(),
@@ -158,14 +168,16 @@ pub fn resolve_explicit_root(root: &str) -> Result<ResolvedRoot, RootResolutionE
 fn resolve_local_configuration(
     selected: &Path,
     followed_symlink: bool,
+    build: Option<&aplan_config::RunningBuild>,
 ) -> Result<Option<ResolvedRoot>, RootResolutionError> {
     let local_config = selected.join(aplan_config::CONFIG_FILE);
     if local_config.symlink_metadata().is_err() {
         return Ok(None);
     }
-    let (config, directory) = aplan_config::load_from(
+    let (config, directory) = aplan_config::load_from_for_build(
         &aplan_config::ConfigSource::File(local_config.clone()),
         selected,
+        build,
     )
     .map_err(|source| RootResolutionError::Configuration {
         root: selected.to_path_buf(),

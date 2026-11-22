@@ -45,6 +45,10 @@ fn an_unknown_key_names_the_running_version_and_what_it_accepts() {
         "{out}"
     );
     assert!(
+        out.contains("`aplan facts --identity`"),
+        "same-version dev builds need build identity guidance:\n{out}"
+    );
+    assert!(
         out.contains("reads exactly like a typo from here"),
         "the note has to say *why* the version matters:\n{out}"
     );
@@ -247,20 +251,27 @@ fn the_second_error_does_not_claim_a_line_number_from_a_file_nobody_has() {
 }
 
 /// The remedy the note names has to work in the state that produced the note.
-/// `facts` and `--version` read no plan and must stay reachable when the config
-/// cannot load, or the advice sends the reader to a second failure.
+/// `facts`, `facts --identity`, and `--version` read no plan and must stay
+/// reachable when the config or task frontmatter cannot load, or the advice
+/// sends the reader to a second failure (`A1-068`, `A2-194`).
 #[test]
 fn the_commands_the_note_names_still_work_with_the_config_broken() {
     let dir = repo("requre_effort: false\n");
-    for args in [vec!["facts"], vec!["--version"]] {
+    for args in [
+        vec!["facts"],
+        vec!["facts", "--identity"],
+        vec!["--version"],
+    ] {
         let (out, code) = aplan(dir.path(), &args);
         assert_eq!(
-            code, 0,
+            code,
+            0,
             "`{}` is unreachable when it is needed:\n{out}",
-            args[0]
+            args.join(" ")
         );
     }
-    // And `facts` really does list the keys the note promises.
+    // And `facts` really does list the keys the note promises, while
+    // `facts --identity` prints valid JSON build identity.
     let (out, _) = aplan(dir.path(), &["facts"]);
     let doc: serde_json::Value = serde_json::from_str(&out).expect("facts json");
     assert!(
@@ -271,4 +282,135 @@ fn the_commands_the_note_names_still_work_with_the_config_broken() {
             .any(|k| k == "require_effort"),
         "{out}"
     );
+    let (id_out, id_code) = aplan(dir.path(), &["facts", "--identity"]);
+    assert_eq!(id_code, 0, "{id_out}");
+    let id_doc: serde_json::Value = serde_json::from_str(&id_out).expect("identity json");
+    assert_eq!(id_doc["schema"], "aplan/tool-identity/v1");
+    assert!(id_doc["facts_sha256"].is_string(), "{id_out}");
+}
+
+/// `A2-194`: unknown task frontmatter fields report `APLAN001`, name the
+/// unknown field cleanly, point to `aplan schema`, `aplan facts`, and
+/// `aplan facts --identity`, and leave `aplan facts --identity` working.
+#[test]
+fn unknown_task_frontmatter_field_points_to_facts_identity() {
+    let dir = repo("root: aplan\n");
+    std::fs::write(
+        dir.path().join("aplan/tasks/T-1.md"),
+        "---\nid: T-1\ntitle: Unknown field\nphase: 1\nstatus: todo\n\
+         effort_days: 1\nfuture_task_key: true\n---\n\nbody\n",
+    )
+    .expect("task");
+
+    let (out, code) = aplan(dir.path(), &["check"]);
+    assert_eq!(code, 1, "{out}");
+    assert!(out.contains("APLAN001"), "{out}");
+    assert!(
+        out.contains("unknown frontmatter field `future_task_key`"),
+        "{out}"
+    );
+    assert!(out.contains("aplan schema"), "{out}");
+    assert!(out.contains("aplan facts"), "{out}");
+    assert!(out.contains("aplan facts --identity"), "{out}");
+
+    let (id_out, id_code) = aplan(dir.path(), &["facts", "--identity"]);
+    assert_eq!(id_code, 0, "{id_out}");
+    let id_doc: serde_json::Value = serde_json::from_str(&id_out).expect("identity json");
+    assert_eq!(id_doc["schema"], "aplan/tool-identity/v1");
+}
+
+/// `A2-193` / `ADR-0068`: pre-schema `requires` fails closed (exit 2) BEFORE
+/// reporting unknown future config keys, names both declared requirements and
+/// running build identity, and keeps inspection/recovery commands reachable.
+#[test]
+fn requires_mismatch_fails_closed_before_unknown_keys_and_leaves_inspection_reachable() {
+    let dir = repo(
+        "requires:\n  min_version: '99.0.0'\n  capabilities: [future.capability]\n\
+         future_v99_key: true\n",
+    );
+    let (out, code) = aplan(dir.path(), &["check", "--root", "aplan"]);
+    assert_eq!(code, 2, "build-contract mismatch must exit 2:\n{out}");
+    assert!(out.contains("does not satisfy `requires`"), "{out}");
+    assert!(out.contains("99.0.0"), "{out}");
+    assert!(out.contains("future.capability"), "{out}");
+    assert!(
+        out.contains(&format!("version={}", env!("CARGO_PKG_VERSION"))),
+        "{out}"
+    );
+    assert!(out.contains("source="), "{out}");
+    assert!(out.contains("facts_sha256="), "{out}");
+    assert!(out.contains("docs/upgrading.md"), "{out}");
+    assert!(
+        !out.contains("future_v99_key"),
+        "pre-schema requires must fail BEFORE unknown future keys:\n{out}"
+    );
+
+    // Every inspection and recovery surface must remain reachable.
+    for args in [
+        vec!["facts"],
+        vec!["facts", "--identity"],
+        vec!["facts", "--require", "requires"],
+        vec!["--version"],
+        vec!["schema"],
+        vec!["--no-config", "check", "--root", "aplan"],
+    ] {
+        let (ok_out, ok_code) = aplan(dir.path(), &args);
+        assert_eq!(
+            ok_code,
+            0,
+            "`{}` must remain reachable while `requires` refuses the build:\n{ok_out}",
+            args.join(" ")
+        );
+    }
+
+    // MCP server stays alive for `aplan_identity` and refuses plan tools with
+    // the build-contract mismatch message.
+    let init = r#"{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2024-11-05","capabilities":{},"clientInfo":{"name":"t","version":"1"}}}"#;
+    let id_call = r#"{"jsonrpc":"2.0","id":2,"method":"tools/call","params":{"name":"aplan_identity","arguments":{}}}"#;
+    let check_call = r#"{"jsonrpc":"2.0","id":3,"method":"tools/call","params":{"name":"aplan_check","arguments":{}}}"#;
+    let mut child = common::command(dir.path(), &["mcp"])
+        .stdin(std::process::Stdio::piped())
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::piped())
+        .spawn()
+        .expect("spawn mcp");
+    {
+        use std::io::Write as _;
+        let stdin = child.stdin.as_mut().expect("stdin");
+        writeln!(stdin, "{init}").expect("write init");
+        writeln!(stdin, "{id_call}").expect("write id");
+        writeln!(stdin, "{check_call}").expect("write check");
+    }
+    let output = child.wait_with_output().expect("mcp exits");
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(
+        stdout.contains("aplan/tool-identity/v1"),
+        "aplan_identity must still answer when `requires` fails:\n{stdout}"
+    );
+    assert!(
+        stdout.contains("does not satisfy `requires`") && stdout.contains("99.0.0"),
+        "MCP plan tools must fail closed with the build-contract refusal:\n{stdout}"
+    );
+}
+
+/// `A2-193`: `requires.min_version` refuses pre-release strings and
+/// `requires.binary_sha256` is explicitly rejected per ADR-0068.
+#[test]
+fn requires_refuses_prerelease_min_version_and_binary_sha256() {
+    let dev_pin = repo("requires:\n  min_version: '0.8.0-dev'\n");
+    let (out, code) = aplan(dev_pin.path(), &["check", "--root", "aplan"]);
+    assert_eq!(code, 2, "{out}");
+    assert!(out.contains("bare released `X.Y.Z`"), "{out}");
+    assert!(out.contains("requires.capabilities"), "{out}");
+    assert!(out.contains("requires.source"), "{out}");
+    assert!(out.contains("requires.facts_sha256"), "{out}");
+
+    let bin_pin = repo(
+        "requires:\n  binary_sha256: '0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef'\n",
+    );
+    let (out, code) = aplan(bin_pin.path(), &["check", "--root", "aplan"]);
+    assert_eq!(code, 2, "{out}");
+    assert!(out.contains("binary_sha256"), "{out}");
+    assert!(out.contains("docs/upgrading.md"), "{out}");
+    assert!(out.contains("external"), "{out}");
 }

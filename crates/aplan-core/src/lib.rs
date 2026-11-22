@@ -97,7 +97,9 @@ pub use close::{
     CloseError, add_evidence, apply_repair, close, remove_evidence, replace_evidence, restamp,
     set_evidence_fingerprints,
 };
-pub use diagnostic::{Diagnostic, Repair, Report, Rule, Severity, Verdict, code};
+pub use diagnostic::{
+    AgentContractProvenance, Diagnostic, Repair, Report, Rule, Severity, Verdict, code,
+};
 pub use explain::{RuleExplanation, explain_rule};
 pub use export::{TaskExport, TaskRow};
 pub use graph::{

@@ -803,7 +803,7 @@ fn report_payload(
     policy: &aplan_core::Verdict,
     denied: bool,
 ) -> serde_json::Value {
-    serde_json::json!({
+    let mut payload = serde_json::json!({
         "tasks_checked": report.tasks_checked,
         // The blocking counts, so they agree with `denied` beside them and with
         // what the CLI prints for the same plan. The raw total is still derivable
@@ -840,7 +840,17 @@ fn report_payload(
             // rerun the command in.
             "detail": d.detail,
         })).collect::<Vec<_>>(),
-    })
+    });
+    if let Some(provenance) = &report.agent_contract_provenance
+        && let Some(map) = payload.as_object_mut()
+    {
+        map.insert(
+            "agent_contract_provenance".to_string(),
+            serde_json::to_value(provenance)
+                .expect("agent contract provenance is always serializable"),
+        );
+    }
+    payload
 }
 
 /// Close a task, through the same gate the CLI uses.

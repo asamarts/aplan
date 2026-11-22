@@ -826,6 +826,16 @@ struct CachedReport {
     key: String,
     tasks_checked: usize,
     diagnostics: Vec<CachedDiagnostic>,
+    #[serde(default)]
+    agent_contract_provenance: Option<CachedAgentContractProvenance>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct CachedAgentContractProvenance {
+    file: EncodedPath,
+    written_by: Option<String>,
+    checked_by: String,
+    note: String,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -876,6 +886,20 @@ impl CachedReport {
             }
             aggregate = aggregate.saturating_add(local);
         }
+        if let Some(provenance) = &self.agent_contract_provenance {
+            let local = provenance
+                .written_by
+                .as_ref()
+                .map_or(0, String::len)
+                .saturating_add(provenance.checked_by.len())
+                .saturating_add(provenance.note.len());
+            if local > MAX_DIAGNOSTIC_TEXT_BYTES
+                || provenance.file.encoded.len() > MAX_PATH_BYTES.saturating_mul(2)
+            {
+                return false;
+            }
+            aggregate = aggregate.saturating_add(local);
+        }
         aggregate <= MAX_REPORT_TEXT_BYTES
     }
 
@@ -901,6 +925,14 @@ impl CachedReport {
                     detail: diagnostic.detail.clone(),
                 })
                 .collect(),
+            agent_contract_provenance: report.agent_contract_provenance.as_ref().map(|p| {
+                CachedAgentContractProvenance {
+                    file: EncodedPath::from_path(&p.file),
+                    written_by: p.written_by.clone(),
+                    checked_by: p.checked_by.clone(),
+                    note: p.note.clone(),
+                }
+            }),
         }
     }
 
@@ -910,9 +942,19 @@ impl CachedReport {
             .iter()
             .map(CachedDiagnostic::diagnostic)
             .collect::<Option<Vec<_>>>()?;
+        let agent_contract_provenance = match &self.agent_contract_provenance {
+            Some(p) => Some(aplan_core::AgentContractProvenance {
+                file: p.file.to_path()?,
+                written_by: p.written_by.clone(),
+                checked_by: p.checked_by.clone(),
+                note: p.note.clone(),
+            }),
+            None => None,
+        };
         Some(aplan_core::Report {
             diagnostics,
             tasks_checked: self.tasks_checked,
+            agent_contract_provenance,
         })
     }
 }
@@ -1788,6 +1830,7 @@ mod tests {
             key: "not-a-digest".to_string(),
             tasks_checked: 0,
             diagnostics: Vec::new(),
+            agent_contract_provenance: None,
         };
         assert!(!invalid_key.bounded());
 
@@ -1806,6 +1849,7 @@ mod tests {
             key: "0".repeat(64),
             tasks_checked: 1,
             diagnostics: vec![diagnostic.clone()],
+            agent_contract_provenance: None,
         };
         assert!(invalid_severity.bounded());
         assert!(invalid_severity.report().is_none());
@@ -1818,6 +1862,7 @@ mod tests {
                 key: "0".repeat(64),
                 tasks_checked: 1,
                 diagnostics: vec![oversized],
+                agent_contract_provenance: None,
             }
             .bounded()
         );

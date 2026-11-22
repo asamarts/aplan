@@ -108,6 +108,13 @@ pub enum Error {
     /// Capture kinds or profiles the portable repository policy cannot apply.
     #[error("invalid `capture` in `.aplan.yml`: {0}")]
     BadCapture(String),
+    /// A `requires` build-contract block the tool cannot act on (`ADR-0068`, `A2-193`).
+    #[error("invalid `requires` in `.aplan.yml`: {0}")]
+    BadRequires(String),
+    /// The running `aplan` build does not satisfy the repository's declared `requires` contract
+    /// (`ADR-0068`, `A2-193`).
+    #[error("{0}")]
+    BuildContractMismatch(Box<BuildContractMismatch>),
     #[error("could not read `.aplan.yml`: {0}")]
     Io(String),
     #[error("could not parse `.aplan.yml`: {0}")]
@@ -173,12 +180,296 @@ impl std::fmt::Display for UnknownKeys {
     }
 }
 
+/// Identity and advertised capabilities of the running `aplan` build, supplied
+/// by the binary crate (or an injected test fixture) to evaluate [`BuildContract`]
+/// (`ADR-0068`, `A2-193`).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RunningBuild {
+    /// Running package version string (for example `0.8.0` or `0.8.0-dev`).
+    pub version: String,
+    /// Full Git commit SHA this build was compiled from, or `None` when absent/unknown.
+    /// `requires.source` fails closed on `None`.
+    pub source: Option<String>,
+    /// Full 64-character lowercase hex SHA-256 of `aplan facts`.
+    pub facts_sha256: String,
+    /// Every capability name advertised by `aplan facts --require`.
+    pub advertised_capabilities: BTreeSet<String>,
+}
+
+/// Structured mismatch produced when the running build does not satisfy `.aplan.yml`'s
+/// `requires` block (`ADR-0068`, `A2-193`).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct BuildContractMismatch {
+    pub path: String,
+    pub failures: Vec<String>,
+    pub running_version: String,
+    pub running_source: Option<String>,
+    pub running_facts_sha256: String,
+}
+
+impl std::fmt::Display for BuildContractMismatch {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        writeln!(
+            f,
+            "{}: running `aplan` build does not satisfy `requires`:",
+            self.path
+        )?;
+        for failure in &self.failures {
+            writeln!(f, "  - {failure}")?;
+        }
+        let source = self.running_source.as_deref().unwrap_or("unknown");
+        writeln!(
+            f,
+            "running build: version={}, source={source}, facts_sha256={}",
+            self.running_version, self.running_facts_sha256
+        )?;
+        write!(
+            f,
+            "hint: inspect this build with `aplan facts --identity` or `aplan facts`, switch to \
+             the required build, or follow the staged upgrade procedure in `docs/upgrading.md`."
+        )
+    }
+}
+
+/// Build contract this repository requires of the running `aplan` (`ADR-0068`, `A2-193`).
+///
+/// Evaluated in a frozen pre-schema pass before full [`Config`] `deny_unknown_fields`
+/// deserialization so an older or wrong build fails with an actionable build-contract
+/// refusal instead of confusing `unknown key` errors for keys introduced later.
+///
+/// Exact executable byte digest pinning (`binary_sha256`) is deliberately excluded:
+/// artifact authenticity belongs outside the executable (CI Action, release checksum +
+/// SLSA attestation, or a repository wrapper script).
+#[derive(Debug, Clone, Default, PartialEq, Eq, Deserialize, Serialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct BuildContract {
+    /// Minimum released semantic version (`X.Y.Z` only). Pre-release strings such as
+    /// `0.8.0-dev` are refused at config load because two development builds share one
+    /// pre-release string; pin `capabilities`, `source`, or `facts_sha256` instead.
+    /// A running pre-release build (`0.8.0-dev`) satisfies released floors strictly
+    /// below `X.Y.Z` (for example `0.7.0`, not `0.8.0`) under `SemVer` precedence.
+    #[serde(default)]
+    pub min_version: Option<String>,
+    /// Exact capability names from `aplan facts --require` (config keys, rule codes,
+    /// commands, output formats, evidence kinds, named behaviours, MCP tools, or
+    /// build capabilities such as `build.tui`). Every named capability must be advertised.
+    #[serde(default)]
+    pub capabilities: Option<Vec<String>>,
+    /// Exact full lowercase hex Git source commit SHA (40-hex SHA-1 or 64-hex SHA-256)
+    /// the plan was reviewed against. Fails closed when the running build carries no
+    /// known `source`; admits same-source rebuilds without claiming byte reproducibility.
+    #[serde(default)]
+    pub source: Option<String>,
+    /// Exact 64-character lowercase hex SHA-256 of `aplan facts`.
+    #[serde(default)]
+    pub facts_sha256: Option<String>,
+}
+
+const REQUIRES_SUBKEYS: &[&str] = &["min_version", "capabilities", "source", "facts_sha256"];
+
+fn parse_bare_released_semver(value: &str) -> Result<(u64, u64, u64), String> {
+    if value.trim() != value || value.is_empty() {
+        return Err(format!(
+            "`requires.min_version` `{value}` must be a bare released semantic version `X.Y.Z` \
+             with no surrounding whitespace"
+        ));
+    }
+    if value.contains('-') || value.contains('+') {
+        return Err(format!(
+            "`requires.min_version` `{value}` carries a pre-release or build suffix; \
+             `min_version` accepts bare released `X.Y.Z` versions only because two `-dev` builds \
+             share one version string. Pin `requires.capabilities`, `requires.source`, or \
+             `requires.facts_sha256` instead"
+        ));
+    }
+    let parts: Vec<&str> = value.split('.').collect();
+    if parts.len() != 3 {
+        return Err(format!(
+            "`requires.min_version` `{value}` must be a bare released semantic version `X.Y.Z` \
+             (for example `0.8.0`, with no leading `v`)"
+        ));
+    }
+    let mut nums = [0u64; 3];
+    for (idx, part) in parts.iter().enumerate() {
+        if part.is_empty()
+            || !part.bytes().all(|b| b.is_ascii_digit())
+            || (part.len() > 1 && part.starts_with('0'))
+        {
+            return Err(format!(
+                "`requires.min_version` `{value}` must be a bare released semantic version `X.Y.Z` \
+                 (for example `0.8.0`)"
+            ));
+        }
+        nums[idx] = part.parse::<u64>().map_err(|_| {
+            format!(
+                "`requires.min_version` `{value}` is out of range for a semantic version `X.Y.Z`"
+            )
+        })?;
+    }
+    Ok((nums[0], nums[1], nums[2]))
+}
+
+fn parse_running_semver(value: &str) -> Option<(u64, u64, u64, bool)> {
+    let without_build = value.split_once('+').map_or(value, |(before, _)| before);
+    let (core, is_prerelease) = match without_build.split_once('-') {
+        Some((before, pre)) if !pre.is_empty() => (before, true),
+        Some(_) => return None,
+        None => (without_build, false),
+    };
+    let (maj, min, pat) = parse_bare_released_semver(core).ok()?;
+    Some((maj, min, pat, is_prerelease))
+}
+
+fn is_lower_hex(value: &str) -> bool {
+    value
+        .bytes()
+        .all(|b| b.is_ascii_digit() || matches!(b, b'a'..=b'f'))
+}
+
+impl BuildContract {
+    /// Reject an empty, malformed, or vacuous `requires` declaration.
+    ///
+    /// # Errors
+    /// [`Error::BadRequires`] describing the invalid field and remedy.
+    pub fn validate(&self) -> Result<(), Error> {
+        if self.min_version.is_none()
+            && self.capabilities.is_none()
+            && self.source.is_none()
+            && self.facts_sha256.is_none()
+        {
+            return Err(Error::BadRequires(
+                "`requires` is empty; declare at least one of `min_version`, `capabilities`, \
+                 `source`, or `facts_sha256`, or remove the key"
+                    .into(),
+            ));
+        }
+        if let Some(min_version) = &self.min_version {
+            parse_bare_released_semver(min_version).map_err(Error::BadRequires)?;
+        }
+        if let Some(capabilities) = &self.capabilities {
+            if capabilities.is_empty() {
+                return Err(Error::BadRequires(
+                    "`requires.capabilities` is an empty list; remove the key, or name a \
+                     capability from `aplan facts --require`"
+                        .into(),
+                ));
+            }
+            for cap in capabilities {
+                if aplan_core::task::is_vacuous_ref(cap) || cap.trim() != cap {
+                    return Err(Error::BadRequires(format!(
+                        "`requires.capabilities` entry `{cap}` must be non-blank with no \
+                         surrounding whitespace"
+                    )));
+                }
+            }
+        }
+        if let Some(source) = &self.source
+            && !((source.len() == 40 || source.len() == 64) && is_lower_hex(source))
+        {
+            return Err(Error::BadRequires(format!(
+                "`requires.source` `{source}` must be a full lowercase 40-character (or \
+                 64-character) hex Git commit SHA"
+            )));
+        }
+        if let Some(facts_sha256) = &self.facts_sha256
+            && !(facts_sha256.len() == 64 && is_lower_hex(facts_sha256))
+        {
+            return Err(Error::BadRequires(format!(
+                "`requires.facts_sha256` `{facts_sha256}` must be a 64-character lowercase \
+                 hex SHA-256 digest from `aplan facts --identity`"
+            )));
+        }
+        Ok(())
+    }
+
+    /// Evaluate every declared constraint against `build` (all present sub-keys must pass).
+    ///
+    /// # Errors
+    /// [`Error::BuildContractMismatch`] naming every failed constraint alongside the running
+    /// build's `version`, `source` (or `unknown`), and `facts_sha256`.
+    pub fn check(&self, build: &RunningBuild, path: &Path) -> Result<(), Error> {
+        let mut failures = Vec::new();
+        if let Some(min_version) = &self.min_version {
+            let required = parse_bare_released_semver(min_version).map_err(Error::BadRequires)?;
+            let satisfied = match parse_running_semver(&build.version) {
+                Some((maj, min, pat, is_pre)) => {
+                    let core = (maj, min, pat);
+                    core > required || (core == required && !is_pre)
+                }
+                None => false,
+            };
+            if !satisfied {
+                failures.push(format!(
+                    "`requires.min_version` requires >= `{min_version}`, but running build is `{}`",
+                    build.version
+                ));
+            }
+        }
+        if let Some(capabilities) = &self.capabilities {
+            let mut seen = BTreeSet::new();
+            let missing: Vec<&str> = capabilities
+                .iter()
+                .map(String::as_str)
+                .filter(|cap| seen.insert(*cap))
+                .filter(|cap| !build.advertised_capabilities.contains(*cap))
+                .collect();
+            if !missing.is_empty() {
+                let list = missing
+                    .iter()
+                    .map(|cap| format!("`{cap}`"))
+                    .collect::<Vec<_>>()
+                    .join(", ");
+                failures.push(format!(
+                    "`requires.capabilities` requires {list}, which this build does not advertise"
+                ));
+            }
+        }
+        if let Some(required_source) = &self.source {
+            match build.source.as_deref().filter(|s| !s.is_empty()) {
+                Some(actual) if actual == required_source => {}
+                Some(actual) => failures.push(format!(
+                    "`requires.source` requires `{required_source}`, but running build is from `{actual}`"
+                )),
+                None => failures.push(format!(
+                    "`requires.source` requires `{required_source}`, but this build carries no \
+                     known `source` revision (fail-closed)"
+                )),
+            }
+        }
+        if let Some(required_digest) = &self.facts_sha256
+            && build.facts_sha256 != *required_digest
+        {
+            failures.push(format!(
+                "`requires.facts_sha256` requires `{required_digest}`, but running build has `{}`",
+                build.facts_sha256
+            ));
+        }
+        if failures.is_empty() {
+            Ok(())
+        } else {
+            Err(Error::BuildContractMismatch(Box::new(
+                BuildContractMismatch {
+                    path: path.display().to_string(),
+                    failures,
+                    running_version: build.version.clone(),
+                    running_source: build.source.clone().filter(|s| !s.is_empty()),
+                    running_facts_sha256: build.facts_sha256.clone(),
+                },
+            )))
+        }
+    }
+}
+
 /// The parsed `.aplan.yml`. Every field is optional: an absent key means "use
 /// the built-in default", and a CLI flag overrides whatever is here (the CLI
 /// owns precedence). Unknown keys are rejected, not ignored.
 #[derive(Debug, Clone, Default, Deserialize, Serialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
 pub struct Config {
+    /// Pre-schema build contract this repository requires of the running `aplan`
+    /// (`ADR-0068`, `A2-193`). Evaluated before strict full-schema deserialization.
+    #[serde(default)]
+    pub requires: Option<BuildContract>,
     /// Portable capture kinds and named creation/promotion profiles.
     ///
     /// This is repository policy, never per-user configuration: the same
@@ -2422,30 +2713,92 @@ pub enum ConfigSource {
 /// [`Error::Io`] when a named file cannot be read, plus the parse and validation
 /// errors [`load_config_located`] raises.
 pub fn load_from(source: &ConfigSource, start: &Path) -> Result<(Config, Option<PathBuf>), Error> {
+    load_from_for_build(source, start, None)
+}
+
+/// Like [`load_from`], additionally enforcing `.aplan.yml`'s pre-schema `requires`
+/// contract against `build` before strict full-schema deserialization (`ADR-0068`).
+pub fn load_from_for_build(
+    source: &ConfigSource,
+    start: &Path,
+    build: Option<&RunningBuild>,
+) -> Result<(Config, Option<PathBuf>), Error> {
+    load_from_inner(source, start, build.map(|b| move || b.clone()))
+}
+
+/// Like [`load_from_for_build`], computing the running build lazily only when
+/// `.aplan.yml` actually declares a `requires` contract (`ADR-0068`).
+pub fn load_from_with_build(
+    source: &ConfigSource,
+    start: &Path,
+    build: impl FnOnce() -> RunningBuild,
+) -> Result<(Config, Option<PathBuf>), Error> {
+    load_from_inner(source, start, Some(build))
+}
+
+fn load_from_inner<F>(
+    source: &ConfigSource,
+    start: &Path,
+    build: Option<F>,
+) -> Result<(Config, Option<PathBuf>), Error>
+where
+    F: FnOnce() -> RunningBuild,
+{
     match source {
-        ConfigSource::Discover => load_config_located(start),
+        ConfigSource::Discover => load_config_located_inner(start, build),
         // No fallback, deliberately: a typo in `--config` must not degrade to
         // whatever the tree being reviewed happens to carry, which is the whole
         // point of naming one.
-        ConfigSource::File(path) => read_config(path),
+        ConfigSource::File(path) => read_config_inner(path, build),
         ConfigSource::None => Ok((Config::default(), None)),
     }
 }
 
 pub fn load_config_located(start: &Path) -> Result<(Config, Option<PathBuf>), Error> {
+    load_config_located_for_build(start, None)
+}
+
+/// Like [`load_config_located`], enforcing `.aplan.yml`'s pre-schema `requires`
+/// contract against `build` when supplied (`ADR-0068`).
+pub fn load_config_located_for_build(
+    start: &Path,
+    build: Option<&RunningBuild>,
+) -> Result<(Config, Option<PathBuf>), Error> {
+    load_config_located_inner(start, build.map(|b| move || b.clone()))
+}
+
+/// Like [`load_config_located_for_build`], computing the running build lazily
+/// only when `.aplan.yml` actually declares a `requires` contract (`ADR-0068`).
+pub fn load_config_located_with_build(
+    start: &Path,
+    build: impl FnOnce() -> RunningBuild,
+) -> Result<(Config, Option<PathBuf>), Error> {
+    load_config_located_inner(start, Some(build))
+}
+
+fn load_config_located_inner<F>(
+    start: &Path,
+    build: Option<F>,
+) -> Result<(Config, Option<PathBuf>), Error>
+where
+    F: FnOnce() -> RunningBuild,
+{
     let Some(path) = discovered_config(start) else {
         return Ok((Config::default(), None));
     };
-    read_config(&path)
+    read_config_inner(&path, build)
 }
 
 /// Read, parse and validate exactly this file.
 ///
 /// Split out so discovery and an explicit `--config` cannot diverge in what they
 /// accept: one parser, one validation, one set of messages (`A1-155`).
-fn read_config(path: &Path) -> Result<(Config, Option<PathBuf>), Error> {
+fn read_config_inner<F>(path: &Path, build: Option<F>) -> Result<(Config, Option<PathBuf>), Error>
+where
+    F: FnOnce() -> RunningBuild,
+{
     let bytes = std::fs::read(path).map_err(|e| Error::Io(format!("{}: {e}", path.display())))?;
-    let config = parse_config_bytes(&bytes, path)?;
+    let config = parse_config_bytes_inner(&bytes, path, build)?;
     let dir = path.parent().map(Path::to_path_buf);
     Ok((config, dir))
 }
@@ -2460,9 +2813,129 @@ fn read_config(path: &Path) -> Result<(Config, Option<PathBuf>), Error> {
 ///
 /// [`Error::Io`] for invalid UTF-8, then the errors from [`parse_config`].
 pub fn parse_config_bytes(bytes: &[u8], path: &Path) -> Result<Config, Error> {
+    parse_config_bytes_for_build(bytes, path, None)
+}
+
+/// Like [`parse_config_bytes`], enforcing `.aplan.yml`'s pre-schema `requires`
+/// contract against `build` before strict full-schema deserialization (`ADR-0068`).
+pub fn parse_config_bytes_for_build(
+    bytes: &[u8],
+    path: &Path,
+    build: Option<&RunningBuild>,
+) -> Result<Config, Error> {
+    parse_config_bytes_inner(bytes, path, build.map(|b| move || b.clone()))
+}
+
+/// Like [`parse_config_bytes_for_build`], computing the running build lazily
+/// only when `.aplan.yml` actually declares a `requires` contract (`ADR-0068`).
+pub fn parse_config_bytes_with_build(
+    bytes: &[u8],
+    path: &Path,
+    build: impl FnOnce() -> RunningBuild,
+) -> Result<Config, Error> {
+    parse_config_bytes_inner(bytes, path, Some(build))
+}
+
+fn parse_config_bytes_inner<F>(bytes: &[u8], path: &Path, build: Option<F>) -> Result<Config, Error>
+where
+    F: FnOnce() -> RunningBuild,
+{
     let text =
         std::str::from_utf8(bytes).map_err(|e| Error::Io(format!("{}: {e}", path.display())))?;
-    parse_config(text, path)
+    parse_config_inner(text, path, build)
+}
+
+/// Frozen pre-schema reader for top-level `requires` (`ADR-0068`, `A2-193`).
+///
+/// Deliberately omits `deny_unknown_fields` at the top level so keys added by
+/// a newer `aplan` do not stop `requires` from being read and enforced first.
+/// Inside `requires`, sub-keys remain strictly validated and fail closed.
+pub fn parse_build_contract(text: &str) -> Result<Option<BuildContract>, Error> {
+    #[derive(Deserialize)]
+    struct PreSchemaRaw {
+        #[serde(default)]
+        requires: Option<yaml_compat::Value>,
+    }
+
+    #[derive(Deserialize)]
+    struct PreSchemaTyped {
+        #[serde(default)]
+        requires: Option<BuildContract>,
+    }
+
+    // First check raw YAML structure. If the whole document is syntactically
+    // invalid YAML or not a mapping, leave it to the ordinary config parser so
+    // `Error::Parse` reports the syntax mistake cleanly.
+    let Ok(raw_doc) = aplan_core::yaml::from_str::<yaml_compat::Value>(text) else {
+        return Ok(None);
+    };
+    let Some(root_map) = raw_doc.as_mapping() else {
+        return Ok(None);
+    };
+    let req_key = yaml_compat::Value::String("requires".into());
+    if !root_map.contains_key(&req_key) {
+        return Ok(None);
+    }
+
+    // Check for duplicate top-level `requires` keys and extract its raw value.
+    let raw = aplan_core::yaml::from_str::<PreSchemaRaw>(text)
+        .map_err(|e| Error::BadRequires(e.to_string()))?;
+    let Some(req_value) = raw.requires else {
+        return Err(Error::BadRequires(
+            "`requires` is empty; declare at least one of `min_version`, `capabilities`, \
+             `source`, or `facts_sha256`, or remove the key"
+                .into(),
+        ));
+    };
+    let Some(req_map) = req_value.as_mapping() else {
+        return Err(Error::BadRequires(
+            "`requires` must be a mapping with one or more of `min_version`, `capabilities`, \
+             `source`, or `facts_sha256`"
+                .into(),
+        ));
+    };
+    let binary_key = yaml_compat::Value::String("binary_sha256".into());
+    if req_map.contains_key(&binary_key) {
+        return Err(Error::BadRequires(
+            "`requires.binary_sha256` is deliberately not supported in `.aplan.yml`: executable \
+             byte digests break cross-platform checkouts and remain an external authenticity \
+             check (wrapper, CI Action, or SLSA attestation; see `docs/upgrading.md`). Pin \
+             `requires.source` and/or `requires.facts_sha256` instead"
+                .into(),
+        ));
+    }
+    let unknown_subkeys: Vec<String> = req_map
+        .keys()
+        .filter_map(|k| k.as_str())
+        .filter(|k| !REQUIRES_SUBKEYS.contains(k))
+        .map(|k| format!("`requires.{k}`"))
+        .collect();
+    if !unknown_subkeys.is_empty() {
+        let accepted = REQUIRES_SUBKEYS
+            .iter()
+            .map(|k| format!("`{k}`"))
+            .collect::<Vec<_>>()
+            .join(", ");
+        return Err(Error::BadRequires(format!(
+            "unknown key(s) {} under `requires`; expected one of {accepted}",
+            unknown_subkeys.join(", ")
+        )));
+    }
+
+    // Typed deserialization via `PreSchemaTyped` catches duplicate sub-keys
+    // inside `requires` and wrong value types while still ignoring unrelated
+    // top-level keys from newer builds.
+    let typed = aplan_core::yaml::from_str::<PreSchemaTyped>(text)
+        .map_err(|e| Error::BadRequires(e.to_string()))?;
+    let Some(contract) = typed.requires else {
+        return Err(Error::BadRequires(
+            "`requires` is empty; declare at least one of `min_version`, `capabilities`, \
+             `source`, or `facts_sha256`, or remove the key"
+                .into(),
+        ));
+    };
+    contract.validate()?;
+    Ok(Some(contract))
 }
 
 /// Parse and validate configuration text associated with `path`.
@@ -2476,6 +2949,39 @@ pub fn parse_config_bytes(bytes: &[u8], path: &Path) -> Result<Config, Error> {
 ///
 /// The same parse, unknown-key and semantic errors as [`load_from`].
 pub fn parse_config(text: &str, path: &Path) -> Result<Config, Error> {
+    parse_config_for_build(text, path, None)
+}
+
+/// Like [`parse_config`], evaluating the frozen pre-schema `requires` block against
+/// `build` before strict full-schema deserialization (`ADR-0068`, `A2-193`).
+pub fn parse_config_for_build(
+    text: &str,
+    path: &Path,
+    build: Option<&RunningBuild>,
+) -> Result<Config, Error> {
+    parse_config_inner(text, path, build.map(|b| move || b.clone()))
+}
+
+/// Like [`parse_config_for_build`], computing the running build lazily only when
+/// `.aplan.yml` actually declares a `requires` contract (`ADR-0068`).
+pub fn parse_config_with_build(
+    text: &str,
+    path: &Path,
+    build: impl FnOnce() -> RunningBuild,
+) -> Result<Config, Error> {
+    parse_config_inner(text, path, Some(build))
+}
+
+fn parse_config_inner<F>(text: &str, path: &Path, build: Option<F>) -> Result<Config, Error>
+where
+    F: FnOnce() -> RunningBuild,
+{
+    if let Some(contract) = parse_build_contract(text)?
+        && let Some(build) = build
+    {
+        let running = build();
+        contract.check(&running, path)?;
+    }
     let config: Config = aplan_core::yaml::from_str(text).map_err(|e| {
         // Ask the schema which keys this build accepts rather than parsing
         // serde's sentence back out: the inventory is derived from the same type
@@ -2504,6 +3010,9 @@ pub fn parse_config(text: &str, path: &Path) -> Result<Config, Error> {
 /// then the runner on the next run, which is the half-an-answer-twice this task
 /// exists to stop (`A1-068`).
 fn validate_all(config: &Config) -> Result<(), Error> {
+    if let Some(requires) = &config.requires {
+        requires.validate()?;
+    }
     config.validate_capture()?;
     if let Some(runner) = &config.test {
         runner.validate()?;
@@ -2958,6 +3467,18 @@ pub const SCAFFOLD: &str = r#"# .aplan.yml, this repository's `aplan` policy.
 # The directory holding the plan's task files (default: aplan), resolved against
 # this file's directory. The --root flag overrides it.
 # root: aplan
+
+# Pre-schema build contract this repository requires of the running `aplan`.
+# Evaluated before full config parsing so an older or unreviewed binary fails
+# closed before reporting unknown keys from newer builds. `min_version` takes
+# bare released `X.Y.Z` only; for `-dev` builds pin `capabilities`, `source`,
+# or `facts_sha256`. Exact executable byte digests (`binary_sha256`) stay
+# external (wrapper, CI Action, or SLSA attestation).
+# requires:
+#   min_version: '0.8.0'
+#   capabilities: [build.tui]
+#   source: '0123456789abcdef0123456789abcdef01234567'
+#   facts_sha256: '0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef'
 
 # Durable intake lives as one versioned YAML file per capture below
 # `<root>/.inbox/`. `task`, `idea` and `note` are always valid kinds. Repository
@@ -4099,6 +4620,11 @@ mod tests {
     /// new key is added without being represented here.
     const EVERY_ACCEPTED_KEY: &str = "\
 root: aplan
+requires:
+  min_version: '0.8.0'
+  capabilities: [root]
+  source: '0123456789abcdef0123456789abcdef01234567'
+  facts_sha256: '0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef'
 capture:
   kinds: [question]
   profiles:
@@ -4465,7 +4991,7 @@ stale_after_days: 30
         let keys = accepted_keys();
         assert_eq!(
             keys.len(),
-            124,
+            129,
             "config keys changed; teach the fixture above, then update this count: {keys:?}"
         );
         for key in keys {
@@ -6121,5 +6647,189 @@ mod published_schema_tests {
         assert_eq!(unbounded.max_processes, Some(32));
         assert_eq!(unbounded.max_output, Some("2M"));
         assert_eq!(unbounded.wrap, Some(wrap.as_slice()));
+    }
+
+    /// `A2-193` / `ADR-0068`: comprehensive pre-schema `requires` unit tests
+    /// against synthetic injected `RunningBuild` fixtures (older, newer,
+    /// same-version-different-commit, headless vs `build.tui`, unknown source).
+    mod build_contract_tests {
+        use super::*;
+
+        const SHA_A: &str = "66ed9997c3ace3d55f64326b1a3bd78fbbf392f1";
+        const SHA_B: &str = "e41ca8d0123456789abcdef0123456789abcdef0";
+        const FACTS_A: &str = "1ba8dbe141bdc68bba7233422db2babea1a74ab0df5f07019b7952529f0a8a3c";
+        const FACTS_B: &str = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
+
+        fn build(
+            version: &str,
+            source: Option<&str>,
+            facts_sha256: &str,
+            caps: &[&str],
+        ) -> RunningBuild {
+            RunningBuild {
+                version: version.to_string(),
+                source: source.map(str::to_string),
+                facts_sha256: facts_sha256.to_string(),
+                advertised_capabilities: caps.iter().map(|c| (*c).to_string()).collect(),
+            }
+        }
+
+        #[test]
+        fn pre_schema_mismatch_fires_before_unknown_future_top_level_keys() {
+            let older = build("0.7.0", Some(SHA_A), FACTS_A, &["APLAN001", "root"]);
+            let yaml = "\
+requires:
+  min_version: '0.8.0'
+  capabilities: [future.capability]
+future_top_level_key_from_v09:
+  nested: true
+";
+            let err = parse_config_for_build(yaml, Path::new(".aplan.yml"), Some(&older))
+                .expect_err("requires must fail before unknown future top-level keys");
+            assert!(
+                matches!(err, Error::BuildContractMismatch(_)),
+                "expected BuildContractMismatch, got: {err:?}"
+            );
+            let msg = err.to_string();
+            assert!(msg.contains("requires.min_version"), "{msg}");
+            assert!(msg.contains("0.8.0"), "{msg}");
+            assert!(msg.contains("0.7.0"), "{msg}");
+            assert!(msg.contains("future.capability"), "{msg}");
+            assert!(msg.contains(SHA_A), "{msg}");
+            assert!(msg.contains(FACTS_A), "{msg}");
+            assert!(msg.contains("docs/upgrading.md"), "{msg}");
+            assert!(
+                !msg.contains("future_top_level_key_from_v09"),
+                "pre-schema check must stop before unknown-key errors:\n{msg}"
+            );
+        }
+
+        #[test]
+        fn min_version_refuses_prerelease_pins_and_applies_semver_precedence_to_running_dev_builds()
+        {
+            let dev_build = build("0.8.0-dev", Some(SHA_A), FACTS_A, &[]);
+            let rel_build = build("0.8.0", Some(SHA_A), FACTS_A, &[]);
+
+            // Pre-release strings in `requires.min_version` are refused as vacuous pins.
+            for bad in ["0.8.0-dev", "0.8.0-rc.1", "v0.8.0", "0.8", "01.2.3", ""] {
+                let yaml = format!("requires:\n  min_version: '{bad}'\n");
+                let err = parse_config_for_build(&yaml, Path::new(".aplan.yml"), Some(&dev_build))
+                    .expect_err(&format!("`{bad}` must be refused"));
+                assert!(matches!(err, Error::BadRequires(_)), "`{bad}` gave {err:?}");
+                if bad.contains('-') {
+                    let msg = err.to_string();
+                    assert!(msg.contains("requires.capabilities"), "{msg}");
+                    assert!(msg.contains("requires.source"), "{msg}");
+                    assert!(msg.contains("requires.facts_sha256"), "{msg}");
+                }
+            }
+
+            // `0.8.0-dev` satisfies `0.7.0`, NOT `0.8.0`.
+            let floor_07 = "requires:\n  min_version: '0.7.0'\n";
+            parse_config_for_build(floor_07, Path::new(".aplan.yml"), Some(&dev_build))
+                .expect("0.8.0-dev satisfies released floor 0.7.0");
+
+            let floor_08 = "requires:\n  min_version: '0.8.0'\n";
+            let err = parse_config_for_build(floor_08, Path::new(".aplan.yml"), Some(&dev_build))
+                .expect_err("0.8.0-dev must NOT satisfy released floor 0.8.0");
+            assert!(matches!(err, Error::BuildContractMismatch(_)), "{err:?}");
+
+            // Released `0.8.0` satisfies `0.8.0`.
+            parse_config_for_build(floor_08, Path::new(".aplan.yml"), Some(&rel_build))
+                .expect("released 0.8.0 satisfies 0.8.0");
+        }
+
+        #[test]
+        fn same_version_different_commit_and_headless_vs_tui_are_caught_precisely() {
+            let dev_a = build("0.8.0-dev", Some(SHA_A), FACTS_A, &["build.tui", "check"]);
+            let dev_b = build("0.8.0-dev", Some(SHA_B), FACTS_B, &["check"]);
+
+            // Same-source rebuilds with different binary bytes share `source` & `facts_sha256`
+            // and pass without needing binary_sha256.
+            let pinned_a = format!(
+                "requires:\n  source: '{SHA_A}'\n  facts_sha256: '{FACTS_A}'\n  capabilities: [build.tui]\n"
+            );
+            parse_config_for_build(&pinned_a, Path::new(".aplan.yml"), Some(&dev_a))
+                .expect("matching source, facts_sha256, and capabilities pass");
+
+            // Another same-version `-dev` build (different commit, headless) fails all three.
+            let err = parse_config_for_build(&pinned_a, Path::new(".aplan.yml"), Some(&dev_b))
+                .expect_err("different same-version dev build must fail");
+            let msg = err.to_string();
+            assert!(msg.contains("build.tui"), "{msg}");
+            assert!(msg.contains(SHA_A) && msg.contains(SHA_B), "{msg}");
+            assert!(msg.contains(FACTS_A) && msg.contains(FACTS_B), "{msg}");
+        }
+
+        #[test]
+        fn requires_source_fails_closed_when_running_build_source_is_unknown() {
+            let unknown_source = build("0.8.0", None, FACTS_A, &[]);
+            let yaml = format!("requires:\n  source: '{SHA_A}'\n");
+            let err = parse_config_for_build(&yaml, Path::new(".aplan.yml"), Some(&unknown_source))
+                .expect_err("unknown source must fail closed");
+            assert!(matches!(err, Error::BuildContractMismatch(_)), "{err:?}");
+            let msg = err.to_string();
+            assert!(msg.contains("fail-closed"), "{msg}");
+            assert!(msg.contains("source=unknown"), "{msg}");
+        }
+
+        #[test]
+        fn binary_sha256_unknown_subkeys_and_empty_requires_are_refused_and_schema_excludes_binary_sha256()
+         {
+            let running = build("0.8.0", Some(SHA_A), FACTS_A, &[]);
+            let bin_err = parse_config_for_build(
+                "requires:\n  binary_sha256: 'aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa'\n",
+                Path::new(".aplan.yml"),
+                Some(&running),
+            )
+            .expect_err("binary_sha256 must be refused");
+            assert!(matches!(bin_err, Error::BadRequires(_)), "{bin_err:?}");
+            assert!(
+                bin_err.to_string().contains("docs/upgrading.md"),
+                "{bin_err}"
+            );
+            assert!(bin_err.to_string().contains("external"), "{bin_err}");
+
+            for bad in [
+                "requires: {}\n",
+                "requires:\n",
+                "requires:\n  unknown_key: 1\n",
+                "requires:\n  capabilities: []\n",
+                "requires:\n  source: 'abc123'\n",
+                "requires:\n  facts_sha256: 'not-hex'\n",
+            ] {
+                let err = parse_config_for_build(bad, Path::new(".aplan.yml"), Some(&running))
+                    .expect_err(&format!("expected BadRequires for:\n{bad}"));
+                assert!(matches!(err, Error::BadRequires(_)), "{bad} -> {err:?}");
+            }
+
+            let schema = derived_schema();
+            let props = schema["$defs"]["BuildContract"]["properties"]
+                .as_object()
+                .expect("BuildContract properties");
+            assert!(
+                !props.contains_key("binary_sha256"),
+                "BuildContract schema properties must exclude binary_sha256: {props:?}"
+            );
+            assert_eq!(
+                props.len(),
+                4,
+                "expected exactly 4 requires keys: {props:?}"
+            );
+            let keys = accepted_keys();
+            for expected in [
+                "requires",
+                "requires.min_version",
+                "requires.capabilities",
+                "requires.source",
+                "requires.facts_sha256",
+            ] {
+                assert!(
+                    keys.iter().any(|k| k == expected),
+                    "missing `{expected}` in {keys:?}"
+                );
+            }
+            assert!(!keys.iter().any(|k| k.contains("binary_sha256")));
+        }
     }
 }

@@ -809,6 +809,10 @@
       "what": "a generated `ROADMAP.status.md` and `AGENTS.md` block carry a comment naming the version and surface that wrote them, and a drift report names the build doing the checking"
     },
     {
+      "name": "agent_contract.provenance_does_not_block_policy",
+      "what": "`APLAN041` and `export-agents-md --check` gate repository policy and provenance well-formedness without blocking on writer-build provenance skew or build-specific static MCP tool lists, while preserving a non-blocking provenance diagnostic naming both builds and `.aplan.yml` `requires`"
+    },
+    {
       "name": "why.cut_bounded_by_default",
       "what": "`aplan why` reports an unfinished cut as itself rather than walking into its members, and names the traversal that produced every answer; `--all` asks for the complete closure"
     },
@@ -1342,6 +1346,11 @@
     "policy.when.tag",
     "require_cut_membership",
     "require_effort",
+    "requires",
+    "requires.capabilities",
+    "requires.facts_sha256",
+    "requires.min_version",
+    "requires.source",
     "roadmap",
     "roadmap.group_by",
     "root",
@@ -1435,10 +1444,10 @@
     "version.require_impact"
   ],
   "counts": {
-    "behaviours": 232,
+    "behaviours": 233,
     "build_capabilities": 1,
     "commands": 48,
-    "config_keys": 124,
+    "config_keys": 129,
     "evidence_kinds": 5,
     "formats": 9,
     "mcp_tools": 13,

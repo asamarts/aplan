@@ -3197,6 +3197,25 @@ fn note_unresolved_evidence(plan: &aplan_core::Plan) {
 /// single choice twenty-eight times. The count is on the summary line as well,
 /// because stderr is what a pipe separates (`A1-091`, and `Kind::failure_cause`
 /// for the same reason).
+/// Surface non-blocking `AGENTS.md` build-only provenance skew on human CLI
+/// output (`ADR-0072`, `A2-122`). Machine formats (`json`, `agent`) carry the
+/// structured `agent_contract_provenance` field directly in stdout.
+fn note_agent_contract_provenance(report: &aplan_core::Report, format: Format) {
+    if format != Format::Human {
+        return;
+    }
+    if let Some(provenance) = &report.agent_contract_provenance {
+        errln!(
+            "{}",
+            aplan_output::fold::fold(
+                &format!("aplan: note: {}", provenance.note),
+                aplan_output::fold::err_width(),
+                0
+            )
+        );
+    }
+}
+
 fn note_unopened_evidence(unopened: &aplan_evidence::Unopened) {
     if !unopened.any() {
         return;
@@ -3339,6 +3358,7 @@ fn cmd_check(root: &std::path::Path, args: &CheckArgs) -> Result<u8> {
         render_tolerant(|| render(&report, format, policy))
     })?;
     note_denied_warnings(&report, policy);
+    note_agent_contract_provenance(&report, format);
     note_unresolved_evidence(context.plan());
     Ok(if report.denied_by(policy) {
         EXIT_VIOLATIONS
@@ -3711,7 +3731,7 @@ fn tui_load_configuration(
         aplan_app::ConfigurationSelection::Discover { found: None, .. }
         | aplan_app::ConfigurationSelection::None => aplan_config::ConfigSource::None,
     };
-    aplan_config::load_from(&source, start)
+    aplan_config::load_from_with_build(&source, start, running_build)
 }
 
 #[cfg(feature = "tui")]
@@ -3803,10 +3823,9 @@ fn tui_onboarding(
             "Repair permissions, file type, encoding, or the selected path. The existing input is never overwritten."
                 .to_string(),
         ),
-        aplan_app::OnboardingCause::InvalidConfiguration => guidance.push(
-            "Edit the existing configuration using the reported parse or policy error. The existing input is never overwritten."
-                .to_string(),
-        ),
+        aplan_app::OnboardingCause::InvalidConfiguration => {
+            tui_invalid_configuration_guidance(&detail, &mut guidance, &mut commands);
+        }
     }
     aplan_tui::Launch::Onboarding(aplan_app::Onboarding {
         cause,
@@ -3817,6 +3836,31 @@ fn tui_onboarding(
         guidance,
         commands,
     })
+}
+
+#[cfg(feature = "tui")]
+fn tui_invalid_configuration_guidance(
+    detail: &str,
+    guidance: &mut Vec<String>,
+    commands: &mut Vec<aplan_app::GuidedCommand>,
+) {
+    if detail.contains("does not satisfy `requires`") {
+        guidance.push(
+            "This repository's `.aplan.yml` declares a `requires` build contract that this \
+             `aplan` binary does not satisfy. Switch to the required build or follow the \
+             staged upgrade procedure in `docs/upgrading.md`."
+                .to_string(),
+        );
+        commands.push(aplan_app::GuidedCommand {
+            purpose: "inspect this build's version, source commit, and facts digest".to_string(),
+            display: "aplan facts --identity".to_string(),
+        });
+    } else {
+        guidance.push(
+            "Edit the existing configuration using the reported parse or policy error. The existing input is never overwritten."
+                .to_string(),
+        );
+    }
 }
 
 #[cfg(feature = "tui")]
@@ -4664,9 +4708,10 @@ fn config_err(e: aplan_config::Error) -> anyhow::Error {
     if let aplan_config::Error::UnknownKeys(unknown) = &e {
         return anyhow::anyhow!(
             "loading .aplan.yml: {unknown}\nnote: this is aplan {}, which accepts {} config \
-             key(s); `aplan facts` lists them. A key added by a newer aplan reads exactly like \
-             a typo from here, so if you staged this binary, upgrade it before adopting the key \
-             (`docs/upgrading.md` leads with that ordering).",
+             key(s); `aplan facts` lists them, and `aplan facts --identity` names this exact \
+             build when comparing same-version development builds. A key added by a newer aplan \
+             reads exactly like a typo from here, so if you staged this binary, upgrade it before \
+             adopting the key (`docs/upgrading.md` leads with that ordering).",
             env!("CARGO_PKG_VERSION"),
             aplan_config::accepted_keys().len(),
         );
@@ -4948,6 +4993,7 @@ fn cmd_verify(root: &std::path::Path, args: &VerifyArgs) -> Result<u8> {
         render_verified_observed(&report, format, &policy, &unopened, &evidence.observation)
     })?;
     note_unopened_evidence(&unopened);
+    note_agent_contract_provenance(&report, format);
     note_denied_warnings(&report, &policy);
     Ok(verdict(&report, &policy))
 }
@@ -5349,7 +5395,7 @@ fn config_at(dir: &std::path::Path) -> Result<(aplan_config::Config, Option<Path
             return Ok(config);
         }
         record_config_load();
-        aplan_config::load_from(&source, dir).map_err(config_err)
+        aplan_config::load_from_with_build(&source, dir, running_build).map_err(config_err)
     })
 }
 
@@ -6951,6 +6997,7 @@ fn cmd_mcp(cli_root: Option<PathBuf>) -> Result<u8> {
             CACHE_MODE.get().copied().unwrap_or_default(),
             cache_writer_identity(),
             written_by(),
+            running_build(),
         ))
         .context("serving MCP over stdio")?;
     Ok(EXIT_OK)
@@ -12874,6 +12921,7 @@ fn render_focused_close_preview(
         let report = aplan_core::Report {
             diagnostics: review.findings.clone(),
             tasks_checked: 1,
+            agent_contract_provenance: None,
         };
         render_proposed(&report, verdict)?;
     }
@@ -13373,6 +13421,27 @@ fn tool_identity() -> aplan_attest::ToolIdentity {
     // auditor reproduces the number with `aplan facts | sha256sum` rather than
     // with a byte-fiddling variant of it (`A1-154`).
     aplan_attest::identify(&facts_document())
+}
+
+/// Running build identity and advertised capability inventory used to evaluate
+/// `.aplan.yml`'s pre-schema `requires` contract (`ADR-0068`, `A2-193`).
+#[must_use]
+pub fn running_build() -> aplan_config::RunningBuild {
+    static BUILD: std::sync::OnceLock<aplan_config::RunningBuild> = std::sync::OnceLock::new();
+    BUILD
+        .get_or_init(|| {
+            let document = facts_document();
+            let id = aplan_attest::identify(&document);
+            let doc: serde_json::Value =
+                serde_json::from_str(&document).expect("this build's own facts are valid JSON");
+            aplan_config::RunningBuild {
+                version: id.version,
+                source: (!id.source.is_empty()).then_some(id.source),
+                facts_sha256: id.facts_sha256,
+                advertised_capabilities: advertised_names(&doc),
+            }
+        })
+        .clone()
 }
 
 #[cfg(feature = "tui")]
@@ -15450,55 +15519,7 @@ fn cmd_export_agents_md(
     );
 
     if let Some(path) = check {
-        let text =
-            std::fs::read_to_string(path).with_context(|| format!("reading {}", path.display()))?;
-        refuse_malformed_block(&text, path)?;
-        return Ok(match replace_block(&text, &block) {
-            Some(updated) if updated == text => EXIT_OK,
-            _ => {
-                // Which build is asking is half the answer (`A1-325`, ADR-0037).
-                // The pilot's thirty-line diff was a pinned CI binary against a
-                // newer local one, and the refusal named neither, so it could
-                // not be reproduced where it was made.
-                // Both sides as the *inner* text: `block` carries its markers
-                // and what a file yields does not, so comparing them whole
-                // would answer "different" for every file.
-                let inner = |t: &str| match aplan_core::contract::block_in(t) {
-                    aplan_core::contract::Block::Present(b) => Some(b.to_string()),
-                    _ => None,
-                };
-                let same_policy = match (inner(&text), inner(&block)) {
-                    (Some(found), Some(want)) => {
-                        aplan_core::contract::differs_only_by_build(&found, &want)
-                    }
-                    _ => false,
-                };
-                let why = if same_policy {
-                    " It says what this repository's policy says and names a different build \
-                     as its author, so the difference is the build and not the policy."
-                } else {
-                    ""
-                };
-                errln!(
-                    "{}",
-                    aplan_output::fold::fold(
-                        &format!(
-                            "{} disagrees with `aplan export-agents-md`, checked by aplan {} \
-                             (surface {}).{} Regenerate it with `aplan export-agents-md \
-                             --write {}`.",
-                            path.display(),
-                            wb.0,
-                            wb.1,
-                            why,
-                            path.display()
-                        ),
-                        aplan_output::fold::err_width(),
-                        0
-                    )
-                );
-                EXIT_VIOLATIONS
-            }
-        });
+        return check_agents_md_file(path, &block, &wb);
     }
     if let Some(path) = write {
         let existing = std::fs::read_to_string(path).unwrap_or_default();
@@ -15528,6 +15549,84 @@ fn cmd_export_agents_md(
         return Ok(EXIT_OK);
     }
     write_stdout(&block)?;
+    Ok(EXIT_OK)
+}
+
+/// Compare a committed `AGENTS.md` file against the generated block (`ADR-0072`, `A2-122`).
+fn check_agents_md_file(path: &std::path::Path, block: &str, wb: &(String, String)) -> Result<u8> {
+    let emit = |msg: &str| {
+        errln!(
+            "{}",
+            aplan_output::fold::fold(msg, aplan_output::fold::err_width(), 0)
+        );
+    };
+    let text =
+        std::fs::read_to_string(path).with_context(|| format!("reading {}", path.display()))?;
+    refuse_malformed_block(&text, path)?;
+    let file = path.display();
+    let aplan_core::contract::Block::Present(found) = aplan_core::contract::block_in(&text) else {
+        emit(&format!(
+            "{file} disagrees with `aplan export-agents-md`, checked by aplan {} (surface {}). \
+             Regenerate it with `aplan export-agents-md --write {file}`.",
+            wb.0, wb.1
+        ));
+        return Ok(EXIT_VIOLATIONS);
+    };
+    let want = match aplan_core::contract::block_in(block) {
+        aplan_core::contract::Block::Present(inner) => inner,
+        _ => block,
+    };
+    let (found_prov, found_policy) = aplan_core::contract::parse_provenance(found);
+    let (want_prov, want_policy) = aplan_core::contract::parse_provenance(want);
+    if let aplan_core::contract::ProvenanceState::Malformed(reason) = found_prov {
+        emit(&format!(
+            "{file} carries malformed provenance ({reason}), checked by aplan {} (surface {}). \
+             Repair the provenance comment or regenerate with the repository's required build \
+             (`aplan export-agents-md --write {file}`).",
+            wb.0, wb.1
+        ));
+        return Ok(EXIT_VIOLATIONS);
+    }
+    if found_policy != want_policy {
+        let extra = match (&found_prov, &want_prov) {
+            (
+                aplan_core::contract::ProvenanceState::Valid(fp),
+                aplan_core::contract::ProvenanceState::Valid(wp),
+            ) if fp != wp => format!(
+                " Block was written by {}; use the repository's required build (see `.aplan.yml` \
+                 `requires` and `docs/upgrading.md`) rather than an unpinned `PATH` binary.",
+                fp.display_label()
+            ),
+            _ => String::new(),
+        };
+        emit(&format!(
+            "{file} disagrees with `aplan export-agents-md`, checked by aplan {} \
+             (surface {}).{extra} Regenerate it with `aplan export-agents-md --write {file}`.",
+            wb.0, wb.1
+        ));
+        return Ok(EXIT_VIOLATIONS);
+    }
+    // Policy matches and provenance is valid (or pre-ADR-0037 absent). Build-only
+    // provenance skew does NOT block (`ADR-0072`, `A2-122`), but remains visible
+    // as an actionable note naming both builds and `.aplan.yml`'s `requires` route.
+    if found_prov != want_prov {
+        let writer = match &found_prov {
+            aplan_core::contract::ProvenanceState::Valid(fp) => {
+                format!("was written by {}", fp.display_label())
+            }
+            aplan_core::contract::ProvenanceState::Absent
+            | aplan_core::contract::ProvenanceState::Malformed(_) => {
+                "carries no writer provenance comment".to_string()
+            }
+        };
+        emit(&format!(
+            "aplan: note: {file} matches this repository's policy, but {writer} and was checked \
+             by aplan {} (surface {}). Provenance alone does not block; do not regenerate with \
+             an unpinned build just to move the comment. To pin one authoritative build across \
+             contributors and CI, declare `requires` in `.aplan.yml` (see `docs/upgrading.md`).",
+            wb.0, wb.1
+        ));
+    }
     Ok(EXIT_OK)
 }
 
@@ -16260,7 +16359,7 @@ fn config_at_revision(
             .map_err(|e| aplan_config::Error::Io(e.to_string()))?
         {
             let path = workdir.join(&candidate);
-            let config = aplan_config::parse_config_bytes(&bytes, &path)?;
+            let config = aplan_config::parse_config_bytes_with_build(&bytes, &path, running_build)?;
             return Ok((config, path.parent().map(std::path::Path::to_path_buf)));
         }
         if !relative.pop() {
@@ -20728,7 +20827,59 @@ mod tests {
         aplan_core::Report {
             diagnostics,
             tasks_checked: 1,
+            agent_contract_provenance: None,
         }
+    }
+
+    #[cfg(feature = "tui")]
+    #[test]
+    fn tui_launch_fails_closed_on_requires_mismatch_before_unknown_keys() {
+        let dir = tempfile::Builder::new()
+            .tempdir_in(aplan_core::fixture::fixture_root())
+            .expect("tempdir");
+        std::fs::create_dir_all(dir.path().join("aplan/tasks")).expect("plan dir");
+        std::fs::write(
+            dir.path().join(".aplan.yml"),
+            "requires:\n  min_version: '99.0.0'\n  capabilities: [future.tui.cap]\n\
+             future_unknown_key: true\n",
+        )
+        .expect("config");
+
+        let launch = tui_launch_at(
+            dir.path(),
+            None,
+            &aplan_config::ConfigSource::Discover,
+            false,
+        )
+        .expect("launch returns typed onboarding state");
+        let aplan_tui::Launch::Onboarding(state) = launch else {
+            panic!("TUI must refuse to open a plan whose `requires` contract failed");
+        };
+        assert_eq!(
+            state.cause,
+            aplan_app::OnboardingCause::InvalidConfiguration
+        );
+        assert!(
+            state.detail.contains("does not satisfy `requires`"),
+            "{}",
+            state.detail
+        );
+        assert!(state.detail.contains("99.0.0"), "{}", state.detail);
+        assert!(state.detail.contains("future.tui.cap"), "{}", state.detail);
+        assert!(state.detail.contains("facts_sha256="), "{}", state.detail);
+        assert!(
+            !state.detail.contains("future_unknown_key"),
+            "pre-schema requires must fire before unknown keys:\n{}",
+            state.detail
+        );
+        assert!(
+            state
+                .commands
+                .iter()
+                .any(|cmd| cmd.display == "aplan facts --identity"),
+            "TUI onboarding must offer `aplan facts --identity`: {:?}",
+            state.commands
+        );
     }
 
     /// The agent surface carries `APLAN041` too, which is the half of that rule

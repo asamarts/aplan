@@ -79,6 +79,10 @@ pub struct AplanServer {
     /// Provenance used by the generated `AGENTS.md` contract rule. Supplied by
     /// the binary because it owns the complete rendered-surface digest.
     written_by: Option<Arc<(String, String)>>,
+    /// Running build identity and advertised capability inventory used to
+    /// enforce `.aplan.yml`'s pre-schema `requires` contract on explicit-root
+    /// calls (`ADR-0068`, `A2-193`).
+    running_build: Option<Arc<aplan_config::RunningBuild>>,
     /// Why this server can do nothing but identify itself, when that is the
     /// case.
     ///
@@ -104,6 +108,7 @@ impl AplanServer {
         cache_mode: aplan_app::CacheMode,
         cache_writer_identity: String,
         written_by: (String, String),
+        running_build: Option<aplan_config::RunningBuild>,
     ) -> Self {
         Self {
             root,
@@ -114,6 +119,7 @@ impl AplanServer {
             cache_root: None,
             identity: Arc::new(identity),
             written_by: Some(Arc::new(written_by)),
+            running_build: running_build.map(Arc::new),
             unconfigured: None,
         }
     }
@@ -134,6 +140,7 @@ impl AplanServer {
             cache_root: None,
             identity: Arc::new(identity),
             written_by: None,
+            running_build: None,
             unconfigured: Some(Arc::new(said)),
         }
     }
@@ -275,7 +282,11 @@ impl AplanServer {
                 prefetched: None,
             });
         };
-        let resolved = aplan_app::resolve_explicit_root(explicit).map_err(|error| {
+        let resolved = aplan_app::resolve_explicit_root_for_build(
+            explicit,
+            self.running_build.as_deref(),
+        )
+        .map_err(|error| {
             format!(
                 "cannot resolve MCP `root` as one repository context: {error}. The server's \
                  launch repository was not used as a fallback."
@@ -306,22 +317,12 @@ impl AplanServer {
             .configuration_directory
             .as_deref()
             .unwrap_or(&resolved.repository_root);
-        let initial_policy = crate::Policy {
-            options: options.clone(),
-            verdict: aplan_app::configured_verdict(&resolved.config),
-            verify: aplan_app::configured_verification(
-                &resolved.config,
-                resolved.configuration_file.clone(),
-                options.traces_root.clone(),
-            ),
-            repo_root: resolved.repository_root.clone(),
-            id_strategy: resolved.config.id_strategy.unwrap_or_default(),
-        };
-        let prefetched = if agent_root.join("AGENTS.md").is_file() {
-            Some(self.plan_snapshot(&resolved.plan_root, &initial_policy)?)
-        } else {
-            None
-        };
+        let initial_policy = policy_for_resolved(&resolved, options.clone());
+        let prefetched = agent_root
+            .join("AGENTS.md")
+            .is_file()
+            .then(|| self.plan_snapshot(&resolved.plan_root, &initial_policy))
+            .transpose()?;
         let written_by = self
             .written_by
             .as_deref()
@@ -337,17 +338,7 @@ impl AplanServer {
                 &tools,
             );
         }
-        let policy = crate::Policy {
-            verify: aplan_app::configured_verification(
-                &resolved.config,
-                resolved.configuration_file.clone(),
-                options.traces_root.clone(),
-            ),
-            options,
-            verdict: aplan_app::configured_verdict(&resolved.config),
-            repo_root: resolved.repository_root.clone(),
-            id_strategy: resolved.config.id_strategy.unwrap_or_default(),
-        };
+        let policy = policy_for_resolved(&resolved, options);
         let provenance = ContextProvenance {
             selection: resolved.selection,
             repository_root: ".",
@@ -873,6 +864,23 @@ impl ServerHandler for AplanServer {
     }
 }
 
+fn policy_for_resolved(
+    resolved: &aplan_app::ResolvedRoot,
+    options: aplan_core::Options,
+) -> crate::Policy {
+    crate::Policy {
+        verify: aplan_app::configured_verification(
+            &resolved.config,
+            resolved.configuration_file.clone(),
+            options.traces_root.clone(),
+        ),
+        options,
+        verdict: aplan_app::configured_verdict(&resolved.config),
+        repo_root: resolved.repository_root.clone(),
+        id_strategy: resolved.config.id_strategy.unwrap_or_default(),
+    }
+}
+
 /// Serve over stdio until the client disconnects.
 pub async fn serve_unconfigured(said: String, identity: serde_json::Value) -> std::io::Result<()> {
     let service = rmcp::serve_server(
@@ -897,6 +905,7 @@ pub async fn serve(
     cache_mode: aplan_app::CacheMode,
     cache_writer_identity: String,
     written_by: (String, String),
+    running_build: aplan_config::RunningBuild,
 ) -> std::io::Result<()> {
     let service = rmcp::serve_server(
         AplanServer::new(
@@ -906,6 +915,7 @@ pub async fn serve(
             cache_mode,
             cache_writer_identity,
             written_by,
+            Some(running_build),
         ),
         rmcp::transport::io::stdio(),
     )
@@ -974,7 +984,8 @@ mod tests {
             serde_json::json!({}),
             aplan_app::CacheMode::Off,
             "mcp-context-test".to_string(),
-            ("test".to_string(), "surface".to_string()),
+            ("0.8.0-dev".to_string(), "0123456789ab".to_string()),
+            None,
         )
     }
 
@@ -1047,7 +1058,8 @@ mod tests {
             serde_json::json!({}),
             aplan_app::CacheMode::Auto,
             "mcp-cache-test".to_string(),
-            ("test".to_string(), "test".to_string()),
+            ("0.8.0-dev".to_string(), "0123456789ab".to_string()),
+            None,
         );
         server.cache_root = Some(temporary.path().join("cache"));
 
@@ -1214,6 +1226,49 @@ mod tests {
                 .expect("launch task after malformed root")
                 .contains("status: todo"),
             "an invalid explicit root must not mutate the launch repository"
+        );
+    }
+
+    #[test]
+    fn explicit_root_enforces_requires_against_injected_running_build_before_unknown_keys() {
+        let launch = repository("aplan-mcp-req-launch-", "aplan", "root: aplan\n");
+        std::fs::write(
+            launch.path().join("aplan/A-1.md"),
+            task("A-1", "launch", true, false),
+        )
+        .expect("launch task");
+
+        let selected = repository(
+            "aplan-mcp-req-selected-",
+            "aplan",
+            "requires:\n  min_version: '0.8.0'\n  capabilities: [build.tui]\n\
+             future_config_key: 123\n",
+        );
+        std::fs::write(
+            selected.path().join("aplan/B-1.md"),
+            task("B-1", "selected", true, false),
+        )
+        .expect("selected task");
+
+        let mut server = server_for(launch.path());
+        server.running_build = Some(std::sync::Arc::new(aplan_config::RunningBuild {
+            version: "0.8.0-dev".to_string(),
+            source: None,
+            facts_sha256: "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+                .to_string(),
+            advertised_capabilities: ["check".to_string()].into_iter().collect(),
+        }));
+
+        let err = server
+            .dispatch("aplan_check", &serde_json::json!({"root": selected.path()}))
+            .expect_err("explicit root violating `requires` must be refused");
+        assert!(err.contains("does not satisfy `requires`"), "{err}");
+        assert!(err.contains("0.8.0"), "{err}");
+        assert!(err.contains("build.tui"), "{err}");
+        assert!(err.contains("source=unknown"), "{err}");
+        assert!(
+            !err.contains("future_config_key"),
+            "pre-schema requires must fire before unknown keys:\n{err}"
         );
     }
 }

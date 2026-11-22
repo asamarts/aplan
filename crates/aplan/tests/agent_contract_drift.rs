@@ -262,3 +262,213 @@ mod not_actually_stale {
         );
     }
 }
+
+/// Proves `agent_contract.provenance_does_not_block_policy` (`A2-122`,
+/// ADR-0072): build-only provenance skew (including two same-version `-dev`
+/// builds and a first-time contributor on an unpinned `PATH`) does NOT fire
+/// `APLAN041` or block `check`, `verify`, `export-agents-md --check`, or MCP
+/// `aplan_check`, even under `deny_warnings: true` without `advisory`, while
+/// keeping the non-blocking provenance signal visible with both identities and
+/// the `.aplan.yml` `requires` pin route.
+#[test]
+fn provenance_only_drift_does_not_block_check_verify_or_mcp() {
+    let dir = stale_repo();
+    std::fs::write(
+        dir.path().join(".aplan.yml"),
+        "root: aplan\ndeny_warnings: true\nevidence:\n  require_min_strength: [commit]\n",
+    )
+    .expect("config");
+    regenerate(dir.path());
+
+    // Simulate a second same-version `-dev` build writing the identical policy
+    // block with a different surface digest.
+    let (version, surface) = aplan::written_by();
+    let mine = format!("<!-- written by aplan {version}, surface {surface} -->");
+    let other_surface = if surface == "000000000000" {
+        "111111111111"
+    } else {
+        "000000000000"
+    };
+    let theirs = format!("<!-- written by aplan {version}, surface {other_surface} -->");
+    let agents_path = dir.path().join("AGENTS.md");
+    let doctored = std::fs::read_to_string(&agents_path)
+        .expect("read AGENTS.md")
+        .replace(&mine, &theirs);
+    std::fs::write(&agents_path, &doctored).expect("write doctored AGENTS.md");
+
+    // `check` under `deny_warnings: true` passes with 0 warnings and emits the
+    // non-blocking provenance note naming both builds and `.aplan.yml` `requires`.
+    let (check_out, check_code) = aplan(dir.path(), &["check"]);
+    assert_eq!(
+        check_code, 0,
+        "provenance-only drift blocked `check`:\n{check_out}"
+    );
+    assert!(!check_out.contains("APLAN041"), "{check_out}");
+    assert!(check_out.contains(&surface), "{check_out}");
+    assert!(check_out.contains(other_surface), "{check_out}");
+    assert!(check_out.contains("requires"), "{check_out}");
+    assert!(
+        !check_out.contains("Run `aplan export-agents-md --write"),
+        "must not tell a contributor on unpinned PATH to regenerate:\n{check_out}"
+    );
+
+    // `check --format json` carries zero warnings and the structured
+    // `agent_contract_provenance` object.
+    let json_raw = common::output(dir.path(), &["check", "--format", "json"]);
+    assert!(json_raw.status.success(), "{json_raw:?}");
+    let doc: serde_json::Value = serde_json::from_slice(&json_raw.stdout).expect("check json");
+    assert_eq!(doc["warnings"], 0, "{doc}");
+    assert_eq!(doc["errors"], 0, "{doc}");
+    assert!(
+        doc["agent_contract_provenance"]["written_by"]
+            .as_str()
+            .is_some_and(|w| w.contains(other_surface)),
+        "{doc}"
+    );
+    assert!(
+        doc["agent_contract_provenance"]["checked_by"]
+            .as_str()
+            .is_some_and(|c| c.contains(&surface)),
+        "{doc}"
+    );
+
+    // `export-agents-md --check` passes too while surfacing the same note.
+    let (export_out, export_code) =
+        aplan(dir.path(), &["export-agents-md", "--check", "AGENTS.md"]);
+    assert_eq!(export_code, 0, "{export_out}");
+    assert!(export_out.contains(other_surface), "{export_out}");
+    assert!(export_out.contains("requires"), "{export_out}");
+
+    // `verify` under `deny_warnings: true` passes too.
+    for args in [
+        vec!["init", "-q"],
+        vec!["config", "user.email", "t@example.invalid"],
+        vec!["config", "user.name", "t"],
+        vec!["add", "-A"],
+        vec!["commit", "-qm", "fixture"],
+    ] {
+        let out = std::process::Command::new("git")
+            .args(&args)
+            .current_dir(dir.path())
+            .output()
+            .expect("git");
+        assert!(out.status.success(), "git {args:?}");
+    }
+    let (verify_out, verify_code) = aplan(dir.path(), &["verify"]);
+    assert_eq!(
+        verify_code, 0,
+        "provenance-only drift blocked `verify`:\n{verify_out}"
+    );
+    assert!(!verify_out.contains("APLAN041"), "{verify_out}");
+    assert!(verify_out.contains(other_surface), "{verify_out}");
+
+    assert_mcp_check_reports_non_blocking_provenance(dir.path(), other_surface);
+}
+
+fn assert_mcp_check_reports_non_blocking_provenance(root: &std::path::Path, other_surface: &str) {
+    // MCP `aplan_check` reports `denied: false`, `warnings: 0`, and carries
+    // `agent_contract_provenance`.
+    let init = r#"{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2024-11-05","capabilities":{},"clientInfo":{"name":"t","version":"1"}}}"#;
+    let call = r#"{"jsonrpc":"2.0","id":2,"method":"tools/call","params":{"name":"aplan_check","arguments":{}}}"#;
+    let mut child = common::command(root, &["mcp"])
+        .stdin(std::process::Stdio::piped())
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::piped())
+        .spawn()
+        .expect("spawn mcp");
+    {
+        use std::io::Write as _;
+        let stdin = child.stdin.as_mut().expect("stdin");
+        writeln!(stdin, "{init}").expect("init");
+        writeln!(stdin, "{call}").expect("call");
+    }
+    let mcp_out = child.wait_with_output().expect("mcp exits");
+    let stdout = String::from_utf8_lossy(&mcp_out.stdout);
+    let check_line = stdout
+        .lines()
+        .find(|line| line.contains(r#""id":2"#))
+        .unwrap_or_else(|| panic!("expected id:2 response:\n{stdout}"));
+    let rpc: serde_json::Value = serde_json::from_str(check_line).expect("jsonrpc response");
+    assert_eq!(rpc["result"]["isError"], serde_json::Value::Bool(false));
+    let text = rpc["result"]["content"][0]["text"]
+        .as_str()
+        .expect("mcp text content");
+    let payload: serde_json::Value = serde_json::from_str(text).expect("check json payload");
+    assert_eq!(payload["denied"], serde_json::Value::Bool(false), "{text}");
+    assert_eq!(payload["errors"], serde_json::json!(0), "{text}");
+    assert_eq!(payload["warnings"], serde_json::json!(0), "{text}");
+    assert!(!text.contains("APLAN041"), "{text}");
+    assert!(
+        payload["agent_contract_provenance"]["written_by"]
+            .as_str()
+            .is_some_and(|w| w.contains(other_surface)),
+        "{text}"
+    );
+}
+
+/// Proves `agent_contract.provenance_does_not_block_policy` (`A2-122`,
+/// ADR-0072): a real repository-policy change (including runner configuration)
+/// still fires `APLAN041`, blocks under `deny_warnings: true`, and retains the
+/// exact repair command.
+#[test]
+fn policy_only_drift_still_blocks_with_exact_repair() {
+    let dir = stale_repo();
+    std::fs::write(
+        dir.path().join(".aplan.yml"),
+        "root: aplan\ndeny_warnings: true\nevidence:\n  require_min_strength: [test]\n",
+    )
+    .expect("config");
+    regenerate(dir.path());
+
+    // Add a configured test runner -- a real repository policy change.
+    std::fs::write(
+        dir.path().join(".aplan.yml"),
+        "root: aplan\ndeny_warnings: true\nevidence:\n  require_min_strength: [test]\n\
+         test:\n  - name: unit\n    list: [echo, t]\n    run: [echo, '{test}']\n",
+    )
+    .expect("updated config");
+
+    let (out, code) = aplan(dir.path(), &["check"]);
+    assert_eq!(code, 1, "runner config drift must still block:\n{out}");
+    assert!(out.contains("APLAN041"), "{out}");
+    assert!(
+        out.contains("aplan export-agents-md --write AGENTS.md"),
+        "{out}"
+    );
+
+    regenerate(dir.path());
+    let (clean, code) = aplan(dir.path(), &["check"]);
+    assert_eq!(code, 0, "regenerating clears real policy drift:\n{clean}");
+    assert!(!clean.contains("APLAN041"), "{clean}");
+}
+
+/// `A2-122`: duplicate or malformed provenance comments block `check` under
+/// `deny_warnings: true` with `APLAN041` rather than being silently normalized.
+#[test]
+fn malformed_or_duplicate_provenance_blocks_check() {
+    let dir = stale_repo();
+    std::fs::write(
+        dir.path().join(".aplan.yml"),
+        "root: aplan\ndeny_warnings: true\nevidence:\n  require_min_strength: [commit]\n",
+    )
+    .expect("config");
+    regenerate(dir.path());
+
+    let (version, surface) = aplan::written_by();
+    let mine = format!("<!-- written by aplan {version}, surface {surface} -->");
+    let path = dir.path().join("AGENTS.md");
+    let text = std::fs::read_to_string(&path).expect("read");
+    std::fs::write(
+        &path,
+        text.replace(
+            &mine,
+            &format!("{mine}\n<!-- written by aplan 0.7.0, surface 000000000000 -->"),
+        ),
+    )
+    .expect("write duplicate provenance");
+
+    let (out, code) = aplan(dir.path(), &["check"]);
+    assert_eq!(code, 1, "duplicate provenance must fire APLAN041:\n{out}");
+    assert!(out.contains("APLAN041"), "{out}");
+    assert!(out.contains("malformed provenance"), "{out}");
+}

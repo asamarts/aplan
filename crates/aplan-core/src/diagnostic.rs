@@ -1614,11 +1614,32 @@ impl Diagnostic {
     }
 }
 
+/// Non-blocking diagnostic emitted when a committed `AGENTS.md` block matches
+/// repository policy and carries well-formed (or pre-ADR-0037 absent)
+/// provenance, but names a different writer build than the one checking it
+/// (`ADR-0072`, `A2-122`).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct AgentContractProvenance {
+    /// Path of the checked `AGENTS.md` file.
+    pub file: PathBuf,
+    /// Writer build named by the block's provenance comment, or `None` when no
+    /// provenance comment was present.
+    pub written_by: Option<String>,
+    /// Running build that checked the block.
+    pub checked_by: String,
+    /// Actionable, non-blocking guidance naming both builds and `.aplan.yml`'s
+    /// `requires` / `docs/upgrading.md` route, without advising blind
+    /// regeneration with the currently running build.
+    pub note: String,
+}
+
 /// The result of a validation run.
 #[derive(Debug, Clone, Default)]
 pub struct Report {
     pub diagnostics: Vec<Diagnostic>,
     pub tasks_checked: usize,
+    /// Non-blocking build-only provenance skew observed on `AGENTS.md`, if any.
+    pub agent_contract_provenance: Option<AgentContractProvenance>,
 }
 
 impl Report {
@@ -1719,6 +1740,7 @@ mod tests {
                 .map(|_| Diagnostic::error(code::CYCLE, "e"))
                 .chain((0..warnings).map(|_| Diagnostic::warning(code::MISSING_EFFORT, "w")))
                 .collect(),
+            agent_contract_provenance: None,
         };
 
         // An error denies whatever the policy says: the policy is about warnings.

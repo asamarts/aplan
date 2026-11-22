@@ -873,13 +873,9 @@ fn the_written_block_names_the_build_that_wrote_it() {
     );
 }
 
-/// Two builds disagreeing is what `--check` now reports, and it reports it as a
-/// build difference rather than as thirty lines of unexplained diff
-/// (`A1-325`).
-///
-/// Driven by editing the provenance line in a file this build just wrote, which
-/// is what a foreign build's output looks like from here: everything else about
-/// the block is byte-identical, so the diff is the one line.
+/// Build-only provenance skew does NOT fail `export-agents-md --check`, while
+/// still surfacing both build identities and `.aplan.yml`'s `requires` route
+/// without advising blind regeneration (`A1-325`, `A2-122`, ADR-0072).
 #[test]
 fn a_block_written_by_another_build_is_reported_as_that() {
     let dir = tempfile::Builder::new()
@@ -899,9 +895,123 @@ fn a_block_written_by_another_build_is_reported_as_that() {
     std::fs::write(&path, &doctored).expect("AGENTS.md");
 
     let (out, code) = common::aplan(dir.path(), &["export-agents-md", "--check", "AGENTS.md"]);
-    assert_ne!(code, 0, "a foreign build's block passed the gate: {out}");
-    assert!(
-        out.contains(&version),
-        "the report does not name the build doing the checking: {out}"
+    assert_eq!(
+        code, 0,
+        "build-only provenance skew must not block a matching policy contract:\n{out}"
     );
+    assert!(
+        out.contains(&version) && out.contains(&surface),
+        "the report must name the checking build: {out}"
+    );
+    assert!(
+        out.contains("0.0.1") && out.contains("000000000000"),
+        "the report must name the writer build: {out}"
+    );
+    assert!(
+        out.contains("requires") && out.contains("docs/upgrading.md"),
+        "the report must point to the documented pin/require route: {out}"
+    );
+    assert!(
+        !out.contains("Regenerate it with"),
+        "must not tell a contributor to regenerate with an unpinned build:\n{out}"
+    );
+}
+
+/// Proves `agent_contract.provenance_does_not_block_policy` (`A2-122`,
+/// ADR-0072): two builds exposing different MCP tool sets render one
+/// byte-identical policy body, and `export-agents-md` teaches live MCP
+/// discovery (`tools/list` and `aplan_identity`) rather than embedding a
+/// build-specific static tool list.
+#[test]
+fn two_builds_with_different_mcp_catalogues_keep_one_policy_body() {
+    let dir = tempfile::Builder::new()
+        .tempdir_in(aplan_core::fixture::fixture_root())
+        .expect("tempdir");
+    fixture(dir.path());
+    let (exported, err, ok) = run(dir.path(), &["export-agents-md"]);
+    assert!(ok, "{err}");
+    assert!(exported.contains("## Through MCP"), "{exported}");
+    assert!(exported.contains("`tools/list`"), "{exported}");
+    assert!(exported.contains("`aplan_identity`"), "{exported}");
+    assert!(
+        !exported.contains("- `aplan_ready` --"),
+        "committed AGENTS.md must not hardcode a static MCP tool list:\n{exported}"
+    );
+
+    let base = aplan_output::AgentContract {
+        plan_dir: Some("aplan".into()),
+        id_examples: vec!["WH2-nn".into()],
+        min_strength: vec!["commit".into(), "test".into()],
+        tools: vec![("aplan_ready".into(), "Old summary.".into())],
+        ..aplan_output::AgentContract::default()
+    };
+    let newer_mcp = aplan_output::AgentContract {
+        tools: vec![
+            ("aplan_ready".into(), "New summary.".into()),
+            ("aplan_future".into(), "A newer build's extra tool.".into()),
+        ],
+        ..base.clone()
+    };
+    let left = aplan_output::render_agents_md(
+        &base,
+        Some(&aplan_output::WrittenBy {
+            version: "0.8.0-dev",
+            surface: "111111111111",
+        }),
+    );
+    let right = aplan_output::render_agents_md(
+        &newer_mcp,
+        Some(&aplan_output::WrittenBy {
+            version: "0.8.0-dev",
+            surface: "222222222222",
+        }),
+    );
+    let aplan_core::contract::Block::Present(left_inner) = aplan_core::contract::block_in(&left)
+    else {
+        panic!("missing left block");
+    };
+    let aplan_core::contract::Block::Present(right_inner) = aplan_core::contract::block_in(&right)
+    else {
+        panic!("missing right block");
+    };
+    let (_, left_policy) = aplan_core::contract::parse_provenance(left_inner);
+    let (_, right_policy) = aplan_core::contract::parse_provenance(right_inner);
+    assert_eq!(
+        left_policy, right_policy,
+        "different MCP catalogues must not diverge the policy body"
+    );
+}
+
+/// `A2-122`: malformed or duplicate provenance lines still fail
+/// `export-agents-md --check` rather than being silently normalized away.
+#[test]
+fn malformed_or_duplicate_provenance_still_fails_export_agents_md_check() {
+    let dir = tempfile::Builder::new()
+        .tempdir_in(aplan_core::fixture::fixture_root())
+        .expect("tempdir");
+    fixture(dir.path());
+    let path = dir.path().join("AGENTS.md");
+    let (out, code) = common::aplan(dir.path(), &["export-agents-md", "--write", "AGENTS.md"]);
+    assert_eq!(code, 0, "{out}");
+
+    let (version, surface) = aplan::written_by();
+    let mine = format!("<!-- written by aplan {version}, surface {surface} -->");
+    let original = std::fs::read_to_string(&path).expect("AGENTS.md");
+
+    // Duplicate provenance lines.
+    let dup = original.replace(
+        &mine,
+        &format!("{mine}\n<!-- written by aplan 0.7.0, surface 000000000000 -->"),
+    );
+    std::fs::write(&path, &dup).expect("write dup");
+    let (out, code) = common::aplan(dir.path(), &["export-agents-md", "--check", "AGENTS.md"]);
+    assert_eq!(code, 1, "duplicate provenance must fail --check:\n{out}");
+    assert!(out.contains("malformed provenance"), "{out}");
+
+    // Malformed provenance comment.
+    let broken = original.replace(&mine, "<!-- written by aplan 0.7.0, surface NOTHEX -->");
+    std::fs::write(&path, &broken).expect("write broken");
+    let (out, code) = common::aplan(dir.path(), &["export-agents-md", "--check", "AGENTS.md"]);
+    assert_eq!(code, 1, "malformed provenance must fail --check:\n{out}");
+    assert!(out.contains("malformed provenance"), "{out}");
 }

@@ -2721,6 +2721,25 @@ pub const ALL: &[Behaviour] = &[
             "a_block_written_by_another_build_is_reported_as_a_build_difference",
         ],
     },
+    // `A2-122`, ADR-0072. Partially supersedes ADR-0037 where writer provenance
+    // or a build's static MCP tool list could make `APLAN041` or
+    // `export-agents-md --check` block an unchanged repository policy. No new
+    // rule code appears, so adopters asserting the narrowed `APLAN041`
+    // semantics need a named behaviour.
+    Behaviour {
+        name: "agent_contract.provenance_does_not_block_policy",
+        what: "`APLAN041` and `export-agents-md --check` gate repository policy and provenance \
+               well-formedness without blocking on writer-build provenance skew or build-specific \
+               static MCP tool lists, while preserving a non-blocking provenance diagnostic naming \
+               both builds and `.aplan.yml` `requires`",
+        proof: &[
+            "a_block_written_by_another_build_is_reported_as_a_build_difference",
+            "malformed_or_duplicate_provenance_still_fires_aplan041",
+            "agent_contract_drift::provenance_only_drift_does_not_block_check_verify_or_mcp",
+            "agent_contract_drift::policy_only_drift_still_blocks_with_exact_repair",
+            "agents_md::two_builds_with_different_mcp_catalogues_keep_one_policy_body",
+        ],
+    },
     Behaviour {
         name: "why.cut_bounded_by_default",
         what: "`aplan why` reports an unfinished cut as itself rather than walking into its \
