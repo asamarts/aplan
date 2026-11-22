@@ -9,7 +9,7 @@
 | cut | status | done/total | ready | blocked | effort | weeks | critical path |
 | --- | --- | --- | --- | --- | --- | --- | --- |
 | v0.7 | done | 30/30 | 0 | 0 | 22.8d | 0.8 (0.0 left) | 3.5d |
-| v0.8 | todo | 10/35 | 24 | 1 | 48.8d | 1.8 (1.4 left) | 4.5d |
+| v0.8 | todo | 13/35 | 22 | 0 | 48.8d | 1.8 (1.2 left) | 4.5d |
 | adoption | todo | 0/81 | 0 | 81 | 105.8d | 3.9 (3.9 left) | 10.0d |
 | backlog | todo | 0/1 | 0 | 1 | 1.0d | <0.1 (<0.1 left) | 1.0d |
 | hardening | todo | 0/15 | 0 | 15 | 14.8d | 0.5 (0.5 left) | 3.0d |
@@ -58,15 +58,15 @@
 | --- | --- | --- | --- | --- |
 | A2-034 | Report a task whose body is still the add placeholder | todo | - | - |
 | A2-050 | Decide how a trace reports retargeting to a different element kind | done | - | commit:d84c89db8489, file:docs/adr/0069-a-trace-anchor-retargeting-to-another-element-kind-is-an-error.md |
-| A2-051 | Report a trace that silently retargets from a heading to a table row | todo | A2-050 | - |
+| A2-051 | Report a trace that silently retargets from a heading to a table row | done | A2-050 | commit:9098490b5fa9, test:anchor::adr0069_and_frontmatter_tests::element_kind_stamps_detect_retargeting_and_keep_legacy_bare_stamps_valid, test:validate::tests::trace_retargeting_between_heading_and_row_blocks_closed_tasks_even_when_drift_is_advisory, test:tests::trace_retargeting_between_heading_and_row_emits_blocking_aplan060_on_open_tasks, test:drift::trace_retargeting_between_heading_and_row_blocks_check_and_verify_even_when_drift_is_advisory |
 | A2-052 | Decide what counts as review that clears APLAN045 | done | - | commit:d84c89db8489, file:docs/adr/0070-open-trace-drift-clears-only-on-substantive-edit-or-explicit-review.md |
-| A2-053 | Clear APLAN045 only on an edit that shows somebody reviewed the task | todo | A2-052, A2-051 | - |
+| A2-053 | Clear APLAN045 only on an edit that shows somebody reviewed the task | done | A2-052, A2-051 | commit:9098490b5fa9, test:task::tests::substantive_content_ignores_metadata_and_formatting_churn, test:tests::stale_premise_ignores_metadata_edits_and_clears_on_substantive_edit_or_review, test:drift::review_clears_stale_premise_and_rearms_when_section_moves_again, test:mcp_parity::every_tool_agrees_with_the_command_it_mirrors |
 | A2-054 | Keep an evidence observation proven current from reading stale on the next read | todo | - | - |
 | A2-055 | Stop aplan_add reporting a concurrent change against an unchanged plan | todo | - | - |
 | A2-056 | Decide whether a live task's exact path that matches nothing is reported | done | - | commit:d84c89db8489, file:docs/adr/0071-live-unmatched-paths-report-only-provably-stranded-targets-and-bare-directories.md |
 | A2-062 | A trace fingerprint says nothing about the build that computed it | todo | - | - |
 | A2-081 | A stale installed binary cannot read a newer plan, and the adopter must notice | done | - | commit:d84c89db8489, file:docs/adr/0068-a-plan-declares-the-build-contract-it-requires.md, file:docs/upgrading.md |
-| A2-085 | A YAML front-matter delimiter mints a heading anchor the rendered document does not have | todo | - | - |
+| A2-085 | A YAML front-matter delimiter mints a heading anchor the rendered document does not have | done | - | commit:9098490b5fa9, test:anchor::adr0069_and_frontmatter_tests::frontmatter_and_nested_metadata_delimiters_mint_no_heading_anchors, test:drift::frontmatter_and_nested_metadata_delimiters_reject_traced_keys_end_to_end |
 | A2-091 | APLAN019 lets a live path entry hide every dead sibling | todo | - | - |
 | A2-095 | Report rendering treats transient WouldBlock as a plan failure | todo | - | - |
 | A2-096 | The agent format appends prose after JSON and is not parseable | todo | - | - |
