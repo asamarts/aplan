@@ -196,13 +196,15 @@ fn is_under(path: &str, root: &str) -> bool {
 
 #[cfg(test)]
 fn resolve_plan_base(workdir: Option<std::path::PathBuf>, repo_root: &Path) -> std::path::PathBuf {
-    crate::repo::resolve_effective_workdir(workdir, repo_root)
-        .unwrap_or_else(|| repo_root.to_path_buf())
+    crate::repo::resolve_effective_workdir(workdir, repo_root).unwrap_or_else(|| {
+        std::fs::canonicalize(repo_root).unwrap_or_else(|_| repo_root.to_path_buf())
+    })
 }
 
 fn plan_base(repo: &Repo, repo_root: &Path) -> std::path::PathBuf {
-    repo.effective_workdir(repo_root)
-        .unwrap_or_else(|| repo_root.to_path_buf())
+    repo.effective_workdir(repo_root).unwrap_or_else(|| {
+        std::fs::canonicalize(repo_root).unwrap_or_else(|_| repo_root.to_path_buf())
+    })
 }
 
 /// A repository-relative path, whatever spelling the loader recorded.
