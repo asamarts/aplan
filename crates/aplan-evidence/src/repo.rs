@@ -943,6 +943,81 @@ impl Repo {
         Ok(seen)
     }
 
+    /// The most recent commit reachable from `HEAD` in which each task file's
+    /// substantive content (`title`, `body`, `paths`, or `traces`) changed
+    /// (`ADR-0070`, `A2-053`).
+    ///
+    /// Commits that modify only non-substantive metadata (`status`, `tags`,
+    /// `owner`, `blocked_by`, `prefer_after`, `effort_days`, `phase`,
+    /// `revisit_at`, `version_impact`, `ratified_by`, `contains`, `evidence`,
+    /// fingerprints, or frontmatter formatting/comments) are skipped until a
+    /// substantive edit or the task file's creation commit is reached.
+    pub fn last_substantive_commit(
+        &self,
+        paths: &[PathBuf],
+    ) -> Result<std::collections::BTreeMap<PathBuf, String>, Error> {
+        let mut wanted: std::collections::BTreeSet<PathBuf> = paths.iter().cloned().collect();
+        let mut seen: std::collections::BTreeMap<PathBuf, String> =
+            std::collections::BTreeMap::new();
+        if wanted.is_empty() {
+            return Ok(seen);
+        }
+        let Some(head) = self.inner.head().ok().and_then(|h| h.peel_to_commit().ok()) else {
+            return Ok(seen);
+        };
+        let mut walk = self.inner.revwalk()?;
+        walk.push(head.id())?;
+        walk.set_sorting(git2::Sort::TOPOLOGICAL | git2::Sort::TIME)?;
+        for oid in walk {
+            if wanted.is_empty() {
+                break;
+            }
+            let oid = oid?;
+            let commit = self.inner.find_commit(oid)?;
+            let tree = commit.tree()?;
+            let parent = commit.parent(0).ok().and_then(|p| p.tree().ok());
+            let diff = self
+                .inner
+                .diff_tree_to_tree(parent.as_ref(), Some(&tree), None)?;
+            let mut touched: Vec<PathBuf> = Vec::new();
+            for delta in diff.deltas() {
+                for path in [delta.new_file().path(), delta.old_file().path()]
+                    .into_iter()
+                    .flatten()
+                {
+                    let candidate = path.to_path_buf();
+                    if wanted.contains(&candidate) && !touched.contains(&candidate) {
+                        touched.push(candidate);
+                    }
+                }
+            }
+            for path in touched {
+                let curr_text = read_tree_text(&self.inner, &tree, &path);
+                let prev_text = parent
+                    .as_ref()
+                    .and_then(|p| read_tree_text(&self.inner, p, &path));
+                let is_substantive = match (curr_text.as_deref(), prev_text.as_deref()) {
+                    // Task creation commit (or deletion/re-creation): always a baseline.
+                    (Some(_), None) | (None, _) => true,
+                    (Some(curr), Some(prev)) => {
+                        match (
+                            aplan_core::substantive_content(curr),
+                            aplan_core::substantive_content(prev),
+                        ) {
+                            (Some(c), Some(p)) => c != p,
+                            // Non-task or unparseable historical bytes fall back to raw diff.
+                            _ => curr != prev,
+                        }
+                    }
+                };
+                if is_substantive && wanted.remove(&path) {
+                    seen.insert(path, oid.to_string());
+                }
+            }
+        }
+        Ok(seen)
+    }
+
     pub fn tracked_paths(&self) -> Result<Vec<PathBuf>, Error> {
         let index = self.inner.index()?;
         Ok(index
@@ -1302,6 +1377,12 @@ fn normalize_repository_path(path: &Path) -> Option<PathBuf> {
         }
     }
     Some(out)
+}
+
+fn read_tree_text(repo: &Repository, tree: &git2::Tree<'_>, path: &Path) -> Option<String> {
+    let entry = tree.get_path(path).ok()?;
+    let blob = repo.find_blob(entry.id()).ok()?;
+    std::str::from_utf8(blob.content()).ok().map(str::to_string)
 }
 
 /// Resolve a usable working directory from libgit2's recorded `workdir` and a

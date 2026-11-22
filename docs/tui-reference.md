@@ -277,6 +277,14 @@ portfolio unparking is an all-or-none claim-aware batch that clears scheduling m
 aplan unpark T-123
 ```
 
+### `review` (CLI-only)
+
+recording a live trace-review stamp asserts that the author re-read each traced section outside the TUI and confirmed the task still holds without substantive edits, so it remains an explicit CLI and MCP command
+
+```sh
+aplan review T-123
+```
+
 ### `blueprint` (CLI-only)
 
 blueprint application captures a caller-selected local file and renders its complete predicted graph before an explicit guarded batch write, so it remains a copyable command until the TUI has a file picker and full multi-task review form

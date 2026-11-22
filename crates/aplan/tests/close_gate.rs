@@ -362,7 +362,7 @@ fn close_replaces_a_live_fingerprint_block_end_to_end() {
     );
     assert_eq!(
         task.trace_fingerprints.get("DOC.md#intro"),
-        aplan_core::anchor::fingerprint_in("DOC.md", doc, "intro").as_ref()
+        aplan_core::anchor::stamp_in("DOC.md", doc, "intro").as_ref()
     );
     assert!(
         task.evidence_fingerprints.contains_key("file:DOC.md"),

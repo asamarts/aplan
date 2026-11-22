@@ -127,6 +127,10 @@ const PARITY: &[(&str, Option<(Parity, Comparison)>)] = &[
         "aplan_stop",
         Some((Parity::File, stop_leaves_the_same_file)),
     ),
+    (
+        "aplan_review",
+        Some((Parity::File, review_leaves_the_same_file)),
+    ),
 ];
 
 /// The two surfaces write the same claim, and refuse the same takeover
@@ -270,6 +274,49 @@ fn stop_leaves_the_same_file() -> Result<(), String> {
         return Err(format!(
             "the surfaces disagree about stopping a `todo` task: cli refused \
              {cli_refused}, mcp refused {mcp_refused}"
+        ));
+    }
+    Ok(())
+}
+
+/// `A2-053` (`ADR-0070`): `aplan review` and `aplan_review` write byte-identical
+/// kind-tagged `trace_fingerprints` onto a live traced task and refuse terminal
+/// or untraced tasks identically.
+fn review_leaves_the_same_file() -> Result<(), String> {
+    let (cli_dir, mcp_dir) = two_fixtures();
+    for dir in [&cli_dir, &mcp_dir] {
+        std::fs::write(
+            dir.path().join("DESIGN.md"),
+            "## Beta\n\nSpec text.\n\n| Key | Val |\n| --- | --- |\n| Beta | Row text |\n",
+        )
+        .map_err(|e| e.to_string())?;
+        let p = dir.path().join("aplan/tasks/A-1.md");
+        let traced = std::fs::read_to_string(&p)
+            .map_err(|e| e.to_string())?
+            .replace("- DOC.md#intro", "- DESIGN.md#beta");
+        std::fs::write(&p, traced).map_err(|e| e.to_string())?;
+    }
+
+    let out = common::output(cli_dir.path(), &["review", "A-1"]);
+    if !out.status.success() {
+        return Err(format!(
+            "the CLI refused review on a live traced task: {}",
+            String::from_utf8_lossy(&out.stderr)
+        ));
+    }
+    let mut mcp_policy = policy(mcp_dir.path(), false);
+    mcp_policy.options.traces_root = Some(mcp_dir.path().to_path_buf());
+    tools::review(&mcp_dir.path().join("aplan"), "A-1", &mcp_policy)
+        .map_err(|e| format!("the MCP review failed: {e}"))?;
+    same_file(&cli_dir, &mcp_dir, "aplan/tasks/A-1.md")?;
+
+    // `A-2` carries no anchored traces, so both surfaces must refuse it.
+    let out = common::output(cli_dir.path(), &["review", "A-2"]);
+    let cli_refused = !out.status.success();
+    let mcp_refused = tools::review(&mcp_dir.path().join("aplan"), "A-2", &mcp_policy).is_err();
+    if cli_refused != mcp_refused || !cli_refused {
+        return Err(format!(
+            "review refusal diverged: cli_refused={cli_refused}, mcp_refused={mcp_refused}"
         ));
     }
     Ok(())

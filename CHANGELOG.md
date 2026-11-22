@@ -8,6 +8,21 @@ to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Added
 
+- **Dedicated `APLAN060` trace-retargeting error rule and additive kind-tagged `trace_fingerprints`
+  (`A2-051`, ADR-0069, closes #30)**. Resolved trace anchors are now classified as `heading`,
+  `row`, or `node` while preserving `ADR-0015`'s heading-first precedence. Renaming a heading so a
+  trace silently falls through to a same-slug table row (or adding a heading that captures a
+  traced table row) now emits the blocking error `APLAN060` on both open tasks (`verify`, comparing
+  the task's review baseline against `HEAD`) and closed kind-stamped tasks (`check` under
+  `detect_drift`), even when `APLAN018` or `APLAN045` is configured in `advisory`. Same-kind
+  content edits remain `APLAN018` / `APLAN045`. Newly written stamps (`close`, `close --restamp`,
+  `supersede`, `review`) store additive kind-tagged strings (`heading:<16-hex>`, `row:<16-hex>`,
+  `node:<16-hex>`), while legacy bare `<16-hex>` stamps remain accepted with zero migration churn.
+- **`aplan review <ID>` CLI command and `aplan_review` MCP tool (`A2-053`, ADR-0070, closes #31)**.
+  Authors and agents can explicitly record that a live task's traced sections were re-reviewed and
+  still hold without editing task prose. The command writes current kind-tagged `trace_fingerprints`
+  through the guarded surgical writer without committing, and refuses terminal tasks (directing to
+  `aplan close <ID> --restamp`) or tasks without resolvable anchored traces.
 - **Pre-schema `requires` build-contract declaration in `.aplan.yml` (`A2-081`, `A2-193`,
   ADR-0068)**. Repositories may now declare `requires` with `min_version` (bare released `X.Y.Z`
   only; pre-release strings such as `0.8.0-dev` are refused as vacuous pins), `capabilities`
@@ -23,6 +38,15 @@ to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Changed
 
+- **`APLAN045` clears only on substantive task edits or a matching explicit review stamp
+  (`A2-053`, ADR-0070, `--require traces.stale_premise_requires_substantive_edit_or_review`,
+  closes #31)**. `APLAN045` now baselines against the most recent commit (or uncommitted
+  working-tree edit) altering `title`, `body`, `paths`, or `traces`. Mechanical metadata and
+  formatting changes (`status`, `tags`, `owner`, `blocked_by`, `prefer_after`, `effort_days`,
+  `phase`, `revisit_at`, `version_impact`, `ratified_by`, `contains`, or frontmatter churn) no
+  longer silence `APLAN045`. A live task's `trace_fingerprints` clears `APLAN045` only when the
+  stored stamp matches the current traced section (re-firing whenever the section moves again), and
+  `APLAN045`'s fix text names both updating substantive fields and running `aplan review <ID>`.
 - **`APLAN041` and `export-agents-md --check` separate repository policy from writer provenance
   and live MCP tools (`A2-122`, ADR-0072, `--require
   agent_contract.provenance_does_not_block_policy`)**. Generated `AGENTS.md` blocks now point
@@ -38,6 +62,12 @@ to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Fixed
 
+- **YAML frontmatter and nested `---`-fenced metadata blocks no longer mint phantom heading anchors
+  (`A2-085`, `--require traces.frontmatter_delimiters_mint_no_heading_anchors`)**. Markdown anchor
+  extraction previously read the closing `---` of a leading YAML frontmatter block or nested
+  metadata block as a setext h2 underline, minting unrendered anchors and risking false drift on
+  metadata date updates. Both shapes now mint no heading anchors (`APLAN008` rejects traces against
+  them) while real setext headings and thematic breaks followed by setext headings stay intact.
 - **Unknown config-key and task-frontmatter diagnostics direct same-version development users to
   `aplan facts --identity` (`A2-194`, ADR-0068)**. Unknown `.aplan.yml` keys retain their leading
   typo suggestion, running version, accepted-key count, and `aplan facts` pointer while also

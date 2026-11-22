@@ -198,6 +198,7 @@ fn the_server_initializes_and_lists_exactly_its_tools() {
             "aplan_release",
             "aplan_start",
             "aplan_stop",
+            "aplan_review",
         ],
         "the surface an agent sees changed. This list is deliberately short: a tool \
          earns a place by being on the loop an agent must complete, which is why \
