@@ -9,7 +9,7 @@
 | cut | status | done/total | ready | blocked | effort | weeks | critical path |
 | --- | --- | --- | --- | --- | --- | --- | --- |
 | v0.7 | done | 30/30 | 0 | 0 | 22.8d | 0.8 (0.0 left) | 3.5d |
-| v0.8 | todo | 14/36 | 22 | 0 | 49.2d | 1.8 (1.2 left) | 4.5d |
+| v0.8 | todo | 18/36 | 18 | 0 | 49.2d | 1.8 (0.9 left) | 4.5d |
 | adoption | todo | 0/81 | 0 | 81 | 105.8d | 3.9 (3.9 left) | 10.0d |
 | backlog | todo | 0/1 | 0 | 1 | 1.0d | <0.1 (<0.1 left) | 1.0d |
 | hardening | todo | 0/15 | 0 | 15 | 14.8d | 0.5 (0.5 left) | 3.0d |
@@ -67,13 +67,13 @@
 | A2-062 | A trace fingerprint says nothing about the build that computed it | todo | - | - |
 | A2-081 | A stale installed binary cannot read a newer plan, and the adopter must notice | done | - | commit:d84c89db8489, file:docs/adr/0068-a-plan-declares-the-build-contract-it-requires.md, file:docs/upgrading.md |
 | A2-085 | A YAML front-matter delimiter mints a heading anchor the rendered document does not have | done | - | commit:9098490b5fa9, test:anchor::adr0069_and_frontmatter_tests::frontmatter_and_nested_metadata_delimiters_mint_no_heading_anchors, test:drift::frontmatter_and_nested_metadata_delimiters_reject_traced_keys_end_to_end |
-| A2-091 | APLAN019 lets a live path entry hide every dead sibling | todo | - | - |
+| A2-091 | APLAN019 lets a live path entry hide every dead sibling | done | - | commit:7f5832a3647f, test:tests::aplan019_reports_every_dead_entry_even_beside_a_bound_sibling, test:close_gate::a_dead_sibling_glob_is_reported_even_beside_a_bound_citation |
 | A2-095 | Report rendering treats transient WouldBlock as a plan failure | todo | - | - |
 | A2-096 | The agent format appends prose after JSON and is not parseable | todo | - | - |
 | A2-097 | A plan with several id families cannot declare which one a cut mints | todo | - | - |
-| A2-099 | A live catch-all paths claim fails only after the work is finished | todo | - | - |
-| A2-101 | File renames silently strand paths on live tasks | todo | A2-056 | - |
-| A2-106 | Duplicate evidence citations are accepted and stored silently | todo | - | - |
+| A2-099 | A live catch-all paths claim fails only after the work is finished | done | - | commit:7f5832a3647f, commit:275b042befe8, test:validate::tests::universal_path_glob_fires_on_live_non_milestone_only |
+| A2-101 | File renames silently strand paths on live tasks | done | A2-056 | commit:275b042befe8, test:tests::aplan063_reports_stranded_rename_ambiguity_and_bare_dir_on_live_tasks_only, test:close_gate::retarget_path_updates_live_tasks_atomically_and_preserves_terminal_tasks |
+| A2-106 | Duplicate evidence citations are accepted and stored silently | done | - | commit:7f5832a3647f, commit:275b042befe8, test:validate::tests::duplicate_evidence_covers_zero_one_two_three_non_adjacent_and_families, test:close::tests::close_and_amend_refuse_duplicate_evidence_by_canonical_key, test:tests::verify_deduplicates_duplicate_evidence_citations |
 | A2-122 | Stop build-only AGENTS.md provenance drift from blocking a correct contract | done | A2-081 | commit:bacb6ab, file:docs/adr/0072-agent-contract-policy-drift-is-separate-from-build-provenance-and-live-tools.md, test:contract::tests::duplicate_and_malformed_provenance_lines_are_classified_as_malformed, test:validate::tests::agents_block::a_block_written_by_another_build_is_reported_as_a_build_difference, test:validate::tests::agents_block::malformed_or_duplicate_provenance_still_fires_aplan041, test:agent_contract_drift::provenance_only_drift_does_not_block_check_verify_or_mcp, test:agent_contract_drift::policy_only_drift_still_blocks_with_exact_repair, test:agent_contract_drift::malformed_or_duplicate_provenance_blocks_check, test:agents_md::two_builds_with_different_mcp_catalogues_keep_one_policy_body, test:agents_md::malformed_or_duplicate_provenance_still_fails_export_agents_md_check |
 | A2-140 | Let generated agent contracts name a repository launcher | todo | - | - |
 | A2-142 | Claim usage errors can publish claim state | todo | - | - |

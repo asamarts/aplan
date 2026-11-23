@@ -9535,6 +9535,10 @@ mod tests {
         }
         let ids: Vec<_> = a61.iter().filter_map(|d| d.task.as_deref()).collect();
         assert_eq!(ids, vec!["LIVE-1", "LIVE-2", "LIVE-3", "LIVE-3"]);
+        assert!(
+            crate::task::is_universal_path_glob("**\\*"),
+            "Windows backslash universal globs must match identically to forward-slash globs"
+        );
     }
 
     /// `A2-106`: `APLAN062` detects duplicate evidence citations across 0, 1,

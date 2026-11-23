@@ -233,6 +233,49 @@ pub enum StrandedPathHistory {
     },
 }
 
+fn collect_rename_candidates(
+    diff: &mut git2::Diff<'_>,
+    target: &Path,
+    old_oid: git2::Oid,
+    tracked_set: &std::collections::BTreeSet<String>,
+) -> Result<Vec<String>, Error> {
+    let mut candidates = std::collections::BTreeSet::new();
+
+    // 1. Exact-OID matches added in the same diff: catches unmodified renames
+    //    and multi-file splits/copies where two or more destinations share the
+    //    old blob (ambiguity).
+    for delta in diff.deltas() {
+        if delta.status() == git2::Delta::Added
+            && delta.new_file().id() == old_oid
+            && let Some(new_p) = delta.new_file().path()
+        {
+            let s = new_p.to_string_lossy().replace('\\', "/");
+            if tracked_set.contains(&s) {
+                candidates.insert(s);
+            }
+        }
+    }
+
+    // 2. Deterministic similarity-based rename/copy detection on this single
+    //    diff (catches modified renames too).
+    let mut find_opts = git2::DiffFindOptions::new();
+    find_opts.renames(true).copies(true);
+    diff.find_similar(Some(&mut find_opts))?;
+    for delta in diff.deltas() {
+        if matches!(delta.status(), git2::Delta::Renamed | git2::Delta::Copied)
+            && delta.old_file().path() == Some(target)
+            && let Some(new_p) = delta.new_file().path()
+        {
+            let s = new_p.to_string_lossy().replace('\\', "/");
+            if tracked_set.contains(&s) {
+                candidates.insert(s);
+            }
+        }
+    }
+
+    Ok(candidates.into_iter().collect())
+}
+
 impl std::fmt::Debug for Repo {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("Repo")
@@ -773,9 +816,10 @@ impl Repo {
     /// later renamed or removed (`A2-101`, `ADR-0071`).
     pub const MAX_STRANDED_PATH_HISTORY_COMMITS: usize = 500;
 
-    /// Inspect bounded first-parent Git history from `HEAD` to determine
-    /// whether a literal path that is absent from the current index was
-    /// previously tracked and later renamed or removed (`A2-101`, `ADR-0071`).
+    /// Inspect bounded first-parent Git history (and staged index removals
+    /// relative to `HEAD`) to determine whether a literal path that is absent
+    /// from the current index was previously tracked and later renamed or
+    /// removed (`A2-101`, `ADR-0071`).
     ///
     /// Returns `StrandedPathHistory::NeverTracked` when the repository has
     /// no commits yet or the path never appeared in the bounded history.
@@ -792,6 +836,26 @@ impl Repo {
         };
         let target = Path::new(canonical_path);
 
+        // 0. Staged removal/rename (`git rm` / `git mv` in the index, not yet
+        //    committed): the path is still in `HEAD`'s tree but already absent
+        //    from `tracked_set` (the index).
+        let head_tree = commit.tree()?;
+        if let Some(old_entry) = head_tree
+            .get_path(target)
+            .ok()
+            .filter(|e| e.kind() == Some(git2::ObjectType::Blob))
+        {
+            let mut diff = self
+                .inner
+                .diff_tree_to_index(Some(&head_tree), None, None)?;
+            let candidates =
+                collect_rename_candidates(&mut diff, target, old_entry.id(), tracked_set)?;
+            return Ok(StrandedPathHistory::Removed {
+                removed_commit: "staged index".to_string(),
+                candidates,
+            });
+        }
+
         for _ in 0..Self::MAX_STRANDED_PATH_HISTORY_COMMITS {
             let Ok(parent) = commit.parent(0) else {
                 break;
@@ -807,49 +871,16 @@ impl Repo {
                 .filter(|e| e.kind() == Some(git2::ObjectType::Blob));
 
             if !in_c && let Some(old_entry) = old_blob {
-                let old_oid = old_entry.id();
-                let mut candidates = std::collections::BTreeSet::new();
-
-                // 1. Exact-OID matches added in the same commit: catches both
-                //    unmodified renames and multi-file splits/copies where two
-                //    or more destinations share the old blob (ambiguity).
                 let mut diff = self
                     .inner
                     .diff_tree_to_tree(Some(&p_tree), Some(&c_tree), None)?;
-                for delta in diff.deltas() {
-                    if delta.status() == git2::Delta::Added
-                        && delta.new_file().id() == old_oid
-                        && let Some(new_p) = delta.new_file().path()
-                    {
-                        let s = new_p.to_string_lossy().replace('\\', "/");
-                        if tracked_set.contains(&s) {
-                            candidates.insert(s);
-                        }
-                    }
-                }
-
-                // 2. Deterministic similarity-based rename/copy detection on
-                //    this single commit (catches modified renames too).
-                let mut find_opts = git2::DiffFindOptions::new();
-                find_opts.renames(true).copies(true);
-                diff.find_similar(Some(&mut find_opts))?;
-                for delta in diff.deltas() {
-                    if matches!(delta.status(), git2::Delta::Renamed | git2::Delta::Copied)
-                        && delta.old_file().path() == Some(target)
-                        && let Some(new_p) = delta.new_file().path()
-                    {
-                        let s = new_p.to_string_lossy().replace('\\', "/");
-                        if tracked_set.contains(&s) {
-                            candidates.insert(s);
-                        }
-                    }
-                }
-
+                let candidates =
+                    collect_rename_candidates(&mut diff, target, old_entry.id(), tracked_set)?;
                 let sha = commit.id().to_string();
                 let short_sha = sha.get(..12).unwrap_or(&sha).to_string();
                 return Ok(StrandedPathHistory::Removed {
                     removed_commit: short_sha,
-                    candidates: candidates.into_iter().collect(),
+                    candidates,
                 });
             }
 
