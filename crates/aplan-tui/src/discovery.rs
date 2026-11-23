@@ -397,6 +397,17 @@ pub const COMMANDS: &[CommandDiscovery] = &[
         mutations: &[],
         boundaries: &[],
     },
+    CommandDiscovery {
+        name: "retarget-path",
+        title: "Retarget a path across live tasks",
+        disposition: CommandDisposition::CliOnly {
+            reason: "retargeting a renamed or bare directory path rewrites every matching live task atomically while preserving terminal tasks, so it remains an explicit CLI command with dry-run preview",
+            example: "aplan retarget-path src/old.rs src/new.rs --dry-run",
+        },
+        surfaces: &[],
+        mutations: &[],
+        boundaries: &[],
+    },
     mutation("mv", "Move tasks", MOVE),
     mutation("rekey", "Rekey a task", REKEY),
     native("tasks", "Browse tasks", &[NativeSurface::Tasks]),

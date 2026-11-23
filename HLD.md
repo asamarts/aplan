@@ -722,6 +722,7 @@ empty cut must be surfaced, not swallowed.
 | `APLAN060` | A traced anchor resolves to the same element kind it was written or stamped against | error | L0/L1 | done (`A2-051`) |
 | `APLAN061` | A live task's `paths` do not include a universal catch-all glob (`**`, `*`, `**/*`, `./**`) | warning | L0 | done (`A2-099`) |
 | `APLAN062` | A task cites each piece of evidence once | warning | L0 | done (`A2-106`) |
+| `APLAN063` | A live task's literal `paths` name neither a bare tracked directory nor a target renamed or removed in Git history | warning | L1 | done (`A2-101`) |
 | `APLAN044` | A closed task claims less of the released version than its level implies, without saying why | warning | L0 | done (`A1-312`) |
 
 Every diagnostic carries a stable code, a severity, an optional task id, an optional
@@ -940,6 +941,7 @@ around every ordinary output write and on every terminal outcome without hiding 
 | `aplan start` | `<id>`: record that work has begun, setting `in_progress`. `APLAN053` checks that durable status against repository paths; the independent local claim is reported when observable but never gates the transition. Refused on a terminal task because nothing reopens finished work | exists (`A1-359`, `A1-531`, ADR-0051) |
 | `aplan stop` | `<id>`: record that work has stopped, returning the task to `todo`. Not a closure: it claims nothing about what was done | exists (`A1-359`, ADR-0044) |
 | `aplan review` | `<id>`: record that a live task's traced sections were re-reviewed and still hold without editing task prose, stamping current kind-tagged `trace_fingerprints` to clear `APLAN045` without committing. Refuses terminal tasks (use `aplan close <id> --restamp`) and tasks without resolvable anchored traces | exists (`A2-053`, ADR-0070) |
+| `aplan retarget-path` | `<from> <to> [--id <id>]... [--dry-run]`: atomically retarget a `paths` entry across matching live tasks while preserving terminal historical tasks untouched and refusing explicit terminal targets; gated by the standard post-state verdict flags (`--deny-warnings` / `--no-deny-warnings`) | exists (`A2-101`, ADR-0071) |
 | `aplan critical-path` | `[<ID>]`: longest path over `effort_days`, **advisory, never a gate**. With an id, the longest chain that *ends at* that task, cut, container or release: what must finish before that checkpoint can. The whole graph is kept and only the endpoint is chosen, which is why this is sound where the refused `--cut` is not -- filtering first turns a fragment into a false path | exists (`A1-013`, `A1-345`) |
 | `aplan init` | scaffold `.aplan.yml`; refuses to overwrite | exists (`A1-009`) |
 | `aplan close` | `<id>`: set `done` + attach evidence; derives `HEAD`; resolves the evidence and refuses what `verify` would reject (`--no-resolve` opts out); with `detect_drift`, stamps traces and mutable file evidence from committed content; `--restamp` refreshes both after review. Fingerprint replacement accepts ordinary string mappings and refuses anchors, aliases, tags, multiline values and structural keys before constructing a candidate; never commits | exists (`A1-008`, `A1-109`, `A1-196`, `A1-716`) |

@@ -8,6 +8,14 @@ to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Added
 
+- **Stranded live literal `paths` rule `APLAN063` and `aplan retarget-path` (`A2-101`,
+  ADR-0071)**. `verify` now reports live tasks (`todo`, `in_progress`, `blocked`) whose literal
+  `paths` name either an existing tracked directory (`src` when `src/**` is tracked) or a file
+  that was previously tracked in bounded Git history and later renamed or removed, surfacing
+  deterministic rename candidates or reporting ambiguity rather than guessing. Never-tracked
+  prospective literal paths, globs, and terminal historical tasks remain silent. The new
+  `aplan retarget-path <FROM> <TO> [--id ID]... [--dry-run]` command atomically rewrites matching
+  live tasks while preserving terminal tasks untouched and refusing explicit terminal targets.
 - **Early universal catch-all `paths` warning `APLAN061` (`A2-099`)**. Live non-milestone tasks
   whose `paths` contain a universal catch-all glob (`**`, `*`, `**/*`, `./**`) now receive an
   early structural warning during `check`, sharing the exact universal-pattern predicate with the

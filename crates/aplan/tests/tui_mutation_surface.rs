@@ -845,7 +845,13 @@ const NON_TASK_MUTATION_LEAVES: &[&str] = &[
 /// Task mutations deliberately kept at an explicit, user-visible CLI boundary.
 /// These are separate from [`NON_TASK_MUTATION_LEAVES`]: classifying a plan
 /// write as a read-only surface would make this audit pass for the wrong reason.
-const CLI_ONLY_TASK_MUTATION_LEAVES: &[&str] = &["blueprint apply", "park", "review", "unpark"];
+const CLI_ONLY_TASK_MUTATION_LEAVES: &[&str] = &[
+    "blueprint apply",
+    "park",
+    "retarget-path",
+    "review",
+    "unpark",
+];
 
 fn leaf_paths(command: &clap::Command, prefix: &str, paths: &mut BTreeSet<String>) {
     let children = command

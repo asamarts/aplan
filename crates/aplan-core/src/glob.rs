@@ -47,6 +47,20 @@ pub fn spelling(pattern: &str) -> String {
     }
 }
 
+/// Whether `pattern` is a literal file or directory path with no glob
+/// metacharacters (`*`, `?`, `[`, `]`, `{`, `}`).
+///
+/// Used by `APLAN063` (`A2-101`, `ADR-0071`) to distinguish literal paths from
+/// glob patterns so prospective or still-matching globs are not treated as
+/// single-file history lookups.
+#[must_use]
+pub fn is_literal_path(pattern: &str) -> bool {
+    !pattern.is_empty()
+        && !pattern
+            .chars()
+            .any(|c| matches!(c, '*' | '?' | '[' | ']' | '{' | '}'))
+}
+
 /// pattern that normalises to nothing keeps its original text, so a degenerate
 /// entry fails exactly as it did rather than becoming a new kind of error.
 ///

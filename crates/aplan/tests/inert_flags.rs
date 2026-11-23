@@ -527,6 +527,7 @@ fn writes(command: &str) -> bool {
             | "park"
             | "rekey"
             | "release"
+            | "retarget-path"
             | "review"
             | "start"
             | "stop"
@@ -1486,6 +1487,18 @@ const PROBES: &[Probe] = &[
     // unclaimed live task so this pair still drives `--format` (`A1-531`).
     p("rekey", "--format", Some("json"), &["D-3", "D-90"]),
     p("rekey", "--allow-terminal", None, &["D-4", "D-90"]),
+    p(
+        "retarget-path",
+        "--dry-run",
+        None,
+        &["src/one/**", "src/renamed/**"],
+    ),
+    p(
+        "retarget-path",
+        "--id",
+        Some("D-3"),
+        &["src/one/**", "src/renamed/**"],
+    ),
     p("roadmap", "--format", Some("json"), &[]),
     p("roadmap", "--regenerate-with", Some("x"), &[]),
     p("show", "--format", Some("json"), &["D-1"]),

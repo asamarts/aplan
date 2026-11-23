@@ -754,6 +754,61 @@ pub fn set_tags(file: &str, tags: &[String]) -> Result<String, CloseError> {
     set_id_list(file, "tags", tags, SequenceEdit::Preserve, |t| &t.tags)
 }
 
+/// Rewrite a task's `paths:` list in place while preserving its YAML style.
+///
+/// # Errors
+///
+/// Whatever [`set_blocked_by`] returns, for the same reasons.
+pub fn set_paths(file: &str, paths: &[String]) -> Result<String, CloseError> {
+    set_id_list(file, "paths", paths, SequenceEdit::Preserve, |t| &t.paths)
+}
+
+/// Retarget a matching `paths` entry on a **live** task from `from` to `to`
+/// (`A2-101`, `ADR-0071`).
+///
+/// Refuses terminal tasks (`done`, `dropped`) with [`CloseError::Terminal`] so
+/// historical evidence territory is never silently rewritten. Matches entries
+/// by canonical [`crate::glob::spelling`] and deduplicates if `to` is already
+/// present. Returns `Ok(None)` when the live task does not declare `from`.
+///
+/// # Errors
+///
+/// Returns [`CloseError::Terminal`] for terminal tasks, or any frontmatter /
+/// round-trip error from [`set_paths`].
+pub fn retarget_path(file: &str, from: &str, to: &str) -> Result<Option<String>, CloseError> {
+    let (frontmatter, _body) = split_frontmatter(file).ok_or(CloseError::NotATask)?;
+    let task: Task =
+        crate::yaml::from_str(frontmatter).map_err(|e| CloseError::Frontmatter(e.to_string()))?;
+    if task.status.is_terminal() {
+        return Err(CloseError::Terminal(task.status));
+    }
+    let from_canon = crate::glob::spelling(from).replace('\\', "/");
+    let to_canon = crate::glob::spelling(to).replace('\\', "/");
+    let mut changed = false;
+    let mut updated: Vec<String> = Vec::with_capacity(task.paths.len());
+    let mut has_to = task.paths.iter().any(|p| {
+        let p_canon = crate::glob::spelling(p).replace('\\', "/");
+        p_canon == to_canon && p_canon != from_canon
+    });
+
+    for entry in &task.paths {
+        if crate::glob::spelling(entry).replace('\\', "/") == from_canon {
+            changed = true;
+            if !has_to {
+                updated.push(to.to_string());
+                has_to = true;
+            }
+        } else {
+            updated.push(entry.clone());
+        }
+    }
+
+    if !changed {
+        return Ok(None);
+    }
+    set_paths(file, &updated).map(Some)
+}
+
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum SequenceEdit {
     /// Add or remove members while retaining the source of every member that

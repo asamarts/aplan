@@ -1077,6 +1077,168 @@ fn a_dead_sibling_glob_is_reported_even_beside_a_bound_citation() {
     assert_eq!(status_of(dir.path()), "status: done");
 }
 
+/// `A2-101` (`ADR-0071`): `aplan retarget-path` atomically rewrites matching
+/// live tasks while preserving terminal tasks untouched and refusing explicit
+/// terminal targets.
+#[test]
+#[allow(clippy::too_many_lines)]
+fn retarget_path_updates_live_tasks_atomically_and_preserves_terminal_tasks() {
+    let dir = tempfile::Builder::new()
+        .tempdir_in(aplan_core::fixture::fixture_root())
+        .expect("tempdir");
+    fixture(dir.path());
+
+    // Create `src/old.rs`, commit it, close `A-DONE` against it, then rename to `src/new.rs`.
+    std::fs::create_dir_all(dir.path().join("src")).unwrap();
+    std::fs::write(dir.path().join("src/old.rs"), "pub fn work() {}\n").unwrap();
+    git(dir.path(), &["add", "src/old.rs"]);
+    git(dir.path(), &["commit", "-m", "add src/old.rs"]);
+    let sha = String::from_utf8(
+        std::process::Command::new("git")
+            .args(["rev-parse", "HEAD"])
+            .current_dir(dir.path())
+            .output()
+            .unwrap()
+            .stdout,
+    )
+    .unwrap();
+    let sha = sha.trim();
+
+    std::fs::write(
+        dir.path().join("aplan/tasks/A-DONE.md"),
+        format!(
+            "---\nid: A-DONE\ntitle: done task\nphase: 1\nstatus: done\nowner: t\n\
+             effort_days: 1\npaths:\n- src/old.rs\nevidence:\n- kind: commit\n  ref: {sha}\n---\n\nbody\n"
+        ),
+    )
+    .unwrap();
+    std::fs::write(
+        dir.path().join("aplan/tasks/A-LIVE1.md"),
+        "---\nid: A-LIVE1\ntitle: live one\nphase: 1\nstatus: todo\nowner: t\n\
+         effort_days: 1\npaths:\n- src/old.rs\n---\n\nbody\n",
+    )
+    .unwrap();
+    std::fs::write(
+        dir.path().join("aplan/tasks/A-LIVE2.md"),
+        "---\nid: A-LIVE2\ntitle: live two\nphase: 1\nstatus: todo\nowner: t\n\
+         effort_days: 1\npaths:\n- src/old.rs\n---\n\nbody\n",
+    )
+    .unwrap();
+
+    std::fs::rename(dir.path().join("src/old.rs"), dir.path().join("src/new.rs")).unwrap();
+    git(dir.path(), &["add", "-A"]);
+    git(
+        dir.path(),
+        &["commit", "-m", "rename src/old.rs to src/new.rs"],
+    );
+
+    // 1. Explicit `--id A-DONE` must be refused.
+    let (out, err, ok) = run(
+        dir.path(),
+        &[
+            "retarget-path",
+            "src/old.rs",
+            "src/new.rs",
+            "--id",
+            "A-DONE",
+        ],
+    );
+    assert!(!ok, "terminal task retarget must be refused: {out}{err}");
+    assert!(format!("{out}{err}").contains("terminal"), "{out}{err}");
+
+    // 2. `--dry-run` previews live tasks and leaves disk untouched.
+    let (out, err, ok) = run(
+        dir.path(),
+        &["retarget-path", "src/old.rs", "src/new.rs", "--dry-run"],
+    );
+    assert!(ok, "dry-run failed: {out}{err}");
+    assert!(out.contains("A-LIVE1") && out.contains("A-LIVE2"), "{out}");
+    assert!(out.contains("preserved 1 terminal"), "{out}");
+    assert!(
+        std::fs::read_to_string(dir.path().join("aplan/tasks/A-LIVE1.md"))
+            .unwrap()
+            .contains("src/old.rs")
+    );
+
+    // 3. Targeted `--id A-LIVE1` updates only `A-LIVE1`.
+    let (out, err, ok) = run(
+        dir.path(),
+        &[
+            "retarget-path",
+            "src/old.rs",
+            "src/new.rs",
+            "--id",
+            "A-LIVE1",
+        ],
+    );
+    assert!(ok, "targeted retarget failed: {out}{err}");
+    assert!(
+        std::fs::read_to_string(dir.path().join("aplan/tasks/A-LIVE1.md"))
+            .unwrap()
+            .contains("src/new.rs")
+    );
+    assert!(
+        std::fs::read_to_string(dir.path().join("aplan/tasks/A-LIVE2.md"))
+            .unwrap()
+            .contains("src/old.rs")
+    );
+
+    // 4. Whole-plan retarget updates remaining `A-LIVE2` and preserves `A-DONE`.
+    let (out, err, ok) = run(dir.path(), &["retarget-path", "src/old.rs", "src/new.rs"]);
+    assert!(ok, "whole-plan retarget failed: {out}{err}");
+    assert!(
+        std::fs::read_to_string(dir.path().join("aplan/tasks/A-LIVE2.md"))
+            .unwrap()
+            .contains("src/new.rs")
+    );
+    assert!(
+        std::fs::read_to_string(dir.path().join("aplan/tasks/A-DONE.md"))
+            .unwrap()
+            .contains("src/old.rs"),
+        "terminal task must keep its historical path"
+    );
+
+    // 5. Re-running when only `A-DONE` still holds `src/old.rs` must refuse.
+    let (out, err, ok) = run(dir.path(), &["retarget-path", "src/old.rs", "src/new.rs"]);
+    assert!(!ok, "only-terminal retarget must be refused: {out}{err}");
+    assert!(format!("{out}{err}").contains("terminal"), "{out}{err}");
+
+    // 6. Post-state gate: retargeting to a universal catch-all (`**`) is refused
+    // under `--deny-warnings` (APLAN061), and allowed with `--no-deny-warnings`.
+    let (out, err, ok) = run(
+        dir.path(),
+        &[
+            "retarget-path",
+            "src/new.rs",
+            "**",
+            "--id",
+            "A-LIVE1",
+            "--deny-warnings",
+        ],
+    );
+    assert!(
+        !ok,
+        "retargeting to `**` under --deny-warnings must be refused: {out}{err}"
+    );
+    assert!(format!("{out}{err}").contains("APLAN061"), "{out}{err}");
+    let (out, err, ok) = run(
+        dir.path(),
+        &[
+            "retarget-path",
+            "src/new.rs",
+            "**",
+            "--id",
+            "A-LIVE1",
+            "--dry-run",
+            "--no-deny-warnings",
+        ],
+    );
+    assert!(
+        ok,
+        "dry-run with --no-deny-warnings should succeed: {out}{err}"
+    );
+}
+
 /// The same refusal for the other kind that names an artefact (`A1-045`).
 ///
 /// The fourth pilot closed a task about ADR authorship with a Containerfile, in
