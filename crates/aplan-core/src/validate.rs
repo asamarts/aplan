@@ -2864,6 +2864,36 @@ fn check_path_globs(lt: &LoadedTask, out: &mut Vec<Diagnostic>) {
             ),
         );
     }
+    // `APLAN061` (`A2-099`): catch-all universal globs on live non-milestone
+    // tasks fail `APLAN012` at close/verify, so warn early at author time using
+    // the exact same predicate. Broad-but-non-universal globs (`src/**`) stay
+    // silent here; `aplan paths` and `vacuity` measure breadth.
+    if !t.status.is_terminal() && !t.is_milestone() {
+        let mut reported: Vec<&str> = Vec::new();
+        for p in &t.paths {
+            let p = p.as_str();
+            if !crate::task::is_universal_path_glob(p) || reported.contains(&p) {
+                continue;
+            }
+            reported.push(p);
+            out.push(
+                Diagnostic::warning(
+                    code::UNIVERSAL_PATH_GLOB,
+                    format!(
+                        "`paths` includes `{p}`, which matches every file in the repository: \
+                         commit evidence cannot prove relevance against a universal catch-all \
+                         and will be refused at close/verify (APLAN012)"
+                    ),
+                )
+                .with_task(&t.id)
+                .with_file(&lt.path)
+                .with_agent_instruction(format!(
+                    "Replace `{p}` with specific file or directory globs naming the territory \
+                     this task actually owns (for example `src/module/**`)."
+                )),
+            );
+        }
+    }
 }
 
 /// `APLAN040`: the same `paths` entry, twice.
@@ -3026,7 +3056,58 @@ fn check_uncheckable_evidence(lt: &LoadedTask, out: &mut Vec<Diagnostic>) {
     }
 }
 
-/// The invariants that read `evidence`: `APLAN005`, `APLAN010`, `APLAN055`.
+/// `APLAN062` (`A2-106`): the same evidence citation (`kind` plus canonical
+/// reference) listed more than once.
+fn check_duplicate_evidence(lt: &LoadedTask, out: &mut Vec<Diagnostic>) {
+    let t = &lt.task;
+    let mut seen: BTreeMap<(EvidenceKind, String), Vec<&str>> = BTreeMap::new();
+    for ev in &t.evidence {
+        if is_vacuous_ref(&ev.reference) {
+            continue;
+        }
+        seen.entry(crate::task::canonical_evidence_key(ev))
+            .or_default()
+            .push(ev.reference.as_str());
+    }
+    for ((kind, canonical), written) in seen {
+        if written.len() < 2 {
+            continue;
+        }
+        let count = written.len();
+        let distinct: std::collections::BTreeSet<&str> = written.iter().copied().collect();
+        let cited = if distinct.len() == 1 {
+            format!("`{}:{}` ({count} times)", kind.as_str(), written[0])
+        } else {
+            let forms: Vec<String> = distinct
+                .iter()
+                .map(|w| format!("`{}:{w}`", kind.as_str()))
+                .collect();
+            format!(
+                "{} ({count} entries resolving to `{}:{canonical}`)",
+                forms.join(" and "),
+                kind.as_str()
+            )
+        };
+        out.push(
+            Diagnostic::warning(
+                code::DUPLICATE_EVIDENCE,
+                format!(
+                    "`evidence` lists {cited}. Duplicating a citation does not make it unresolved \
+                     or weak, but it inflates the evidence list and usually means an edit went \
+                     wrong"
+                ),
+            )
+            .with_task(&t.id)
+            .with_file(&lt.path)
+            .with_agent_instruction(
+                "Remove the repeated evidence entry so each distinct citation appears once. If \
+                 two entries were meant to cite different artifacts, fix the wrong reference.",
+            ),
+        );
+    }
+}
+
+/// The invariants that read `evidence`: `APLAN005`, `APLAN010`, `APLAN055`, `APLAN062`.
 fn check_evidence(
     lt: &LoadedTask,
     opts: &Options,
@@ -3117,6 +3198,7 @@ fn check_evidence(
     }
 
     check_uncheckable_evidence(lt, out);
+    check_duplicate_evidence(lt, out);
 
     // Configured minimum evidence strength. A `done` task must carry at least one
     // piece of an accepted kind *with a real reference*, unless a tag exempts it.
@@ -9391,5 +9473,163 @@ mod tests {
             .collect();
         assert_eq!(a2.len(), 1, "{a2:?}");
         assert_eq!(a2[0].code, code::TRACE_DRIFT);
+    }
+
+    /// `A2-099`: `APLAN061` fires early on live non-milestone tasks whose
+    /// `paths` contain a universal catch-all glob (`**`, `*`, `**/*`, `./**`),
+    /// stays silent on broad-but-scoped globs (`src/**`), milestones, and
+    /// terminal tasks (`done`, `dropped`, `superseded`).
+    #[test]
+    fn universal_path_glob_fires_on_live_non_milestone_only() {
+        let make = |id: &str, status: Status, paths: &[&str], milestone: bool| {
+            let mut task = t(id, status);
+            task.owner = Some("alice".into());
+            task.effort_days = if milestone { None } else { Some(1.0) };
+            task.paths = paths.iter().map(|s| (*s).to_string()).collect();
+            if milestone {
+                task.tags = vec!["milestone".into()];
+            }
+            if status == Status::Done {
+                task.evidence = vec![Evidence {
+                    kind: EvidenceKind::Commit,
+                    reference: "abc1234".into(),
+                    captured: None,
+                }];
+            }
+            task
+        };
+
+        let tasks = vec![
+            make("LIVE-1", Status::Todo, &["**"], false),
+            make("LIVE-2", Status::InProgress, &["*", "src/**"], false),
+            make("LIVE-3", Status::Blocked, &["**/*", "./**"], false),
+            make("SCOPED", Status::Todo, &["src/**", "crates/**"], false),
+            make("DONE-1", Status::Done, &["**"], false),
+            make("DROP-1", Status::Dropped, &["**"], false),
+            make("MILE-1", Status::Todo, &["**"], true),
+        ];
+
+        let opts = Options {
+            require_effort: false,
+            ..Default::default()
+        };
+        let r = validate(&plan_of(tasks), &opts);
+        let a61: Vec<_> = r
+            .diagnostics
+            .iter()
+            .filter(|d| d.code == code::UNIVERSAL_PATH_GLOB)
+            .collect();
+        assert_eq!(a61.len(), 4, "expected 4 APLAN061 findings: {a61:#?}");
+        for d in &a61 {
+            assert_eq!(d.severity, crate::Severity::Warning);
+            assert!(
+                d.message.contains("matches every file") && d.message.contains("cannot prove"),
+                "message should explain why commit evidence cannot prove relevance: {}",
+                d.message
+            );
+            let instr = d.agent_instruction.as_deref().unwrap_or("");
+            assert!(
+                instr.contains("specific file or directory globs") && instr.contains("territory"),
+                "instruction should explain how to narrow paths: {instr}"
+            );
+        }
+        let ids: Vec<_> = a61.iter().filter_map(|d| d.task.as_deref()).collect();
+        assert_eq!(ids, vec!["LIVE-1", "LIVE-2", "LIVE-3", "LIVE-3"]);
+    }
+
+    /// `A2-106`: `APLAN062` detects duplicate evidence citations across 0, 1,
+    /// 2, and 3 copies, non-adjacent copies, multiple duplicate families, and
+    /// canonicalized `file:` paths, while allowing distinct references and the
+    /// same text under different kinds.
+    #[test]
+    fn duplicate_evidence_covers_zero_one_two_three_non_adjacent_and_families() {
+        let ev = |kind: EvidenceKind, reference: &str| Evidence {
+            kind,
+            reference: reference.into(),
+            captured: if kind == EvidenceKind::Note {
+                Some("2026-01-01".into())
+            } else {
+                None
+            },
+        };
+        let done_with = |id: &str, evidence: Vec<Evidence>| {
+            let mut task = t(id, Status::Done);
+            task.owner = Some("alice".into());
+            task.effort_days = Some(1.0);
+            task.paths = vec!["src/**".into()];
+            task.evidence = evidence;
+            task
+        };
+
+        // 0 copies (live task) and 1 copy (done task) -> clean.
+        let mut zero = done_with("E-0", Vec::new());
+        zero.status = Status::Todo;
+        let one = done_with("E-1", vec![ev(EvidenceKind::File, "deny.toml")]);
+        // Same text under different kinds -> allowed.
+        let diff_kinds = done_with(
+            "E-KIND",
+            vec![
+                ev(EvidenceKind::File, "abc1234"),
+                ev(EvidenceKind::Commit, "abc1234"),
+            ],
+        );
+        // 2 copies (with `./` canonicalization) -> 1 finding.
+        let two = done_with(
+            "E-2",
+            vec![
+                ev(EvidenceKind::File, "deny.toml"),
+                ev(EvidenceKind::File, "./deny.toml"),
+            ],
+        );
+        // 3 non-adjacent copies + a second duplicate family -> 2 findings (one per family).
+        let multi = done_with(
+            "E-3",
+            vec![
+                ev(EvidenceKind::File, "deny.toml"),
+                ev(EvidenceKind::Commit, "abc1234"),
+                ev(EvidenceKind::File, "deny.toml"),
+                ev(EvidenceKind::Commit, "abc1234"),
+                ev(EvidenceKind::File, "./deny.toml"),
+            ],
+        );
+
+        let opts = Options {
+            require_effort: false,
+            ..Default::default()
+        };
+        let r = validate(&plan_of(vec![zero, one, diff_kinds, two, multi]), &opts);
+        let a62: Vec<_> = r
+            .diagnostics
+            .iter()
+            .filter(|d| d.code == code::DUPLICATE_EVIDENCE)
+            .collect();
+        assert_eq!(a62.len(), 3, "expected 3 APLAN062 findings: {a62:#?}");
+        for d in &a62 {
+            assert_eq!(d.severity, crate::Severity::Warning);
+            assert!(
+                d.message.contains("does not make it unresolved or weak"),
+                "message must distinguish duplication from weak/unresolved evidence: {}",
+                d.message
+            );
+            let instr = d.agent_instruction.as_deref().unwrap_or("");
+            assert!(
+                instr.contains("Remove the repeated"),
+                "instruction must guide removing only the duplicate: {instr}"
+            );
+        }
+        assert!(
+            a62.iter()
+                .any(|d| d.task.as_deref() == Some("E-2") && d.message.contains("2 entries"))
+        );
+        assert!(a62.iter().any(|d| {
+            d.task.as_deref() == Some("E-3")
+                && d.message.contains("file:deny.toml")
+                && d.message.contains("3 entries")
+        }));
+        assert!(a62.iter().any(|d| {
+            d.task.as_deref() == Some("E-3")
+                && d.message.contains("commit:abc1234")
+                && d.message.contains("2 times")
+        }));
     }
 }

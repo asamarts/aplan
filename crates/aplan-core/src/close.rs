@@ -210,6 +210,19 @@ pub fn close(
         return Err(CloseError::HasEvidence);
     }
 
+    // `A2-106`: refuse duplicate citations before writing so `close` never
+    // stores inflated evidence lists.
+    let mut seen_evidence = std::collections::BTreeSet::new();
+    for ev in evidence {
+        if !seen_evidence.insert(crate::task::canonical_evidence_key(ev)) {
+            return Err(CloseError::DuplicateEvidence(format!(
+                "{}:{}",
+                ev.kind.as_str(),
+                ev.reference
+            )));
+        }
+    }
+
     // Presence is a source fact, not the same thing as a typed optional value.
     // `version: null` and its alternate-key spellings load as `None`; appending
     // the derived record beside that authored key creates a duplicate mapping
@@ -1751,7 +1764,11 @@ pub fn add_evidence(file: &str, add: &Evidence) -> Result<String, CloseError> {
     if task.status != Status::Done {
         return Err(CloseError::NotDone(task.status));
     }
-    if task.evidence.iter().any(|e| e == add) {
+    if task
+        .evidence
+        .iter()
+        .any(|e| crate::task::canonical_evidence_key(e) == crate::task::canonical_evidence_key(add))
+    {
         return Err(CloseError::DuplicateEvidence(format!(
             "{}:{}",
             add.kind.as_str(),
@@ -1791,7 +1808,7 @@ pub fn add_evidence(file: &str, add: &Evidence) -> Result<String, CloseError> {
 /// note-level provenance *with* a date -- and there the citation could be named
 /// in the message and never matched by the code that printed it.
 fn names_same(a: &Evidence, b: &Evidence) -> bool {
-    a.kind == b.kind && a.reference == b.reference
+    crate::task::canonical_evidence_key(a) == crate::task::canonical_evidence_key(b)
 }
 
 /// Replace one evidence citation on a `done` task with another, in place.
@@ -5384,5 +5401,62 @@ body
 
         let cleared = set_owner(bare, None).expect("clear a null owner");
         assert!(!cleared.contains("owner"), "{cleared}");
+    }
+
+    /// `A2-106`: `close`, `add_evidence`, and `replace_evidence` refuse
+    /// duplicate citations by `(kind, canonical reference)`, while allowing
+    /// the same text under different kinds.
+    #[test]
+    fn close_and_amend_refuse_duplicate_evidence_by_canonical_key() {
+        let todo = "---\nid: A1-001\ntitle: t\nphase: 1\nstatus: todo\nowner: ada\n---\n\nbody\n";
+        let file_a = Evidence {
+            kind: EvidenceKind::File,
+            reference: "deny.toml".into(),
+            captured: None,
+        };
+        let file_dot = Evidence {
+            kind: EvidenceKind::File,
+            reference: "./deny.toml".into(),
+            captured: None,
+        };
+        let commit_same_text = Evidence {
+            kind: EvidenceKind::Commit,
+            reference: "deny.toml".into(),
+            captured: None,
+        };
+
+        // `close` refuses exact and `./`-equivalent duplicates.
+        let empty = BTreeMap::new();
+        let err = close(todo, &[file_a.clone(), file_dot.clone()], &empty, None)
+            .expect_err("close must refuse duplicate evidence");
+        assert!(
+            matches!(err, CloseError::DuplicateEvidence(ref s) if s.contains("file:")),
+            "expected DuplicateEvidence naming kind and ref, got {err:?}"
+        );
+
+        // `close` allows the same text under a different kind.
+        let closed = close(
+            todo,
+            &[file_a.clone(), commit_same_text.clone()],
+            &empty,
+            None,
+        )
+        .expect("distinct kinds with same text are allowed");
+
+        // `add_evidence` refuses canonical duplicate against already-present citation.
+        let err = add_evidence(&closed, &file_dot)
+            .expect_err("add_evidence must refuse canonical duplicate");
+        assert!(
+            matches!(err, CloseError::DuplicateEvidence(ref s) if s.contains("file:")),
+            "expected DuplicateEvidence, got {err:?}"
+        );
+
+        // `replace_evidence` refuses replacing one citation with a canonical duplicate of another.
+        let err = replace_evidence(&closed, &commit_same_text, &file_dot)
+            .expect_err("replace_evidence must refuse canonical duplicate");
+        assert!(
+            matches!(err, CloseError::DuplicateEvidence(ref s) if s.contains("file:")),
+            "expected DuplicateEvidence, got {err:?}"
+        );
     }
 }

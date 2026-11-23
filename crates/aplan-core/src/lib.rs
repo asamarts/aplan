@@ -119,7 +119,10 @@ pub use load::{Unopened, Unresolved, unresolved_by_check};
 pub use roadmap::{Cut, Roadmap, RoadmapTask, cut_label, parse_cut_version};
 pub use show::{Show, ShowSources};
 pub use summary::{GroupSummary, GroupedSummary, PhaseSummary, Summary};
-pub use task::{Evidence, EvidenceKind, Status, SubstantiveContent, Task, substantive_content};
+pub use task::{
+    Evidence, EvidenceKind, Status, SubstantiveContent, Task, canonical_evidence_key,
+    is_universal_path_glob, substantive_content,
+};
 pub use validate::{
     AgentsBlock, Cardinality, MilestoneScope, Options, StatusScope, TagFamily, TraceDocumentWork,
     is_iso_date, is_one_edit_apart, trace_document_work, validate, validate_with_graph,

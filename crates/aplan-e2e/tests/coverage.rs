@@ -551,6 +551,8 @@ fn corpus() -> Vec<Scenario> {
     all.extend(policy_evidence_rules());
     all.extend(drift_rules());
     all.extend(trace_retargeted_rules());
+    all.extend(universal_path_glob_rules());
+    all.extend(duplicate_evidence_rules());
     all.extend(interpolated_reason_branches());
     all.extend(partial_stamp_rules());
     all.extend(body_criteria_rules());
@@ -800,6 +802,70 @@ fn trace_retargeted_rules() -> Vec<Scenario> {
             vec![tf("a", &stamped(heading_stamp)), doc("DESIGN.md", both)],
         )
         .drift(),
+    ]
+}
+
+/// `APLAN061` (`A2-099`): universal catch-all `paths` globs fire early on live
+/// non-milestone tasks and stay silent on scoped globs and terminal tasks.
+fn universal_path_glob_rules() -> Vec<Scenario> {
+    vec![
+        scen(
+            "universal-path-glob-fires",
+            Rule::UniversalPathGlob,
+            Fires,
+            vec![tf(
+                "a",
+                "id: A-1\ntitle: A-1\nphase: 0\nstatus: todo\neffort_days: 1\npaths:\n  - '**'",
+            )],
+        ),
+        scen(
+            "universal-path-glob-silent-scoped",
+            Rule::UniversalPathGlob,
+            Silent,
+            vec![tf(
+                "a",
+                "id: A-1\ntitle: A-1\nphase: 0\nstatus: todo\neffort_days: 1\npaths:\n  - 'src/**'",
+            )],
+        ),
+        scen(
+            "universal-path-glob-silent-done",
+            Rule::UniversalPathGlob,
+            Silent,
+            vec![tf(
+                "a",
+                "id: A-1\ntitle: A-1\nphase: 0\nstatus: done\neffort_days: 1\npaths:\n  - '**'\nevidence:\n  - kind: commit\n    ref: abc1234",
+            )],
+        ),
+    ]
+}
+
+/// `APLAN062` (`A2-106`): duplicate evidence citations already on disk fire on
+/// `check`, while distinct citations or same text under different kinds stay
+/// silent.
+fn duplicate_evidence_rules() -> Vec<Scenario> {
+    vec![
+        scen(
+            "duplicate-evidence-fires",
+            Rule::DuplicateEvidence,
+            Fires,
+            vec![tf(
+                "a",
+                "id: A-1\ntitle: A-1\nphase: 0\nstatus: done\neffort_days: 1\n\
+                 paths:\n  - deny.toml\n\
+                 evidence:\n  - kind: file\n    ref: deny.toml\n  - kind: file\n    ref: ./deny.toml",
+            )],
+        ),
+        scen(
+            "duplicate-evidence-silent",
+            Rule::DuplicateEvidence,
+            Silent,
+            vec![tf(
+                "a",
+                "id: A-1\ntitle: A-1\nphase: 0\nstatus: done\neffort_days: 1\n\
+                 paths:\n  - deny.toml\n\
+                 evidence:\n  - kind: file\n    ref: deny.toml\n  - kind: commit\n    ref: abc1234",
+            )],
+        ),
     ]
 }
 
@@ -2788,14 +2854,13 @@ fn verify_corpus() -> Vec<VerifyCase> {
             Silent,
             v019_silent_all_match,
         ),
-        // The multi-glob shape, which nothing exercised until `A1-141`: a dead
-        // glob beside a live one the citation binds through is a stale
-        // declaration, not an unbound claim.
+        // The multi-glob shape (`A2-091`, superseding `A1-141`): a dead
+        // sibling beside a live bound glob is still reported individually.
         git_case(
-            "paths-unmatched-silent-bound-sibling",
+            "paths-unmatched-dead-sibling-fires",
             Rule::PathsUnmatched,
-            Silent,
-            v019_silent_bound_sibling,
+            Fires,
+            v019_fires_dead_sibling_beside_bound_citation,
         ),
         // The bare-directory shape every pilot hit, and the branch that offers the
         // one-character fix rather than the generic advice.
@@ -3239,10 +3304,9 @@ fn v019_silent(repo: &Repository) -> Vec<Task> {
     t.status = aplan_core::Status::Todo;
     vec![t]
 }
-/// The fourth pilot's item 26: `paths` with a dead sibling, and a citation that
-/// binds through the live one. Under `deny_warnings` this refused a close whose
-/// evidence was bound (`A1-141`).
-fn v019_silent_bound_sibling(repo: &Repository) -> Vec<Task> {
+/// `A2-091`: a dead `paths` entry beside a live sibling that binds the
+/// citation still fires `APLAN019` for the dead entry.
+fn v019_fires_dead_sibling_beside_bound_citation(repo: &Repository) -> Vec<Task> {
     git_commit(repo, &[("src/a.rs", "x")], "init");
     vec![done(
         "A",

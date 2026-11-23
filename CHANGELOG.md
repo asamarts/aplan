@@ -8,6 +8,15 @@ to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Added
 
+- **Early universal catch-all `paths` warning `APLAN061` (`A2-099`)**. Live non-milestone tasks
+  whose `paths` contain a universal catch-all glob (`**`, `*`, `**/*`, `./**`) now receive an
+  early structural warning during `check`, sharing the exact universal-pattern predicate with the
+  close-time `APLAN012` refusal while leaving scoped globs and terminal tasks silent.
+- **Duplicate evidence refusal and `APLAN062` (`A2-106`)**. `close` and `amend` (`add` /
+  `replace`) now refuse duplicate evidence citations by `(kind, canonical reference)` before
+  writing; `check` reports duplicate citations already on disk via `APLAN062` while distinguishing
+  harmless duplication from weak or unresolved evidence; and `verify` deduplicates citations so
+  work and diagnostics are not multiplied.
 - **Dedicated `APLAN060` trace-retargeting error rule and additive kind-tagged `trace_fingerprints`
   (`A2-051`, ADR-0069, closes #30)**. Resolved trace anchors are now classified as `heading`,
   `row`, or `node` while preserving `ADR-0015`'s heading-first precedence. Renaming a heading so a
@@ -38,6 +47,11 @@ to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Changed
 
+- **`APLAN019` reports every individual dead `paths` entry even beside a live bound sibling
+  (`A2-091`, `--require paths.unmatched_reports_every_dead_entry`)**. Retired `A1-141`'s
+  task-level bound-sibling suppression so a dead glob or typo in `paths` can no longer hide
+  behind a live sibling on an evidence-bearing task, while keeping no-evidence tasks silent and
+  preserving historical-revision resolution for terminal tasks.
 - **`APLAN045` clears only on substantive task edits or a matching explicit review stamp
   (`A2-053`, ADR-0070, `--require traces.stale_premise_requires_substantive_edit_or_review`,
   closes #31)**. `APLAN045` now baselines against the most recent commit (or uncommitted

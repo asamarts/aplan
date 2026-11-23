@@ -1335,22 +1335,19 @@ pub const ALL: &[Behaviour] = &[
             "aplan019_is_silent_where_nothing_is_bound_to_the_paths",
         ],
     },
-    // `A1-141`. The scope moved again, so a second name rather than a rewritten
-    // one: `paths.unmatched_needs_evidence` stays true of this build, and a
-    // consumer that pinned it is not refused by a build that also has this.
-    //
-    // What changed: a dead glob beside a live one the task's evidence binds
-    // through is silent. `--require paths.unmatched_needs_evidence` passes on the
-    // build that refused the fourth pilot's bound closure and on the build that
-    // accepts it, which is the blind spot `A1-142` exists to gate rather than to
-    // keep meeting (pre-public adoption evidence item 26).
+    // `A2-091`. Widened `APLAN019` back to per-entry reporting on evidence-bearing
+    // tasks: a live sibling path entry no longer hides dead sibling entries on the
+    // same task, while no-evidence tasks stay silent and terminal historical
+    // revision lookup stays intact. Replaces the former `A1-141` bound-sibling
+    // exemption.
     Behaviour {
-        name: "paths.unmatched_ignores_a_bound_sibling",
-        what: "`APLAN019` is silent about a dead `paths` glob when the task's cited commit or \
-               file binds through another one, so a stale declaration does not refuse a close",
+        name: "paths.unmatched_reports_every_dead_entry",
+        what: "`APLAN019` reports every individual dead `paths` entry on an evidence-bearing task \
+               even when a sibling entry matches, while keeping no-evidence tasks silent and \
+               historical terminal resolution intact",
         proof: &[
-            "aplan019_is_silent_when_the_evidence_binds_through_another_glob",
-            "close_gate::a_dead_sibling_glob_does_not_refuse_a_bound_citation",
+            "aplan019_reports_every_dead_entry_even_beside_a_bound_sibling",
+            "close_gate::a_dead_sibling_glob_is_reported_even_beside_a_bound_citation",
         ],
     },
     // `A1-491`. The rule already ignored vacuous evidence when deciding whether

@@ -1022,29 +1022,26 @@ fn no_resolve_records_it_and_says_that_it_did() {
     );
 }
 
-/// A stale sibling glob does not stop a close whose citation is bound
-/// (`A1-141`).
+/// A dead sibling glob is reported by `APLAN019` even when another sibling
+/// binds the task's citation (`A2-091`, superseding `A1-141`).
 ///
-/// `close` refuses what `verify` would fail, so under `deny_warnings` the fourth
-/// pilot could not close a task whose evidence *was* bound because a second glob
-/// named a directory the task had not created yet. 28 of its tasks are that
-/// shape, including all twelve of the cut it was starting
-/// (pre-public adoption evidence item 26).
-/// Proves the named behaviour `paths.unmatched_ignores_a_bound_sibling` (`A1-211`).
+/// Under `deny_warnings: true`, `close` refuses what `verify` would fail so
+/// dead `paths` entries cannot slip through behind a live sibling.
+/// Proves the named behaviour `paths.unmatched_reports_every_dead_entry` (`A2-091`).
 #[test]
-fn a_dead_sibling_glob_does_not_refuse_a_bound_citation() {
+fn a_dead_sibling_glob_is_reported_even_beside_a_bound_citation() {
     let dir = tempfile::Builder::new()
         .tempdir_in(aplan_core::fixture::fixture_root())
         .expect("tempdir");
     fixture(dir.path());
-    // The pilot's policy, which is what turns the warning into a refusal.
+    // `deny_warnings: true` turns the `APLAN019` warning into a refusal.
     let config = std::fs::read_to_string(dir.path().join(".aplan.yml")).expect("read");
     std::fs::write(
         dir.path().join(".aplan.yml"),
         format!("deny_warnings: true\n{config}"),
     )
     .expect("config");
-    // `tests/**` is live; `fixtures/**` is a directory this task has not made.
+    // `tests/**` is live; `fixtures/**` is dead.
     std::fs::write(
         dir.path().join("aplan/tasks/A-1.md"),
         "---\nid: A-1\ntitle: a task\nphase: 1\nstatus: todo\nowner: t\n\
@@ -1056,30 +1053,28 @@ fn a_dead_sibling_glob_does_not_refuse_a_bound_citation() {
         dir.path(),
         &["close", "A-1", "--evidence", "file:tests/t.rs"],
     );
+    let said = format!("{out}{err}");
     assert!(
-        ok,
-        "a bound citation was refused for a stale sibling: {out}{err}"
+        !ok,
+        "a dead sibling glob must be reported and refuse close under deny_warnings: {said}"
     );
-    assert_eq!(status_of(dir.path()), "status: done");
+    assert!(said.contains("APLAN019"), "{said}");
+    assert!(said.contains("fixtures/**"), "{said}");
+    assert_eq!(status_of(dir.path()), "status: todo");
 
-    // And the case the rule is for still refuses: with no live glob at all,
-    // nothing the task cites binds.
+    // Once the dead sibling is removed, the same close succeeds.
     std::fs::write(
-        dir.path().join("aplan/tasks/A-2.md"),
-        "---\nid: A-2\ntitle: another\nphase: 1\nstatus: todo\nowner: t\n\
-         effort_days: 1\npaths:\n- fixtures/**\n---\n\nbody\n",
+        dir.path().join("aplan/tasks/A-1.md"),
+        "---\nid: A-1\ntitle: a task\nphase: 1\nstatus: todo\nowner: t\n\
+         effort_days: 1\npaths:\n- tests/**\n---\n\nbody\n",
     )
     .expect("task");
     let (out, err, ok) = run(
         dir.path(),
-        &["close", "A-2", "--evidence", "file:tests/t.rs"],
+        &["close", "A-1", "--evidence", "file:tests/t.rs"],
     );
-    let said = format!("{out}{err}");
-    assert!(!ok, "{said}");
-    assert!(
-        said.contains("APLAN019") || said.contains("APLAN031"),
-        "{said}"
-    );
+    assert!(ok, "close without dead sibling should pass: {out}{err}");
+    assert_eq!(status_of(dir.path()), "status: done");
 }
 
 /// The same refusal for the other kind that names an artefact (`A1-045`).
@@ -1492,6 +1487,8 @@ fn focused_l3_runs_only_the_proposed_closures_tests() {
     );
     assert!(!log.exists(), "clap conflict started a configured runner");
 
+    // `A2-106`: duplicate `--evidence` citations are refused before executing
+    // any runner or writing the task.
     let (stdout, stderr, ok) = run(
         dir.path(),
         &[
@@ -1499,6 +1496,31 @@ fn focused_l3_runs_only_the_proposed_closures_tests() {
             "A-1",
             "--evidence",
             "test:focus::primary",
+            "--evidence",
+            "test:focus::primary",
+            "--evidence",
+            "test:focus::secondary",
+            "--execute",
+        ],
+    );
+    assert!(
+        !ok,
+        "duplicate evidence citation must be refused by close (A2-106): {stdout}{stderr}"
+    );
+    assert!(
+        format!("{stdout}{stderr}").contains("test:focus::primary"),
+        "duplicate refusal must name kind and reference: {stdout}{stderr}"
+    );
+    assert!(
+        !log.exists(),
+        "duplicate refusal must happen before running tests"
+    );
+
+    let (stdout, stderr, ok) = run(
+        dir.path(),
+        &[
+            "close",
+            "A-1",
             "--evidence",
             "test:focus::primary",
             "--evidence",

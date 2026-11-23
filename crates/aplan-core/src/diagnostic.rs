@@ -1456,6 +1456,17 @@ define_rules! {
     TraceRetargeted => TRACE_RETARGETED = "APLAN060", Error,
         "a traced anchor resolves to the same element kind it was written or stamped against",
         points_at: Some("traces");
+    /// A live non-milestone task declares a universal catch-all `paths` glob
+    /// (`**`, `*`, `**/*`) that matches every file in the repository and can
+    /// never bind commit evidence at close/verify (`A2-099`).
+    UniversalPathGlob => UNIVERSAL_PATH_GLOB = "APLAN061", Warning,
+        "a live task's paths do not claim every file in the repository with a universal glob",
+        points_at: Some("paths");
+    /// A task lists the same evidence citation (`kind` plus canonical
+    /// reference) more than once (`A2-106`).
+    DuplicateEvidence => DUPLICATE_EVIDENCE = "APLAN062", Warning,
+        "evidence lists each citation once",
+        points_at: Some("evidence");
 }
 
 /// A repository's verdict policy: what makes a report fail its build.
@@ -1826,7 +1837,7 @@ mod tests {
         // Every rule's `code()` is one of the module constants and vice versa is
         // structurally guaranteed by the macro; this pins the count so dropping
         // a row is a visible change.
-        assert_eq!(Rule::ALL.len(), 60);
+        assert_eq!(Rule::ALL.len(), 62);
     }
 
     /// Severity is declared per rule in the macro. Pin the warnings so a
@@ -1846,7 +1857,7 @@ mod tests {
                 "APLAN025", "APLAN026", "APLAN027", "APLAN029", "APLAN035", "APLAN036", "APLAN037",
                 "APLAN038", "APLAN039", "APLAN040", "APLAN041", "APLAN042", "APLAN043", "APLAN044",
                 "APLAN045", "APLAN051", "APLAN052", "APLAN053", "APLAN054", "APLAN056", "APLAN058",
-                "APLAN059"
+                "APLAN059", "APLAN061", "APLAN062"
             ]
         );
     }
