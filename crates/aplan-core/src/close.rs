@@ -5514,4 +5514,43 @@ body
             "expected DuplicateEvidence, got {err:?}"
         );
     }
+
+    /// `A2-101`: `retarget_path` preserves flow-style `paths`, deduplicates
+    /// when the replacement is already present, and refuses terminal tasks.
+    #[test]
+    fn retarget_path_preserves_flow_style_deduplicates_and_refuses_terminal() {
+        let flow = "---\nid: A1-001\ntitle: t\nphase: 1\nstatus: todo\n\
+                    paths: [src/old.rs, src/other.rs]\n---\n\nbody\n";
+        let updated = retarget_path(flow, "src/old.rs", "src/new.rs")
+            .expect("live retarget succeeds")
+            .expect("path matched");
+        assert!(
+            updated.contains("paths: [src/new.rs, src/other.rs]"),
+            "flow style should be preserved:\n{updated}"
+        );
+
+        let already_has_to = "---\nid: A1-002\ntitle: t\nphase: 1\nstatus: todo\n\
+                              paths:\n- src/old.rs\n- src/new.rs\n---\n\nbody\n";
+        let deduped = retarget_path(already_has_to, "./src/old.rs", "src/new.rs")
+            .expect("dedup retarget succeeds")
+            .expect("path matched");
+        assert_eq!(
+            deduped.matches("src/new.rs").count(),
+            1,
+            "retarget must deduplicate when target is already present:\n{deduped}"
+        );
+
+        for terminal in ["done", "dropped"] {
+            let doc = format!(
+                "---\nid: A1-003\ntitle: t\nphase: 1\nstatus: {terminal}\n\
+                 paths:\n- src/old.rs\n---\n\nbody\n"
+            );
+            let err = retarget_path(&doc, "src/old.rs", "src/new.rs")
+                .expect_err("terminal task must be refused");
+            assert!(
+                matches!(err, CloseError::Terminal(_)),
+                "expected Terminal refusal for {terminal}, got {err:?}"
+            );
+        }
+    }
 }

@@ -4265,6 +4265,32 @@ mod tests {
             "ambiguous rename must report all candidates without guessing: {}",
             ambig.message
         );
+
+        // Staged (uncommitted) `git mv src/keep.rs src/moved.rs` must also
+        // surface `APLAN063` with the rename target rather than reading as
+        // never-tracked.
+        std::fs::remove_file(dir.path().join("src/keep.rs")).unwrap();
+        std::fs::write(dir.path().join("src/moved.rs"), "pub fn keep() {}\n").unwrap();
+        let mut idx = repo.index().unwrap();
+        idx.remove_path(Path::new("src/keep.rs")).unwrap();
+        idx.add_path(Path::new("src/moved.rs")).unwrap();
+        idx.write().unwrap();
+
+        let staged_plan = plan_of_all(vec![mk_live("LIVE-STAGED", &["src/keep.rs"])]);
+        let staged_report = verify(&staged_plan, dir.path(), &VerifyOptions::default()).unwrap();
+        let staged_diag = staged_report
+            .diagnostics
+            .iter()
+            .find(|d| {
+                d.code == code::LIVE_PATH_STRANDED && d.task.as_deref() == Some("LIVE-STAGED")
+            })
+            .expect("staged git mv must fire APLAN063");
+        assert!(
+            staged_diag.message.contains("src/moved.rs")
+                && staged_diag.message.contains("staged index"),
+            "staged rename must name src/moved.rs and staged index: {}",
+            staged_diag.message
+        );
     }
 
     /// The scope `A1-138` gave the rule, in the case the fourth pilot met 140
