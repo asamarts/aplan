@@ -1713,7 +1713,15 @@ fn verify_inner(
         // stored `in_progress` is a claim with nothing to resolve, so the only
         // thing that can check it is the repository (`APLAN053`, `A1-359`).
         resolve::report_unstarted_in_progress(&lt.task, &lt.path, &tracked, &mut diagnostics);
+        // `A2-106`: deduplicate exact `(kind, canonical_ref)` citations so
+        // `verify` resolves the distinct set once rather than multiplying work
+        // or diagnostic counts when a duplicate is already on disk (`APLAN062`
+        // reports the duplication structurally).
+        let mut seen_evidence = std::collections::BTreeSet::new();
         for ev in &lt.task.evidence {
+            if !seen_evidence.insert(aplan_core::task::canonical_evidence_key(ev)) {
+                continue;
+            }
             let mut handled = false;
             for r in &resolvers {
                 if r.kind() == ev.kind {
@@ -3965,42 +3973,46 @@ mod tests {
         );
     }
 
-    /// The historical reading is earned by being closed, not by citing a commit.
-    /// A live task's `paths` are a claim about the code as it stands, so a glob
-    /// whose files were deleted is dead for it even though the cited commit
-    /// contained them. Caught by a surviving mutation: dropping the status guard
-    /// A dead glob beside a live one the evidence binds through (`A1-141`).
+    /// Every individual dead `paths` entry on an evidence-bearing task is
+    /// reported even when a live sibling binds the task's evidence (`A2-091`,
+    /// superseding `A1-141`).
     ///
-    /// The fourth pilot's item 26, filed against its own interest: `close`
-    /// refuses what `verify` would fail, so under `deny_warnings` a *bound*
-    /// citation could not close a task whose `paths` carried a stale sibling. 43
-    /// of its tasks have no satisfied glob at all, where the rule is right; 28
-    /// have a satisfied sibling, which is this.
-    /// Proves the named behaviour `paths.unmatched_ignores_a_bound_sibling` (`A1-211`).
+    /// Proves the named behaviour `paths.unmatched_reports_every_dead_entry` (`A2-091`).
     #[test]
-    fn aplan019_is_silent_when_the_evidence_binds_through_another_glob() {
+    fn aplan019_reports_every_dead_entry_even_beside_a_bound_sibling() {
         let (dir, repo) = init();
         let sha = commit(&repo, &[("docs/adr/0001.md", "x")], "the work");
 
-        // The pilot's shape: two globs, one dead, a citation bound through the
-        // other.
+        // Dead sibling after a live bound sibling (file citation): still reported.
         let bound_file = done_task(
             "A",
             vec![file_ev("docs/adr/0001.md")],
             vec!["docs/adr/**".into(), "fixtures/**".into()],
         );
         let report = verify(&plan_of(bound_file), dir.path(), &VerifyOptions::default()).unwrap();
-        assert!(
-            !codes(&report).contains(&code::PATHS_UNMATCHED),
-            "a stale sibling is not an unbound claim: {:?}",
+        let dead_a: Vec<_> = report
+            .diagnostics
+            .iter()
+            .filter(|d| d.code == code::PATHS_UNMATCHED)
+            .collect();
+        assert_eq!(
+            dead_a.len(),
+            1,
+            "the dead sibling must be reported beside the live bound one: {:?}",
             report.diagnostics
         );
+        assert!(dead_a[0].message.contains("fixtures/**"), "{:?}", dead_a[0]);
 
-        // The same for a commit, which is judged by the same globset.
+        // Dead sibling first, live sibling second, plus a second dead sibling:
+        // both dead entries are reported regardless of order (commit citation).
         let bound_commit = done_task(
             "B",
             vec![commit_ev(&sha)],
-            vec!["docs/adr/**".into(), "fixtures/**".into()],
+            vec![
+                "stale-first/**".into(),
+                "docs/adr/**".into(),
+                "fixtures/**".into(),
+            ],
         );
         let report = verify(
             &plan_of(bound_commit),
@@ -4008,14 +4020,21 @@ mod tests {
             &VerifyOptions::default(),
         )
         .unwrap();
-        assert!(
-            !codes(&report).contains(&code::PATHS_UNMATCHED),
-            "{:?}",
+        let dead_b: Vec<_> = report
+            .diagnostics
+            .iter()
+            .filter(|d| d.code == code::PATHS_UNMATCHED)
+            .collect();
+        assert_eq!(
+            dead_b.len(),
+            2,
+            "every dead entry must be reported: {:?}",
             report.diagnostics
         );
+        assert!(dead_b.iter().any(|d| d.message.contains("stale-first/**")));
+        assert!(dead_b.iter().any(|d| d.message.contains("fixtures/**")));
 
-        // And the case the rule is for is untouched: nothing binds through the
-        // set, so the dead glob is named.
+        // Nothing binds through the set at all: dead glob is named as before.
         let unbound = done_task(
             "C",
             vec![file_ev("docs/adr/0001.md")],
@@ -4028,9 +4047,7 @@ mod tests {
             report.diagnostics
         );
 
-        // A task citing only a `test` binds nothing *through a glob* -- coverage
-        // is what judges a test (`APLAN025`) -- so its dead globs are still worth
-        // naming.
+        // A task citing only a `test` also reports its dead globs.
         let mut tested = done_task("D", Vec::new(), vec!["fixtures/**".into()]);
         tested.evidence = vec![aplan_core::Evidence {
             kind: aplan_core::EvidenceKind::Test,
@@ -4041,6 +4058,64 @@ mod tests {
         assert!(
             codes(&report).contains(&code::PATHS_UNMATCHED),
             "{:?}",
+            report.diagnostics
+        );
+    }
+
+    /// `A2-106`: duplicate evidence citations on disk are deduplicated in
+    /// `verify` so work and diagnostics are not multiplied.
+    #[test]
+    fn verify_deduplicates_duplicate_evidence_citations() {
+        let (dir, repo) = init();
+        let sha = commit(&repo, &[("src/a.rs", "x")], "work");
+
+        // Duplicate resolvable citations (including `./` normalization on `file:`)
+        // stay clean and are resolved without error.
+        let task = done_task(
+            "A",
+            vec![
+                commit_ev(&sha),
+                commit_ev(&sha),
+                file_ev("src/a.rs"),
+                file_ev("./src/a.rs"),
+            ],
+            vec!["src/**".into()],
+        );
+        let report = verify(&plan_of(task), dir.path(), &VerifyOptions::default()).unwrap();
+        assert!(report.diagnostics.is_empty(), "{:?}", report.diagnostics);
+
+        // Duplicate broken citations emit one failure diagnostic each, not two.
+        let broken = done_task(
+            "B",
+            vec![
+                file_ev("src/missing.rs"),
+                file_ev("./src/missing.rs"),
+                commit_ev("deadbeef0000"),
+                commit_ev("deadbeef0000"),
+            ],
+            vec!["src/**".into()],
+        );
+        let report = verify(&plan_of(broken), dir.path(), &VerifyOptions::default()).unwrap();
+        let aplan015: Vec<_> = report
+            .diagnostics
+            .iter()
+            .filter(|d| d.code == code::FILE_UNRESOLVED)
+            .collect();
+        assert_eq!(
+            aplan015.len(),
+            1,
+            "duplicate broken file citations must not multiply APLAN015: {:?}",
+            report.diagnostics
+        );
+        let aplan011: Vec<_> = report
+            .diagnostics
+            .iter()
+            .filter(|d| d.code == code::COMMIT_UNRESOLVED)
+            .collect();
+        assert_eq!(
+            aplan011.len(),
+            1,
+            "duplicate broken commit citations must not multiply APLAN011: {:?}",
             report.diagnostics
         );
     }
@@ -6533,8 +6608,28 @@ mod tests {
             ..VerifyOptions::default()
         };
         let same = "https://example.invalid/one";
-        let report = verify(&url_task(&[same, same, same]), dir.path(), &opts).unwrap();
-        assert_eq!(report.diagnostics.len(), 3, "each citation is reported");
+        let three_tasks = plan_of_all(
+            ["A", "B", "C"]
+                .into_iter()
+                .map(|id| {
+                    done_task(
+                        id,
+                        vec![aplan_core::Evidence {
+                            kind: aplan_core::EvidenceKind::Url,
+                            reference: same.into(),
+                            captured: None,
+                        }],
+                        Vec::new(),
+                    )
+                })
+                .collect(),
+        );
+        let report = verify(&three_tasks, dir.path(), &opts).unwrap();
+        assert_eq!(
+            report.diagnostics.len(),
+            3,
+            "each task citation is reported"
+        );
         let asked = std::fs::read_to_string(&counter).unwrap().lines().count();
         assert_eq!(asked, 1, "the checker was asked {asked} times for one url");
     }
@@ -7058,8 +7153,24 @@ mod tests {
         };
         let started = std::time::Instant::now();
         let same = "https://example.com/a";
-        let observed = verify_observed(&url_task(&[same, same, same]), dir.path(), &opts)
-            .expect("findings, not repeated waits");
+        let three_tasks = plan_of_all(
+            ["A", "B", "C"]
+                .into_iter()
+                .map(|id| {
+                    done_task(
+                        id,
+                        vec![aplan_core::Evidence {
+                            kind: aplan_core::EvidenceKind::Url,
+                            reference: same.into(),
+                            captured: None,
+                        }],
+                        Vec::new(),
+                    )
+                })
+                .collect(),
+        );
+        let observed =
+            verify_observed(&three_tasks, dir.path(), &opts).expect("findings, not repeated waits");
         let took = started.elapsed();
         assert!(
             took < std::time::Duration::from_secs(20),

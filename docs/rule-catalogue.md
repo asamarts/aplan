@@ -176,6 +176,8 @@ a closed task's traced section is unchanged since closure
 
 a task's paths globs each match at least one tracked file, once it cites evidence
 
+- **says:** `paths` entry `fixtures/**` matches no tracked file, so the file this task cites binds to nothing through it
+  - **fix:** Correct `fixtures/**` to name files this task owns, or remove it. Nothing the repository tracks matches it.
 - **says:** `paths` entry `src/gone/**` matches no tracked file, so the file this task cites binds to nothing through it
   - **fix:** Correct `src/gone/**` to name files this task owns, or remove it. Nothing the repository tracks matches it.
 - **says:** `paths` entry `src` matches no tracked file, so the file this task cites binds to nothing through it
@@ -525,4 +527,18 @@ a traced anchor resolves to the same element kind it was written or stamped agai
   - **fix:** Update `traces` to the renamed heading target, or if tracing the table row is intentional, run `aplan close A-1 --restamp` to re-stamp against it.
 - **says:** traced anchor `DESIGN.md#beta` silently retargeted from a table row to a heading
   - **fix:** Update `traces` to the renamed table row target, or if tracing the heading is intentional, run `aplan close A-1 --restamp` to re-stamp against it.
+
+## APLAN061 (warning)
+
+a live task's paths do not claim every file in the repository with a universal glob
+
+- **says:** `paths` includes `**`, which matches every file in the repository: commit evidence cannot prove relevance against a universal catch-all and will be refused at close/verify (APLAN012)
+  - **fix:** Replace `**` with specific file or directory globs naming the territory this task actually owns (for example `src/module/**`).
+
+## APLAN062 (warning)
+
+evidence lists each citation once
+
+- **says:** `evidence` lists `file:./deny.toml` and `file:deny.toml` (2 entries resolving to `file:deny.toml`). Duplicating a citation does not make it unresolved or weak, but it inflates the evidence list and usually means an edit went wrong
+  - **fix:** Remove the repeated evidence entry so each distinct citation appears once. If two entries were meant to cite different artifacts, fix the wrong reference.
 

@@ -720,6 +720,8 @@ empty cut must be surfaced, not swallowed.
 | `APLAN058` | Every cut and tag in `policy[].when` can match this plan | warning | L0 | done (`A2-024`) |
 | `APLAN059` | Every evidence kind required by policy has a configured resolver | warning | L0 | done (`A2-025`) |
 | `APLAN060` | A traced anchor resolves to the same element kind it was written or stamped against | error | L0/L1 | done (`A2-051`) |
+| `APLAN061` | A live task's `paths` do not include a universal catch-all glob (`**`, `*`, `**/*`, `./**`) | warning | L0 | done (`A2-099`) |
+| `APLAN062` | A task cites each piece of evidence once | warning | L0 | done (`A2-106`) |
 | `APLAN044` | A closed task claims less of the released version than its level implies, without saying why | warning | L0 | done (`A1-312`) |
 
 Every diagnostic carries a stable code, a severity, an optional task id, an optional

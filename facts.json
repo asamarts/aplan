@@ -421,8 +421,8 @@
       "what": "`APLAN019` reports a dead `paths` glob only where the task cites a `commit`, `file` or `test`, so a plan that names trees a later cut creates is silent"
     },
     {
-      "name": "paths.unmatched_ignores_a_bound_sibling",
-      "what": "`APLAN019` is silent about a dead `paths` glob when the task's cited commit or file binds through another one, so a stale declaration does not refuse a close"
+      "name": "paths.unmatched_reports_every_dead_entry",
+      "what": "`APLAN019` reports every individual dead `paths` entry on an evidence-bearing task even when a sibling entry matches, while keeping no-evidence tasks silent and historical terminal resolution intact"
     },
     {
       "name": "paths.unmatched_ignores_vacuous_evidence",
@@ -1465,7 +1465,7 @@
     "evidence_kinds": 5,
     "formats": 9,
     "mcp_tools": 14,
-    "rules": 60
+    "rules": 62
   },
   "evidence_kinds": [
     "commit",
@@ -1849,6 +1849,16 @@
       "code": "APLAN060",
       "severity": "error",
       "title": "a traced anchor resolves to the same element kind it was written or stamped against"
+    },
+    {
+      "code": "APLAN061",
+      "severity": "warning",
+      "title": "a live task's paths do not claim every file in the repository with a universal glob"
+    },
+    {
+      "code": "APLAN062",
+      "severity": "warning",
+      "title": "evidence lists each citation once"
     }
   ],
   "schema_version": "v1",

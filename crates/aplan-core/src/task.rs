@@ -99,7 +99,9 @@ crate::str_enum! {
     ///
     /// The point of typing this is that "I finished it" is not evidence. A commit,
     /// a URL, a committed artefact, a named test, or a dated note is.
-    #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+    #[derive(
+        Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize, JsonSchema,
+    )]
     #[serde(rename_all = "snake_case")]
     pub enum EvidenceKind {
         /// A git commit SHA in this repository.
@@ -1028,6 +1030,54 @@ pub fn substantive_content(file_text: &str) -> Option<SubstantiveContent> {
         paths: task.paths,
         traces: task.traces,
     })
+}
+
+/// Whether `glob` is a universal catch-all pattern (`**`, `*`, `**/*`, `./**`)
+/// that matches every file in the repository and therefore can never bind
+/// commit evidence to specific work (`A2-099`, shared between `APLAN061` and
+/// `APLAN012`).
+#[must_use]
+pub fn is_universal_path_glob(glob: &str) -> bool {
+    let normalized = crate::glob::spelling(glob);
+    let literal: String = normalized
+        .chars()
+        .filter(|c| !matches!(c, '*' | '/') && !c.is_whitespace())
+        .collect();
+    literal.is_empty() && normalized.contains('*')
+}
+
+/// Canonical identity of an evidence citation over `(kind, canonical_reference)`
+/// (`A2-106`, shared between `close`/`amend` duplicate refusals, `APLAN062`,
+/// and `verify` deduplication).
+///
+/// Two different kinds carrying the same text (`file:foo` vs `note:foo`) stay
+/// distinct. For `file` citations, `.` and `..` path segments before any `@rev`
+/// or `#anchor` suffix are normalised via `glob::spelling`, while the optional
+/// revision and anchor suffixes stay intact.
+#[must_use]
+pub fn canonical_evidence_key(ev: &Evidence) -> (EvidenceKind, String) {
+    let trimmed = ev.reference.trim();
+    if ev.kind != EvidenceKind::File {
+        return (ev.kind, trimmed.to_string());
+    }
+    let (before_anchor, anchor) = match trimmed.split_once('#') {
+        Some((head, frag)) => (head, Some(frag)),
+        None => (trimmed, None),
+    };
+    let (path_part, rev) = match before_anchor.split_once('@') {
+        Some((path, r)) => (path, Some(r)),
+        None => (before_anchor, None),
+    };
+    let mut canonical = crate::glob::spelling(path_part);
+    if let Some(r) = rev {
+        canonical.push('@');
+        canonical.push_str(r);
+    }
+    if let Some(frag) = anchor {
+        canonical.push('#');
+        canonical.push_str(frag);
+    }
+    (ev.kind, canonical)
 }
 
 #[cfg(test)]

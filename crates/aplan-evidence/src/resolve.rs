@@ -5245,11 +5245,7 @@ fn reachable_cited_commit<'repo>(
 /// Whether `glob` matches every file, a catch-all with no literal path segment
 /// (`**`, `*`, `**/*`, `*/**`). Such a glob is not a real ownership claim.
 fn is_match_everything(glob: &str) -> bool {
-    let literal: String = glob
-        .chars()
-        .filter(|c| !matches!(c, '*' | '/') && !c.is_whitespace())
-        .collect();
-    literal.is_empty() && glob.contains('*')
+    aplan_core::task::is_universal_path_glob(glob)
 }
 
 /// A runner's `dir` as a `foo/`-shaped prefix. `None` when it names the
@@ -5767,26 +5763,6 @@ pub fn report_unmatched_paths(
         return Ok(());
     };
 
-    // A dead glob beside a live one that the task's evidence *does* bind through
-    // is a stale declaration, not an unbound claim (`A1-141`). `A1-138` scoped
-    // this rule to where its stated consequence can occur; read once more, the
-    // consequence is that the task's evidence binds to nothing, and evidence
-    // bound through another glob is bound. Nothing is ever bound *through* an
-    // empty glob, so a per-glob reading would silence the rule everywhere.
-    //
-    // The fourth pilot met this at the moment it matters: `close` refuses what
-    // `verify` would fail, so under `deny_warnings` a bound citation could not
-    // close a task with a stale sibling. It filed the question against its own
-    // interest, with 43 tasks where the rule is unambiguously right and 28 where
-    // it is this case (pre-public adoption evidence item 26).
-    //
-    // It also settles a disagreement between two rules: `APLAN031` asks whether a
-    // cited file is inside the `paths` *set*, and this asked its question of each
-    // glob alone. Both read the set now.
-    if binds_through_paths(repo, task, tracked)? {
-        return Ok(());
-    }
-
     // Only now, and only for a closed task, is history worth reading.
     let historic = if task.status == Status::Done {
         historic_paths(repo, task)?
@@ -5936,59 +5912,6 @@ pub fn report_unstarted_in_progress(
         .with_file(file)
         .with_agent_instruction(instruction),
     );
-}
-
-/// Whether any citation this task makes binds through its `paths`.
-///
-/// Only `commit` and `file` can: those are the kinds a glob judges
-/// (`APLAN012`, `APLAN031`). A `test` is bound by runner coverage rather than by
-/// a path match (`APLAN025`), and a `note` or `url` by nothing, so a task citing
-/// only those has nothing bound through the set and its dead globs are still
-/// worth naming.
-fn binds_through_paths(repo: &Repo, task: &Task, tracked: &[PathBuf]) -> Result<bool, Error> {
-    let Some(set) = build_globset(&task.paths) else {
-        return Ok(false);
-    };
-    // Judged against what the repository tracks *now*, which is what keeps
-    // `A1-022`'s distinction: a live task's `paths` are a claim about the code as
-    // it stands, so a commit that touched a file since deleted does not make a
-    // dead glob live again. A closed task is judged at the revision its evidence
-    // cites, and that is handled below by `historic_paths`.
-    //
-    // The glob test comes first and does the filtering: measured on 400 tasks
-    // each citing a commit that touches 400 files, ordering it this way leaves
-    // the membership check running only for the paths a glob already accepted.
-    // The set is here so that what remains is a lookup rather than a scan, not
-    // because the scan was hot.
-    let tracked: std::collections::BTreeSet<&Path> = tracked.iter().map(PathBuf::as_path).collect();
-    let binds = |path: &Path| set.is_match(path) && tracked.contains(path);
-
-    // Files first, whatever order the citations are written in: a file is a
-    // lookup and a commit is a diff, and one bound citation is the whole answer.
-    for ev in &task.evidence {
-        if ev.kind.capabilities().locality.locator() == Some(EvidencePathLocator::CitedFile) {
-            // Membership of `tracked` is the existence check: a path the
-            // repository tracks is a path that is there, so this asks git nothing
-            // and works in a repository with no commits yet, which `close`
-            // already treats as a real situation (`A1-109`).
-            let (path, _) = split_rev(&ev.reference);
-            if binds(Path::new(path)) {
-                return Ok(true);
-            }
-        }
-    }
-    for ev in &task.evidence {
-        if ev.kind.capabilities().locality.locator() != Some(EvidencePathLocator::CommitChanges) {
-            continue;
-        }
-        let Some(commit) = reachable_cited_commit(repo, &ev.reference) else {
-            continue;
-        };
-        if repo.commit_paths(&commit)?.iter().any(|p| binds(p)) {
-            return Ok(true);
-        }
-    }
-    Ok(false)
 }
 
 /// The globs in `paths` that match nothing in `tracked`, with their compiled

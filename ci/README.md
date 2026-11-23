@@ -63,7 +63,7 @@ classifier audit. It widens Rust gates according to `validation.yml` and reports
 gate. Set the one `APLAN_ORDINARY_PROFILE` value in `ci.yml` to `full` to roll ordinary CI back to
 the complete profile without reconstructing steps.
 
-By default, 29 of aplan's 60 rules are warnings. A consumer that needs every finding to block sets
+By default, 31 of aplan's 62 rules are warnings. A consumer that needs every finding to block sets
 `deny_warnings: true`; the repository dogfood already does.
 
 The full profile runs every gate:
