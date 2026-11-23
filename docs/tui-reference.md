@@ -133,6 +133,30 @@ the interactive advanced check can use or disable the loaded trace root, but sel
 aplan check --traces-root .
 ```
 
+### `check --range` (CLI-only)
+
+auditing every historical commit tree in a Git range is a batch CI/pre-push history audit rather than an interactive working-tree check
+
+```sh
+aplan check --range origin/main..HEAD
+```
+
+### `check --fail-fast` (CLI-only)
+
+fail-fast stopping applies only to batch commit-range audits invoked through the CLI
+
+```sh
+aplan check --fail-fast --range origin/main..HEAD
+```
+
+### `check --repo` (CLI-only)
+
+selecting an alternate Git repository for commit-range audits remains an explicit CLI session boundary
+
+```sh
+aplan check --repo . --range origin/main..HEAD
+```
+
 ### `verify --repo` (CLI-only)
 
 the interactive verifier is bound to the loaded repository identity; selecting another evidence repository requires an explicit CLI invocation

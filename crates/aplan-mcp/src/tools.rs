@@ -861,6 +861,15 @@ fn report_payload(
                 .expect("agent contract provenance is always serializable"),
         );
     }
+    if !report.candidate_projections.is_empty()
+        && let Some(map) = payload.as_object_mut()
+    {
+        map.insert(
+            "candidate_projections".to_string(),
+            serde_json::to_value(&report.candidate_projections)
+                .expect("candidate projections are always serializable"),
+        );
+    }
     payload
 }
 
@@ -1069,6 +1078,9 @@ pub fn verify_of_cached(
     report
         .diagnostics
         .extend(evidence.report.diagnostics.iter().cloned());
+    report
+        .candidate_projections
+        .extend(evidence.report.candidate_projections.iter().cloned());
     let mut payload = report_payload(&report, &policy.verdict, report.denied_by(&policy.verdict));
     if let Some(map) = payload.as_object_mut() {
         let mut observation = evidence.observation.clone();

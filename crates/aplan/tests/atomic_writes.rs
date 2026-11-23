@@ -421,6 +421,11 @@ fn every_plan_write_goes_through_save() {
              current holder's diagnostic pid inside the private cache directory, while the cache \
              envelope itself still publishes through native atomic replacement",
         ),
+        (
+            "audit_single_commit",
+            "stages historical Git blob bytes into a private auto-deleted tempdir during \
+             `check --range` (`A2-156`) and never writes to the working tree or plan directory",
+        ),
     ];
     let mut raw = Vec::new();
     let mut scanned = 0usize;

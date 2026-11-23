@@ -234,6 +234,23 @@ pub const ALL: &[Behaviour] = &[
         ],
     },
     Behaviour {
+        name: "check.range_validates_every_introduced_commit",
+        what: "`check --range` validates `.aplan.yml`, tasks and referenced trace documents at \
+               every commit introduced by a commit range in deterministic order without mutating \
+               the working tree, catching intermediate failures behind a clean tip",
+        proof: &[
+            "close_gate::check_range_catches_intermediate_aplan018_behind_green_tip_and_handles_edge_cases",
+        ],
+    },
+    Behaviour {
+        name: "verify.projects_working_tree_drift",
+        what: "`verify` projects advisory pre-commit `APLAN054` and `APLAN045` drift from staged, \
+               unstaged and deleted working-tree changes beside the unchanged `HEAD` verdict",
+        proof: &[
+            "verify_projects_working_tree_drift_for_aplan054_and_aplan045_and_matches_committed_head",
+        ],
+    },
+    Behaviour {
         name: "coordination.is_not_a_plan_verdict_mutation",
         what: "`claim` and `release` mutate only local ephemeral coordination state, so they do \
                not accept plan-verdict overrides or imply that the plan passed a gate",

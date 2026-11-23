@@ -1239,6 +1239,171 @@ fn retarget_path_updates_live_tasks_atomically_and_preserves_terminal_tasks() {
     );
 }
 
+/// `A2-156`: `aplan check --range` validates every commit introduced by a
+/// commit range without mutating the working tree, catching an intermediate
+/// `APLAN018` commit behind a green restamp tip, supporting `--fail-fast`,
+/// reusing proved-identical commits, and handling empty, root-inclusive,
+/// unrelated, and invalid ranges explicitly.
+///
+/// Proves the named behaviour `check.range_validates_every_introduced_commit` (`A2-156`).
+#[test]
+#[allow(clippy::too_many_lines)]
+fn check_range_catches_intermediate_aplan018_behind_green_tip_and_handles_edge_cases() {
+    let dir = tempfile::Builder::new()
+        .tempdir_in(aplan_core::fixture::fixture_root())
+        .expect("tempdir");
+    fixture(dir.path());
+
+    // Configure `deny_warnings: true` and `detect_drift: true`, plus a traced
+    // doc and a closed stamped task.
+    std::fs::write(
+        dir.path().join(".aplan.yml"),
+        "root: aplan\ndeny_warnings: true\ndetect_drift: true\n",
+    )
+    .unwrap();
+    let doc_v1 = "## Policy\n\nOriginal policy text.\n";
+    std::fs::write(dir.path().join("SPEC.md"), doc_v1).unwrap();
+    let stamp_v1 = aplan_core::stamp_in("SPEC.md", doc_v1, "policy").unwrap();
+    let base_sha_init = String::from_utf8(
+        std::process::Command::new("git")
+            .args(["rev-parse", "HEAD"])
+            .current_dir(dir.path())
+            .output()
+            .unwrap()
+            .stdout,
+    )
+    .unwrap();
+    let base_sha_init = base_sha_init.trim().to_string();
+    std::fs::write(
+        dir.path().join("aplan/tasks/A-1.md"),
+        format!(
+            "---\nid: A-1\ntitle: stamped task\nphase: 1\nstatus: done\nowner: t\n\
+             effort_days: 1\npaths:\n- tests/**\ntraces:\n- SPEC.md#policy\n\
+             trace_fingerprints:\n  SPEC.md#policy: '{stamp_v1}'\n\
+             evidence:\n- kind: commit\n  ref: {base_sha_init}\n---\n\nbody\n"
+        ),
+    )
+    .unwrap();
+    git(dir.path(), &["add", "-A"]);
+    git(dir.path(), &["commit", "-m", "base clean state"]);
+    let base_sha = String::from_utf8(
+        std::process::Command::new("git")
+            .args(["rev-parse", "HEAD"])
+            .current_dir(dir.path())
+            .output()
+            .unwrap()
+            .stdout,
+    )
+    .unwrap();
+    let base_sha = base_sha.trim().to_string();
+
+    // Commit 1 (intermediate, RED): edit SPEC.md#policy without restamping A-1.
+    let doc_v2 = "## Policy\n\nChanged policy text without restamp.\n";
+    std::fs::write(dir.path().join("SPEC.md"), doc_v2).unwrap();
+    git(dir.path(), &["add", "SPEC.md"]);
+    git(dir.path(), &["commit", "-m", "edit spec without restamp"]);
+
+    // Commit 2 (tip, GREEN): restamp A-1 so tip passes ordinary `check`.
+    let stamp_v2 = aplan_core::stamp_in("SPEC.md", doc_v2, "policy").unwrap();
+    std::fs::write(
+        dir.path().join("aplan/tasks/A-1.md"),
+        format!(
+            "---\nid: A-1\ntitle: stamped task\nphase: 1\nstatus: done\nowner: t\n\
+             effort_days: 1\npaths:\n- tests/**\ntraces:\n- SPEC.md#policy\n\
+             trace_fingerprints:\n  SPEC.md#policy: '{stamp_v2}'\n\
+             evidence:\n- kind: commit\n  ref: {base_sha_init}\n---\n\nbody\n"
+        ),
+    )
+    .unwrap();
+    git(dir.path(), &["add", "aplan/tasks/A-1.md"]);
+    git(dir.path(), &["commit", "-m", "restamp A-1"]);
+
+    // Commit 3 (clean no-op code commit): touches unrelated file -> reuses Commit 2.
+    std::fs::write(dir.path().join("tests/other.rs"), "// unrelated\n").unwrap();
+    git(dir.path(), &["add", "tests/other.rs"]);
+    git(dir.path(), &["commit", "-m", "unrelated test edit"]);
+
+    // Ordinary tip-only `check` passes cleanly.
+    let (out, err, ok) = run(dir.path(), &["check"]);
+    assert!(ok, "ordinary tip-only check must stay green: {out}{err}");
+    assert!(out.contains("ok:"), "{out}");
+
+    // Range check catches intermediate APLAN018 behind the green tip (JSON).
+    let range_spec = format!("{base_sha}..HEAD");
+    let (out, err, ok) = run(
+        dir.path(),
+        &[
+            "check",
+            "--range",
+            &range_spec,
+            "--repo",
+            dir.path().to_str().unwrap(),
+            "--format",
+            "json",
+        ],
+    );
+    assert!(
+        !ok,
+        "range check must fail on intermediate APLAN018: {out}{err}"
+    );
+    let json: serde_json::Value = serde_json::from_str(&out).expect("valid json");
+    assert_eq!(json["schema"], "aplan/range-check/v1");
+    assert_eq!(json["range_clean"], false);
+    assert_eq!(json["tip_clean"], true);
+    assert_eq!(json["commits_total"], 3);
+    assert_eq!(json["commits_audited"], 3);
+    assert_eq!(json["commits_failed"], 1);
+    assert_eq!(json["commits"][0]["clean"], false);
+    assert_eq!(json["commits"][0]["diagnostics"][0]["code"], "APLAN018");
+    assert_eq!(json["commits"][1]["clean"], true);
+    assert_eq!(json["commits"][2]["clean"], true);
+    assert!(
+        json["commits"][2]["reused_from"].is_string(),
+        "unrelated commit should reuse proved-identical result: {json:#}"
+    );
+
+    // `--fail-fast` stops at commit 1 (commits_audited == 1) while still reporting tip_clean.
+    let (out, err, ok) = run(
+        dir.path(),
+        &[
+            "check",
+            "--range",
+            &range_spec,
+            "--fail-fast",
+            "--format",
+            "json",
+        ],
+    );
+    assert!(!ok, "fail-fast range must fail: {out}{err}");
+    let ff: serde_json::Value = serde_json::from_str(&out).expect("valid json");
+    assert_eq!(ff["stopped_early"], true);
+    assert_eq!(ff["commits_audited"], 1);
+    assert_eq!(ff["tip_clean"], true);
+
+    // Clean multi-commit range (`HEAD~2..HEAD`: restamp + unrelated edit) passes.
+    let (out, err, ok) = run(dir.path(), &["check", "--range", "HEAD~2..HEAD"]);
+    assert!(ok, "clean range must pass: {out}{err}");
+    assert!(out.contains("ok: range `HEAD~2..HEAD` clean"), "{out}");
+
+    // Equal endpoints (`HEAD..HEAD`) -> empty range, ok.
+    let (out, err, ok) = run(dir.path(), &["check", "--range", "HEAD..HEAD"]);
+    assert!(ok, "empty range must succeed explicitly: {out}{err}");
+    assert!(out.contains("empty"), "{out}");
+
+    // Reversed range (`HEAD..{base_sha}`) -> explicit error refusal.
+    let rev_spec = format!("HEAD..{base_sha}");
+    let (out, err, ok) = run(dir.path(), &["check", "--range", &rev_spec]);
+    assert!(!ok, "reversed range must be refused: {out}{err}");
+    assert!(
+        format!("{out}{err}").contains("not an ancestor"),
+        "{out}{err}"
+    );
+
+    // Invalid revision -> explicit error refusal.
+    let (out, err, ok) = run(dir.path(), &["check", "--range", "nope1234..HEAD"]);
+    assert!(!ok, "invalid rev must be refused: {out}{err}");
+}
+
 /// The same refusal for the other kind that names an artefact (`A1-045`).
 ///
 /// The fourth pilot closed a task about ADR authorship with a Containerfile, in

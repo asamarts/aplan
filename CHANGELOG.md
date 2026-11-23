@@ -8,6 +8,20 @@ to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Added
 
+- **Commit-range structural validation `aplan check --range <BASE..TIP>` (`A2-156`,
+  `--require check.range_validates_every_introduced_commit`)**. Validates `.aplan.yml`, plan
+  tasks, and referenced trace documents at every commit introduced by `BASE..TIP` (or `..TIP`) in
+  deterministic topological oldest-first order without mutating the working tree, executing
+  historical commands/hooks, following symlinks, or touching the parsed-plan cache. Supports
+  `--fail-fast`, `--repo`, and versioned JSON/agent output (`aplan/range-check/v1`) distinguishing
+  `tip_clean` from `range_clean`, while reusing proved-identical results when relevant inputs are
+  unchanged and refusing incomplete shallow clones, unrelated histories, and invalid revisions.
+- **Advisory pre-commit working-tree drift projection in `aplan verify` (`A2-153`,
+  `--require verify.projects_working_tree_drift`)**. When the working tree has staged, unstaged,
+  or deleted edits relative to `HEAD`, `verify` now projects prospective `APLAN054` (mutable
+  `file:` evidence) and `APLAN045` (untouched live tasks whose traced section changed) beside the
+  unchanged `HEAD` verdict across human, JSON, agent, and MCP output, while staying completely
+  silent on a clean working tree.
 - **Stranded live literal `paths` rule `APLAN063` and `aplan retarget-path` (`A2-101`,
   ADR-0071)**. `verify` now reports live tasks (`todo`, `in_progress`, `blocked`) whose literal
   `paths` name either an existing tracked directory (`src` when `src/**` is tracked) or a file

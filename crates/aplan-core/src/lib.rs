@@ -101,7 +101,8 @@ pub use close::{
     retarget_path, review, set_evidence_fingerprints, set_paths,
 };
 pub use diagnostic::{
-    AgentContractProvenance, Diagnostic, Repair, Report, Rule, Severity, Verdict, code,
+    AgentContractProvenance, CandidateProjection, Diagnostic, Repair, Report, Rule, Severity,
+    Verdict, WorkingTreeState, code,
 };
 pub use explain::{RuleExplanation, explain_rule};
 pub use export::{TaskExport, TaskRow};

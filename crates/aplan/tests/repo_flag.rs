@@ -75,6 +75,7 @@ fn every_command_taking_repo_opens_the_one_it_names() {
     // test twice over.
     let extra = |command: &str| -> Vec<String> {
         match command {
+            "check" => vec!["--range".into(), "..HEAD".into()],
             "show" | "close" => vec!["T-1".into()],
             // A commit citation, not a test one: `test:` resolves through the
             // configured runner and never opens git, so the command would

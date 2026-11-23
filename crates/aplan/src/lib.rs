@@ -3234,6 +3234,22 @@ fn note_unresolved_evidence(plan: &aplan_core::Plan) {
 /// Surface non-blocking `AGENTS.md` build-only provenance skew on human CLI
 /// output (`ADR-0072`, `A2-122`). Machine formats (`json`, `agent`) carry the
 /// structured `agent_contract_provenance` field directly in stdout.
+fn note_candidate_projections(report: &aplan_core::Report, format: Format) {
+    if format != Format::Human || report.candidate_projections.is_empty() {
+        return;
+    }
+    errln!("candidate projection (working tree, advisory; does not change current HEAD verdict):");
+    for proj in &report.candidate_projections {
+        errln!(
+            "  {} [{}] {}: {}",
+            proj.code,
+            proj.state.as_str(),
+            proj.task,
+            proj.message
+        );
+    }
+}
+
 fn note_agent_contract_provenance(report: &aplan_core::Report, format: Format) {
     if format != Format::Human {
         return;
@@ -3344,9 +3360,95 @@ fn refuse_absent_external_roots(opts: &Options) -> Result<()> {
 
 /// `aplan check`, hermetic structural validation (rung L0). No git, no network,
 /// no subprocess.
+fn cmd_check_range(
+    root: &std::path::Path,
+    args: &CheckArgs,
+    range: &str,
+    format: Format,
+) -> Result<u8> {
+    let repo_root = args.repo.clone().unwrap_or_else(|| plan_repository(root));
+    let deny_warnings_override = if args.deny_warnings {
+        Some(true)
+    } else if args.no_deny_warnings {
+        Some(false)
+    } else {
+        None
+    };
+    let opts = aplan_evidence::range::RangeCheckOptions {
+        range: range.to_string(),
+        fail_fast: args.fail_fast,
+        max_commits: aplan_evidence::range::MAX_RANGE_COMMITS,
+        no_require_effort: args.no_require_effort,
+        no_traces: args.no_traces,
+        deny_warnings_override,
+    };
+    let report = aplan_evidence::range::check_commit_range(&repo_root, &opts)
+        .map_err(|e| anyhow::anyhow!("{e}"))?;
+
+    match format {
+        Format::Json | Format::Agent => {
+            let rendered = serde_json::to_string_pretty(&report)?;
+            write_stdout(&format!("{rendered}\n"))?;
+        }
+        _ => {
+            if report.empty_range {
+                write_stdout(&format!(
+                    "ok: range `{}` is empty (0 commit(s) audited)\n",
+                    report.range
+                ))?;
+            } else if report.range_clean {
+                write_stdout(&format!(
+                    "ok: range `{}` clean ({}/{} commit(s) audited)\n",
+                    report.range, report.commits_audited, report.commits_total
+                ))?;
+            } else {
+                let tip_note = if report.tip_clean {
+                    "tip is clean; intermediate commit(s) failed"
+                } else {
+                    "tip commit failed"
+                };
+                write_stdout(&format!(
+                    "fail: range `{}` has {} invalid commit(s) out of {} audited ({tip_note})\n",
+                    report.range, report.commits_failed, report.commits_audited
+                ))?;
+                for commit in &report.commits {
+                    if commit.clean {
+                        continue;
+                    }
+                    write_stdout(&format!(
+                        "\ncommit {} ({}): {} finding(s):\n",
+                        commit.short_commit,
+                        commit.subject,
+                        commit.diagnostics.len()
+                    ))?;
+                    for d in &commit.diagnostics {
+                        let who = d
+                            .task
+                            .as_deref()
+                            .map_or_else(String::new, |id| format!(" [{id}]"));
+                        write_stdout(&format!(
+                            "  {} ({}){who}: {}\n",
+                            d.code, d.severity, d.message
+                        ))?;
+                    }
+                }
+            }
+        }
+    }
+
+    Ok(if report.range_clean {
+        EXIT_OK
+    } else {
+        EXIT_VIOLATIONS
+    })
+}
+
 fn cmd_check(root: &std::path::Path, args: &CheckArgs) -> Result<u8> {
     refuse_selection_on_a_gate("check", &args.select)?;
     let format = format_for("check", &args.format)?;
+    if let Some(range) = &args.range {
+        return cmd_check_range(root, args, range, format);
+    }
     let context = hermetic_application_context(
         root,
         HermeticContextOptions {
@@ -5000,6 +5102,9 @@ fn cmd_verify(root: &std::path::Path, args: &VerifyArgs) -> Result<u8> {
     let evidence = inspect_verify_evidence(&plan, repo, &opts, args)?;
     note_what_the_run_cost(&evidence.spend, args.execute);
     report.diagnostics.extend(evidence.report.diagnostics);
+    report
+        .candidate_projections
+        .extend(evidence.report.candidate_projections);
     report.diagnostics.sort_by(|a, b| {
         a.code
             .cmp(b.code)
@@ -5028,6 +5133,7 @@ fn cmd_verify(root: &std::path::Path, args: &VerifyArgs) -> Result<u8> {
     })?;
     note_unopened_evidence(&unopened);
     note_agent_contract_provenance(&report, format);
+    note_candidate_projections(&report, format);
     note_denied_warnings(&report, &policy);
     Ok(verdict(&report, &policy))
 }
@@ -7207,6 +7313,18 @@ pub struct CheckArgs {
     /// Do not fail on warnings, whatever `.aplan.yml` says.
     #[arg(long, conflicts_with = "deny_warnings")]
     no_deny_warnings: bool,
+    /// Validate every plan state introduced by a Git commit range (`BASE..TIP`
+    /// or `..TIP`) without mutating the working tree.
+    #[arg(long, value_name = "BASE..TIP")]
+    range: Option<String>,
+    /// Stop at the first invalid commit when auditing `--range` instead of
+    /// auditing every commit in the range.
+    #[arg(long, requires = "range")]
+    fail_fast: bool,
+    /// Where the git repository is when running `--range` (default: current
+    /// directory).
+    #[arg(long, value_name = "PATH", requires = "range")]
+    repo: Option<PathBuf>,
 }
 
 /// Everything `aplan verify` was asked to do.
@@ -13008,6 +13126,7 @@ fn render_focused_close_preview(
             diagnostics: review.findings.clone(),
             tasks_checked: 1,
             agent_contract_provenance: None,
+            candidate_projections: Vec::new(),
         };
         render_proposed(&report, verdict)?;
     }
@@ -21092,6 +21211,7 @@ mod tests {
             diagnostics,
             tasks_checked: 1,
             agent_contract_provenance: None,
+            candidate_projections: Vec::new(),
         }
     }
 
