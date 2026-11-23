@@ -1610,6 +1610,15 @@ fn render_json(
                 .expect("agent contract provenance is always serializable"),
         );
     }
+    if !report.candidate_projections.is_empty()
+        && let Some(obj) = doc.as_object_mut()
+    {
+        obj.insert(
+            "candidate_projections".to_string(),
+            serde_json::to_value(&report.candidate_projections)
+                .expect("candidate projections are always serializable"),
+        );
+    }
     let mut out = std::io::stdout().lock();
     serde_json::to_writer_pretty(&mut out, &doc)?;
     writeln!(out)
@@ -4759,6 +4768,7 @@ mod tests {
             tasks_checked: 0,
             diagnostics: Vec::new(),
             agent_contract_provenance: None,
+            candidate_projections: Vec::new(),
         };
         for format in [Format::Markdown, Format::Mermaid, Format::Dot, Format::Text] {
             let error = render_kind(&report, format, Kind::Check, &Verdict::default())
@@ -4790,6 +4800,7 @@ mod tests {
             tasks_checked: 2,
             diagnostics: vec![first, second],
             agent_contract_provenance: None,
+            candidate_projections: Vec::new(),
         };
         let policy = Verdict {
             deny_warnings: true,
@@ -4806,6 +4817,7 @@ mod tests {
             tasks_checked: 0,
             diagnostics: Vec::new(),
             agent_contract_provenance: None,
+            candidate_projections: Vec::new(),
         };
         render_verified(
             &report,
@@ -6146,6 +6158,7 @@ mod sarif_tests {
                     .with_task("S-2"),
             ],
             agent_contract_provenance: None,
+            candidate_projections: Vec::new(),
         }
     }
 
@@ -6264,6 +6277,7 @@ mod sarif_tests {
             diagnostics: vec![],
             tasks_checked: 5,
             agent_contract_provenance: None,
+            candidate_projections: Vec::new(),
         };
         let doc = sarif_document(&clean, &Verdict::default());
         assert_eq!(doc["runs"][0]["results"].as_array().unwrap().len(), 0);

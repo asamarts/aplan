@@ -1665,6 +1665,59 @@ pub struct AgentContractProvenance {
     pub note: String,
 }
 
+/// Working-tree change state of an input contributing to a pre-commit
+/// candidate drift projection (`A2-153`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum WorkingTreeState {
+    /// Differs between `HEAD` and the Git index, with the working tree matching
+    /// the index.
+    Staged,
+    /// Matches `HEAD` in the Git index, but differs in the working tree.
+    Unstaged,
+    /// Differs in both the Git index (relative to `HEAD`) and the working tree
+    /// (relative to the index).
+    StagedAndUnstaged,
+    /// Present in `HEAD`, but removed in the index or working tree.
+    Deleted,
+}
+
+impl WorkingTreeState {
+    /// Stable display label for human output.
+    #[must_use]
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::Staged => "staged",
+            Self::Unstaged => "unstaged",
+            Self::StagedAndUnstaged => "staged+unstaged",
+            Self::Deleted => "deleted",
+        }
+    }
+}
+
+/// Advisory pre-commit projection of drift (`APLAN054` or `APLAN045`) that
+/// committing the current working-tree bytes will expose (`A2-153`).
+///
+/// Separate from [`Report::diagnostics`] so projecting candidate working-tree
+/// drift never alters the current `HEAD` verdict or exit status and never
+/// conflates uncommitted bytes with resolved evidence.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct CandidateProjection {
+    /// The rule code committing these bytes will expose (`APLAN054` or `APLAN045`).
+    pub code: String,
+    /// The affected task id.
+    pub task: String,
+    /// The affected task file path.
+    pub file: PathBuf,
+    /// The cited file (`file:<path>`) or trace (`<doc>#<anchor>`) whose
+    /// working-tree bytes differ from `HEAD` / the recorded stamp.
+    pub subject: String,
+    /// Whether the working-tree input is staged, unstaged, both, or deleted.
+    pub state: WorkingTreeState,
+    /// Human-readable advisory explanation.
+    pub message: String,
+}
+
 /// The result of a validation run.
 #[derive(Debug, Clone, Default)]
 pub struct Report {
@@ -1672,6 +1725,9 @@ pub struct Report {
     pub tasks_checked: usize,
     /// Non-blocking build-only provenance skew observed on `AGENTS.md`, if any.
     pub agent_contract_provenance: Option<AgentContractProvenance>,
+    /// Advisory pre-commit working-tree drift projections (`A2-153`), empty
+    /// when the working tree is clean. Does not affect the current verdict.
+    pub candidate_projections: Vec<CandidateProjection>,
 }
 
 impl Report {
@@ -1773,6 +1829,7 @@ mod tests {
                 .chain((0..warnings).map(|_| Diagnostic::warning(code::MISSING_EFFORT, "w")))
                 .collect(),
             agent_contract_provenance: None,
+            candidate_projections: Vec::new(),
         };
 
         // An error denies whatever the policy says: the policy is about warnings.

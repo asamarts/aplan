@@ -955,6 +955,7 @@ impl CachedReport {
             diagnostics,
             tasks_checked: self.tasks_checked,
             agent_contract_provenance,
+            candidate_projections: Vec::new(),
         })
     }
 }

@@ -123,12 +123,32 @@ const INBOX: &[MutationAction] = &[
     MutationAction::CaptureRestore,
     MutationAction::CapturePromote,
 ];
-const CHECK_BOUNDARIES: &[CommandBoundary] = &[CommandBoundary {
-    name: "check --traces-root",
-    aliases: &["check --traces-root", "alternate trace root"],
-    reason: "the interactive advanced check can use or disable the loaded trace root, but selecting a different filesystem root remains an explicit CLI session boundary",
-    example: "aplan check --traces-root .",
-}];
+const CHECK_BOUNDARIES: &[CommandBoundary] = &[
+    CommandBoundary {
+        name: "check --traces-root",
+        aliases: &["check --traces-root", "alternate trace root"],
+        reason: "the interactive advanced check can use or disable the loaded trace root, but selecting a different filesystem root remains an explicit CLI session boundary",
+        example: "aplan check --traces-root .",
+    },
+    CommandBoundary {
+        name: "check --range",
+        aliases: &["check --range", "commit range check"],
+        reason: "auditing every historical commit tree in a Git range is a batch CI/pre-push history audit rather than an interactive working-tree check",
+        example: "aplan check --range origin/main..HEAD",
+    },
+    CommandBoundary {
+        name: "check --fail-fast",
+        aliases: &["check --fail-fast", "range fail fast"],
+        reason: "fail-fast stopping applies only to batch commit-range audits invoked through the CLI",
+        example: "aplan check --fail-fast --range origin/main..HEAD",
+    },
+    CommandBoundary {
+        name: "check --repo",
+        aliases: &["check --repo", "range repository"],
+        reason: "selecting an alternate Git repository for commit-range audits remains an explicit CLI session boundary",
+        example: "aplan check --repo . --range origin/main..HEAD",
+    },
+];
 const VERIFY_BOUNDARIES: &[CommandBoundary] = &[
     CommandBoundary {
         name: "verify --repo",

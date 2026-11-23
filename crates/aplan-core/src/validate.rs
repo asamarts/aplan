@@ -634,6 +634,7 @@ pub fn validate_with_graph(plan: &Plan, opts: &Options, graph: &Graph<'_>) -> Re
         diagnostics: plan.load_diagnostics.clone(),
         tasks_checked: plan.tasks.len(),
         agent_contract_provenance: None,
+        candidate_projections: Vec::new(),
     };
 
     // Duplicate ids. Detected before building the graph, which dedupes.

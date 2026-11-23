@@ -890,6 +890,64 @@ impl Repo {
         Ok(StrandedPathHistory::NeverTracked)
     }
 
+    /// Classify a single repository-relative path's uncommitted working-tree
+    /// state relative to `HEAD` (`A2-153`), reading only that path (never a
+    /// full-repo status scan).
+    ///
+    /// Returns `None` when the file matches `HEAD` in both index and working
+    /// tree (or is untracked and absent from `HEAD`).
+    pub fn working_tree_file_state(
+        &self,
+        workdir: &Path,
+        repo_rel_path: &Path,
+    ) -> Option<(aplan_core::WorkingTreeState, Vec<u8>, Option<Vec<u8>>)> {
+        let head_commit = self.inner.head().ok()?.peel_to_commit().ok()?;
+        let head_tree = head_commit.tree().ok()?;
+        let head_entry = head_tree
+            .get_path(repo_rel_path)
+            .ok()
+            .filter(|e| e.kind() == Some(git2::ObjectType::Blob))?;
+        let head_bytes = self
+            .inner
+            .find_blob(head_entry.id())
+            .ok()?
+            .content()
+            .to_vec();
+
+        let index_bytes = self
+            .inner
+            .index()
+            .ok()
+            .and_then(|idx| idx.get_path(repo_rel_path, 0))
+            .and_then(|entry| self.inner.find_blob(entry.id).ok())
+            .map(|blob| blob.content().to_vec());
+        let disk_bytes = std::fs::read(workdir.join(repo_rel_path)).ok();
+
+        match (index_bytes, disk_bytes) {
+            (None, _) | (_, None) => {
+                Some((aplan_core::WorkingTreeState::Deleted, head_bytes, None))
+            }
+            (Some(idx), Some(wt)) => {
+                let staged = idx != head_bytes;
+                let unstaged = wt != idx;
+                match (staged, unstaged) {
+                    (false, false) => None,
+                    (true, false) => {
+                        Some((aplan_core::WorkingTreeState::Staged, head_bytes, Some(idx)))
+                    }
+                    (false, true) => {
+                        Some((aplan_core::WorkingTreeState::Unstaged, head_bytes, Some(wt)))
+                    }
+                    (true, true) => Some((
+                        aplan_core::WorkingTreeState::StagedAndUnstaged,
+                        head_bytes,
+                        Some(wt),
+                    )),
+                }
+            }
+        }
+    }
+
     /// Whether `path` names a committed *file* (a blob) in the tree of `rev` (or
     /// `HEAD`, when `rev` is `None`). A rev that does not resolve is reported as
     /// "does not exist there" rather than an error, the citation is what is wrong.

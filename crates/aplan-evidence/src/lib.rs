@@ -28,6 +28,7 @@
 mod batch;
 pub mod excerpt;
 mod material;
+pub mod range;
 mod repo;
 mod resolve;
 mod scheduler;
@@ -293,6 +294,8 @@ use aplan_core::{EvidenceKind, Plan, Report};
 pub enum Error {
     // Command-neutral: this is raised by both `verify` (resolving evidence) and
     // `close` (deriving HEAD), so the message must not name one of them.
+    #[error("{0}")]
+    InvalidRange(String),
     #[error("`{0}` is not a git repository")]
     NotARepository(std::path::PathBuf),
     #[error("the repository at `{0}` has no commits yet")]
@@ -1820,11 +1823,194 @@ fn verify_inner(
             .then(a.message.cmp(&b.message))
     });
 
+    let candidate_projections = project_working_tree_drift(&repo, repo_root, plan, opts);
+
     Ok(Report {
         diagnostics,
         tasks_checked: plan.tasks.len(),
         agent_contract_provenance: None,
+        candidate_projections,
     })
+}
+
+/// `A2-153`: project advisory pre-commit `APLAN054` (mutable `file:` evidence)
+/// and `APLAN045` (live task `traces`) drift from staged, unstaged, or deleted
+/// working-tree changes beside the unchanged `HEAD` verdict.
+///
+/// Reads only cited files, traced documents, and their task files. Returns an
+/// empty list on a clean working tree or when `HEAD` cannot be opened.
+type WorkingTreeFileState = Option<(aplan_core::WorkingTreeState, Vec<u8>, Option<Vec<u8>>)>;
+
+#[allow(clippy::too_many_lines)]
+fn project_working_tree_drift(
+    repo: &Repo,
+    repo_root: &Path,
+    plan: &Plan,
+    opts: &VerifyOptions,
+) -> Vec<aplan_core::CandidateProjection> {
+    let workdir = repo.effective_workdir(repo_root);
+    let root = workdir.as_deref().unwrap_or(repo_root);
+    let mut projections = Vec::new();
+    let mut file_states: std::collections::BTreeMap<std::path::PathBuf, WorkingTreeFileState> =
+        std::collections::BTreeMap::new();
+
+    let mut state_of = |rel: &Path| {
+        file_states
+            .entry(rel.to_path_buf())
+            .or_insert_with(|| repo.working_tree_file_state(root, rel))
+            .clone()
+    };
+
+    // 1. Prospective `APLAN054`: closed tasks with mutable `file:` citations
+    //    whose stamped file has uncommitted changes in the working tree.
+    if opts.detect_drift {
+        for lt in &plan.tasks {
+            if lt.task.status != aplan_core::Status::Done {
+                continue;
+            }
+            let mut seen_ev = std::collections::BTreeSet::new();
+            for ev in &lt.task.evidence {
+                if ev.kind != aplan_core::EvidenceKind::File
+                    || !seen_ev.insert(aplan_core::task::canonical_evidence_key(ev))
+                {
+                    continue;
+                }
+                let trimmed = ev.reference.trim();
+                let (before_anchor, anchor) = trimmed
+                    .split_once('#')
+                    .map_or((trimmed, None), |(h, f)| (h, Some(f)));
+                // Pinned `@rev` file citations are immutable history, never APLAN054.
+                if before_anchor.contains('@') {
+                    continue;
+                }
+                let canon_path = aplan_core::glob::spelling(before_anchor).replace('\\', "/");
+                let key = format!("file:{trimmed}");
+                let alt_key = anchor.map_or_else(
+                    || format!("file:{canon_path}"),
+                    |frag| format!("file:{canon_path}#{frag}"),
+                );
+                let Some(stamp) = lt
+                    .task
+                    .evidence_fingerprints
+                    .get(&key)
+                    .or_else(|| lt.task.evidence_fingerprints.get(&alt_key))
+                else {
+                    continue;
+                };
+
+                let rel = Path::new(&canon_path);
+                let Some((state, head_bytes, wt_bytes)) = state_of(rel) else {
+                    continue;
+                };
+
+                // Only project when `HEAD` currently satisfies the stamp (so
+                // committing these bytes will *newly* expose APLAN054).
+                if !file_evidence_matches_stamp(&canon_path, anchor, &head_bytes, stamp) {
+                    continue;
+                }
+
+                let wt_ok = wt_bytes
+                    .as_deref()
+                    .is_some_and(|b| file_evidence_matches_stamp(&canon_path, anchor, b, stamp));
+                if !wt_ok {
+                    projections.push(aplan_core::CandidateProjection {
+                        code: aplan_core::code::EVIDENCE_DRIFT.to_string(),
+                        task: lt.task.id.clone(),
+                        file: lt.path.clone(),
+                        subject: format!("file:{trimmed}"),
+                        state,
+                        message: format!(
+                            "working tree ({}) modifies cited file `{canon_path}` relative to its \
+                             recorded stamp; committing these bytes will trigger APLAN054",
+                            state.as_str()
+                        ),
+                    });
+                }
+            }
+        }
+    }
+
+    // 2. Prospective `APLAN045`: live tasks whose traced section changed in the
+    //    working tree relative to `HEAD` while the task itself is untouched.
+    let traces_base = opts.traces_root.as_deref().unwrap_or(root);
+    for lt in &plan.tasks {
+        if lt.task.status.is_terminal() || lt.task.traces.is_empty() {
+            continue;
+        }
+        let task_rel = repository_relative_path(&lt.path, workdir.as_deref());
+        // If the task itself has an uncommitted substantive edit, committing
+        // both together gives the task the same commit timestamp as the doc.
+        if uncommitted_substantive_edit(repo, repo_root, lt, &task_rel).0 {
+            continue;
+        }
+        for trace in &lt.task.traces {
+            let Some((doc_part, anchor)) = trace.split_once('#') else {
+                continue;
+            };
+            let abs_doc = traces_base.join(doc_part);
+            let doc_rel = repository_relative_path(&abs_doc, workdir.as_deref());
+            let Some((state, head_bytes, wt_bytes)) = state_of(&doc_rel) else {
+                continue;
+            };
+            let Ok(head_text) = std::str::from_utf8(&head_bytes) else {
+                continue;
+            };
+            let head_stamp = aplan_core::stamp_in(doc_part, head_text, anchor);
+            let wt_stamp = wt_bytes
+                .as_deref()
+                .and_then(|b| std::str::from_utf8(b).ok())
+                .and_then(|wt_text| aplan_core::stamp_in(doc_part, wt_text, anchor));
+
+            if head_stamp == wt_stamp {
+                continue;
+            }
+            // If the task already carries a review stamp matching the working-tree
+            // section (e.g., `aplan review` was already run), do not project drift.
+            if let (Some(existing), Some(wt_s)) = (lt.task.trace_fingerprints.get(trace), &wt_stamp)
+                && existing == wt_s
+            {
+                continue;
+            }
+            projections.push(aplan_core::CandidateProjection {
+                code: aplan_core::code::STALE_PREMISE.to_string(),
+                task: lt.task.id.clone(),
+                file: lt.path.clone(),
+                subject: trace.clone(),
+                state,
+                message: format!(
+                    "working tree ({}) modifies traced section `{trace}` while task `{}` is \
+                     untouched; committing these bytes will trigger APLAN045",
+                    state.as_str(),
+                    lt.task.id
+                ),
+            });
+        }
+    }
+
+    projections.sort_by(|a, b| {
+        a.code
+            .cmp(&b.code)
+            .then(a.task.cmp(&b.task))
+            .then(a.subject.cmp(&b.subject))
+    });
+    projections
+}
+
+fn file_evidence_matches_stamp(
+    canon_path: &str,
+    anchor: Option<&str>,
+    bytes: &[u8],
+    stamp: &str,
+) -> bool {
+    if let Some(frag) = anchor {
+        let Ok(text) = std::str::from_utf8(bytes) else {
+            return false;
+        };
+        aplan_core::anchor::check_stamp_in(canon_path, text, frag, stamp)
+            == Some(aplan_core::StampCheck::Holds)
+    } else {
+        aplan_core::anchor::content_fingerprint(bytes) == stamp
+    }
 }
 
 /// Remove proposals that are exact alone but collide as a batch.
@@ -2009,6 +2195,7 @@ pub fn resolve_proposed(
                     diagnostics: Vec::new(),
                     tasks_checked: 1,
                     agent_contract_provenance: None,
+                    candidate_projections: Vec::new(),
                 },
                 unchecked,
                 repository_unreadable: true,
@@ -4291,6 +4478,158 @@ mod tests {
             "staged rename must name src/moved.rs and staged index: {}",
             staged_diag.message
         );
+    }
+
+    /// `A2-153`: `verify` projects advisory pre-commit `APLAN054` (mutable
+    /// `file:` evidence) and `APLAN045` (live task `traces`, including heading
+    /// and table-row anchors across multiple tasks) from staged, unstaged, and
+    /// deleted working-tree changes without altering the current `HEAD`
+    /// verdict, and matches the subsequent clean-`HEAD` findings once committed.
+    ///
+    /// Proves the named behaviour `verify.projects_working_tree_drift` (`A2-153`).
+    #[test]
+    fn verify_projects_working_tree_drift_for_aplan054_and_aplan045_and_matches_committed_head() {
+        let (dir, repo) = init();
+        let proof_v1 = "proof version 1\n";
+        let design_v1 = concat!(
+            "## Alpha\n\nOriginal alpha.\n\n",
+            "| Key | Val |\n| --- | --- |\n| Beta | Original beta |\n"
+        );
+
+        let mut done_file = done_task(
+            "DONE-F",
+            vec![file_ev("docs/proof.md")],
+            vec!["docs/**".into()],
+        );
+        done_file.evidence_fingerprints.insert(
+            "file:docs/proof.md".to_string(),
+            aplan_core::anchor::content_fingerprint(proof_v1.as_bytes()),
+        );
+
+        let mut live_heading = done_task("LIVE-H", Vec::new(), vec!["src/**".into()]);
+        live_heading.status = aplan_core::Status::Todo;
+        live_heading.traces = vec!["docs/design.md#alpha".into()];
+
+        let mut live_row = done_task("LIVE-R", Vec::new(), vec!["src/**".into()]);
+        live_row.status = aplan_core::Status::Todo;
+        live_row.traces = vec!["docs/design.md#beta".into()];
+
+        // Commit both documents and the task files so HEAD is clean and ordered.
+        commit(
+            &repo,
+            &[
+                ("docs/proof.md", proof_v1),
+                ("docs/design.md", design_v1),
+                ("plan/tasks/DONE-F.md", "task done\n"),
+                ("plan/tasks/LIVE-H.md", "task live h\n"),
+                ("plan/tasks/LIVE-R.md", "task live r\n"),
+            ],
+            "initial clean baseline",
+        );
+
+        let opts = VerifyOptions {
+            detect_drift: true,
+            traces_root: Some(dir.path().to_path_buf()),
+            ..VerifyOptions::default()
+        };
+        let plan = plan_of_all(vec![done_file, live_heading, live_row]);
+
+        // 1. Clean working tree -> 0 diagnostics, 0 candidate projections.
+        let clean = verify(&plan, dir.path(), &opts).unwrap();
+        assert!(clean.diagnostics.is_empty(), "{:?}", clean.diagnostics);
+        assert!(
+            clean.candidate_projections.is_empty(),
+            "clean working tree must emit no projections: {:?}",
+            clean.candidate_projections
+        );
+
+        // 2. Stage an edit to `docs/proof.md` (prospective APLAN054, staged)
+        //    and leave an unstaged edit to `docs/design.md` (prospective APLAN045,
+        //    unstaged, affecting both heading and table-row traces).
+        let proof_v2 = "proof version 2\n";
+        let design_v2 = concat!(
+            "## Alpha\n\nUpdated alpha.\n\n",
+            "| Key | Val |\n| --- | --- |\n| Beta | Updated beta |\n"
+        );
+        std::fs::write(dir.path().join("docs/proof.md"), proof_v2).unwrap();
+        let mut idx = repo.index().unwrap();
+        idx.add_path(Path::new("docs/proof.md")).unwrap();
+        idx.write().unwrap();
+        std::fs::write(dir.path().join("docs/design.md"), design_v2).unwrap();
+
+        let pre_commit = verify(&plan, dir.path(), &opts).unwrap();
+        // HEAD verdict is unchanged (0 diagnostics!).
+        assert!(
+            pre_commit.diagnostics.is_empty(),
+            "advisory projection must not alter HEAD diagnostics: {:?}",
+            pre_commit.diagnostics
+        );
+        assert_eq!(
+            pre_commit.candidate_projections.len(),
+            3,
+            "expected 3 projections (1 APLAN054 + 2 APLAN045): {:#?}",
+            pre_commit.candidate_projections
+        );
+        assert!(pre_commit.candidate_projections.iter().any(|p| {
+            p.code == code::EVIDENCE_DRIFT
+                && p.task == "DONE-F"
+                && p.state == aplan_core::WorkingTreeState::Staged
+        }));
+        assert!(pre_commit.candidate_projections.iter().any(|p| {
+            p.code == code::STALE_PREMISE
+                && p.task == "LIVE-H"
+                && p.state == aplan_core::WorkingTreeState::Unstaged
+        }));
+        assert!(pre_commit.candidate_projections.iter().any(|p| {
+            p.code == code::STALE_PREMISE
+                && p.task == "LIVE-R"
+                && p.state == aplan_core::WorkingTreeState::Unstaged
+        }));
+
+        // 3. Control: commit the exact candidate bytes and verify clean HEAD.
+        //    The post-commit (task, code) findings must match the pre-commit
+        //    projections exactly.
+        commit(
+            &repo,
+            &[("docs/proof.md", proof_v2), ("docs/design.md", design_v2)],
+            "commit candidate bytes",
+        );
+        let post_commit = verify(&plan, dir.path(), &opts).unwrap();
+        assert!(
+            post_commit.candidate_projections.is_empty(),
+            "committed clean HEAD must have 0 projections: {:?}",
+            post_commit.candidate_projections
+        );
+        let predicted: std::collections::BTreeSet<(String, String)> = pre_commit
+            .candidate_projections
+            .iter()
+            .map(|p| (p.task.clone(), p.code.clone()))
+            .collect();
+        let observed: std::collections::BTreeSet<(String, String)> = post_commit
+            .diagnostics
+            .iter()
+            .filter(|d| d.code == code::EVIDENCE_DRIFT || d.code == code::STALE_PREMISE)
+            .filter_map(|d| d.task.clone().map(|t| (t, d.code.to_string())))
+            .collect();
+        assert_eq!(
+            predicted, observed,
+            "pre-commit projections must match post-commit clean-HEAD findings"
+        );
+
+        // 4. Deleted cited file in working tree is distinguished as `Deleted`.
+        std::fs::remove_file(dir.path().join("docs/proof.md")).unwrap();
+        // Restamp DONE-F to proof_v2 so HEAD is clean before deletion check.
+        let mut plan_v2 = plan;
+        plan_v2.tasks[0].task.evidence_fingerprints.insert(
+            "file:docs/proof.md".to_string(),
+            aplan_core::anchor::content_fingerprint(proof_v2.as_bytes()),
+        );
+        let del_report = verify(&plan_v2, dir.path(), &opts).unwrap();
+        assert!(del_report.candidate_projections.iter().any(|p| {
+            p.code == code::EVIDENCE_DRIFT
+                && p.task == "DONE-F"
+                && p.state == aplan_core::WorkingTreeState::Deleted
+        }));
     }
 
     /// The scope `A1-138` gave the rule, in the case the fourth pilot met 140
