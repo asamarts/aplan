@@ -169,8 +169,6 @@ a closed task's traced section is unchanged since closure
 
 - **says:** traced node `spec.yaml#/states/provisioning` has changed since this task was closed
   - **fix:** See what moved with `git diff <sha> -- <tmp>/spec.yaml`, then re-review the task; if it still holds, re-stamp with `aplan close --restamp`, otherwise `aplan supersede` it with the task that now needs doing.
-- **says:** traced section `DESIGN.md#beta` has changed since this task was closed
-  - **fix:** See what moved with `git diff <sha> -- <tmp>/DESIGN.md`, then re-review the task; if it still holds, re-stamp with `aplan close --restamp`, otherwise `aplan supersede` it with the task that now needs doing.
 - **says:** traced section `DOC.md#intro` has changed since this task was closed
   - **fix:** See what moved with `git diff <sha> -- <tmp>/DOC.md`, then re-review the task; if it still holds, re-stamp with `aplan close --restamp`, otherwise `aplan supersede` it with the task that now needs doing.
 
@@ -525,4 +523,6 @@ a traced anchor resolves to the same element kind it was written or stamped agai
 
 - **says:** traced anchor `DESIGN.md#beta` silently retargeted from a heading to a table row
   - **fix:** Update `traces` to the renamed heading target, or if tracing the table row is intentional, run `aplan close A-1 --restamp` to re-stamp against it.
+- **says:** traced anchor `DESIGN.md#beta` silently retargeted from a table row to a heading
+  - **fix:** Update `traces` to the renamed table row target, or if tracing the heading is intentional, run `aplan close A-1 --restamp` to re-stamp against it.
 

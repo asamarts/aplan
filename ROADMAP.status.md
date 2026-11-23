@@ -9,7 +9,7 @@
 | cut | status | done/total | ready | blocked | effort | weeks | critical path |
 | --- | --- | --- | --- | --- | --- | --- | --- |
 | v0.7 | done | 30/30 | 0 | 0 | 22.8d | 0.8 (0.0 left) | 3.5d |
-| v0.8 | todo | 13/35 | 22 | 0 | 48.8d | 1.8 (1.2 left) | 4.5d |
+| v0.8 | todo | 13/36 | 23 | 0 | 49.2d | 1.8 (1.2 left) | 4.5d |
 | adoption | todo | 0/81 | 0 | 81 | 105.8d | 3.9 (3.9 left) | 10.0d |
 | backlog | todo | 0/1 | 0 | 1 | 1.0d | <0.1 (<0.1 left) | 1.0d |
 | hardening | todo | 0/15 | 0 | 15 | 14.8d | 0.5 (0.5 left) | 3.0d |
@@ -91,6 +91,7 @@
 | A2-194 | Direct unknown config and frontmatter diagnostics to aplan facts --identity | done | A2-081 | commit:bacb6ab, test:load::field_line_tests::unknown_frontmatter_field_points_to_schema_facts_and_build_identity, test:load::field_line_tests::nested_unknown_frontmatter_field_carries_its_path, test:config_error::the_commands_the_note_names_still_work_with_the_config_broken, test:config_error::unknown_task_frontmatter_field_points_to_facts_identity |
 | A2-195 | Close post-merge audit gaps in build identity, bind-mounted worktrees, ADR-0068, and task specs | done | - | commit:0a903ce, commit:7b9c9a1, test:build_identity::build_script_cache_identity_ignores_tools_target_and_tracks_product_sources, test:repo::incremental_change_tests::resolve_effective_workdir_handles_bind_mounted_subdirectories, test:version::tests::resolve_plan_base_falls_back_when_workdir_does_not_contain_repo_root |
 | A2-196 | Close post-merge audit gaps in build-contract enforcement and agent-contract provenance | done | - | commit:05e97ffca2c2, test:load::field_line_tests::multiple_unknown_frontmatter_fields_are_sorted_deterministically, test:store::tests::structural_report_cache_persists_agent_contract_provenance_and_isolates_checking_builds, test:config_error::requires_enforced_across_build_tui_feature_explicit_mcp_root_and_git_rev, test:agent_contract_drift::pre_adr0037_block_without_provenance_passes_when_policy_matches_and_blocks_on_policy_drift |
+| A2-197 | Close post-merge audit gaps in frontmatter table-row anchors, open APLAN060, and partial trace review | todo | - | - |
 
 ## adoption Adoption and ergonomics
 

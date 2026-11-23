@@ -337,31 +337,46 @@ fn table_rows(text: &str) -> Vec<Row> {
     let mut out = Vec::new();
     let lines: Vec<&str> = text.lines().collect();
     let mut fence: Option<(char, usize)> = None;
-    for (i, line) in lines.iter().enumerate() {
+    let mut i = 0;
+    if let Some(close) = fenced_metadata_close(&lines, 0, true) {
+        i = close + 1;
+    }
+    while i < lines.len() {
+        let line = lines[i];
         if let Some((ch, len, bare)) = code_fence(line) {
             match fence {
                 None => fence = Some((ch, len)),
                 Some((fch, flen)) if ch == fch && len >= flen && bare => fence = None,
                 Some(_) => {}
             }
+            i += 1;
             continue;
         }
         if fence.is_some() {
+            i += 1;
+            continue;
+        }
+        let after_blank = i == 0 || lines[i - 1].trim().is_empty();
+        if after_blank && let Some(close) = fenced_metadata_close(&lines, i, false) {
+            i = close + 1;
             continue;
         }
         let Some(cell) = first_cell(line) else {
+            i += 1;
             continue;
         };
         // The header row names the columns, not a fact, and markdown says exactly
         // which row it is: the one the delimiter follows. Anchoring it would offer
         // `#invariant` for a table of invariants, which is a trap.
         if lines.get(i + 1).is_some_and(|n| is_delimiter_row(n)) {
+            i += 1;
             continue;
         }
         out.push(Row {
             anchor: mint(&mut counts, cell),
             line: i,
         });
+        i += 1;
     }
     out
 }
@@ -1701,6 +1716,40 @@ After Thematic Break
         assert_eq!(
             check_stamp_in("spec.yaml", yaml, "/states/ready", bare_node),
             Some(StampCheck::Holds)
+        );
+    }
+
+    #[test]
+    fn frontmatter_and_nested_metadata_delimiters_mint_no_table_row_anchors() {
+        let doc = "\
+---
+id: ABC
+summary: |
+  | FrontmatterRow | ignored |
+---
+
+# Plan
+
+---
+owner: platform
+note: |
+  | NestedRow | ignored |
+---
+
+| Name | State |
+| --- | --- |
+| RealRow | active |
+";
+        let anchors = resolvable_anchors(doc);
+        assert!(anchors.contains("plan"), "{anchors:?}");
+        assert!(anchors.contains("realrow"), "{anchors:?}");
+        assert!(
+            !anchors.contains("frontmatterrow"),
+            "frontmatter pipe line minted a phantom table-row anchor: {anchors:?}"
+        );
+        assert!(
+            !anchors.contains("nestedrow"),
+            "nested metadata pipe line minted a phantom table-row anchor: {anchors:?}"
         );
     }
 }

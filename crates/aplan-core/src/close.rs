@@ -118,6 +118,8 @@ pub enum CloseError {
          trace or fix broken traces before running `review`"
     )]
     ReviewNoResolvableTraces,
+    #[error("cannot review while anchored trace(s) do not resolve: {0}")]
+    ReviewUnresolvedTraces(String),
     #[error("internal: `close` produced invalid frontmatter ({0}) and refused to write it")]
     Produced(String),
 }
@@ -170,6 +172,9 @@ pub fn advice(error: &CloseError, id: &str) -> Option<String> {
         )),
         CloseError::ReviewTerminal(Status::Done) => Some(format!(
             "To refresh a `done` task's trace stamps after review, run `aplan close {id} --restamp`."
+        )),
+        CloseError::ReviewUnresolvedTraces(_) => Some(format!(
+            "Fix or remove the unresolved anchored trace(s) before running `aplan review {id}`."
         )),
         _ => None,
     }
@@ -1653,6 +1658,15 @@ pub fn review(file: &str, fingerprints: &BTreeMap<String, String>) -> Result<Str
     }
     if fingerprints.is_empty() {
         return Err(CloseError::ReviewNoResolvableTraces);
+    }
+    let unresolved: Vec<&str> = task
+        .traces
+        .iter()
+        .filter(|tr| tr.contains('#') && !fingerprints.contains_key(tr.as_str()))
+        .map(String::as_str)
+        .collect();
+    if !unresolved.is_empty() {
+        return Err(CloseError::ReviewUnresolvedTraces(unresolved.join(", ")));
     }
 
     let nl = newline(file, bom);
