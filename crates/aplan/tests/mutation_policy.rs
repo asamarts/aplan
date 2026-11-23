@@ -147,6 +147,7 @@ const GATED: &[&str] = &[
     "mv",
     "park",
     "rekey",
+    "retarget-path",
     "review",
     "start",
     "stop",
@@ -634,6 +635,10 @@ fn each_mutating_command_accepts_the_pair_when_run() {
         ("park", &["park", "T-1", "--reason", "later"]),
         ("unpark", &["unpark", "T-1"]),
         ("rekey", &["rekey", "T-1", "T-9"]),
+        (
+            "retarget-path",
+            &["retarget-path", "src/old.rs", "src/new.rs"],
+        ),
         ("review", &["review", "T-1"]),
         ("dep", &["dep", "add", "T-1", "--after", "M-a"]),
         ("dep", &["dep", "rm", "T-1", "--after", "M-a"]),

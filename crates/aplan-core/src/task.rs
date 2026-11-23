@@ -1038,7 +1038,7 @@ pub fn substantive_content(file_text: &str) -> Option<SubstantiveContent> {
 /// `APLAN012`).
 #[must_use]
 pub fn is_universal_path_glob(glob: &str) -> bool {
-    let normalized = crate::glob::spelling(glob);
+    let normalized = crate::glob::spelling(glob).replace('\\', "/");
     let literal: String = normalized
         .chars()
         .filter(|c| !matches!(c, '*' | '/') && !c.is_whitespace())
@@ -1068,7 +1068,7 @@ pub fn canonical_evidence_key(ev: &Evidence) -> (EvidenceKind, String) {
         Some((path, r)) => (path, Some(r)),
         None => (before_anchor, None),
     };
-    let mut canonical = crate::glob::spelling(path_part);
+    let mut canonical = crate::glob::spelling(path_part).replace('\\', "/");
     if let Some(r) = rev {
         canonical.push('@');
         canonical.push_str(r);

@@ -1222,6 +1222,26 @@ enum Command {
         #[command(flatten)]
         verdict: VerdictFlags,
     },
+    /// Retarget a `paths` entry across matching live tasks atomically while
+    /// preserving terminal historical tasks untouched.
+    RetargetPath {
+        /// The existing `paths` entry to replace (matched by canonical path
+        /// spelling).
+        from: String,
+        /// The replacement path or glob to write into matching live tasks.
+        to: String,
+        /// Restrict retargeting to these specific live task ids. Refuses if
+        /// any named task is terminal (`done` or `dropped`).
+        #[arg(long = "id", value_name = "ID")]
+        ids: Vec<String>,
+        /// Preview which live tasks would be updated and which terminal tasks
+        /// would be preserved, without writing any files.
+        #[arg(long)]
+        dry_run: bool,
+        /// Whether a warning blocks this write, as `check` and `verify` take it.
+        #[command(flatten)]
+        verdict: VerdictFlags,
+    },
     /// Move tasks between cuts, editing both milestones or neither.
     Mv {
         /// The tasks to move. Several are one move: every refusal runs before
@@ -1509,6 +1529,7 @@ fn progress_profile(format: &str, source: ProgressSource) -> CommandProgressProf
     }
 }
 
+#[allow(clippy::too_many_lines)]
 fn command_progress_profile(command: &Command) -> CommandProgressProfile {
     use aplan_output::progress::ProgressSurface::{Human, Interactive, Machine};
     match command {
@@ -1577,6 +1598,7 @@ fn command_progress_profile(command: &Command) -> CommandProgressProfile {
         | Command::Start { .. }
         | Command::Stop { .. }
         | Command::Review { .. }
+        | Command::RetargetPath { .. }
         | Command::Add(_)
         | Command::Supersede(_)
         | Command::Tag(_)
@@ -6028,7 +6050,8 @@ fn dispatch(command: Command, cli_root: Option<PathBuf>) -> Result<u8> {
         | Command::Release { .. }
         | Command::Start { .. }
         | Command::Stop { .. }
-        | Command::Review { .. } => dispatch_placement(command, cli_root),
+        | Command::Review { .. }
+        | Command::RetargetPath { .. } => dispatch_placement(command, cli_root),
         Command::Tasks { format, select } => cmd_tasks(&resolve_root(cli_root)?, &format, &select),
         Command::Roadmap(args) => cmd_roadmap(&resolve_root(cli_root)?, &args),
 
@@ -16630,11 +16653,188 @@ fn dispatch_placement(command: Command, cli_root: Option<PathBuf>) -> Result<u8>
         Command::Start { id, verdict } => cmd_working(&resolve_root(cli_root)?, &id, true, verdict),
         Command::Stop { id, verdict } => cmd_working(&resolve_root(cli_root)?, &id, false, verdict),
         Command::Review { id, verdict } => cmd_review(&resolve_root(cli_root)?, &id, verdict),
+        Command::RetargetPath {
+            from,
+            to,
+            ids,
+            dry_run,
+            verdict,
+        } => cmd_retarget_path(&resolve_root(cli_root)?, &from, &to, &ids, dry_run, verdict),
         // Unreachable by construction: the caller matches these four before
         // routing here. A refusal rather than `unreachable!`, so a fifth arm
         // added to that pattern cannot panic in a consumer's terminal.
         other => anyhow::bail!("`{other:?}` is not a placement command"),
     }
+}
+
+type RetargetTargets<'a> = (
+    Vec<(&'a aplan_core::load::LoadedTask, String, String)>,
+    Vec<String>,
+);
+
+fn collect_retarget_targets<'a>(
+    plan: &'a aplan_core::Plan,
+    from: &str,
+    from_canon: &str,
+    to: &str,
+    ids: &[String],
+) -> Result<RetargetTargets<'a>> {
+    let mut live_targets = Vec::new();
+    let mut terminal_preserved = Vec::new();
+
+    if ids.is_empty() {
+        for lt in &plan.tasks {
+            let matches_from = lt
+                .task
+                .paths
+                .iter()
+                .any(|p| aplan_core::glob::spelling(p).replace('\\', "/") == from_canon);
+            if !matches_from {
+                continue;
+            }
+            if lt.task.status.is_terminal() {
+                terminal_preserved.push(lt.task.id.clone());
+                continue;
+            }
+            let original = std::fs::read_to_string(&lt.path)
+                .with_context(|| format!("reading {}", lt.path.display()))?;
+            if let Some(updated) = aplan_core::retarget_path(&original, from, to)
+                .map_err(|e| anyhow::anyhow!("`{}`: {e}", lt.task.id))?
+            {
+                live_targets.push((lt, original, updated));
+            }
+        }
+        if live_targets.is_empty() {
+            if !terminal_preserved.is_empty() {
+                anyhow::bail!(
+                    "refusing to retarget `{from}`: only terminal task(s) ({}) declare it, and \
+                     terminal tasks preserve historical `paths`",
+                    terminal_preserved.join(", ")
+                );
+            }
+            anyhow::bail!("no live task declares `{from}` in `paths`");
+        }
+    } else {
+        let mut seen = std::collections::BTreeSet::new();
+        for id in ids {
+            if !seen.insert(id.as_str()) {
+                continue;
+            }
+            let Some(lt) = plan.tasks.iter().find(|t| t.task.id == *id) else {
+                anyhow::bail!("unknown task `{id}`");
+            };
+            if lt.task.status.is_terminal() {
+                anyhow::bail!(
+                    "refusing to retarget terminal task `{id}` (`{}`): terminal tasks preserve \
+                     historical `paths` so closed evidence remains resolvable",
+                    lt.task.status
+                );
+            }
+            let original = std::fs::read_to_string(&lt.path)
+                .with_context(|| format!("reading {}", lt.path.display()))?;
+            if let Some(updated) = aplan_core::retarget_path(&original, from, to)
+                .map_err(|e| anyhow::anyhow!("`{id}`: {e}"))?
+            {
+                live_targets.push((lt, original, updated));
+            }
+        }
+        if live_targets.is_empty() {
+            anyhow::bail!("none of the specified live tasks declare `{from}` in `paths`");
+        }
+    }
+    Ok((live_targets, terminal_preserved))
+}
+
+fn cmd_retarget_path(
+    root: &std::path::Path,
+    from: &str,
+    to: &str,
+    ids: &[String],
+    dry_run: bool,
+    verdict: VerdictFlags,
+) -> Result<u8> {
+    if from.trim().is_empty() {
+        anyhow::bail!("`from` path must not be empty");
+    }
+    if to.trim().is_empty() {
+        anyhow::bail!("`to` path must not be empty");
+    }
+    aplan_core::glob::compile(to)
+        .map_err(|e| anyhow::anyhow!("replacement path `{to}` is not a valid glob: {e}"))?;
+    let from_canon = aplan_core::glob::spelling(from).replace('\\', "/");
+    let to_canon = aplan_core::glob::spelling(to).replace('\\', "/");
+    if from_canon == to_canon {
+        anyhow::bail!(
+            "`from` (`{from}`) and `to` (`{to}`) resolve to the same path `{from_canon}`"
+        );
+    }
+
+    let plan = load_checked(root)?;
+    if !loaded_cleanly(&plan) {
+        return Ok(EXIT_VIOLATIONS);
+    }
+    let (live_targets, terminal_preserved) =
+        collect_retarget_targets(&plan, from, &from_canon, to, ids)?;
+
+    let mut after = plan.clone();
+    for (lt, _, updated) in &live_targets {
+        after = aplan_core::mutation::with_replaced(
+            &after,
+            &lt.task.id,
+            task_of(updated, &lt.task.id)?,
+        );
+    }
+    refuse_bad_mutation(
+        root,
+        &format!("retarget-path `{from}` -> `{to}`"),
+        &plan,
+        &after,
+        verdict,
+    )?;
+
+    let live_ids: Vec<&str> = live_targets
+        .iter()
+        .map(|(lt, _, _)| lt.task.id.as_str())
+        .collect();
+    if dry_run {
+        println!(
+            "dry-run: would retarget `{from}` -> `{to}` on {} live task(s): {}",
+            live_ids.len(),
+            live_ids.join(", ")
+        );
+        if !terminal_preserved.is_empty() {
+            println!(
+                "preserved {} terminal task(s) untouched: {}",
+                terminal_preserved.len(),
+                terminal_preserved.join(", ")
+            );
+        }
+        return Ok(0);
+    }
+
+    let batch: Vec<aplan_core::save::Replacement> = live_targets
+        .iter()
+        .map(|(lt, original, updated)| aplan_core::save::Replacement {
+            path: lt.path.clone(),
+            expected: original.clone(),
+            updated: updated.clone(),
+        })
+        .collect();
+    aplan_core::save::replace_all(&batch).map_err(|e| anyhow::anyhow!("{e}"))?;
+
+    println!(
+        "retargeted `{from}` -> `{to}` on {} live task(s): {}",
+        live_ids.len(),
+        live_ids.join(", ")
+    );
+    if !terminal_preserved.is_empty() {
+        println!(
+            "preserved {} terminal task(s) untouched: {}",
+            terminal_preserved.len(),
+            terminal_preserved.join(", ")
+        );
+    }
+    Ok(0)
 }
 
 fn cmd_portfolio(

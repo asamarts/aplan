@@ -364,6 +364,7 @@ pub const MCP_COMMAND_POLICY: &[McpCommandPolicy] = &[
     McpCommandPolicy::mirrored("review", &["aplan_review"]),
     McpCommandPolicy::excluded("mv", CliOnlyReason::HumanJudgement),
     McpCommandPolicy::excluded("rekey", CliOnlyReason::HumanJudgement),
+    McpCommandPolicy::excluded("retarget-path", CliOnlyReason::HumanJudgement),
     McpCommandPolicy::excluded("tasks", CliOnlyReason::AlternateView),
     McpCommandPolicy::excluded("critical-path", CliOnlyReason::AlternateView),
     McpCommandPolicy::excluded("roadmap", CliOnlyReason::AlternateView),

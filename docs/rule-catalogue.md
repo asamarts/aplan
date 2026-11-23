@@ -542,3 +542,12 @@ evidence lists each citation once
 - **says:** `evidence` lists `file:./deny.toml` and `file:deny.toml` (2 entries resolving to `file:deny.toml`). Duplicating a citation does not make it unresolved or weak, but it inflates the evidence list and usually means an edit went wrong
   - **fix:** Remove the repeated evidence entry so each distinct citation appears once. If two entries were meant to cite different artifacts, fix the wrong reference.
 
+## APLAN063 (warning)
+
+a live task's literal paths name neither a bare tracked directory nor a target removed or renamed in history
+
+- **says:** `paths` entry `src/old.rs` was removed in commit `<sha>` and appears to have been renamed to `src/new.rs`, stranding this live task
+  - **fix:** Retarget matching live tasks with `aplan retarget-path src/old.rs src/new.rs` (terminal tasks keep their historical path).
+- **says:** `paths` entry `src` names a tracked directory rather than a file, so it matches nothing
+  - **fix:** Replace `src` with `src/**` to own files under that directory (or run `aplan retarget-path src src/**`).
+

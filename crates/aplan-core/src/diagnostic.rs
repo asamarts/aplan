@@ -1467,6 +1467,13 @@ define_rules! {
     DuplicateEvidence => DUPLICATE_EVIDENCE = "APLAN062", Warning,
         "evidence lists each citation once",
         points_at: Some("evidence");
+    /// A live task declares a literal (non-glob) `paths` entry that either
+    /// names an existing tracked directory (missing `/**`) or names a file
+    /// that was previously tracked in Git history and later renamed or removed
+    /// (`A2-101`, `ADR-0071`).
+    LivePathStranded => LIVE_PATH_STRANDED = "APLAN063", Warning,
+        "a live task's literal paths name neither a bare tracked directory nor a target removed or renamed in history",
+        points_at: Some("paths");
 }
 
 /// A repository's verdict policy: what makes a report fail its build.
@@ -1837,7 +1844,7 @@ mod tests {
         // Every rule's `code()` is one of the module constants and vice versa is
         // structurally guaranteed by the macro; this pins the count so dropping
         // a row is a visible change.
-        assert_eq!(Rule::ALL.len(), 62);
+        assert_eq!(Rule::ALL.len(), 63);
     }
 
     /// Severity is declared per rule in the macro. Pin the warnings so a
@@ -1857,7 +1864,7 @@ mod tests {
                 "APLAN025", "APLAN026", "APLAN027", "APLAN029", "APLAN035", "APLAN036", "APLAN037",
                 "APLAN038", "APLAN039", "APLAN040", "APLAN041", "APLAN042", "APLAN043", "APLAN044",
                 "APLAN045", "APLAN051", "APLAN052", "APLAN053", "APLAN054", "APLAN056", "APLAN058",
-                "APLAN059", "APLAN061", "APLAN062"
+                "APLAN059", "APLAN061", "APLAN062", "APLAN063"
             ]
         );
     }

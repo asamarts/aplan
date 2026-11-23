@@ -909,6 +909,7 @@ const UNDER_THE_SHIM: &[(&[&str], bool)] = &[
     (&["start", "W-1"], false),
     (&["stop", "W-4"], false),
     (&["review", "W-3"], false),
+    (&["retarget-path", "NOTES.md", "NOTES2.md"], false),
     (&["add", "Something"], false),
     (&["close", "W-1", "--evidence", "file:NOTES.md"], false),
     (&["drop", "W-3"], false),

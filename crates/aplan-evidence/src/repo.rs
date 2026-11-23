@@ -217,6 +217,22 @@ pub struct Repo {
     head_reachability: RefCell<BTreeMap<(String, String, bool), HeadReachability>>,
 }
 
+/// Bounded Git-history classification for a missing literal `paths` entry on a
+/// live task (`A2-101`, `ADR-0071`).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum StrandedPathHistory {
+    /// The path never appeared as a tracked blob in the bounded reachable
+    /// history, so it is treated as a prospective new file and stays silent.
+    NeverTracked,
+    /// The path was tracked and disappeared at `removed_commit`, with zero,
+    /// one (unambiguous rename), or multiple (ambiguous) currently-tracked
+    /// replacement candidates in deterministic sorted order.
+    Removed {
+        removed_commit: String,
+        candidates: Vec<String>,
+    },
+}
+
 impl std::fmt::Debug for Repo {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("Repo")
@@ -750,6 +766,97 @@ impl Repo {
         paths.sort();
         paths.dedup();
         Ok(paths)
+    }
+
+    /// Deterministic upper bound on first-parent commits walked when checking
+    /// whether a missing live literal `paths` entry was previously tracked and
+    /// later renamed or removed (`A2-101`, `ADR-0071`).
+    pub const MAX_STRANDED_PATH_HISTORY_COMMITS: usize = 500;
+
+    /// Inspect bounded first-parent Git history from `HEAD` to determine
+    /// whether a literal path that is absent from the current index was
+    /// previously tracked and later renamed or removed (`A2-101`, `ADR-0071`).
+    ///
+    /// Returns `StrandedPathHistory::NeverTracked` when the repository has
+    /// no commits yet or the path never appeared in the bounded history.
+    pub fn lookup_stranded_literal_path(
+        &self,
+        canonical_path: &str,
+        tracked_set: &std::collections::BTreeSet<String>,
+    ) -> Result<StrandedPathHistory, Error> {
+        let Ok(head) = self.inner.head() else {
+            return Ok(StrandedPathHistory::NeverTracked);
+        };
+        let Ok(mut commit) = head.peel_to_commit() else {
+            return Ok(StrandedPathHistory::NeverTracked);
+        };
+        let target = Path::new(canonical_path);
+
+        for _ in 0..Self::MAX_STRANDED_PATH_HISTORY_COMMITS {
+            let Ok(parent) = commit.parent(0) else {
+                break;
+            };
+            let c_tree = commit.tree()?;
+            let p_tree = parent.tree()?;
+            let in_c = c_tree
+                .get_path(target)
+                .is_ok_and(|e| e.kind() == Some(git2::ObjectType::Blob));
+            let old_blob = p_tree
+                .get_path(target)
+                .ok()
+                .filter(|e| e.kind() == Some(git2::ObjectType::Blob));
+
+            if !in_c && let Some(old_entry) = old_blob {
+                let old_oid = old_entry.id();
+                let mut candidates = std::collections::BTreeSet::new();
+
+                // 1. Exact-OID matches added in the same commit: catches both
+                //    unmodified renames and multi-file splits/copies where two
+                //    or more destinations share the old blob (ambiguity).
+                let mut diff = self
+                    .inner
+                    .diff_tree_to_tree(Some(&p_tree), Some(&c_tree), None)?;
+                for delta in diff.deltas() {
+                    if delta.status() == git2::Delta::Added
+                        && delta.new_file().id() == old_oid
+                        && let Some(new_p) = delta.new_file().path()
+                    {
+                        let s = new_p.to_string_lossy().replace('\\', "/");
+                        if tracked_set.contains(&s) {
+                            candidates.insert(s);
+                        }
+                    }
+                }
+
+                // 2. Deterministic similarity-based rename/copy detection on
+                //    this single commit (catches modified renames too).
+                let mut find_opts = git2::DiffFindOptions::new();
+                find_opts.renames(true).copies(true);
+                diff.find_similar(Some(&mut find_opts))?;
+                for delta in diff.deltas() {
+                    if matches!(delta.status(), git2::Delta::Renamed | git2::Delta::Copied)
+                        && delta.old_file().path() == Some(target)
+                        && let Some(new_p) = delta.new_file().path()
+                    {
+                        let s = new_p.to_string_lossy().replace('\\', "/");
+                        if tracked_set.contains(&s) {
+                            candidates.insert(s);
+                        }
+                    }
+                }
+
+                let sha = commit.id().to_string();
+                let short_sha = sha.get(..12).unwrap_or(&sha).to_string();
+                return Ok(StrandedPathHistory::Removed {
+                    removed_commit: short_sha,
+                    candidates: candidates.into_iter().collect(),
+                });
+            }
+
+            commit = parent;
+        }
+
+        Ok(StrandedPathHistory::NeverTracked)
     }
 
     /// Whether `path` names a committed *file* (a blob) in the tree of `rev` (or

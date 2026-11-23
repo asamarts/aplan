@@ -1203,6 +1203,12 @@
       "name": "review"
     },
     {
+      "about": "Retarget a `paths` entry across matching live tasks atomically while preserving terminal historical tasks untouched",
+      "default_format": null,
+      "formats": [],
+      "name": "retarget-path"
+    },
+    {
       "about": "Move tasks between cuts, editing both milestones or neither",
       "default_format": null,
       "formats": [],
@@ -1460,12 +1466,12 @@
   "counts": {
     "behaviours": 235,
     "build_capabilities": 1,
-    "commands": 49,
+    "commands": 50,
     "config_keys": 129,
     "evidence_kinds": 5,
     "formats": 9,
     "mcp_tools": 14,
-    "rules": 62
+    "rules": 63
   },
   "evidence_kinds": [
     "commit",
@@ -1859,6 +1865,11 @@
       "code": "APLAN062",
       "severity": "warning",
       "title": "evidence lists each citation once"
+    },
+    {
+      "code": "APLAN063",
+      "severity": "warning",
+      "title": "a live task's literal paths name neither a bare tracked directory nor a target removed or renamed in history"
     }
   ],
   "schema_version": "v1",

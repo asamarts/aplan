@@ -1468,6 +1468,11 @@ const UNSTYLED: &[(&str, &str, Option<&[&str]>)] = &[
         Some(&["review", "T-001"]),
     ),
     (
+        "retarget-path",
+        "a confirmation sentence naming the old path, replacement path, and updated live task ids",
+        Some(&["retarget-path", "src/old.rs", "src/new.rs", "--dry-run"]),
+    ),
+    (
         "rekey",
         "a migration confirmation and review locations, whose ids and paths carry no semantic role",
         Some(&["rekey", "T-001", "T-900"]),

@@ -285,6 +285,14 @@ recording a live trace-review stamp asserts that the author re-read each traced 
 aplan review T-123
 ```
 
+### `retarget-path` (CLI-only)
+
+retargeting a renamed or bare directory path rewrites every matching live task atomically while preserving terminal tasks, so it remains an explicit CLI command with dry-run preview
+
+```sh
+aplan retarget-path src/old.rs src/new.rs --dry-run
+```
+
 ### `blueprint` (CLI-only)
 
 blueprint application captures a caller-selected local file and renders its complete predicted graph before an explicit guarded batch write, so it remains a copyable command until the TUI has a file picker and full multi-task review form

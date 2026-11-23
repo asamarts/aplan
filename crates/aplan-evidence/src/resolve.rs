@@ -5914,6 +5914,130 @@ pub fn report_unstarted_in_progress(
     );
 }
 
+/// `APLAN063` (`A2-101`, `ADR-0071`): report live literal `paths` entries that
+/// are provably broken without guessing author intent:
+///
+/// 1. a literal path naming an existing tracked directory (`src` when `src/**`
+///    is tracked), which can never match a file; and
+/// 2. a literal path that matches no currently tracked file and was previously
+///    tracked in Git history and later renamed or removed.
+///
+/// Terminal tasks (`done`, `dropped`), glob patterns, and never-tracked
+/// prospective literal paths stay silent.
+pub fn report_stranded_live_paths(
+    repo: &Repo,
+    task: &Task,
+    file: &Path,
+    tracked: &[PathBuf],
+    tracked_set: &std::collections::BTreeSet<String>,
+    history_cache: &mut std::collections::BTreeMap<String, crate::repo::StrandedPathHistory>,
+    out: &mut Vec<Diagnostic>,
+) -> Result<(), Error> {
+    if task.status.is_terminal() || task.paths.is_empty() {
+        return Ok(());
+    }
+
+    let mut seen_canon: Vec<String> = Vec::new();
+    for raw in &task.paths {
+        if !aplan_core::glob::is_literal_path(raw) {
+            continue;
+        }
+        let canon = aplan_core::glob::spelling(raw).replace('\\', "/");
+        if seen_canon.contains(&canon) {
+            continue;
+        }
+        seen_canon.push(canon.clone());
+
+        if tracked_set.contains(&canon) {
+            continue;
+        }
+
+        if looks_like_a_tracked_directory(&canon, tracked) {
+            out.push(
+                Diagnostic::warning(
+                    code::LIVE_PATH_STRANDED,
+                    format!(
+                        "`paths` entry `{raw}` names a tracked directory rather than a file, \
+                         so it matches nothing"
+                    ),
+                )
+                .with_task(&task.id)
+                .with_file(file)
+                .with_agent_instruction(format!(
+                    "Replace `{raw}` with `{canon}/**` to own files under that directory \
+                     (or run `aplan retarget-path {raw} {canon}/**`)."
+                )),
+            );
+            continue;
+        }
+
+        let history = if let Some(cached) = history_cache.get(&canon) {
+            cached.clone()
+        } else {
+            let looked_up = repo.lookup_stranded_literal_path(&canon, tracked_set)?;
+            history_cache.insert(canon.clone(), looked_up.clone());
+            looked_up
+        };
+
+        if let crate::repo::StrandedPathHistory::Removed {
+            removed_commit,
+            candidates,
+        } = history
+        {
+            let (message, instruction) = match candidates.as_slice() {
+                [only] => (
+                    format!(
+                        "`paths` entry `{raw}` was removed in commit `{removed_commit}` and \
+                         appears to have been renamed to `{only}`, stranding this live task"
+                    ),
+                    format!(
+                        "Retarget matching live tasks with `aplan retarget-path {raw} {only}` \
+                         (terminal tasks keep their historical path)."
+                    ),
+                ),
+                many if many.len() > 1 => {
+                    let list = many
+                        .iter()
+                        .map(|c| format!("`{c}`"))
+                        .collect::<Vec<_>>()
+                        .join(", ");
+                    (
+                        format!(
+                            "`paths` entry `{raw}` was removed in commit `{removed_commit}` with \
+                             multiple candidate replacements ({list}), so `aplan` will not guess \
+                             which target replaces it"
+                        ),
+                        format!(
+                            "Choose the intended replacement path and run \
+                             `aplan retarget-path {raw} <new-path>` to update live tasks without \
+                             altering terminal history."
+                        ),
+                    )
+                }
+                _ => (
+                    format!(
+                        "`paths` entry `{raw}` was previously tracked and removed in commit \
+                         `{removed_commit}`, stranding this live task"
+                    ),
+                    format!(
+                        "Update or remove `{raw}` in this live task's `paths` (or run \
+                         `aplan retarget-path {raw} <new-path>` if it moved) so future evidence \
+                         can bind."
+                    ),
+                ),
+            };
+            out.push(
+                Diagnostic::warning(code::LIVE_PATH_STRANDED, message)
+                    .with_task(&task.id)
+                    .with_file(file)
+                    .with_agent_instruction(instruction),
+            );
+        }
+    }
+
+    Ok(())
+}
+
 /// The globs in `paths` that match nothing in `tracked`, with their compiled
 /// matchers, or `None` when they all match.
 ///

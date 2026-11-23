@@ -98,7 +98,7 @@ pub use claim::{ClaimOrigin, ClaimRecord, ClaimScope, ClaimSnapshot};
 pub use close::trace_fingerprints;
 pub use close::{
     CloseError, add_evidence, apply_repair, close, remove_evidence, replace_evidence, restamp,
-    review, set_evidence_fingerprints,
+    retarget_path, review, set_evidence_fingerprints, set_paths,
 };
 pub use diagnostic::{
     AgentContractProvenance, Diagnostic, Repair, Report, Rule, Severity, Verdict, code,

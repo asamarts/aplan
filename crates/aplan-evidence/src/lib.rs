@@ -1674,6 +1674,31 @@ pub fn terminate_active_configured_commands() {
     resolve::terminate_active_configured_commands();
 }
 
+fn report_plan_stranded_live_paths(
+    repo: &Repo,
+    plan: &Plan,
+    tracked: &[std::path::PathBuf],
+    diagnostics: &mut Vec<aplan_core::Diagnostic>,
+) -> Result<(), Error> {
+    let tracked_set: std::collections::BTreeSet<String> = tracked
+        .iter()
+        .map(|p| p.to_string_lossy().replace('\\', "/"))
+        .collect();
+    let mut stranded_history = std::collections::BTreeMap::new();
+    for lt in &plan.tasks {
+        resolve::report_stranded_live_paths(
+            repo,
+            &lt.task,
+            &lt.path,
+            tracked,
+            &tracked_set,
+            &mut stranded_history,
+            diagnostics,
+        )?;
+    }
+    Ok(())
+}
+
 fn verify_inner(
     plan: &Plan,
     repo_root: &Path,
@@ -1704,14 +1729,9 @@ fn verify_inner(
     let mut diagnostics = Vec::new();
     report_stale_premises(&repo, repo_root, plan, opts, &mut diagnostics)?;
     report_version_behind(&repo, repo_root, plan, opts, spend, &mut diagnostics)?;
+    report_plan_stranded_live_paths(&repo, plan, &tracked, &mut diagnostics)?;
     for lt in &plan.tasks {
-        // Independent of evidence: a task's ownership claim can be dead whether
-        // or not it cites anything, and catching it on a `todo` task is the point
-        // (`APLAN019`, `A1-022`).
         resolve::report_unmatched_paths(&repo, &lt.task, &lt.path, &tracked, &mut diagnostics)?;
-        // Also independent of evidence, and for the mirror-image reason: a
-        // stored `in_progress` is a claim with nothing to resolve, so the only
-        // thing that can check it is the repository (`APLAN053`, `A1-359`).
         resolve::report_unstarted_in_progress(&lt.task, &lt.path, &tracked, &mut diagnostics);
         // `A2-106`: deduplicate exact `(kind, canonical_ref)` citations so
         // `verify` resolves the distinct set once rather than multiplying work
@@ -4117,6 +4137,133 @@ mod tests {
             1,
             "duplicate broken commit citations must not multiply APLAN011: {:?}",
             report.diagnostics
+        );
+    }
+
+    /// `A2-101` (`ADR-0071`): `APLAN063` reports stranded historical literal
+    /// paths (unambiguous rename + multi-candidate ambiguity) and bare tracked
+    /// directories on live tasks, while staying silent on terminal tasks,
+    /// never-tracked prospective paths, and matching globs.
+    #[test]
+    fn aplan063_reports_stranded_rename_ambiguity_and_bare_dir_on_live_tasks_only() {
+        let (dir, repo) = init();
+        let initial_sha = commit(
+            &repo,
+            &[
+                ("src/old.rs", "pub fn old_work() -> usize { 42 }\n"),
+                ("src/split.rs", "pub fn shared_body() -> usize { 99 }\n"),
+                ("src/keep.rs", "pub fn keep() {}\n"),
+            ],
+            "initial files",
+        );
+
+        // Rename `src/old.rs` -> `src/new.rs` and split `src/split.rs` into
+        // two identical files `src/split_a.rs` and `src/split_b.rs`.
+        std::fs::remove_file(dir.path().join("src/old.rs")).unwrap();
+        std::fs::write(
+            dir.path().join("src/new.rs"),
+            "pub fn old_work() -> usize { 42 }\n",
+        )
+        .unwrap();
+        std::fs::remove_file(dir.path().join("src/split.rs")).unwrap();
+        std::fs::write(
+            dir.path().join("src/split_a.rs"),
+            "pub fn shared_body() -> usize { 99 }\n",
+        )
+        .unwrap();
+        std::fs::write(
+            dir.path().join("src/split_b.rs"),
+            "pub fn shared_body() -> usize { 99 }\n",
+        )
+        .unwrap();
+        let mut idx = repo.index().unwrap();
+        idx.remove_path(Path::new("src/old.rs")).unwrap();
+        idx.remove_path(Path::new("src/split.rs")).unwrap();
+        idx.add_path(Path::new("src/new.rs")).unwrap();
+        idx.add_path(Path::new("src/split_a.rs")).unwrap();
+        idx.add_path(Path::new("src/split_b.rs")).unwrap();
+        idx.write().unwrap();
+        let tree_id = idx.write_tree().unwrap();
+        let tree = repo.find_tree(tree_id).unwrap();
+        let parent = repo.head().unwrap().peel_to_commit().unwrap();
+        let sig = git2::Signature::now("t", "t@e").unwrap();
+        repo.commit(
+            Some("HEAD"),
+            &sig,
+            &sig,
+            "rename and split",
+            &tree,
+            &[&parent],
+        )
+        .unwrap();
+
+        let mk_live = |id: &str, paths: &[&str]| {
+            let mut t = done_task(id, Vec::new(), paths.iter().map(|s| (*s).into()).collect());
+            t.status = aplan_core::Status::Todo;
+            t
+        };
+
+        let plan = plan_of_all(vec![
+            // Done task sharing `src/old.rs`: MUST stay silent for APLAN063.
+            done_task(
+                "DONE-OLD",
+                vec![commit_ev(&initial_sha)],
+                vec!["src/old.rs".into()],
+            ),
+            // Live task with renamed `src/old.rs`: fires with unambiguous `src/new.rs`.
+            mk_live("LIVE-RENAMED", &["src/old.rs"]),
+            // Live task with bare tracked directory `src`: fires suggesting `src/**`.
+            mk_live("LIVE-DIR", &["src"]),
+            // Live task with glob that still matches: silent.
+            mk_live("LIVE-GLOB", &["src/**"]),
+            // Live task with never-tracked prospective literal path: silent.
+            mk_live("LIVE-PROSPECTIVE", &["src/not_yet_created.rs"]),
+            // Live task with ambiguous split (`src/split_a.rs`, `src/split_b.rs`): fires reporting both.
+            mk_live("LIVE-AMBIG", &["src/split.rs"]),
+        ]);
+
+        let report = verify(&plan, dir.path(), &VerifyOptions::default()).unwrap();
+        let a63: Vec<_> = report
+            .diagnostics
+            .iter()
+            .filter(|d| d.code == code::LIVE_PATH_STRANDED)
+            .collect();
+        assert_eq!(a63.len(), 3, "expected 3 APLAN063 findings: {a63:#?}");
+
+        let renamed = a63
+            .iter()
+            .find(|d| d.task.as_deref() == Some("LIVE-RENAMED"))
+            .expect("LIVE-RENAMED must fire APLAN063");
+        assert!(
+            renamed.message.contains("src/new.rs"),
+            "unambiguous rename must name src/new.rs: {}",
+            renamed.message
+        );
+
+        let bare_dir = a63
+            .iter()
+            .find(|d| d.task.as_deref() == Some("LIVE-DIR"))
+            .expect("LIVE-DIR must fire APLAN063");
+        assert!(
+            bare_dir
+                .agent_instruction
+                .as_deref()
+                .unwrap_or("")
+                .contains("src/**"),
+            "bare directory must suggest src/**: {:?}",
+            bare_dir.agent_instruction
+        );
+
+        let ambig = a63
+            .iter()
+            .find(|d| d.task.as_deref() == Some("LIVE-AMBIG"))
+            .expect("LIVE-AMBIG must fire APLAN063");
+        assert!(
+            ambig.message.contains("src/split_a.rs")
+                && ambig.message.contains("src/split_b.rs")
+                && ambig.message.contains("multiple candidate"),
+            "ambiguous rename must report all candidates without guessing: {}",
+            ambig.message
         );
     }
 

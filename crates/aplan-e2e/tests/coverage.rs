@@ -2890,6 +2890,33 @@ fn verify_corpus() -> Vec<VerifyCase> {
             Fires,
             v053_fires_on_a_bare_directory,
         ),
+        // APLAN063 (`A2-101`, `ADR-0071`): stranded historical literal paths
+        // and bare tracked directories on live tasks; silent on prospective
+        // literal paths and terminal tasks.
+        git_case(
+            "live-path-stranded-renamed-fires",
+            Rule::LivePathStranded,
+            Fires,
+            v063_fires_renamed,
+        ),
+        git_case(
+            "live-path-stranded-bare-directory-fires",
+            Rule::LivePathStranded,
+            Fires,
+            v063_fires_bare_directory,
+        ),
+        git_case(
+            "live-path-stranded-prospective-silent",
+            Rule::LivePathStranded,
+            Silent,
+            v063_silent_prospective,
+        ),
+        git_case(
+            "live-path-stranded-terminal-silent",
+            Rule::LivePathStranded,
+            Silent,
+            v063_silent_terminal,
+        ),
         git_case(
             "unstarted-in-progress-silent-no-paths",
             Rule::UnstartedInProgress,
@@ -3297,6 +3324,66 @@ fn v053_silent_not_started(repo: &Repository) -> Vec<Task> {
     let mut t = done("A", Vec::new(), vec!["src/not-yet/**".to_string()]);
     t.status = aplan_core::Status::Todo;
     vec![t]
+}
+/// `APLAN063` fires on a live task whose literal path was renamed in Git history.
+fn v063_fires_renamed(repo: &Repository) -> Vec<Task> {
+    git_commit(repo, &[("src/old.rs", "pub fn old() {}\n")], "init");
+    let workdir = repo.workdir().expect("non-bare");
+    std::fs::remove_file(workdir.join("src/old.rs")).expect("rm");
+    std::fs::write(workdir.join("src/new.rs"), "pub fn old() {}\n").expect("write");
+    let mut idx = repo.index().expect("index");
+    idx.remove_path(std::path::Path::new("src/old.rs"))
+        .expect("rm idx");
+    idx.add_path(std::path::Path::new("src/new.rs"))
+        .expect("add idx");
+    idx.write().expect("write idx");
+    let tree_id = idx.write_tree().expect("tree id");
+    let tree = repo.find_tree(tree_id).expect("tree");
+    let parent = repo.head().expect("head").peel_to_commit().expect("parent");
+    let sig = git2::Signature::now("t", "t@e").expect("sig");
+    repo.commit(Some("HEAD"), &sig, &sig, "rename", &tree, &[&parent])
+        .expect("commit");
+    let mut t = done("A", Vec::new(), vec!["src/old.rs".to_string()]);
+    t.status = aplan_core::Status::Todo;
+    vec![t]
+}
+/// `APLAN063` fires on a live `todo` task whose literal path names a tracked directory.
+fn v063_fires_bare_directory(repo: &Repository) -> Vec<Task> {
+    git_commit(repo, &[("src/a.rs", "x")], "init");
+    let mut t = done("A", Vec::new(), vec!["src".to_string()]);
+    t.status = aplan_core::Status::Todo;
+    vec![t]
+}
+/// `APLAN063` stays silent on a live task naming a never-tracked prospective file.
+fn v063_silent_prospective(repo: &Repository) -> Vec<Task> {
+    git_commit(repo, &[("src/a.rs", "x")], "init");
+    let mut t = done("A", Vec::new(), vec!["src/not_yet.rs".to_string()]);
+    t.status = aplan_core::Status::Todo;
+    vec![t]
+}
+/// `APLAN063` stays silent on a terminal `done` task whose historical literal path was renamed.
+fn v063_silent_terminal(repo: &Repository) -> Vec<Task> {
+    let sha = git_commit(repo, &[("src/old.rs", "pub fn old() {}\n")], "init");
+    let workdir = repo.workdir().expect("non-bare");
+    std::fs::remove_file(workdir.join("src/old.rs")).expect("rm");
+    std::fs::write(workdir.join("src/new.rs"), "pub fn old() {}\n").expect("write");
+    let mut idx = repo.index().expect("index");
+    idx.remove_path(std::path::Path::new("src/old.rs"))
+        .expect("rm idx");
+    idx.add_path(std::path::Path::new("src/new.rs"))
+        .expect("add idx");
+    idx.write().expect("write idx");
+    let tree_id = idx.write_tree().expect("tree id");
+    let tree = repo.find_tree(tree_id).expect("tree");
+    let parent = repo.head().expect("head").peel_to_commit().expect("parent");
+    let sig = git2::Signature::now("t", "t@e").expect("sig");
+    repo.commit(Some("HEAD"), &sig, &sig, "rename", &tree, &[&parent])
+        .expect("commit");
+    vec![done(
+        "A",
+        vec![commit_ev(&sha)],
+        vec!["src/old.rs".to_string()],
+    )]
 }
 fn v019_silent(repo: &Repository) -> Vec<Task> {
     git_commit(repo, &[("src/a.rs", "x")], "init");
