@@ -310,6 +310,39 @@ fn review_leaves_the_same_file() -> Result<(), String> {
         .map_err(|e| format!("the MCP review failed: {e}"))?;
     same_file(&cli_dir, &mcp_dir, "aplan/tasks/A-1.md")?;
 
+    // Second review is an idempotent no-op on both surfaces.
+    let out = common::output(cli_dir.path(), &["review", "A-1"]);
+    if !out.status.success() {
+        return Err(format!(
+            "second CLI review failed: {}",
+            String::from_utf8_lossy(&out.stderr)
+        ));
+    }
+    let second_mcp = tools::review(&mcp_dir.path().join("aplan"), "A-1", &mcp_policy)
+        .map_err(|e| format!("second MCP review failed: {e}"))?;
+    if second_mcp["changed"] != serde_json::json!(false) {
+        return Err(format!("expected MCP idempotent no-op: {second_mcp}"));
+    }
+    same_file(&cli_dir, &mcp_dir, "aplan/tasks/A-1.md")?;
+
+    // Mixed valid + dangling anchored traces must be refused identically on both surfaces.
+    for dir in [&cli_dir, &mcp_dir] {
+        let p = dir.path().join("aplan/tasks/A-1.md");
+        let broken = std::fs::read_to_string(&p)
+            .map_err(|e| e.to_string())?
+            .replace("- DESIGN.md#beta", "- DESIGN.md#beta\n- DESIGN.md#missing");
+        std::fs::write(&p, broken).map_err(|e| e.to_string())?;
+    }
+    let cli_refused = !common::output(cli_dir.path(), &["review", "A-1"])
+        .status
+        .success();
+    let mcp_refused = tools::review(&mcp_dir.path().join("aplan"), "A-1", &mcp_policy).is_err();
+    if !cli_refused || !mcp_refused {
+        return Err(format!(
+            "partial-dangling review refusal diverged: cli_refused={cli_refused}, mcp_refused={mcp_refused}"
+        ));
+    }
+
     // `A-2` carries no anchored traces, so both surfaces must refuse it.
     let out = common::output(cli_dir.path(), &["review", "A-2"]);
     let cli_refused = !out.status.success();

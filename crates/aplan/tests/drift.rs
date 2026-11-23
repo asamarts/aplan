@@ -671,3 +671,41 @@ Setext body.
         "frontmatter date updates must not drift real headings: {stdout}\n{stderr}"
     );
 }
+
+#[test]
+fn review_is_idempotent_and_refuses_partial_unresolved_anchored_traces() {
+    let dir = tempfile::Builder::new()
+        .tempdir_in(aplan_core::fixture::fixture_root())
+        .expect("tempdir");
+    std::fs::create_dir_all(dir.path().join("aplan/tasks")).expect("mkdir");
+    std::fs::write(dir.path().join("SPEC.md"), "# Scope\n\nBody.\n").expect("spec");
+    std::fs::write(
+        dir.path().join("aplan/tasks/A-1.md"),
+        "---\nid: A-1\ntitle: Mixed valid and file-only traces\nphase: 1\nstatus: todo\n\
+         effort_days: 1\npaths:\n- SPEC.md\ntraces:\n- SPEC.md\n- SPEC.md#scope\n---\n\nbody\n",
+    )
+    .expect("A-1");
+    std::fs::write(
+        dir.path().join("aplan/tasks/A-2.md"),
+        "---\nid: A-2\ntitle: Mixed valid and dangling anchored traces\nphase: 1\nstatus: todo\n\
+         effort_days: 1\npaths:\n- SPEC.md\ntraces:\n- SPEC.md#scope\n- SPEC.md#missing\n---\n\nbody\n",
+    )
+    .expect("A-2");
+
+    // File-only trace beside a valid anchored trace succeeds, and a second run is a no-op.
+    let (stdout, stderr, ok) = run(dir.path(), &["review", "A-1"]);
+    assert!(ok, "review A-1 failed: {stderr}");
+    assert!(stdout.contains("reviewed A-1"), "{stdout}");
+    let after_first = task(dir.path(), "A-1");
+    let (stdout, stderr, ok) = run(dir.path(), &["review", "A-1"]);
+    assert!(ok, "second review A-1 failed: {stderr}");
+    assert!(stdout.contains("already current"), "{stdout}");
+    assert_eq!(task(dir.path(), "A-1"), after_first);
+
+    // Mixed valid + dangling anchored traces must refuse without writing.
+    let before_a2 = task(dir.path(), "A-2");
+    let (_, stderr, ok) = run(dir.path(), &["review", "A-2"]);
+    assert!(!ok, "review A-2 must refuse unresolved anchored trace");
+    assert!(stderr.contains("SPEC.md#missing"), "{stderr}");
+    assert_eq!(task(dir.path(), "A-2"), before_a2);
+}

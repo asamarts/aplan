@@ -550,6 +550,7 @@ fn corpus() -> Vec<Scenario> {
     all.extend(policy_selector_rules());
     all.extend(policy_evidence_rules());
     all.extend(drift_rules());
+    all.extend(trace_retargeted_rules());
     all.extend(interpolated_reason_branches());
     all.extend(partial_stamp_rules());
     all.extend(body_criteria_rules());
@@ -758,6 +759,50 @@ fn partial_stamp_rules() -> Vec<Scenario> {
     ]
 }
 
+/// `APLAN060` (`ADR-0069`, `A2-051`, `A2-197`): symmetric `heading <-> row`
+/// retargeting fires a blocking error while same-kind edits stay silent.
+fn trace_retargeted_rules() -> Vec<Scenario> {
+    let stamped = |stamp: String| {
+        format!(
+            "id: A-1\ntitle: A-1\nphase: 0\nstatus: done\n\
+             evidence:\n  - kind: commit\n    ref: abc1234\n\
+             traces:\n  - DESIGN.md#beta\n\
+             trace_fingerprints:\n  DESIGN.md#beta: '{stamp}'"
+        )
+    };
+    let both = "## Beta\n\nHeading.\n\n| Key | Val |\n| --- | --- |\n| Beta | Row |\n";
+    let renamed = "## Beta Prime\n\nHeading.\n\n| Key | Val |\n| --- | --- |\n| Beta | Row |\n";
+    let row_only = "| Key | Val |\n| --- | --- |\n| Beta | Row |\n";
+    let heading_stamp = aplan_core::stamp_in("DESIGN.md", both, "beta").expect("heading stamp");
+    let row_stamp = aplan_core::stamp_in("DESIGN.md", row_only, "beta").expect("row stamp");
+    vec![
+        scen(
+            "trace-retargeted-heading-to-row-fires",
+            Rule::TraceRetargeted,
+            Fires,
+            vec![
+                tf("a", &stamped(heading_stamp.clone())),
+                doc("DESIGN.md", renamed),
+            ],
+        )
+        .drift(),
+        scen(
+            "trace-retargeted-row-to-heading-fires",
+            Rule::TraceRetargeted,
+            Fires,
+            vec![tf("a", &stamped(row_stamp)), doc("DESIGN.md", both)],
+        )
+        .drift(),
+        scen(
+            "trace-retargeted-same-kind-silent",
+            Rule::TraceRetargeted,
+            Silent,
+            vec![tf("a", &stamped(heading_stamp)), doc("DESIGN.md", both)],
+        )
+        .drift(),
+    ]
+}
+
 /// `APLAN018`: a closed task's traced section is unchanged since closure.
 fn drift_rules() -> Vec<Scenario> {
     let doc_body = "# Intro\n\nprose\n";
@@ -789,62 +834,6 @@ fn drift_rules() -> Vec<Scenario> {
             Rule::TraceDrift,
             Silent,
             vec![tf("a", &stamped(&good)), doc("DOC.md", doc_body)],
-        )
-        .drift(),
-        // APLAN060 (`ADR-0069`, `A2-051`): a kind-tagged heading stamp whose
-        // anchor now resolves to a table row after the heading was renamed
-        // fires blocking error `APLAN060` (not `APLAN018`).
-        scen(
-            "trace-retargeted-heading-to-row-fires",
-            Rule::TraceRetargeted,
-            Fires,
-            vec![
-                tf(
-                    "a",
-                    &format!(
-                        "id: A-1\ntitle: A-1\nphase: 0\nstatus: done\n\
-                         evidence:\n  - kind: commit\n    ref: abc1234\n\
-                         traces:\n  - DESIGN.md#beta\n\
-                         trace_fingerprints:\n  DESIGN.md#beta: '{}'",
-                        aplan_core::stamp_in(
-                            "DESIGN.md",
-                            "## Beta\n\nHeading.\n\n| Key | Val |\n| --- | --- |\n| Beta | Row |\n",
-                            "beta"
-                        )
-                        .expect("heading stamp")
-                    ),
-                ),
-                doc(
-                    "DESIGN.md",
-                    "## Beta Prime\n\nHeading.\n\n| Key | Val |\n| --- | --- |\n| Beta | Row |\n",
-                ),
-            ],
-        )
-        .drift(),
-        // Near miss for APLAN060: a kind-tagged heading stamp whose anchor
-        // still resolves to the heading (even if its content drifted) is silent
-        // for APLAN060 (content drift is APLAN018's job).
-        scen(
-            "trace-retargeted-same-kind-silent",
-            Rule::TraceRetargeted,
-            Silent,
-            vec![
-                tf(
-                    "a",
-                    &format!(
-                        "id: A-1\ntitle: A-1\nphase: 0\nstatus: done\n\
-                         evidence:\n  - kind: commit\n    ref: abc1234\n\
-                         traces:\n  - DESIGN.md#beta\n\
-                         trace_fingerprints:\n  DESIGN.md#beta: '{}'",
-                        aplan_core::stamp_in("DESIGN.md", "## Beta\n\nHeading.\n", "beta")
-                            .expect("heading stamp")
-                    ),
-                ),
-                doc(
-                    "DESIGN.md",
-                    "## Beta\n\nHeading.\n\n| Key | Val |\n| --- | --- |\n| Beta | Row |\n",
-                ),
-            ],
         )
         .drift(),
         // The same rule over a structured document, which says `node` rather

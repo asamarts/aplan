@@ -994,12 +994,14 @@ fn trace_retargeted_diagnostic(
     ))
 }
 
-fn has_uncommitted_substantive_edit(
+/// Return `(substantive_changed, traces_changed)` for uncommitted working-tree
+/// edits relative to `HEAD` (`ADR-0070`, `A2-197`).
+fn uncommitted_substantive_edit(
     repo: &Repo,
     repo_root: &Path,
     lt: &aplan_core::load::LoadedTask,
     task_path: &Path,
-) -> bool {
+) -> (bool, bool) {
     let on_disk_path = if lt.path.is_absolute() || lt.path.exists() {
         lt.path.clone()
     } else {
@@ -1015,10 +1017,10 @@ fn has_uncommitted_substantive_edit(
             aplan_core::substantive_content(disk),
             aplan_core::substantive_content(head),
         ) {
-            (Some(d), Some(h)) => d != h,
-            _ => true,
+            (Some(d), Some(h)) => (d != h, d.traces != h.traces),
+            _ => (true, true),
         },
-        _ => false,
+        _ => (false, false),
     }
 }
 
@@ -1029,8 +1031,8 @@ fn check_live_task_trace(
     repository_root: &Path,
     opts: &VerifyOptions,
     lt: &aplan_core::load::LoadedTask,
-    rev: &str,
-    uncommitted_substantive: bool,
+    rev: Option<&str>,
+    uncommitted: (bool, bool),
     trace: &str,
 ) -> Option<aplan_core::Diagnostic> {
     let (doc, anchor) = trace.split_once('#')?;
@@ -1053,9 +1055,8 @@ fn check_live_task_trace(
         }
     }
 
-    if uncommitted_substantive {
-        return None;
-    }
+    let rev = rev?;
+    let (uncommitted_substantive, uncommitted_traces) = uncommitted;
     let then = repo.text_at(Some(rev), &at).ok()??;
     let (Some(a), Some(b)) = (
         aplan_core::anchor::resolve_in(doc, &then, anchor),
@@ -1064,6 +1065,9 @@ fn check_live_task_trace(
         return None;
     };
     if a.kind != b.kind {
+        if uncommitted_traces {
+            return None;
+        }
         return Some(trace_retargeted_diagnostic(
             &lt.task.id,
             &lt.path,
@@ -1072,7 +1076,7 @@ fn check_live_task_trace(
             b.kind,
         ));
     }
-    if a.hash == b.hash {
+    if uncommitted_substantive || a.hash == b.hash {
         return None;
     }
     Some(
@@ -1141,21 +1145,15 @@ fn report_stale_premises(
     let repository_root = workdir.as_deref().unwrap_or(repo_root);
     for lt in live {
         let task_path = repository_relative_path(&lt.path, workdir.as_deref());
-        let Some(rev) = born.get(&task_path) else {
+        let rev = born.get(&task_path).map(String::as_str);
+        if rev.is_none() && lt.task.trace_fingerprints.is_empty() {
             continue;
-        };
-        let uncommitted_substantive =
-            has_uncommitted_substantive_edit(repo, repo_root, lt, &task_path);
+        }
+        let uncommitted = uncommitted_substantive_edit(repo, repo_root, lt, &task_path);
         for trace in &lt.task.traces {
-            if let Some(diag) = check_live_task_trace(
-                repo,
-                repository_root,
-                opts,
-                lt,
-                rev,
-                uncommitted_substantive,
-                trace,
-            ) {
+            if let Some(diag) =
+                check_live_task_trace(repo, repository_root, opts, lt, rev, uncommitted, trace)
+            {
                 out.push(diag);
             }
         }
@@ -3406,6 +3404,71 @@ mod tests {
         assert!(
             !check_has_045(dir.path()),
             "committed substantive edit must keep APLAN045 clear"
+        );
+    }
+
+    #[test]
+    fn uncommitted_body_edit_does_not_suppress_aplan060_and_untracked_retargeted_stamp_is_caught() {
+        let (dir, repo) = init();
+        let both = "## Beta\n\nHeading.\n\n| Key | Val |\n| --- | --- |\n| Beta | Row |\n";
+        let renamed = "## Beta Prime\n\nHeading.\n\n| Key | Val |\n| --- | --- |\n| Beta | Row |\n";
+        let task_file = dir.path().join("plan/tasks/a.md");
+        let base_task = "---\nid: A-1\ntitle: Traced task\nphase: 1\nstatus: todo\n\
+                         effort_days: 1\npaths:\n  - DESIGN.md\ntraces:\n  - DESIGN.md#beta\n---\n\n\
+                         Initial body.\n";
+        commit(
+            &repo,
+            &[("DESIGN.md", both), ("plan/tasks/a.md", base_task)],
+            "initial",
+        );
+        commit(&repo, &[("DESIGN.md", renamed)], "rename heading");
+
+        // An uncommitted body edit (without changing `traces`) must NOT hide APLAN060.
+        std::fs::write(
+            &task_file,
+            base_task.replace("Initial body.", "Edited body without touching traces."),
+        )
+        .expect("body edit");
+        let report = verify(
+            &aplan_core::load_plan(&dir.path().join("plan")),
+            dir.path(),
+            &VerifyOptions::default(),
+        )
+        .expect("verify");
+        assert!(
+            report
+                .diagnostics
+                .iter()
+                .any(|d| d.code == aplan_core::diagnostic::code::TRACE_RETARGETED),
+            "uncommitted body edit must not suppress APLAN060: {:?}",
+            report.diagnostics
+        );
+
+        // An untracked live task carrying a retargeted `trace_fingerprints` stamp is still caught.
+        let heading_stamp = aplan_core::stamp_in("DESIGN.md", both, "beta").expect("stamp");
+        let untracked = dir.path().join("plan/tasks/u.md");
+        std::fs::write(
+            &untracked,
+            format!(
+                "---\nid: A-2\ntitle: Untracked\nphase: 1\nstatus: todo\neffort_days: 1\n\
+                 paths:\n  - DESIGN.md\ntraces:\n  - DESIGN.md#beta\n\
+                 trace_fingerprints:\n  DESIGN.md#beta: '{heading_stamp}'\n---\n\nBody.\n"
+            ),
+        )
+        .expect("untracked task");
+        let report = verify(
+            &aplan_core::load_plan(&dir.path().join("plan")),
+            dir.path(),
+            &VerifyOptions::default(),
+        )
+        .expect("verify");
+        assert!(
+            report.diagnostics.iter().any(|d| {
+                d.task.as_deref() == Some("A-2")
+                    && d.code == aplan_core::diagnostic::code::TRACE_RETARGETED
+            }),
+            "untracked live task with retargeted stamp must emit APLAN060: {:?}",
+            report.diagnostics
         );
     }
 
