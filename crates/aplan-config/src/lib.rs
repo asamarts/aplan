@@ -808,16 +808,37 @@ impl IdFamiliesConfig {
                     .into(),
             ));
         }
+        let mut prefixes: Vec<(String, String)> = Vec::new();
         for (cut, spec) in &self.cuts {
             if aplan_core::task::is_vacuous_ref(cut) {
                 return Err(Error::BadIdFamilies(
                     "`id_families.cuts` contains a blank cut key".into(),
                 ));
             }
-            spec.validate(&format!("`id_families.cuts.{cut}`"))?;
+            let label = format!("`id_families.cuts.{cut}`");
+            spec.validate(&label)?;
+            if let Some(prefix) = spec.to_rule().prefix {
+                prefixes.push((label, prefix));
+            }
         }
         if let Some(default) = &self.default {
             default.validate("`id_families.default`")?;
+            if let Some(prefix) = default.to_rule().prefix {
+                prefixes.push(("`id_families.default`".into(), prefix));
+            }
+        }
+        for (idx, (left_label, left_prefix)) in prefixes.iter().enumerate() {
+            for (right_label, right_prefix) in prefixes.iter().skip(idx + 1) {
+                if left_prefix != right_prefix
+                    && (left_prefix.starts_with(right_prefix)
+                        || right_prefix.starts_with(left_prefix))
+                {
+                    return Err(Error::BadIdFamilies(format!(
+                        "overlapping prefixes between {left_label} (`{left_prefix}`) and \
+                         {right_label} (`{right_prefix}`); use distinct non-overlapping prefixes"
+                    )));
+                }
+            }
         }
         Ok(())
     }

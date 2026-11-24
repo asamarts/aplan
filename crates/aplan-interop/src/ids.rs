@@ -263,6 +263,25 @@ pub fn mint_with_policy(
                 .iter()
                 .find(|c| c.milestone_id == cut_id)
                 .and_then(|c| (!c.version.is_empty()).then_some(c.version.as_str()));
+            if let Some(cut_label) = label
+                && !policy.cuts.contains_key(cut_id)
+                && policy.cuts.contains_key(cut_label)
+            {
+                let matching: Vec<&str> = roadmap
+                    .cuts
+                    .iter()
+                    .filter(|c| !c.release && !c.borrows && c.version == cut_label)
+                    .map(|c| c.milestone_id.as_str())
+                    .collect();
+                if matching.len() > 1 {
+                    return Err(IdError::AmbiguousCutFamily(format!(
+                        "ambiguous `id_families.cuts` entry `{cut_label}` matches {} milestones \
+                         ({}); name the exact milestone id instead",
+                        matching.len(),
+                        matching.join(", ")
+                    )));
+                }
+            }
             policy
                 .rule_for_cut(cut_id, label)
                 .map_err(IdError::AmbiguousCutFamily)?
