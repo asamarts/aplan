@@ -71,6 +71,14 @@ to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Added
 
+- **Repository launcher argv in generated agent contracts (`A2-140`,
+  `--require agent_contract.renders_configured_launcher_argv`)**. `.aplan.yml` now accepts an
+  optional `agent_contract` block (`agent_contract.invocation`) declaring an ordered non-empty
+  argv sequence (default `["aplan"]`, byte-for-byte unchanged when absent). `aplan export-agents-md`
+  and `APLAN041` render that argv deterministically and shell-safely across every generated command
+  and executable-identifying sentence without shell evaluation or changing the running process,
+  widen Markdown fences when tokens contain backticks, and refuse empty, blank, scalar,
+  control-character, or over-budget values at config load.
 - **Commit-range structural validation `aplan check --range <BASE..TIP>` (`A2-156`,
   `--require check.range_validates_every_introduced_commit`)**. Validates `.aplan.yml`, plan
   tasks, and referenced trace documents at every commit introduced by `BASE..TIP` (or `..TIP`) in

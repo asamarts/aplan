@@ -1,5 +1,23 @@
 {
   "$defs": {
+    "AgentContractConfig": {
+      "additionalProperties": false,
+      "description": "Generated agent-contract settings (`A2-140`).\n\nLets a repository that pins `aplan` behind a checked-in launcher declare\nthat launcher as an ordered, non-empty argv sequence so `export-agents-md`\nand `APLAN041` render the repository's authoritative command rather than\nbare `aplan`.",
+      "properties": {
+        "invocation": {
+          "default": null,
+          "description": "Ordered, non-empty argv used to invoke `aplan` in generated agent\ncontract examples and prose (for example `[\"./scripts/aplan\"]` or\n`[\"./tools/aplan-launcher\", \"--profile\", \"ci\"]`).\n\nAbsent means the default single token `[\"aplan\"]`. This is rendered as\nshell-safe Markdown data only: it never alters the running process or\nspawns a command.",
+          "items": {
+            "type": "string"
+          },
+          "type": [
+            "array",
+            "null"
+          ]
+        }
+      },
+      "type": "object"
+    },
     "BuildContract": {
       "additionalProperties": false,
       "description": "Build contract this repository requires of the running `aplan` (`ADR-0068`, `A2-193`).\n\nEvaluated in a frozen pre-schema pass before full [`Config`] `deny_unknown_fields`\ndeserialization so an older or wrong build fails with an actionable build-contract\nrefusal instead of confusing `unknown key` errors for keys introduced later.\n\nExact executable byte digest pinning (`binary_sha256`) is deliberately excluded:\nartifact authenticity belongs outside the executable (CI Action, release checksum +\nSLSA attestation, or a repository wrapper script).",
@@ -1196,6 +1214,18 @@
         "array",
         "null"
       ]
+    },
+    "agent_contract": {
+      "anyOf": [
+        {
+          "$ref": "#/$defs/AgentContractConfig"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": null,
+      "description": "How `aplan export-agents-md` and `APLAN041` render the repository's\ngenerated agent contract (`A2-140`)."
     },
     "capture": {
       "anyOf": [

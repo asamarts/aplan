@@ -108,6 +108,9 @@ pub enum Error {
     /// Capture kinds or profiles the portable repository policy cannot apply.
     #[error("invalid `capture` in `.aplan.yml`: {0}")]
     BadCapture(String),
+    /// An `agent_contract` declaration the generator cannot render safely (`A2-140`).
+    #[error("invalid `agent_contract` in `.aplan.yml`: {0}")]
+    BadAgentContract(String),
     /// A `requires` build-contract block the tool cannot act on (`ADR-0068`, `A2-193`).
     #[error("invalid `requires` in `.aplan.yml`: {0}")]
     BadRequires(String),
@@ -648,6 +651,10 @@ pub struct Config {
     /// cut's membership (`A1-165`, `A1-203`).
     #[serde(default)]
     pub docs: Option<DocsConfig>,
+    /// How `aplan export-agents-md` and `APLAN041` render the repository's
+    /// generated agent contract (`A2-140`).
+    #[serde(default)]
+    pub agent_contract: Option<AgentContractConfig>,
     /// Treat any warning as a finding that fails the command, so `check` and
     /// `verify` exit `1` rather than `0` when a plan has warnings and nothing
     /// worse. Off unless set.
@@ -673,6 +680,85 @@ pub struct CaptureConfig {
     /// Explicitly selected profiles; there is no implicit personal default.
     #[serde(default)]
     pub profiles: BTreeMap<String, CaptureProfile>,
+}
+
+/// Generated agent-contract settings (`A2-140`).
+///
+/// Lets a repository that pins `aplan` behind a checked-in launcher declare
+/// that launcher as an ordered, non-empty argv sequence so `export-agents-md`
+/// and `APLAN041` render the repository's authoritative command rather than
+/// bare `aplan`.
+#[derive(Debug, Clone, Default, Deserialize, Serialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct AgentContractConfig {
+    /// Ordered, non-empty argv used to invoke `aplan` in generated agent
+    /// contract examples and prose (for example `["./scripts/aplan"]` or
+    /// `["./tools/aplan-launcher", "--profile", "ci"]`).
+    ///
+    /// Absent means the default single token `["aplan"]`. This is rendered as
+    /// shell-safe Markdown data only: it never alters the running process or
+    /// spawns a command.
+    #[serde(default)]
+    pub invocation: Option<Vec<String>>,
+}
+
+impl AgentContractConfig {
+    /// Maximum number of argv elements accepted in `agent_contract.invocation`
+    /// so generated Markdown stays strictly bounded.
+    pub const MAX_INVOCATION_ARGS: usize = 32;
+    /// Maximum combined UTF-8 byte length of all argv elements in
+    /// `agent_contract.invocation`.
+    pub const MAX_INVOCATION_BYTES: usize = 1024;
+
+    /// Reject empty, blank, overlong or control-character invocations rather
+    /// than falling back to default `aplan`.
+    ///
+    /// # Errors
+    /// When `invocation` is present and empty, exceeds the bounded argument or
+    /// byte limits, or contains a blank, control or directional-override token.
+    pub fn validate(&self) -> Result<(), Error> {
+        let Some(argv) = &self.invocation else {
+            return Ok(());
+        };
+        if argv.is_empty() {
+            return Err(Error::BadAgentContract(
+                "`invocation` must not be empty; omit it to use the default `[\"aplan\"]`".into(),
+            ));
+        }
+        if argv.len() > Self::MAX_INVOCATION_ARGS {
+            return Err(Error::BadAgentContract(format!(
+                "`invocation` has {} arguments; at most {} are allowed",
+                argv.len(),
+                Self::MAX_INVOCATION_ARGS
+            )));
+        }
+        let total_bytes: usize = argv.iter().map(String::len).sum();
+        if total_bytes > Self::MAX_INVOCATION_BYTES {
+            return Err(Error::BadAgentContract(format!(
+                "`invocation` is {total_bytes} bytes; at most {} bytes are allowed",
+                Self::MAX_INVOCATION_BYTES
+            )));
+        }
+        for (index, token) in argv.iter().enumerate() {
+            if aplan_core::task::is_vacuous_ref(token) {
+                return Err(Error::BadAgentContract(format!(
+                    "argument {index} in `invocation` is blank"
+                )));
+            }
+            if token.chars().any(|ch| {
+                ch.is_control()
+                    || matches!(
+                        ch,
+                        '\u{2028}' | '\u{2029}' | '\u{202A}'..='\u{202E}' | '\u{2066}'..='\u{2069}'
+                    )
+            }) {
+                return Err(Error::BadAgentContract(format!(
+                    "argument {index} in `invocation` contains a control or directional character"
+                )));
+            }
+        }
+        Ok(())
+    }
 }
 
 impl Config {
@@ -3018,6 +3104,9 @@ fn validate_all(config: &Config) -> Result<(), Error> {
     if let Some(requires) = &config.requires {
         requires.validate()?;
     }
+    if let Some(agent_contract) = &config.agent_contract {
+        agent_contract.validate()?;
+    }
     config.validate_capture()?;
     if let Some(runner) = &config.test {
         runner.validate()?;
@@ -3643,6 +3732,14 @@ pub const SCAFFOLD: &str = r#"# .aplan.yml, this repository's `aplan` policy.
 # gets a correction; an unassigned task stays valid. Owner selectors in
 # `policy[].when` use the same vocabulary.
 # owners: [ada, grace]
+
+# Generated agent-contract launcher (`export-agents-md` / APLAN041). When this
+# repository pins `aplan` behind a checked-in wrapper script, declare the
+# launcher as an ordered, non-empty argv sequence so generated guidance names
+# the wrapper instead of bare `aplan`. Rendered as shell-safe Markdown data
+# only; never evaluated as shell syntax and never alters the running process.
+# agent_contract:
+#   invocation: ['./scripts/aplan']
 
 # A family may also say how many of it a task carries (APLAN030). The list above
 # is the short form of `{members: [...]}` with no requirement, so nothing changes
@@ -4649,6 +4746,8 @@ policy:
 tag_families:
   epic: [epic-a]
 owners: [kim]
+agent_contract:
+  invocation: ['./scripts/aplan', '--strict']
 roadmap:
   group_by: epic
 summary:
@@ -4996,7 +5095,7 @@ stale_after_days: 30
         let keys = accepted_keys();
         assert_eq!(
             keys.len(),
-            129,
+            131,
             "config keys changed; teach the fixture above, then update this count: {keys:?}"
         );
         for key in keys {

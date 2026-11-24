@@ -372,6 +372,11 @@ pub fn configured_agent_contract(
     let evidence = config.evidence.as_ref();
     aplan_output::AgentContract {
         plan_dir,
+        invocation: config
+            .agent_contract
+            .as_ref()
+            .and_then(|ac| ac.invocation.clone())
+            .unwrap_or_default(),
         id_examples: aplan_interop::ids::example_ids(plan),
         scoped_evidence: config
             .policy

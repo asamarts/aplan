@@ -3163,4 +3163,21 @@ pub const ALL: &[Behaviour] = &[
             "drift::review_clears_stale_premise_and_rearms_when_section_moves_again",
         ],
     },
+    // `A2-140`. `export-agents-md` and `APLAN041` already existed, and
+    // `agent_contract.invocation` is also listed in `config_keys`, but
+    // pinned consumers need an assertable capability for deterministic
+    // shell-safe argv rendering, default byte-compatibility and bounded
+    // Markdown fencing before generating repository-launcher policy.
+    Behaviour {
+        name: "agent_contract.renders_configured_launcher_argv",
+        what: "`export-agents-md` and `APLAN041` render a configured non-empty \
+               `agent_contract.invocation` argv deterministically and shell-safely across every \
+               generated command and executable-identifying sentence without shell evaluation, \
+               preserve default `aplan` bytes unchanged, keep Markdown fenced and bounded, and \
+               refuse blank, empty, scalar or control-character invocations at config load",
+        proof: &[
+            "agents_md::configured_launcher_invocation_renders_safely_and_gates_drift",
+            "agents_md::malformed_launcher_invocation_fails_configuration",
+        ],
+    },
 ];

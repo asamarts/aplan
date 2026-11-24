@@ -98,8 +98,9 @@ an unknown-flag error.
 ## Other interfaces
 
 `aplan tui` opens the terminal interface. `aplan mcp` exposes the same guarded plan operations to
-MCP clients. Machine-readable JSON, SARIF, schemas, facts, and generated agent guidance are also
-available.
+MCP clients. Machine-readable JSON, SARIF, schemas, facts, and generated agent guidance
+(`aplan export-agents-md`, with optional `agent_contract.invocation` in `.aplan.yml` for
+repositories that pin `aplan` behind a checked-in launcher) are also available.
 
 ## Documentation
 
