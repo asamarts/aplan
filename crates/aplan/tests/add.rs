@@ -58,7 +58,10 @@ fn a_scaffolded_task_is_one_check_accepts() {
 
     let (check, code) = aplan(dir.path(), &["check"]);
     assert_eq!(code, 0, "{check}");
-    assert!(check.contains("0 warning(s)"), "{check}");
+    assert!(
+        check.contains("1 warning(s)") && check.contains("APLAN043"),
+        "untouched `add` placeholder body warns with APLAN043 (`A2-034`): {check}"
+    );
 }
 
 #[test]
@@ -423,7 +426,7 @@ fn an_improving_plain_add_to_an_existing_malformed_milestone_is_not_hard_refused
     let (check, code) = aplan(dir.path(), &["check"]);
     assert_eq!(code, 0, "a warning is lenient by default: {check}");
     assert!(
-        check.contains("1 warning(s)") && !check.contains("has no members"),
+        check.matches("APLAN021").count() == 1 && !check.contains("has no members"),
         "the post-state did not strictly improve the warning: {check}"
     );
 }

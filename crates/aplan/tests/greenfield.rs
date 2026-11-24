@@ -142,7 +142,10 @@ fn the_readme_start_commands_run_as_written() {
     );
     let (out, code) = aplan(dir.path(), &["check"]);
     assert_eq!(code, 0, "the README's first plan does not check: {out}");
-    assert!(out.contains("ok: 1 tasks, 0 warning(s)"), "{out}");
+    assert!(
+        out.contains("ok: 1 tasks, 1 warning(s)") && out.contains("APLAN043"),
+        "an untouched `add` scaffold should warn with APLAN043 (`A2-034`): {out}"
+    );
 }
 
 fn greenfield(dir: &Path) {

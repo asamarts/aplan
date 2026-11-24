@@ -1335,6 +1335,7 @@ pub fn close(
         "closed": id,
         "file": target.path.display().to_string(),
         "evidence": final_evidence_refs,
+        "aplan_version": env!("CARGO_PKG_VERSION"),
         // What a release recorded, `null` for everything else, and why when a
         // release could not record one: an agent has no stderr to read, and a
         // `null` with no explanation cannot be told from "this is not a
@@ -3388,7 +3389,7 @@ fn add_preview(
             "`effort_days: {days}` is not a number of days; give a finite, non-negative estimate or omit it"
         )));
     }
-    let context = aplan_app::PlanContext::new(
+    let base_context = aplan_app::PlanContext::new(
         aplan_core::load_plan_identified(root),
         aplan_app::ContextInputs {
             repository_root: policy.repo_root.clone(),
@@ -3397,11 +3398,23 @@ fn add_preview(
             options: policy.options.clone(),
             verdict: policy.verdict.clone(),
         },
-    )
-    .with_report_config(aplan_config::Config {
-        id_strategy: Some(policy.id_strategy),
-        ..aplan_config::Config::default()
-    });
+    );
+    // Capture the real on-disk configuration bytes when a configuration file is
+    // selected so `context.identity.configuration` carries the exact `Observed`
+    // content digest that `commit_change_set`'s `identity_for` computes (`A2-055`).
+    let context = if let Some(path) = policy.verify.config_file.as_deref()
+        && let Ok(bytes) = std::fs::read(path)
+        && let Ok(parsed_cfg) = aplan_config::parse_config_bytes(&bytes, path)
+    {
+        base_context
+            .with_captured_report_config(parsed_cfg)
+            .map_err(|e| ToolError::Plan(e.to_string()))?
+    } else {
+        base_context.with_report_config(aplan_config::Config {
+            id_strategy: Some(policy.id_strategy),
+            ..aplan_config::Config::default()
+        })
+    };
     let unknown = args
         .blocked_by
         .iter()
@@ -3544,6 +3557,38 @@ impl AddReport {
     }
 }
 
+fn describe_stale_mismatch(
+    expected: &aplan_app::InputIdentity,
+    actual: &aplan_app::InputIdentity,
+) -> String {
+    let mut diffs = Vec::new();
+    if expected.plan_sha256 != actual.plan_sha256 {
+        diffs.push(format!(
+            "plan digest {} -> {}",
+            &expected.plan_sha256[..expected.plan_sha256.len().min(12)],
+            &actual.plan_sha256[..actual.plan_sha256.len().min(12)]
+        ));
+    }
+    if expected.configuration != actual.configuration {
+        diffs.push(format!(
+            "configuration digest {} -> {}",
+            &expected.configuration.sha256[..expected.configuration.sha256.len().min(12)],
+            &actual.configuration.sha256[..actual.configuration.sha256.len().min(12)]
+        ));
+    }
+    if expected.repository != actual.repository {
+        diffs.push("repository state changed".to_string());
+    }
+    if diffs.is_empty() {
+        diffs.push(format!(
+            "snapshot digest {} -> {}",
+            &expected.sha256[..expected.sha256.len().min(12)],
+            &actual.sha256[..actual.sha256.len().min(12)]
+        ));
+    }
+    diffs.join(", ")
+}
+
 fn publish_add(
     context: &aplan_app::PlanContext,
     preview: aplan_app::AuthoringPreview,
@@ -3557,10 +3602,10 @@ fn publish_add(
         aplan_app::CommitOutcome::NoOp(_) => Err(ToolError::Plan(format!(
             "add `{id}` unexpectedly produced no change"
         ))),
-        aplan_app::CommitOutcome::Stale { .. } => Err(ToolError::Plan(
-            "the plan changed while aplan_add was preparing its batch; nothing was written; run aplan_add again"
-                .to_string(),
-        )),
+        aplan_app::CommitOutcome::Stale { change, actual } => Err(ToolError::Plan(format!(
+            "the plan changed while aplan_add was preparing its batch ({}); nothing was written; run aplan_add again",
+            describe_stale_mismatch(change.input(), &actual)
+        ))),
         aplan_app::CommitOutcome::PublicationFailed { error, .. } => Err(ToolError::Plan(
             aplan_core::save::advice(&error, "aplan_add"),
         )),

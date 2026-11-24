@@ -386,6 +386,8 @@ a `revisit_at` names a real instant, on a task that is parked
 
 a live task carries the scaffold's own prompt beside the criteria its author wrote
 
+- **says:** body still contains the `aplan add` placeholder text
+  - **fix:** Replace the placeholder prose under `## Why` and the placeholder criterion under `## Acceptance criteria` with this task's actual purpose and done criteria.
 - **says:** carries the scaffold's own prompt beside 1 criterion of its own: `state what done means for this task, in this repository's terms` is the line `aplan add` writes to be replaced, not kept
   - **fix:** Delete that line, and the `## Acceptance criteria` heading it was written under if that heading now has nothing else beneath it. Keep the criteria you wrote. A body with two of that heading is the scaffold left beside the answer.
 

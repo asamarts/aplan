@@ -115,6 +115,12 @@ struct StoredObservation {
     root: String,
     provider: String,
     material: String,
+    #[serde(default)]
+    inputs_sha256: Option<String>,
+    #[serde(default)]
+    env_sha256: Option<String>,
+    #[serde(default)]
+    executables_sha256: Option<String>,
     identity: String,
     observed_at_epoch_seconds: i64,
     started_at_epoch_nanos: u128,
@@ -131,14 +137,29 @@ struct Envelope {
     observation: StoredObservation,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct MaterialComponents {
+    material: String,
+    inputs_sha256: String,
+    env_sha256: String,
+    executables_sha256: String,
+}
+
 #[derive(Debug)]
 enum MaterialIdentity {
-    Identified(String),
+    Identified(MaterialComponents),
     Unsupported(String),
 }
 
 impl MaterialIdentity {
     fn as_identified(&self) -> Option<&str> {
+        match self {
+            Self::Identified(value) => Some(&value.material),
+            Self::Unsupported(_) => None,
+        }
+    }
+
+    fn components(&self) -> Option<&MaterialComponents> {
         match self {
             Self::Identified(value) => Some(value),
             Self::Unsupported(_) => None,
@@ -151,6 +172,77 @@ impl MaterialIdentity {
             Self::Unsupported(reason) => Some(reason),
         }
     }
+}
+
+/// Capture the current material identity digest for `repo_root` under `options`,
+/// if declared `evidence.observation_inputs` are identifiable (`A2-054`).
+#[must_use]
+pub fn capture_material_identity(
+    repo_root: &Path,
+    options: &aplan_evidence::VerifyOptions,
+) -> Option<String> {
+    material_identity(repo_root, options)
+        .as_identified()
+        .map(str::to_string)
+}
+
+/// Reconcile a retained observation after a command (such as `close --execute`)
+/// rewrote a plan file that happens to be matched by `evidence.observation_inputs`
+/// (`A2-054`).
+///
+/// Only updates the stored observation when its `provider`, `protocol`, and
+/// pre-write `material` exactly match `before_material`, and only when the
+/// environment and provider executables are unchanged. If anything else changed,
+/// the observation is left untouched so staleness fails closed.
+pub fn reconcile_observation_after_own_write(
+    repo_root: &Path,
+    options: &aplan_evidence::VerifyOptions,
+    store_options: &EvidenceObservationOptions,
+    before_material: &str,
+) {
+    let Some(mut stored) = read_observation(repo_root, store_options) else {
+        return;
+    };
+    let provider = provider_identity(options);
+    if stored.protocol != PROTOCOL
+        || stored.provider != provider
+        || stored.material != before_material
+        || !stored.complete
+    {
+        return;
+    }
+    let after = material_identity(repo_root, options);
+    let Some(after_components) = after.components() else {
+        return;
+    };
+    if stored.material == after_components.material {
+        return;
+    }
+    if stored
+        .env_sha256
+        .as_deref()
+        .is_some_and(|env| env != after_components.env_sha256)
+        || stored
+            .executables_sha256
+            .as_deref()
+            .is_some_and(|exec| exec != after_components.executables_sha256)
+    {
+        return;
+    }
+    stored.material.clone_from(&after_components.material);
+    stored.inputs_sha256 = Some(after_components.inputs_sha256.clone());
+    stored.env_sha256 = Some(after_components.env_sha256.clone());
+    stored.executables_sha256 = Some(after_components.executables_sha256.clone());
+    stored.started_at_epoch_nanos = stored
+        .started_at_epoch_nanos
+        .saturating_add(1)
+        .max(epoch_nanos());
+    stored.identity = observation_identity(
+        &provider,
+        &after_components.material,
+        stored.catalogue.as_ref(),
+    );
+    publish_observation(repo_root, store_options, &stored);
 }
 
 /// Inspect evidence without letting an ordinary read execute opaque providers.
@@ -312,6 +404,7 @@ fn inspect_stored(
     ))
 }
 
+#[allow(clippy::too_many_lines)]
 fn refresh(
     plan: &Plan,
     repo_root: &Path,
@@ -376,6 +469,15 @@ fn refresh(
             root: root_identity(repo_root),
             provider: provider.clone(),
             material: stable.clone().unwrap_or_default(),
+            inputs_sha256: stable
+                .as_ref()
+                .and_then(|_| before.components().map(|c| c.inputs_sha256.clone())),
+            env_sha256: stable
+                .as_ref()
+                .and_then(|_| before.components().map(|c| c.env_sha256.clone())),
+            executables_sha256: stable
+                .as_ref()
+                .and_then(|_| before.components().map(|c| c.executables_sha256.clone())),
             identity: provider_observation.clone().unwrap_or_default(),
             observed_at_epoch_seconds: observed_at,
             started_at_epoch_nanos,
@@ -506,6 +608,51 @@ fn refreshed_state_and_detail(
     (state, detail)
 }
 
+fn stale_reason(
+    stored: &StoredObservation,
+    provider: &str,
+    material_components: &MaterialComponents,
+) -> String {
+    let mut reasons = Vec::new();
+    if stored.protocol != PROTOCOL {
+        reasons.push("observation protocol changed");
+    }
+    if stored.provider != provider {
+        reasons.push("provider configuration changed");
+    }
+    if stored.material != material_components.material {
+        let mut matched_component = false;
+        if stored
+            .inputs_sha256
+            .as_deref()
+            .is_some_and(|v| v != material_components.inputs_sha256)
+        {
+            reasons.push("declared material inputs changed");
+            matched_component = true;
+        }
+        if stored
+            .env_sha256
+            .as_deref()
+            .is_some_and(|v| v != material_components.env_sha256)
+        {
+            reasons.push("process environment changed");
+            matched_component = true;
+        }
+        if stored
+            .executables_sha256
+            .as_deref()
+            .is_some_and(|v| v != material_components.executables_sha256)
+        {
+            reasons.push("provider executable changed");
+            matched_component = true;
+        }
+        if !matched_component {
+            reasons.push("a provider, environment, executable, or declared material input changed");
+        }
+    }
+    reasons.join("; ")
+}
+
 fn stored_test_state(
     stored: Option<&StoredObservation>,
     provider: &str,
@@ -536,7 +683,7 @@ fn stored_test_state(
             "no provider observation has been published; use --refresh-evidence".into(),
         );
     };
-    let Some(material) = material.as_identified() else {
+    let Some(material_components) = material.components() else {
         return (
             EvidenceObservationState::Unsupported,
             None,
@@ -548,13 +695,16 @@ fn stored_test_state(
                 .into(),
         );
     };
-    if stored.protocol != PROTOCOL || stored.provider != provider || stored.material != material {
+    if stored.protocol != PROTOCOL
+        || stored.provider != provider
+        || stored.material != material_components.material
+    {
         return (
             EvidenceObservationState::Stale,
             None,
             Some(stored.identity.clone()).filter(|identity| !identity.is_empty()),
             Some(stored.observed_at_epoch_seconds),
-            "a provider, environment, executable, or declared material input changed".into(),
+            stale_reason(stored, provider, material_components),
         );
     }
     if !stored.complete {
@@ -877,13 +1027,22 @@ fn material_identity(
             );
         }
     };
+    let mut env_digest = Sha256::new();
+    hash_environment(&mut env_digest);
+    let env_bytes = env_digest.finalize();
+
     let mut digest = Sha256::new();
     digest.update(b"aplan-evidence-material-v2\0");
     digest.update(root_identity(repo_root).as_bytes());
     digest.update(inputs);
-    hash_environment(&mut digest);
+    digest.update(env_bytes);
     digest.update(executables);
-    MaterialIdentity::Identified(hex(&digest.finalize()))
+    MaterialIdentity::Identified(MaterialComponents {
+        material: hex(&digest.finalize()),
+        inputs_sha256: hex(&inputs),
+        env_sha256: hex(&env_bytes),
+        executables_sha256: hex(&executables),
+    })
 }
 
 fn declared_inputs_identity(
@@ -1054,8 +1213,17 @@ fn hash_file_metadata_blake3(digest: &mut blake3::Hasher, metadata: &fs::Metadat
     digest.update(&[u8::from(metadata.permissions().readonly())]);
 }
 
+fn is_ephemeral_shell_env(key: &std::ffi::OsStr) -> bool {
+    matches!(
+        key.to_str(),
+        Some("_" | "SHLVL" | "OLDPWD" | "PWD" | "APLAN_TEST_INVOCATIONS")
+    )
+}
+
 fn hash_environment(digest: &mut Sha256) {
-    let mut environment = std::env::vars_os().collect::<Vec<_>>();
+    let mut environment = std::env::vars_os()
+        .filter(|(key, _)| !is_ephemeral_shell_env(key))
+        .collect::<Vec<_>>();
     environment.sort_by(|left, right| left.0.cmp(&right.0));
     digest.update(b"environment\0");
     for (key, value) in environment {
@@ -1696,12 +1864,24 @@ mod tests {
         (root, cache, options)
     }
 
+    fn material_id(material: &str) -> MaterialIdentity {
+        MaterialIdentity::Identified(MaterialComponents {
+            material: material.to_string(),
+            inputs_sha256: String::new(),
+            env_sha256: String::new(),
+            executables_sha256: String::new(),
+        })
+    }
+
     fn stored(started_at_epoch_nanos: u128, identity: &str) -> StoredObservation {
         StoredObservation {
             protocol: PROTOCOL,
             root: String::new(),
             provider: "provider".to_string(),
             material: "material".to_string(),
+            inputs_sha256: None,
+            env_sha256: None,
+            executables_sha256: None,
             identity: identity.to_string(),
             observed_at_epoch_seconds: 1,
             started_at_epoch_nanos,
@@ -1750,12 +1930,7 @@ mod tests {
             test_runner: Some(runners.clone()),
             ..aplan_evidence::VerifyOptions::default()
         };
-        let state = stored_test_state(
-            Some(&value),
-            "provider",
-            &MaterialIdentity::Identified("material".to_string()),
-            &options,
-        );
+        let state = stored_test_state(Some(&value), "provider", &material_id("material"), &options);
         assert_eq!(state.0, EvidenceObservationState::RefreshFailed);
         assert!(state.1.is_none(), "a malformed catalogue must not be used");
 
@@ -1767,12 +1942,7 @@ mod tests {
                 names: Vec::new(),
             }],
         });
-        let state = stored_test_state(
-            Some(&value),
-            "provider",
-            &MaterialIdentity::Identified("material".to_string()),
-            &options,
-        );
+        let state = stored_test_state(Some(&value), "provider", &material_id("material"), &options);
         assert_eq!(state.0, EvidenceObservationState::Current);
         assert!(state.1.is_some(), "the exact configured shape is reusable");
     }
@@ -1782,7 +1952,7 @@ mod tests {
         let no_runner = stored_test_state(
             None,
             "provider",
-            &MaterialIdentity::Identified("material".to_string()),
+            &material_id("material"),
             &aplan_evidence::VerifyOptions::default(),
         );
         assert_eq!(no_runner.0, EvidenceObservationState::Unsupported);
@@ -1807,7 +1977,7 @@ mod tests {
         let failed_state = stored_test_state(
             Some(&failed),
             "provider",
-            &MaterialIdentity::Identified("material".to_string()),
+            &material_id("material"),
             &options,
         );
         assert_eq!(failed_state.0, EvidenceObservationState::RefreshFailed);
@@ -1818,7 +1988,7 @@ mod tests {
             stored_test_state(
                 Some(&failed),
                 "provider",
-                &MaterialIdentity::Identified("material".to_string()),
+                &material_id("material"),
                 &options,
             )
             .4
@@ -1830,7 +2000,7 @@ mod tests {
         let missing_catalogue = stored_test_state(
             Some(&failed),
             "provider",
-            &MaterialIdentity::Identified("material".to_string()),
+            &material_id("material"),
             &options,
         );
         assert_eq!(missing_catalogue.0, EvidenceObservationState::RefreshFailed);
@@ -1843,19 +2013,13 @@ mod tests {
 
     #[test]
     fn refresh_movement_and_unobserved_url_projection_say_exactly_what_happened() {
-        let identified = MaterialIdentity::Identified("before".to_string());
+        let identified = material_id("before");
         assert_eq!(
             refresh_failure(true, &identified, None).as_deref(),
             Some("declared provider inputs changed while refresh was running")
         );
-        let moved = refreshed_state_and_detail(
-            true,
-            true,
-            true,
-            &identified,
-            &MaterialIdentity::Identified("after".to_string()),
-            None,
-        );
+        let moved =
+            refreshed_state_and_detail(true, true, true, &identified, &material_id("after"), None);
         assert_eq!(moved.0, EvidenceObservationState::Stale);
         assert!(moved.1.contains("changed while refresh was running"));
 

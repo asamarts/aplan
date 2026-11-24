@@ -8,6 +8,24 @@ to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Fixed
 
+- **Stop `aplan_add` reporting a false concurrent change on unchanged plans (`A2-055`)**.
+  `aplan_add` over MCP now loads the real configured `.aplan.yml` when constructing its preview
+  context instead of a synthetic default config, eliminating the false compare-and-swap mismatch
+  against `commit_change_set`'s on-disk re-read, and names the exact differing snapshot digests on
+  genuine concurrent-change refusals.
+- **Keep current evidence observations from reading stale on the next read (`A2-054`)**.
+  Observation material identity now ignores ephemeral per-invocation shell variables (`_`,
+  `SHLVL`, `OLDPWD`, `PWD`, `APLAN_TEST_INVOCATIONS`), `close --execute` reconciles its retained
+  observation after rewriting a task file matched by `evidence.observation_inputs`, and stale
+  observations now name the exact component that changed (declared inputs, environment,
+  executables, or provider configuration).
+- **Report open tasks still carrying the `aplan add` placeholder body (`A2-034`)**. Extended
+  `APLAN043` to warn on open tasks whose body still contains the generated `aplan add` placeholder
+  text while keeping promoted captures and hand-written prose bodies silent.
+- **Trace fingerprint build-algorithm provenance and MCP close version (`A2-062`)**.
+  `trace_fingerprints` now distinguish explicit `@<algo>` build-algorithm mismatches from section
+  content edits in `APLAN018` while treating legacy unmarked stamps as unknown-build (never drift),
+  and `aplan_close` now reports `aplan_version` in its response payload.
 - **Close a live task that already carries partial evidence (`A2-147`,
   `--require close.combines_existing_live_evidence`)**. `aplan close` (and `aplan_close` over
   MCP and the typed application preview) now preserves existing citations on a live task

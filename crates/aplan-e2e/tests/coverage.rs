@@ -507,9 +507,19 @@ fn body_criteria_rules() -> Vec<Scenario> {
                 "## Acceptance criteria\n\n- [ ] the renderer emits SVG\n\n                 ## Acceptance criteria\n\n                 - [x] state what done means for this task, in this repository's terms\n",
             )],
         ),
-        // The prompt on its own is what `add` wrote and nobody has answered yet,
-        // which is between the author and `APLAN038` at close. This rule is about
-        // the scaffold *surviving* an answer.
+        // An open task whose body is still the `aplan add` placeholder warns (`A2-034`).
+        scen(
+            "scaffold-placeholder-only-fires",
+            Rule::ScaffoldLeftover,
+            Fires,
+            vec![tf_body(
+                "a",
+                "id: A-1\ntitle: A-1\nphase: 0\nstatus: todo\neffort_days: 1",
+                "## Why\n\n(Why this task exists, and what is different once it is done.)\n\n## Acceptance criteria\n\n- [ ] state what done means for this task, in this repository's terms\n",
+            )],
+        ),
+        // A promoted capture or hand-written body with real prose and no `add`
+        // placeholder stays silent.
         scen(
             "scaffold-leftover-silent",
             Rule::ScaffoldLeftover,
@@ -517,7 +527,7 @@ fn body_criteria_rules() -> Vec<Scenario> {
             vec![tf_body(
                 "a",
                 "id: A-1\ntitle: A-1\nphase: 0\nstatus: todo\neffort_days: 1",
-                "## Acceptance criteria\n\n                 - [ ] state what done means for this task, in this repository's terms\n",
+                "Captured from production incident review: keep the parser bounded.\n",
             )],
         ),
         // Ticked, which is what closing a task is supposed to look like.

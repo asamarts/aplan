@@ -2796,3 +2796,320 @@ fn verify_flags_working_tree_hand_reopen_and_help_names_supersede_and_amend() {
         "amend help should cover citations removed with reverted work:\n{a_help}"
     );
 }
+
+/// Regression test for `A2-055`: `aplan_add` succeeds against an unchanged plan
+/// when `policy.verify.config_file` points at a real `.aplan.yml` (previously
+/// mismatched synthetic default config vs on-disk config during CAS).
+#[test]
+fn mcp_add_succeeds_with_real_config_file_and_stale_refusal_names_diff() {
+    let dir = tempfile::Builder::new()
+        .tempdir_in(aplan_core::fixture::fixture_root())
+        .expect("repository");
+    let root = dir.path();
+    std::fs::create_dir_all(root.join("aplan/tasks")).expect("tasks");
+    let cfg_path = root.join(".aplan.yml");
+    std::fs::write(&cfg_path, "root: aplan\ndeny_warnings: true\n").expect("cfg");
+    std::fs::write(
+        root.join("aplan/tasks/A-1.md"),
+        "---\nid: A-1\ntitle: existing\nphase: 1\nstatus: todo\neffort_days: 1\n---\n\nReal body.\n",
+    )
+    .expect("A-1");
+
+    let policy = aplan_mcp::Policy {
+        id_strategy: aplan_core::IdStrategy::Sequential,
+        options: aplan_core::Options::default(),
+        verdict: aplan_core::Verdict {
+            deny_warnings: true,
+            advisory: Vec::new(),
+        },
+        verify: aplan_evidence::VerifyOptions {
+            detect_drift: false,
+            version: None,
+            traces_root: None,
+            config_file: Some(cfg_path),
+            execute: false,
+            test_runner: None,
+            max_unrelated_files: None,
+            observation_inputs: None,
+            url_check: None,
+        },
+        repo_root: root.to_path_buf(),
+    };
+
+    let args = aplan_mcp::tools::AddArgs {
+        title: "Added via MCP".to_string(),
+        effort_days: Some(1.0),
+        ..aplan_mcp::tools::AddArgs::default()
+    };
+    let created = aplan_mcp::tools::add(&root.join("aplan"), &args, &policy)
+        .expect("aplan_add must succeed on an unchanged plan with real .aplan.yml");
+    assert_eq!(created["created"], "A-2");
+    assert!(root.join("aplan/tasks/A-2.md").exists());
+}
+
+/// Regression test for `A2-054`: `show --refresh-evidence` followed by plain
+/// `show`, and `close --execute` whose own write touches a declared
+/// `observation_inputs` file followed by plain `show`, both remain `current`,
+/// while a real external input edit reads `stale` naming the changed component.
+#[cfg(unix)]
+#[test]
+#[allow(clippy::too_many_lines)]
+fn observation_stays_current_across_show_refresh_and_close_execute_own_write() {
+    let dir = tempfile::Builder::new()
+        .tempdir_in(aplan_core::fixture::fixture_root())
+        .expect("repository");
+    let support = tempfile::Builder::new()
+        .tempdir_in(aplan_core::fixture::fixture_root())
+        .expect("support");
+    let root = dir.path();
+    std::fs::create_dir_all(root.join("aplan/tasks")).expect("tasks");
+    std::fs::create_dir_all(root.join("src")).expect("src");
+    std::fs::write(root.join("src/lib.rs"), "pub fn ok() {}\n").expect("lib");
+    std::fs::write(
+        root.join("aplan/tasks/O-1.md"),
+        "---\nid: O-1\ntitle: obs test\nphase: 1\nstatus: todo\neffort_days: 1\n\
+         paths: [src/lib.rs]\nevidence:\n  - kind: test\n    ref: suite::green\n---\n\nReal body.\n",
+    )
+    .expect("O-1");
+
+    let list = support.path().join("list.sh");
+    let runner = support.path().join("run.sh");
+    std::fs::write(&list, "#!/bin/sh\nprintf '%s\\n' suite::green\n").expect("list");
+    std::fs::write(&runner, "#!/bin/sh\nexit 0\n").expect("runner");
+    std::fs::write(
+        root.join(".aplan.yml"),
+        format!(
+            "root: aplan\nevidence:\n  observation_inputs:\n    - src/**\n    - aplan/tasks/**\n\
+             test:\n  name: passing\n  list: [sh, {}]\n  run: [sh, {}, '{{test}}']\n  run_selects: true\n  covers: ['src/**']\n",
+            list.display(),
+            runner.display()
+        ),
+    )
+    .expect("cfg");
+    git(root, &["init", "-q", "."]);
+    git(root, &["config", "user.email", "t@example.com"]);
+    git(root, &["config", "user.name", "t"]);
+    git(root, &["add", "-A"]);
+    git(root, &["commit", "-q", "-m", "init"]);
+
+    let cache_dir = support.path().join("cache");
+    let run_with_env = |args: &[&str], shlvl: &str| {
+        let out = crate::common::command(root, args)
+            .env("APLAN_CACHE_DIR", &cache_dir)
+            .env("SHLVL", shlvl)
+            .env("OLDPWD", format!("/tmp/dir-{shlvl}"))
+            .output()
+            .expect("run");
+        (
+            String::from_utf8_lossy(&out.stdout).to_string(),
+            String::from_utf8_lossy(&out.stderr).to_string(),
+            out.status.success(),
+        )
+    };
+
+    // 1. `show --refresh-evidence` followed by plain `show` with changed ephemeral shell env.
+    let (r_out, r_err, r_ok) = run_with_env(
+        &[
+            "show",
+            "O-1",
+            "--refresh-evidence",
+            "--require-current-evidence",
+            "--format",
+            "json",
+        ],
+        "1",
+    );
+    assert!(r_ok, "refresh failed: {r_out}{r_err}");
+    let r_doc: serde_json::Value = serde_json::from_str(&r_out).expect("json");
+    assert_eq!(r_doc["evidence_observation"]["state"], "current");
+
+    let (s_out, s_err, s_ok) = run_with_env(&["show", "O-1", "--format", "json"], "2");
+    assert!(s_ok, "plain show failed: {s_out}{s_err}");
+    let s_doc: serde_json::Value = serde_json::from_str(&s_out).expect("json");
+    assert_eq!(
+        s_doc["evidence_observation"]["state"], "current",
+        "plain show after refresh must remain current: {s_doc}"
+    );
+
+    // 2. `close --execute` rewrites `aplan/tasks/O-1.md` (which is in observation_inputs),
+    //    and the immediately following plain `show` must still read `current`.
+    let (c_out, c_err, c_ok) = run_with_env(&["close", "O-1", "--execute"], "3");
+    assert!(c_ok, "close --execute failed: {c_out}{c_err}");
+
+    let (after_close_out, after_close_err, after_close_ok) =
+        run_with_env(&["show", "O-1", "--format", "json"], "4");
+    assert!(
+        after_close_ok,
+        "show after close --execute failed: {after_close_out}{after_close_err}"
+    );
+    let after_close_doc: serde_json::Value = serde_json::from_str(&after_close_out).expect("json");
+    assert_eq!(
+        after_close_doc["evidence_observation"]["state"], "current",
+        "observation must not be invalidated by close --execute's own write: {after_close_doc}"
+    );
+
+    // 3. An external edit to a declared input marks the observation stale and
+    //    names `declared material inputs changed`.
+    std::fs::write(root.join("src/lib.rs"), "pub fn ok() { /* edited */ }\n").expect("edit");
+    let (after_edit_out, after_edit_err, after_edit_ok) =
+        run_with_env(&["show", "O-1", "--format", "json"], "5");
+    assert!(
+        after_edit_ok,
+        "show after external edit failed: {after_edit_out}{after_edit_err}"
+    );
+    let after_edit_doc: serde_json::Value = serde_json::from_str(&after_edit_out).expect("json");
+    assert_eq!(after_edit_doc["evidence_observation"]["state"], "stale");
+    assert!(
+        after_edit_doc["evidence_observation"]["detail"]
+            .as_str()
+            .is_some_and(|d| d.contains("declared material inputs changed")),
+        "stale reason should name the changed component: {after_edit_doc}"
+    );
+}
+
+/// Regression test for `A2-034`: `aplan check` warns (`APLAN043`) on an open
+/// task whose body still contains the `aplan add` placeholder text, while a
+/// promoted capture (real prose without placeholders) stays silent.
+#[test]
+fn check_warns_on_add_placeholder_body_and_stays_silent_on_promoted_capture() {
+    let dir = tempfile::Builder::new()
+        .tempdir_in(aplan_core::fixture::fixture_root())
+        .expect("repository");
+    let root = dir.path();
+    std::fs::create_dir_all(root.join("aplan/tasks")).expect("tasks");
+    std::fs::write(root.join(".aplan.yml"), "root: aplan\n").expect("cfg");
+
+    let (a_out, a_err, a_ok) = run(
+        root,
+        &["add", "Placeholder task", "--id", "H-1", "--effort", "1"],
+    );
+    assert!(a_ok, "add failed: {a_out}{a_err}");
+
+    std::fs::write(
+        root.join("aplan/tasks/H-2.md"),
+        "---\nid: H-2\ntitle: Promoted capture\nphase: 1\nstatus: todo\neffort_days: 1\n---\n\n\
+         Investigate queue backpressure observed during peak traffic.\n",
+    )
+    .expect("H-2");
+
+    let (c_out, _c_err, c_ok) = run(root, &["check", "--format", "agent"]);
+    assert!(c_ok, "warnings without deny_warnings still exit 0");
+    let doc: serde_json::Value = serde_json::from_str(&c_out).expect("json");
+    let diags = doc["diagnostics"].as_array().expect("diags");
+    let h1 = diags
+        .iter()
+        .find(|d| d["code"] == "APLAN043" && d["task"] == "H-1")
+        .expect("APLAN043 must warn on untouched `add` placeholder");
+    assert!(
+        h1["agent_instruction"]
+            .as_str()
+            .is_some_and(|s| s.contains("## Why") && s.contains("## Acceptance criteria")),
+        "fix should name the sections to write: {h1}"
+    );
+    assert!(
+        !diags
+            .iter()
+            .any(|d| d["code"] == "APLAN043" && d["task"] == "H-2"),
+        "promoted capture without placeholder must not trigger APLAN043: {diags:?}"
+    );
+}
+
+/// Regression test for `A2-062`: a trace fingerprint stamped with a different
+/// build algorithm marker (`@f0`) is reported as a build mismatch rather than
+/// content drift, a legacy unmarked stamp stays silent, and `aplan_close`
+/// reports `aplan_version`.
+#[test]
+fn trace_fingerprint_build_mismatch_reports_build_not_content_drift_and_mcp_close_reports_version()
+{
+    let dir = tempfile::Builder::new()
+        .tempdir_in(aplan_core::fixture::fixture_root())
+        .expect("repository");
+    let root = dir.path();
+    std::fs::create_dir_all(root.join("aplan/tasks")).expect("tasks");
+    std::fs::create_dir_all(root.join("docs")).expect("docs");
+    std::fs::create_dir_all(root.join("src")).expect("src");
+    std::fs::write(root.join("src/lib.rs"), "pub fn v() {}\n").expect("lib");
+    let doc_text = "# Design\n\n## Rule\n\nStable section text.\n";
+    std::fs::write(root.join("docs/design.md"), doc_text).expect("doc");
+    std::fs::write(root.join(".aplan.yml"), "root: aplan\ndetect_drift: true\n").expect("cfg");
+    let legacy_stamp = aplan_core::anchor::fingerprint_in("docs/design.md", doc_text, "rule")
+        .expect("fingerprint");
+
+    // B-1: stamped with an older build algorithm `@f0` on unchanged content.
+    std::fs::write(
+        root.join("aplan/tasks/B-1.md"),
+        "---\nid: B-1\ntitle: other build\nphase: 1\nstatus: done\neffort_days: 1\n\
+         paths: [src/lib.rs]\ntraces:\n  - docs/design.md#rule\n\
+         trace_fingerprints:\n  docs/design.md#rule: heading:0000000000000000@f0\n\
+         evidence:\n  - kind: file\n    ref: src/lib.rs\n---\n\nDone.\n",
+    )
+    .expect("B-1");
+    // B-2: legacy unmarked stamp with matching hash -> unknown build, not drift.
+    std::fs::write(
+        root.join("aplan/tasks/B-2.md"),
+        format!(
+            "---\nid: B-2\ntitle: legacy unmarked\nphase: 1\nstatus: done\neffort_days: 1\n\
+             paths: [src/lib.rs]\ntraces:\n  - docs/design.md#rule\n\
+             trace_fingerprints:\n  docs/design.md#rule: {legacy_stamp}\n\
+             evidence:\n  - kind: file\n    ref: src/lib.rs\n---\n\nDone.\n"
+        ),
+    )
+    .expect("B-2");
+
+    let (c_out, _c_err, _c_ok) = run(root, &["check", "--format", "agent"]);
+    let doc: serde_json::Value = serde_json::from_str(&c_out).expect("json");
+    let diags = doc["diagnostics"].as_array().expect("diags");
+    let b1 = diags
+        .iter()
+        .find(|d| d["code"] == "APLAN018" && d["task"] == "B-1")
+        .expect("B-1 must report build mismatch");
+    let msg = b1["message"].as_str().expect("msg");
+    assert!(
+        msg.contains("build algorithm `f0`") && !msg.contains("has changed since"),
+        "build mismatch must not read as content drift: {msg}"
+    );
+    assert!(
+        !diags
+            .iter()
+            .any(|d| d["code"] == "APLAN018" && d["task"] == "B-2"),
+        "legacy unmarked stamp must not fire APLAN018: {diags:?}"
+    );
+
+    // MCP `close` reports `aplan_version`.
+    std::fs::write(
+        root.join("aplan/tasks/B-3.md"),
+        "---\nid: B-3\ntitle: mcp version\nphase: 1\nstatus: todo\neffort_days: 1\n\
+         paths: [src/lib.rs]\n---\n\nReal body.\n",
+    )
+    .expect("B-3");
+    git(root, &["init", "-q", "."]);
+    git(root, &["config", "user.email", "t@example.com"]);
+    git(root, &["config", "user.name", "t"]);
+    git(root, &["add", "-A"]);
+    git(root, &["commit", "-q", "-m", "init"]);
+    let policy = aplan_mcp::Policy {
+        id_strategy: aplan_core::IdStrategy::Sequential,
+        options: aplan_core::Options::default(),
+        verdict: aplan_core::Verdict::default(),
+        verify: aplan_evidence::VerifyOptions {
+            detect_drift: false,
+            version: None,
+            traces_root: None,
+            config_file: None,
+            execute: false,
+            test_runner: None,
+            max_unrelated_files: None,
+            observation_inputs: None,
+            url_check: None,
+        },
+        repo_root: root.to_path_buf(),
+    };
+    let closed = aplan_mcp::tools::close(
+        &root.join("aplan"),
+        "B-3",
+        &["file:src/lib.rs".to_string()],
+        &policy,
+    )
+    .expect("mcp close");
+    assert_eq!(closed["aplan_version"], env!("CARGO_PKG_VERSION"));
+}
