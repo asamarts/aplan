@@ -41,6 +41,7 @@ use aplan_core::{
 };
 
 pub mod progress;
+pub mod write;
 
 /// Whether a capture mutation is a preview, publication or idempotent no-op.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize)]
@@ -102,7 +103,7 @@ pub fn render_capture_collection(
     if format != Format::Human {
         return unsupported_capture_format(format, "an inbox collection");
     }
-    let mut out = anstream::stdout().lock();
+    let mut out = crate::write::anstream_stdout();
     render_capture_collection_human_to(&mut out, report)
 }
 
@@ -158,7 +159,7 @@ pub fn render_capture_focused(
     if format != Format::Human {
         return unsupported_capture_format(format, "one focused capture");
     }
-    let mut out = anstream::stdout().lock();
+    let mut out = crate::write::anstream_stdout();
     render_capture_human_to(&mut out, &report.capture, None, None)
 }
 
@@ -183,7 +184,7 @@ pub fn render_capture_action(report: &CaptureActionReport, format: Format) -> st
                     capture_action_agent_instruction(report.outcome, report.task_id.is_some());
                 object.insert("agent_instruction".to_string(), instruction.into());
             }
-            let mut out = std::io::stdout().lock();
+            let mut out = crate::write::stdout();
             writeln!(out, "{}", serde_json::to_string_pretty(&value)?)
         }
         other => unsupported_capture_format(other, "a capture action"),
@@ -217,7 +218,7 @@ const fn capture_action_agent_instruction(
 }
 
 fn render_capture_action_human(report: &CaptureActionReport) -> std::io::Result<()> {
-    let mut out = anstream::stdout().lock();
+    let mut out = crate::write::anstream_stdout();
     render_capture_human_to(
         &mut out,
         &report.capture,
@@ -419,7 +420,7 @@ fn render_capture_json(schema: &str, report: &impl serde::Serialize) -> std::io:
         .as_object_mut()
         .expect("capture report serializes as an object")
         .insert("schema".to_string(), schema.into());
-    let mut out = std::io::stdout().lock();
+    let mut out = crate::write::stdout();
     writeln!(out, "{}", serde_json::to_string_pretty(&value)?)
 }
 
@@ -763,7 +764,7 @@ pub fn render_blueprint_application(
 }
 
 fn render_blueprint_application_human(report: &BlueprintApplicationReport) -> std::io::Result<()> {
-    let mut out = anstream::stdout().lock();
+    let mut out = crate::write::anstream_stdout();
     let heading = crate::style::HEADING;
     writeln!(
         out,
@@ -808,7 +809,7 @@ fn render_blueprint_application_json(
     report: &BlueprintApplicationReport,
     format: Format,
 ) -> std::io::Result<()> {
-    let mut out = std::io::stdout().lock();
+    let mut out = crate::write::stdout();
     let mut document = serde_json::to_value(report)?;
     let object = document.as_object_mut().ok_or_else(|| {
         std::io::Error::new(
@@ -906,7 +907,7 @@ pub fn render_dependency_batch(
 }
 
 fn render_dependency_batch_human(report: &DependencyBatchReport) -> std::io::Result<()> {
-    let mut out = anstream::stdout().lock();
+    let mut out = crate::write::anstream_stdout();
     let heading = crate::style::HEADING;
     writeln!(
         out,
@@ -953,7 +954,7 @@ fn render_dependency_batch_json(
     report: &DependencyBatchReport,
     format: Format,
 ) -> std::io::Result<()> {
-    let mut out = std::io::stdout().lock();
+    let mut out = crate::write::stdout();
     let mut object = serde_json::to_value(report)?
         .as_object()
         .expect("DependencyBatchReport serializes as an object")
@@ -975,7 +976,9 @@ fn render_dependency_batch_json(
 /// diagnostic lines are identical either way.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum Kind<'a> {
-    Check,
+    Check {
+        unresolved: Option<&'a aplan_core::Unresolved>,
+    },
     /// `verify`, carrying how many citations no resolver was configured to open.
     /// The summary has to be able to say it: a consumer reading stdout alone
     /// would otherwise be told `evidence resolved` about citations nothing
@@ -1015,7 +1018,7 @@ impl Kind<'_> {
     /// wrong in (`A1-112`).
     fn clean_note(&self) -> Option<String> {
         match self {
-            Kind::Check => Some("DAG acyclic".to_string()),
+            Kind::Check { .. } => Some("DAG acyclic".to_string()),
             // A run that opened some citations and had no resolver for others
             // resolved evidence, and did not resolve *this* evidence. The count
             // is the difference, said where the verdict is read.
@@ -1032,12 +1035,22 @@ impl Kind<'_> {
     /// The `schema` field of the non-agent JSON document.
     fn json_schema(&self) -> &'static str {
         match self {
-            Kind::Check | Kind::CheckPartial(_) => "aplan/check-report/v1",
+            Kind::Check { .. } | Kind::CheckPartial(_) => "aplan/check-report/v1",
             Kind::Verify { .. }
             | Kind::VerifyPartial(_)
             | Kind::VerifyInboxInvalid(_)
             | Kind::Evidence => "aplan/verify-report/v1",
         }
+    }
+
+    /// Whether human output may suppress repeated fix lines for a rule code
+    /// and direct the caller to `--format agent`.
+    ///
+    /// True for `check` and `verify` (which accept `--format agent`); false
+    /// for refused mutation previews (`Kind::Evidence`), whose commands do not
+    /// accept `--format` and must never advise an invalid flag.
+    const fn suppresses_repeated_fixes(&self) -> bool {
+        !matches!(self, Kind::Evidence)
     }
 
     /// What this run had no resolver for, for the machine document.
@@ -1049,6 +1062,13 @@ impl Kind<'_> {
     /// ways is how two surfaces disagree about one plan (`A1-104`).
     fn evidence_unresolved(&self) -> Option<serde_json::Value> {
         match self {
+            Kind::Check {
+                unresolved: Some(u),
+            } if u.any() => Some(serde_json::json!({
+                "citations": u.citations,
+                "tasks": u.tasks,
+                "resolved_by": "verify",
+            })),
             Kind::Verify { unopened: u, .. } if u.any() => Some(serde_json::json!({
                 "citations": u.citations,
                 "tasks": u.tasks,
@@ -1085,7 +1105,25 @@ impl Kind<'_> {
 
 /// Render a `check` report to stdout.
 pub fn render(report: &Report, format: Format, policy: &Verdict) -> std::io::Result<()> {
-    render_kind(report, format, Kind::Check, policy)
+    render_kind(report, format, Kind::Check { unresolved: None }, policy)
+}
+
+/// Render a `check` report to stdout, carrying structural unchecked-evidence
+/// counts inside machine-readable formats (`json` and `agent`).
+pub fn render_checked(
+    report: &Report,
+    format: Format,
+    policy: &Verdict,
+    unresolved: &aplan_core::Unresolved,
+) -> std::io::Result<()> {
+    render_kind(
+        report,
+        format,
+        Kind::Check {
+            unresolved: Some(unresolved),
+        },
+        policy,
+    )
 }
 
 /// Render a `check` report for a plan whose files did not all load.
@@ -1209,7 +1247,7 @@ fn render_kind(
 /// resolves to a described rule, and a clean run still tells a dashboard what
 /// this tool checks.
 fn render_sarif(report: &Report, policy: &Verdict) -> std::io::Result<()> {
-    let mut out = std::io::stdout().lock();
+    let mut out = crate::write::stdout();
     writeln!(
         out,
         "{}",
@@ -1370,7 +1408,7 @@ fn render_human_evidence_observation(
 }
 
 fn render_human(report: &Report, kind: Kind<'_>, policy: &Verdict) -> std::io::Result<()> {
-    let mut out = anstream::stdout().lock();
+    let mut out = crate::write::anstream_stdout();
     let red = crate::style::ERROR;
     let yellow = crate::style::WARNING;
     let dim = crate::style::DIM;
@@ -1447,7 +1485,7 @@ fn render_human(report: &Report, kind: Kind<'_>, policy: &Verdict) -> std::io::R
             )?;
         }
         if let Some(ai) = &d.agent_instruction {
-            if instructed.insert(d.code) {
+            if !kind.suppresses_repeated_fixes() || instructed.insert(d.code) {
                 // `fold_after` rather than a fixed indent, so the prefix is
                 // measured rather than assumed and the first line fits too.
                 writeln!(
@@ -1619,13 +1657,13 @@ fn render_json(
                 .expect("candidate projections are always serializable"),
         );
     }
-    let mut out = std::io::stdout().lock();
+    let mut out = crate::write::stdout();
     serde_json::to_writer_pretty(&mut out, &doc)?;
     writeln!(out)
 }
 
 fn render_github(report: &Report, policy: &Verdict) -> std::io::Result<()> {
-    let mut out = std::io::stdout().lock();
+    let mut out = crate::write::stdout();
     for d in &report.diagnostics {
         writeln!(out, "{}", github_line(d, policy.is_advisory(d.code)))?;
     }
@@ -1710,7 +1748,7 @@ pub fn render_grouped_summary(summary: &GroupedSummary, format: Format) -> std::
 }
 
 fn render_grouped_summary_human(summary: &GroupedSummary) -> std::io::Result<()> {
-    let mut out = anstream::stdout().lock();
+    let mut out = crate::write::anstream_stdout();
     let bold = crate::style::HEADING;
     let labels: Vec<String> = summary
         .groups
@@ -1824,7 +1862,7 @@ fn pad_display(text: &str, width: usize) -> String {
 }
 
 fn render_summary_human(summary: &Summary) -> std::io::Result<()> {
-    let mut out = anstream::stdout().lock();
+    let mut out = crate::write::anstream_stdout();
     let bold = crate::style::HEADING;
 
     writeln!(
@@ -1891,7 +1929,7 @@ pub fn render_tasks(export: &TaskExport, format: Format) -> std::io::Result<()> 
     if format == Format::Human {
         return render_tasks_human(export);
     }
-    let mut out = std::io::stdout().lock();
+    let mut out = crate::write::stdout();
     serde_json::to_writer_pretty(&mut out, export)?;
     writeln!(out)
 }
@@ -1907,7 +1945,7 @@ fn column<'a>(values: impl Iterator<Item = &'a str>, floor: usize) -> usize {
 }
 
 fn render_tasks_human(export: &TaskExport) -> std::io::Result<()> {
-    let mut out = anstream::stdout().lock();
+    let mut out = crate::write::anstream_stdout();
     let bold = crate::style::HEADING;
     // Wide enough for the widest value, never narrower than the width this table
     // has always had. A fixed 12 was fine while every id was `A1-047`; under
@@ -2021,7 +2059,7 @@ fn render_summary_json(summary: &Summary) -> std::io::Result<()> {
         "total_weeks": summary.total_weeks(),
         "remaining_weeks": summary.remaining_weeks(),
     });
-    let mut out = std::io::stdout().lock();
+    let mut out = crate::write::stdout();
     serde_json::to_writer_pretty(&mut out, &doc)?;
     writeln!(out)
 }
@@ -2059,7 +2097,7 @@ fn render_grouped_summary_json(summary: &GroupedSummary) -> std::io::Result<()> 
         "total_weeks": summary.total_weeks(),
         "remaining_weeks": summary.remaining_weeks(),
     });
-    let mut out = std::io::stdout().lock();
+    let mut out = crate::write::stdout();
     serde_json::to_writer_pretty(&mut out, &doc)?;
     writeln!(out)
 }
@@ -2184,7 +2222,7 @@ fn render_critical_path_human(
     remaining: Option<&CriticalPath>,
     to: Option<&str>,
 ) -> std::io::Result<()> {
-    let mut out = anstream::stdout().lock();
+    let mut out = crate::write::anstream_stdout();
     let bold = crate::style::HEADING;
     // **The target is named, and so is the reason there is no chain** (`A1-345`).
     // A checkpoint with no live ancestry is a real answer -- nothing has to
@@ -2275,7 +2313,7 @@ fn render_critical_path_json(
         }),
         "tasks": tasks,
     });
-    let mut out = std::io::stdout().lock();
+    let mut out = crate::write::stdout();
     serde_json::to_writer_pretty(&mut out, &doc)?;
     writeln!(out)
 }
@@ -4737,16 +4775,34 @@ mod tests {
 
     #[test]
     fn report_kind_metadata_covers_clean_and_partial_verdicts() {
-        assert_eq!(Kind::Check.clean_note().as_deref(), Some("DAG acyclic"));
+        let check = Kind::Check { unresolved: None };
+        assert_eq!(check.clean_note().as_deref(), Some("DAG acyclic"));
         assert_eq!(
             Kind::Evidence.clean_note().as_deref(),
             Some("this evidence resolves")
         );
-        assert_eq!(Kind::Check.json_schema(), "aplan/check-report/v1");
+        assert_eq!(check.json_schema(), "aplan/check-report/v1");
         assert_eq!(Kind::Evidence.json_schema(), "aplan/verify-report/v1");
-        assert_eq!(Kind::Check.evidence_unresolved(), None);
-        assert_eq!(Kind::Check.failure_cause(), "");
-        assert_eq!(Kind::Check.evidence_observation(), None);
+        assert_eq!(check.evidence_unresolved(), None);
+        assert!(check.suppresses_repeated_fixes());
+        assert!(!Kind::Evidence.suppresses_repeated_fixes());
+        let unresolved = aplan_core::Unresolved {
+            citations: 3,
+            tasks: 2,
+        };
+        assert_eq!(
+            Kind::Check {
+                unresolved: Some(&unresolved)
+            }
+            .evidence_unresolved(),
+            Some(serde_json::json!({
+                "citations": 3,
+                "tasks": 2,
+                "resolved_by": "verify",
+            }))
+        );
+        assert_eq!(check.failure_cause(), "");
+        assert_eq!(check.evidence_observation(), None);
 
         let partial = Kind::VerifyPartial(2);
         assert_eq!(partial.clean_note(), None);
@@ -4771,8 +4827,13 @@ mod tests {
             candidate_projections: Vec::new(),
         };
         for format in [Format::Markdown, Format::Mermaid, Format::Dot, Format::Text] {
-            let error = render_kind(&report, format, Kind::Check, &Verdict::default())
-                .expect_err("wrong surface");
+            let error = render_kind(
+                &report,
+                format,
+                Kind::Check { unresolved: None },
+                &Verdict::default(),
+            )
+            .expect_err("wrong surface");
             assert_eq!(error.kind(), std::io::ErrorKind::InvalidInput);
             assert!(error.to_string().contains(format.as_str()));
         }
@@ -4807,8 +4868,13 @@ mod tests {
             advisory: vec!["APLAN009".into()],
         };
 
-        render_kind(&report, Format::Human, Kind::Check, &policy)
-            .expect("complete human diagnostic");
+        render_kind(
+            &report,
+            Format::Human,
+            Kind::Check { unresolved: None },
+            &policy,
+        )
+        .expect("complete human diagnostic");
     }
 
     #[test]
@@ -7345,10 +7411,10 @@ pub fn render_due(report: &DueReport, format: Format) -> std::io::Result<()> {
                 "overdue_seconds": t.overdue_seconds,
             })).collect::<Vec<_>>(),
         });
-        let mut out = anstream::stdout().lock();
+        let mut out = crate::write::anstream_stdout();
         return writeln!(out, "{}", serde_json::to_string_pretty(&doc)?);
     }
-    let mut out = anstream::stdout().lock();
+    let mut out = crate::write::anstream_stdout();
     write!(out, "{}", due_human(report))
 }
 
@@ -7465,7 +7531,7 @@ pub fn render_stale(report: &StaleReport, format: Format) -> std::io::Result<()>
     if format != Format::Human {
         return render_stale_json(report);
     }
-    let mut out = anstream::stdout().lock();
+    let mut out = crate::write::anstream_stdout();
     write!(out, "{}", stale_human(report))
 }
 
@@ -7650,7 +7716,7 @@ fn render_stale_json(report: &StaleReport) -> std::io::Result<()> {
             "claim_age_seconds": t.claim_age_seconds,
         })).collect::<Vec<_>>(),
     });
-    let mut out = std::io::stdout().lock();
+    let mut out = crate::write::stdout();
     serde_json::to_writer_pretty(&mut out, &doc)?;
     writeln!(out)
 }
@@ -7837,7 +7903,7 @@ pub fn render_vacuity(report: &[RuleReach], format: Format) -> std::io::Result<(
     if format != Format::Human {
         return render_vacuity_json(report);
     }
-    let mut out = anstream::stdout().lock();
+    let mut out = crate::write::anstream_stdout();
     write!(out, "{}", vacuity_human(report))
 }
 
@@ -7972,7 +8038,7 @@ fn render_vacuity_json(report: &[RuleReach]) -> std::io::Result<()> {
             }).collect::<Vec<_>>(),
         })).collect::<Vec<_>>(),
     });
-    let mut out = std::io::stdout().lock();
+    let mut out = crate::write::stdout();
     serde_json::to_writer_pretty(&mut out, &doc)?;
     writeln!(out)
 }
@@ -7994,7 +8060,7 @@ pub fn render_paths(report: &PathsReport, format: Format) -> std::io::Result<()>
     if format != Format::Human {
         return render_paths_json(report);
     }
-    let mut out = anstream::stdout().lock();
+    let mut out = crate::write::anstream_stdout();
     write!(out, "{}", paths_human(report))
 }
 
@@ -8117,7 +8183,7 @@ pub fn render_deprecations(report: &Deprecations, format: Format) -> std::io::Re
     if format != Format::Human {
         return render_deprecations_json(report);
     }
-    let mut out = anstream::stdout().lock();
+    let mut out = crate::write::anstream_stdout();
     write!(out, "{}", deprecations_human(report))
 }
 
@@ -8285,7 +8351,7 @@ fn render_deprecations_json(report: &Deprecations) -> std::io::Result<()> {
         })).collect::<Vec<_>>(),
         "unannounced_removals": report.unannounced.iter().map(&task).collect::<Vec<_>>(),
     });
-    let mut out = std::io::stdout().lock();
+    let mut out = crate::write::stdout();
     serde_json::to_writer_pretty(&mut out, &doc)?;
     writeln!(out)
 }
@@ -8309,7 +8375,7 @@ fn render_paths_json(report: &PathsReport) -> std::io::Result<()> {
             "first_path": t.first_path,
         })).collect::<Vec<_>>(),
     });
-    let mut out = std::io::stdout().lock();
+    let mut out = crate::write::stdout();
     serde_json::to_writer_pretty(&mut out, &doc)?;
     writeln!(out)
 }

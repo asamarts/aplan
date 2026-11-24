@@ -23,7 +23,7 @@ use aplan_core::{Graph, Options, load_plan_files, validate};
 use aplan_output::{
     BlueprintApplicationReport, BlueprintFile, BlueprintFileKind, BlueprintOutcome, BlueprintTask,
     DependencyBatchOperation, DependencyBatchOutcome, DependencyBatchReport, Format, Surface,
-    render, render_blueprint_application, render_critical_path, render_dependency_batch,
+    render_blueprint_application, render_checked, render_critical_path, render_dependency_batch,
     render_grouped_summary, render_partial, render_proposed, render_roadmap,
     render_roadmap_markdown, render_summary, render_tasks, render_verified_inbox_invalid,
     render_verified_observed, render_verified_partial,
@@ -2097,7 +2097,7 @@ fn timings_from_argv(args: impl Iterator<Item = std::ffi::OsString>) -> bool {
 fn write_stdout(s: &str) -> Result<()> {
     use std::io::Write as _;
     let _progress_write = ProgressWriteGuard::new();
-    match anstream::stdout().write_all(s.as_bytes()) {
+    match aplan_output::write::anstream_stdout().write_all(s.as_bytes()) {
         Ok(()) => Ok(()),
         Err(e) if e.kind() == std::io::ErrorKind::BrokenPipe => Ok(()),
         Err(e) => Err(e.into()),
@@ -3149,8 +3149,8 @@ fn resolve_deny_warnings(
 /// document. Without this the human output reads `ok: 12 tasks, 3 warning(s)`
 /// and then exits `1`, which looks like a bug in the tool rather than the policy
 /// the repository asked for.
-fn note_denied_warnings(report: &aplan_core::Report, policy: &aplan_core::Verdict) {
-    if !policy.deny_warnings {
+fn note_denied_warnings(report: &aplan_core::Report, policy: &aplan_core::Verdict, format: Format) {
+    if format == Format::Agent || !policy.deny_warnings {
         return;
     }
     // Counted against the policy, like the verdict and the summary: a repository
@@ -3190,9 +3190,8 @@ fn note_denied_warnings(report: &aplan_core::Report, policy: &aplan_core::Verdic
 /// announces the policy it did not apply, and `check-docs` refuses outright
 /// rather than report a clean run it cannot back. A gate that cannot fire has to
 /// say so.
-fn note_unresolved_evidence(plan: &aplan_core::Plan) {
-    let left = timed("project", || aplan_core::unresolved_by_check(plan));
-    if !left.any() {
+fn note_unresolved_evidence(left: &aplan_core::Unresolved, format: Format) {
+    if format == Format::Agent || !left.any() {
         return;
     }
     let (citations, tasks) = (left.citations, left.tasks);
@@ -3266,8 +3265,8 @@ fn note_agent_contract_provenance(report: &aplan_core::Report, format: Format) {
     }
 }
 
-fn note_unopened_evidence(unopened: &aplan_evidence::Unopened) {
-    if !unopened.any() {
+fn note_unopened_evidence(unopened: &aplan_evidence::Unopened, format: Format) {
+    if format == Format::Agent || !unopened.any() {
         return;
     }
     let (citations, tasks, kinds) = (unopened.citations, unopened.tasks, unopened.kinds_said());
@@ -3490,12 +3489,13 @@ fn cmd_check(root: &std::path::Path, args: &CheckArgs) -> Result<u8> {
         })?;
         return Ok(EXIT_VIOLATIONS);
     }
+    let unresolved = response.evidence_unresolved;
     timed("render", || {
-        render_tolerant(|| render(&report, format, policy))
+        render_tolerant(|| render_checked(&report, format, policy, &unresolved))
     })?;
-    note_denied_warnings(&report, policy);
+    note_denied_warnings(&report, policy, format);
     note_agent_contract_provenance(&report, format);
-    note_unresolved_evidence(context.plan());
+    note_unresolved_evidence(&unresolved, format);
     Ok(if report.denied_by(policy) {
         EXIT_VIOLATIONS
     } else {
@@ -5096,7 +5096,7 @@ fn cmd_verify(root: &std::path::Path, args: &VerifyArgs) -> Result<u8> {
         render_tolerant(|| {
             render_verified_inbox_invalid(&report, format, &policy, invalid_captures)
         })?;
-        note_denied_warnings(&report, &policy);
+        note_denied_warnings(&report, &policy, format);
         return Ok(EXIT_VIOLATIONS);
     }
     let evidence = inspect_verify_evidence(&plan, repo, &opts, args)?;
@@ -5131,10 +5131,10 @@ fn cmd_verify(root: &std::path::Path, args: &VerifyArgs) -> Result<u8> {
     render_tolerant(|| {
         render_verified_observed(&report, format, &policy, &unopened, &evidence.observation)
     })?;
-    note_unopened_evidence(&unopened);
+    note_unopened_evidence(&unopened, format);
     note_agent_contract_provenance(&report, format);
     note_candidate_projections(&report, format);
-    note_denied_warnings(&report, &policy);
+    note_denied_warnings(&report, &policy, format);
     Ok(verdict(&report, &policy))
 }
 
@@ -9932,7 +9932,7 @@ fn cmd_show(root: &std::path::Path, args: &ShowArgs) -> Result<u8> {
             Format::Json => render_tolerant(|| {
                 // `anstream` passes every byte that is not an SGR sequence through
                 // untouched, so the JSON is identical at any `--color` (`A1-286`).
-                let mut out = anstream::stdout().lock();
+                let mut out = aplan_output::write::anstream_stdout();
                 serde_json::to_writer_pretty(&mut out, &view)?;
                 writeln!(out)
             })?,
@@ -17279,14 +17279,28 @@ fn cmd_working(
         );
     }
 
-    let updated =
+    let mut updated =
         aplan_core::close::set_status(&original, want).map_err(|e| close_err(verb, id, &e))?;
+    let cleared_revisit = if starting && current.status == aplan_core::Status::Blocked {
+        if let Some(previous) = current.revisit_at.clone() {
+            updated = aplan_core::close::set_revisit_at(&updated, None)
+                .map_err(|e| close_err(verb, id, &e))?;
+            Some(previous)
+        } else {
+            None
+        }
+    } else {
+        None
+    };
     let after = aplan_core::mutation::with_replaced(&plan, id, task_of(&updated, id)?);
     refuse_bad_mutation(root, &format!("{verb} `{id}`"), &plan, &after, verdict)?;
     save_one(&lt.path, &original, &updated, verb)?;
 
     let mut out = String::new();
     let _ = writeln!(out, "`{id}` is now `{want}`\n  -> {}", lt.path.display());
+    if let Some(previous) = cleared_revisit {
+        let _ = writeln!(out, "  cleared `revisit_at` (was `{}`)", shown(&previous));
+    }
     // Who is on it is a different question, and an unclaimed task that somebody
     // has started is the coordination gap this pair exists to close.
     if starting {
@@ -17455,7 +17469,7 @@ fn cmd_drop(
     save_batch(&writes, "drop")?;
 
     let _progress_write = ProgressWriteGuard::new();
-    let mut out = anstream::stdout().lock();
+    let mut out = aplan_output::write::anstream_stdout();
     for lt in &targets {
         writeln!(
             out,
@@ -18186,7 +18200,7 @@ fn cmd_mv(
     save_batch(&batch, "mv")?;
 
     let _progress_write = ProgressWriteGuard::new();
-    let mut out = anstream::stdout().lock();
+    let mut out = aplan_output::write::anstream_stdout();
     if let (Some(cut), Some((_, pending)), Some(placement)) = (cut, moving, placement) {
         let placed = aplan_interop::cut::Placed {
             path: placement.path,
@@ -18861,7 +18875,7 @@ fn cmd_roadmap(root: &std::path::Path, args: &RoadmapArgs) -> Result<u8> {
     };
     render_tolerant(|| {
         use std::io::Write as _;
-        anstream::stdout().write_all(text.as_bytes())
+        aplan_output::write::anstream_stdout().write_all(text.as_bytes())
     })?;
     Ok(EXIT_OK)
 }

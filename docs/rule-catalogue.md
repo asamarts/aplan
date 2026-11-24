@@ -380,7 +380,7 @@ a `revisit_at` names a real instant, on a task that is parked
 - **says:** `revisit_at: next tuesday` is not an RFC 3339 instant, so nothing can act on it
   - **fix:** Write the instant as `YYYY-MM-DDTHH:MM:SSZ`, or with an offset (`YYYY-MM-DDTHH:MM:SS+02:00`). A date alone is not an instant: a scheduler has to know which moment of the day to return at.
 - **says:** carries `revisit_at` and is `todo`: a revisit says when to look at *parked* work again, and nothing reads it here
-  - **fix:** Park the task (`status: blocked`) if it is waiting on something outside the plan, or drop the `revisit_at`. Reaching the instant never changes a status, so it cannot be what makes this task start.
+  - **fix:** Park the task (`status: blocked`) if it is waiting on something outside the plan, or drop the `revisit_at` (`aplan unpark` returns parked work to `todo` and clears it). Reaching the instant never changes a status, so it cannot be what makes this task start.
 
 ## APLAN043 (warning)
 

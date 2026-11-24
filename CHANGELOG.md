@@ -6,6 +6,32 @@ to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+### Fixed
+
+- **Single valid JSON document on `--format agent` (`A2-096`,
+  `--require agent.output_is_single_json_document`)**. `aplan check --format agent` (and
+  `--format json`) now carries unchecked structural evidence inside the JSON document under
+  `evidence_unresolved` (`citations`, `tasks`, `resolved_by: "verify"`), matching the MCP
+  surface, and suppresses the trailing human prose note on machine formats so stdout/stderr
+  consumers always receive one parseable JSON document to EOF.
+- **Byte-boundary `WouldBlock` retry in report rendering (`A2-095`)**. All stdout renderers now
+  write through a bounded retrying writer (`RetryingWriter`) that retries transient
+  `io::ErrorKind::WouldBlock` and `Interrupted` errors without truncating or duplicating bytes,
+  bounds persistent stalls so it cannot busy-spin forever, preserves `BrokenPipe` clean-exit
+  semantics, and keeps unrelated I/O faults as internal errors.
+- **Stop refused mutation commands from advising `--format agent` (`A2-182`)**. Refused
+  `close`/`amend` evidence previews (`Kind::Evidence`) no longer suppress repeated fix lines or
+  advise passing `--format agent` (which mutation commands do not accept), while `check` and
+  `verify` human output keep their existing `--format agent` hint.
+- **Parse-before-effect regression coverage for `claim`/`release`/`start`/`stop` (`A2-142`)**.
+  Audited CLI dispatch and pinned end-to-end tests proving unsupported options (such as
+  `aplan claim <ID> --owner ...`) are refused before claim storage or task files are opened or
+  mutated.
+- **`aplan start` on parked work clears `revisit_at` (`A2-160`)**. Starting a `blocked` task that
+  carries `revisit_at` now clears `revisit_at` and announces the cleared value instead of leaving
+  a dangling revisit timestamp that triggers `APLAN042`, while `APLAN042`'s instruction now also
+  names `aplan unpark` and misplaced `revisit_at` on non-blocked tasks remains reported.
+
 ### Added
 
 - **Commit-range structural validation `aplan check --range <BASE..TIP>` (`A2-156`,
