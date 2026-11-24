@@ -1015,3 +1015,240 @@ fn malformed_or_duplicate_provenance_still_fails_export_agents_md_check() {
     assert_eq!(code, 1, "malformed provenance must fail --check:\n{out}");
     assert!(out.contains("malformed provenance"), "{out}");
 }
+
+/// Proves `agent_contract.renders_configured_launcher_argv` (`A2-140`):
+/// configured `agent_contract.invocation` renders deterministically and
+/// shell-safely across every generated command and executable-identifying
+/// sentence, keeps default output byte-identical, widens Markdown fences when
+/// tokens carry backticks, stays idempotent across `--write` then `--check`,
+/// and gates changes through both `--check` and `APLAN041`.
+#[test]
+fn configured_launcher_invocation_renders_safely_and_gates_drift() {
+    let dir = tempfile::Builder::new()
+        .tempdir_in(aplan_core::fixture::fixture_root())
+        .expect("tempdir");
+    fixture(dir.path());
+    // Enable drift detection so the `close --restamp` sentence is rendered too.
+    let base_cfg = "detect_drift: true\ndeny_warnings: true\n";
+    std::fs::write(dir.path().join(".aplan.yml"), base_cfg).expect("write base config");
+
+    // Facts advertises both the config key and the argv-safety behaviour.
+    let (out, code) = common::aplan(
+        dir.path(),
+        &[
+            "facts",
+            "--require",
+            "agent_contract.invocation",
+            "--require",
+            "agent_contract.renders_configured_launcher_argv",
+        ],
+    );
+    assert_eq!(code, 0, "facts --require failed:\n{out}");
+
+    // Default config and empty `agent_contract: {}` render byte-for-byte identically.
+    let (default_block, err, ok) = run(dir.path(), &["export-agents-md"]);
+    assert!(ok, "{err}");
+    std::fs::write(
+        dir.path().join(".aplan.yml"),
+        format!("{base_cfg}agent_contract: {{}}\n"),
+    )
+    .expect("write empty agent_contract");
+    let (empty_table_block, err, ok) = run(dir.path(), &["export-agents-md"]);
+    assert!(ok, "{err}");
+    assert_eq!(
+        default_block, empty_table_block,
+        "empty agent_contract table must match default output byte-for-byte"
+    );
+
+    // Path with spaces + fixed launcher arguments.
+    let spaced_cfg = format!(
+        "{base_cfg}agent_contract:\n  invocation: [\"./tools/my launcher/aplan.sh\", \"--profile\", \"ci\"]\n"
+    );
+    std::fs::write(dir.path().join(".aplan.yml"), &spaced_cfg).expect("write spaced config");
+    let (spaced_block, err, ok) = run(dir.path(), &["export-agents-md"]);
+    assert!(ok, "{err}");
+    assert_ne!(spaced_block, default_block);
+
+    let expected_prefix = "'./tools/my launcher/aplan.sh' --profile ci";
+    for needle in [
+        format!("`{expected_prefix} check`"),
+        format!("`{expected_prefix} verify`"),
+        format!("{expected_prefix} ready"),
+        format!("{expected_prefix} why "),
+        format!("{expected_prefix} close "),
+        format!("{expected_prefix} check && {expected_prefix} verify"),
+        format!("{expected_prefix} blueprint apply --file FILE_PATH"),
+        format!("`{expected_prefix} close --restamp`"),
+        format!("`{expected_prefix} mcp`"),
+    ] {
+        assert!(
+            spaced_block.contains(&needle),
+            "missing rendered launcher command `{needle}` in:\n{spaced_block}"
+        );
+    }
+    // No bare `aplan <subcommand>` examples left in the policy body (outside markers/provenance).
+    let aplan_core::contract::Block::Present(inner) = aplan_core::contract::block_in(&spaced_block)
+    else {
+        panic!("missing block");
+    };
+    let (_, policy_body) = aplan_core::contract::parse_provenance(inner);
+    for bare in [
+        "`aplan check`",
+        "`aplan verify`",
+        "`aplan mcp`",
+        "`aplan close --restamp`",
+        "\naplan ready",
+        "\naplan why",
+        "\naplan close",
+        "\naplan blueprint apply",
+    ] {
+        assert!(
+            !policy_body.contains(bare),
+            "unexpected bare command `{bare}` remained in:\n{policy_body}"
+        );
+    }
+
+    // Idempotent across `--write` then `--check`, and `aplan check` is clean.
+    let (out, code) = common::aplan(dir.path(), &["export-agents-md", "--write", "AGENTS.md"]);
+    assert_eq!(code, 0, "{out}");
+    let (out, code) = common::aplan(dir.path(), &["export-agents-md", "--check", "AGENTS.md"]);
+    assert_eq!(code, 0, "idempotent --check failed:\n{out}");
+    let (out, code) = common::aplan(dir.path(), &["check"]);
+    assert_eq!(code, 0, "aplan check should pass after --write:\n{out}");
+
+    // Changing the invocation makes both `--check` and `APLAN041` report drift.
+    let updated_cfg = format!(
+        "{base_cfg}agent_contract:\n  invocation: [\"./tools/aplan-wrapper\", \"--strict\"]\n"
+    );
+    std::fs::write(dir.path().join(".aplan.yml"), &updated_cfg).expect("write updated config");
+    let (out, code) = common::aplan(dir.path(), &["export-agents-md", "--check", "AGENTS.md"]);
+    assert_eq!(code, 1, "changed invocation must fail --check:\n{out}");
+    let (out, code) = common::aplan(dir.path(), &["check"]);
+    assert_eq!(code, 1, "changed invocation must trigger APLAN041:\n{out}");
+    assert!(out.contains("APLAN041"), "expected APLAN041:\n{out}");
+
+    assert_hostile_launcher_tokens_stay_inert_and_fenced(dir.path(), base_cfg);
+}
+
+fn assert_hostile_launcher_tokens_stay_inert_and_fenced(dir: &Path, base_cfg: &str) {
+    // Quotes, shell metacharacters, backticks and option-looking tokens stay
+    // inert as data, keep Markdown fences intact, and round-trip cleanly.
+    let hostile_cfg = format!(
+        "{base_cfg}agent_contract:\n  invocation:\n    - \"./tools/it's aplan\"\n    - \"--label\"\n    - 'a\"b'\n    - \"$(id)\"\n    - \"```fence```\"\n    - \"-v\"\n    - \"--\"\n"
+    );
+    std::fs::write(dir.join(".aplan.yml"), &hostile_cfg).expect("write hostile config");
+    let (out, code) = common::aplan(dir, &["export-agents-md", "--write", "AGENTS.md"]);
+    assert_eq!(code, 0, "{out}");
+    let (out, code) = common::aplan(dir, &["export-agents-md", "--check", "AGENTS.md"]);
+    assert_eq!(code, 0, "hostile tokens must round-trip cleanly:\n{out}");
+    let written = std::fs::read_to_string(dir.join("AGENTS.md")).expect("read AGENTS.md");
+    let expected_hostile = "'./tools/it'\\''s aplan' --label 'a\"b' '$(id)' '```fence```' -v --";
+    assert!(
+        written.contains(expected_hostile),
+        "expected shell-safe argv `{expected_hostile}` in:\n{written}"
+    );
+    assert!(
+        written.contains("````sh\n"),
+        "triple backtick inside argv must widen fenced code block to 4 backticks:\n{written}"
+    );
+    assert!(
+        written.contains(&format!("````{expected_hostile} check````")),
+        "triple backtick inside argv must widen inline code span to 4 backticks:\n{written}"
+    );
+
+    // Option-looking and assignment-looking first tokens are single-quoted so
+    // POSIX `sh` cannot treat them as flags or variable assignments.
+    let opt_first_cfg =
+        format!("{base_cfg}agent_contract:\n  invocation: [\"--launcher\", \"FOO=bar\"]\n");
+    std::fs::write(dir.join(".aplan.yml"), &opt_first_cfg).expect("write opt-first");
+    let (opt_block, err, ok) = run(dir, &["export-agents-md"]);
+    assert!(ok, "{err}");
+    assert!(
+        opt_block.contains("'--launcher' FOO=bar ready"),
+        "option-looking command token must be quoted:\n{opt_block}"
+    );
+    let assign_first_cfg =
+        format!("{base_cfg}agent_contract:\n  invocation: [\"FOO=bar\", \"run\"]\n");
+    std::fs::write(dir.join(".aplan.yml"), &assign_first_cfg).expect("write assign-first");
+    let (assign_block, err, ok) = run(dir, &["export-agents-md"]);
+    assert!(ok, "{err}");
+    assert!(
+        assign_block.contains("'FOO=bar' run ready"),
+        "assignment-looking command token must be quoted:\n{assign_block}"
+    );
+}
+
+/// Proves the refusal half of `agent_contract.renders_configured_launcher_argv`
+/// (`A2-140`): malformed, empty, blank, scalar, control-character and
+/// over-budget invocations fail configuration (exit 2) rather than falling back
+/// to bare `aplan`.
+#[test]
+fn malformed_launcher_invocation_fails_configuration() {
+    let dir = tempfile::Builder::new()
+        .tempdir_in(aplan_core::fixture::fixture_root())
+        .expect("tempdir");
+    fixture(dir.path());
+
+    let too_many_args = format!(
+        "agent_contract:\n  invocation: [{}]\n",
+        (0..33)
+            .map(|i| format!("\"arg{i}\""))
+            .collect::<Vec<_>>()
+            .join(", ")
+    );
+    let too_many_bytes = format!(
+        "agent_contract:\n  invocation: [\"{}\"]\n",
+        "a".repeat(1025)
+    );
+
+    let cases = [
+        ("empty list", "agent_contract:\n  invocation: []\n"),
+        (
+            "empty string token",
+            "agent_contract:\n  invocation: [\"\"]\n",
+        ),
+        (
+            "whitespace token",
+            "agent_contract:\n  invocation: [\"./aplan\", \"   \"]\n",
+        ),
+        (
+            "scalar string",
+            "agent_contract:\n  invocation: \"./scripts/aplan --flag\"\n",
+        ),
+        (
+            "newline control",
+            "agent_contract:\n  invocation: [\"./aplan\\nrm -rf /\"]\n",
+        ),
+        (
+            "carriage return",
+            "agent_contract:\n  invocation: [\"./aplan\", \"a\\rb\"]\n",
+        ),
+        (
+            "nul byte",
+            "agent_contract:\n  invocation: [\"./aplan\\u0000\"]\n",
+        ),
+        (
+            "ansi escape",
+            "agent_contract:\n  invocation: [\"./aplan\\u001b[31m\"]\n",
+        ),
+        (
+            "bidi override",
+            "agent_contract:\n  invocation: [\"./aplan\\u202e\"]\n",
+        ),
+        (
+            "unknown subkey",
+            "agent_contract:\n  command: [\"./aplan\"]\n",
+        ),
+        ("too many args", too_many_args.as_str()),
+        ("too many bytes", too_many_bytes.as_str()),
+    ];
+
+    for (label, yaml) in cases {
+        std::fs::write(dir.path().join(".aplan.yml"), yaml).expect("write invalid config");
+        let (out, code) = common::aplan(dir.path(), &["export-agents-md"]);
+        assert_eq!(
+            code, 2,
+            "case `{label}` must fail configuration with exit 2, got {code}:\n{out}"
+        );
+    }
+}

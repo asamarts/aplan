@@ -390,6 +390,7 @@ fn wire(support: &Path) -> Wiring {
     let current_wrap = script("version.current.wrap", "exec \"$@\"");
     let check = script("version.check", "exit 0");
     let check_wrap = script("version.check.wrap", "exec \"$@\"");
+    let agent_invocation = script("agent_contract.invocation", "exit 0");
     let legacy_config = format!(
         "root: aplan\n\
          test:\n  \
@@ -406,7 +407,9 @@ fn wire(support: &Path) -> Wiring {
              wrap: [sh, {current_wrap}]\n  \
            check:\n    \
              command: [sh, {check}]\n    \
-             wrap: [sh, {check_wrap}]\n"
+             wrap: [sh, {check_wrap}]\n\
+         agent_contract:\n  \
+           invocation: [sh, {agent_invocation}]\n"
     );
     let batched = legacy_config.replace(
         "  skipped:",
@@ -706,6 +709,12 @@ fn every_wired_runner_is_reached_by_something() {
          reaching them either: {unreached:?}. It saw {saw:?}",
         unreached.len()
     );
+    for (_, name) in NON_EXECUTABLE_ARGV {
+        assert!(
+            !saw.contains(*name),
+            "non-executable argv key `{name}` was unexpectedly spawned: {saw:?}"
+        );
+    }
 }
 
 #[test]
@@ -769,6 +778,12 @@ const WIRED: &[(&str, &str)] = &[
     (".version.current.wrap", "version.current.wrap"),
 ];
 
+/// Configuration paths that carry an argv array as inert Markdown/data only and
+/// must never be spawned by any command (`A2-140`). Wired in [`wire`] so any
+/// accidental spawn is caught, and asserted unreached above.
+const NON_EXECUTABLE_ARGV: &[(&str, &str)] =
+    &[(".agent_contract.invocation", "agent_contract.invocation")];
+
 #[test]
 fn every_place_configuration_can_name_a_command_is_wired_into_the_fixture() {
     let text =
@@ -776,7 +791,11 @@ fn every_place_configuration_can_name_a_command_is_wired_into_the_fixture() {
             .expect("the published config schema");
     let schema: serde_json::Value = serde_json::from_str(&text).expect("the schema parses");
     let found = command_valued_paths(&schema);
-    let wired: BTreeSet<String> = WIRED.iter().map(|(p, _)| (*p).to_string()).collect();
+    let wired: BTreeSet<String> = WIRED
+        .iter()
+        .chain(NON_EXECUTABLE_ARGV.iter())
+        .map(|(p, _)| (*p).to_string())
+        .collect();
 
     let unwired: Vec<&String> = found.difference(&wired).collect();
     assert!(

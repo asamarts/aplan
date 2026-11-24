@@ -6457,6 +6457,10 @@ pub struct AgentContract {
     /// audit found `the repository root/` inside backticks, which is what
     /// passing prose through a path field produces.
     pub plan_dir: Option<String>,
+    /// Ordered argv used to invoke `aplan` in generated command examples and
+    /// executable-identifying sentences (`A2-140`). Empty means the default
+    /// single token `["aplan"]`.
+    pub invocation: Vec<String>,
     /// The id shapes this plan currently mints, with the number left as `nn`.
     /// Empty when the plan teaches no convention, where inventing one would be
     /// worse than saying nothing (`A1-047`).
@@ -6556,6 +6560,135 @@ pub mod style;
 /// writer and the `--check` gate actually read (`A1-294`, audit).
 pub use aplan_core::contract::{BEGIN as AGENTS_BEGIN, END as AGENTS_END};
 
+/// Render an ordered argv as one deterministic, shell-safe POSIX command prefix
+/// (`A2-140`).
+///
+/// An empty slice renders as bare `aplan`. Safe bare tokens render unquoted so
+/// the default `["aplan"]` and ordinary wrapper paths stay clean and readable;
+/// any token with spaces, quotes, shell metacharacters, a command-position `=`
+/// assignment, or a leading `-` in command position is single-quoted with `'`
+/// escaped as `'\''`. Nothing is evaluated as shell syntax.
+#[must_use]
+pub fn render_shell_argv(argv: &[String]) -> String {
+    if argv.is_empty() {
+        return "aplan".to_string();
+    }
+    argv.iter()
+        .enumerate()
+        .map(|(index, token)| render_shell_token(token, index == 0))
+        .collect::<Vec<_>>()
+        .join(" ")
+}
+
+fn render_shell_token(token: &str, is_command: bool) -> String {
+    let safe_bare = !(token.is_empty() || is_command && token.starts_with('-'))
+        && token.bytes().all(|b| {
+            b.is_ascii_alphanumeric()
+                || matches!(b, b'.' | b'_' | b'/' | b'@' | b':' | b'+' | b',' | b'-')
+                || (!is_command && b == b'=')
+        });
+    if safe_bare {
+        token.to_string()
+    } else {
+        format!("'{}'", token.replace('\'', "'\\''"))
+    }
+}
+
+fn longest_backtick_run(text: &str) -> usize {
+    let mut best = 0;
+    let mut current = 0;
+    for b in text.bytes() {
+        if b == b'`' {
+            current += 1;
+            best = best.max(current);
+        } else {
+            current = 0;
+        }
+    }
+    best
+}
+
+/// Render an inline `CommonMark` code span that cannot be broken by backticks
+/// inside `content`. When `content` contains no backticks this emits `` `content` ``.
+fn markdown_code_span(content: &str) -> String {
+    let run = longest_backtick_run(content);
+    if run == 0 {
+        return format!("`{content}`");
+    }
+    let fence = "`".repeat(run + 1);
+    if content.starts_with('`')
+        || content.ends_with('`')
+        || content.starts_with(' ')
+        || content.ends_with(' ')
+    {
+        format!("{fence} {content} {fence}")
+    } else {
+        format!("{fence}{content}{fence}")
+    }
+}
+
+/// Render a fenced `sh` code block using a backtick fence longer than any
+/// backtick run inside `lines` (3 backticks in the ordinary case).
+fn write_fenced_sh(out: &mut String, lines: &[String]) {
+    let max_run = lines
+        .iter()
+        .map(|line| longest_backtick_run(line))
+        .max()
+        .unwrap_or(0);
+    let fence = "`".repeat(max_run.max(2) + 1);
+    let _ = writeln!(out, "{fence}sh");
+    for line in lines {
+        let _ = writeln!(out, "{line}");
+    }
+    let _ = writeln!(out, "{fence}\n");
+}
+
+/// Split `text` into wrap tokens without splitting or collapsing whitespace
+/// inside inline Markdown backtick code spans.
+fn wrap_tokens(text: &str) -> Vec<&str> {
+    let bytes = text.as_bytes();
+    let len = bytes.len();
+    let mut i = 0;
+    let mut tokens = Vec::new();
+    while i < len {
+        while i < len && bytes[i].is_ascii_whitespace() {
+            i += 1;
+        }
+        if i >= len {
+            break;
+        }
+        let start = i;
+        while i < len && !bytes[i].is_ascii_whitespace() {
+            if bytes[i] == b'`' {
+                let tick_start = i;
+                while i < len && bytes[i] == b'`' {
+                    i += 1;
+                }
+                let ticks = i - tick_start;
+                let mut j = i;
+                while j < len {
+                    if bytes[j] == b'`' {
+                        let close_start = j;
+                        while j < len && bytes[j] == b'`' {
+                            j += 1;
+                        }
+                        if j - close_start == ticks {
+                            i = j;
+                            break;
+                        }
+                    } else {
+                        j += 1;
+                    }
+                }
+            } else {
+                i += 1;
+            }
+        }
+        tokens.push(&text[start..i]);
+    }
+    tokens
+}
+
 /// Wrap a paragraph at 95 columns, on word boundaries.
 ///
 /// A generated block is a committed file with a drift gate on it, so the shape
@@ -6565,7 +6698,7 @@ pub use aplan_core::contract::{BEGIN as AGENTS_BEGIN, END as AGENTS_END};
 fn wrap(text: &str) -> String {
     let mut out = String::new();
     let mut width = 0;
-    for word in text.split_whitespace() {
+    for word in wrap_tokens(text) {
         let len = word.chars().count();
         if width > 0 && width + 1 + len > 95 {
             out.push('\n');
@@ -6584,7 +6717,7 @@ fn wrap(text: &str) -> String {
 ///
 /// Kept as one renderer so the command, occasion and trust boundary cannot be
 /// edited as independent fragments inside the larger policy contract.
-fn blueprint_agent_guidance() -> String {
+fn blueprint_agent_guidance(cmd: &str) -> String {
     let mut s = String::new();
     let _ = writeln!(s, "## Reusing a plan shape\n");
     let _ = writeln!(
@@ -6597,12 +6730,12 @@ fn blueprint_agent_guidance() -> String {
              selected file and preview its whole effect before applying it."
         )
     );
-    let _ = writeln!(s, "```sh");
-    let _ = writeln!(
-        s,
-        "aplan blueprint apply --file FILE_PATH --cut CUT_ID --set NAME=VALUE --dry-run"
+    write_fenced_sh(
+        &mut s,
+        &[format!(
+            "{cmd} blueprint apply --file FILE_PATH --cut CUT_ID --set NAME=VALUE --dry-run"
+        )],
     );
-    let _ = writeln!(s, "```\n");
     let _ = writeln!(
         s,
         "{}\n",
@@ -6626,6 +6759,10 @@ fn blueprint_agent_guidance() -> String {
 /// the whole file (pre-public adoption evidence section 5).
 #[must_use]
 pub fn render_agents_md(c: &AgentContract, written_by: Option<&WrittenBy<'_>>) -> String {
+    let cmd = render_shell_argv(&c.invocation);
+    let check_span = markdown_code_span(&format!("{cmd} check"));
+    let verify_span = markdown_code_span(&format!("{cmd} verify"));
+    let mcp_span = markdown_code_span(&format!("{cmd} mcp"));
     let mut s = String::new();
     let _ = writeln!(s, "{AGENTS_BEGIN}");
     // Inside the block, never in the marker. `A1-294` made that marker a literal
@@ -6646,8 +6783,8 @@ pub fn render_agents_md(c: &AgentContract, written_by: Option<&WrittenBy<'_>>) -
         s,
         "{}\n",
         wrap(&format!(
-            "Planning, tasking and status live {}, and what judges them is `aplan check` \
-             followed by `aplan verify`. Not in issues, not in a TODO comment, not in prose: a \
+            "Planning, tasking and status live {}, and what judges them is {check_span} \
+             followed by {verify_span}. Not in issues, not in a TODO comment, not in prose: a \
              document that carries status becomes a second copy of it, and the second copy \
              drifts.",
             match c.plan_dir.as_deref().map(|d| d.trim_end_matches('/')) {
@@ -6675,26 +6812,31 @@ pub fn render_agents_md(c: &AgentContract, written_by: Option<&WrittenBy<'_>>) -
     }
 
     let _ = writeln!(s, "## The loop\n");
-    let _ = writeln!(s, "```sh");
-    let _ = writeln!(
-        s,
-        "aplan ready                 # what can be started now: blockers all done, in a derived order"
-    );
     // One shape for the command line, and the first is a stable choice because
     // the list is keyed by stem: a plan running two conventions still needs a
     // single word here, and the sentence above has already named both.
     let example = c.id_examples.first().map_or("<id>", String::as_str);
-    let _ = writeln!(
-        s,
-        "aplan why {example:<17} # why something cannot be started yet"
-    );
-    let _ = writeln!(s, "# ... implement, commit ...");
-    let _ = writeln!(
-        s,
-        "aplan close {example} --evidence commit:COMMIT_SHA --evidence test:REGISTERED_TEST_NAME"
-    );
-    let _ = writeln!(s, "aplan check && aplan verify # what CI will run");
-    let _ = writeln!(s, "```\n");
+    let ready_cmd = format!("{cmd} ready");
+    let why_cmd = format!("{cmd} why {example}");
+    let gate_cmd = format!("{cmd} check && {cmd} verify");
+    let pad = ready_cmd
+        .chars()
+        .count()
+        .max(why_cmd.chars().count())
+        .max(gate_cmd.chars().count())
+        .max(27);
+    let loop_lines = vec![
+        format!(
+            "{ready_cmd:<pad$} # what can be started now: blockers all done, in a derived order"
+        ),
+        format!("{why_cmd:<pad$} # why something cannot be started yet"),
+        "# ... implement, commit ...".to_string(),
+        format!(
+            "{cmd} close {example} --evidence commit:COMMIT_SHA --evidence test:REGISTERED_TEST_NAME"
+        ),
+        format!("{gate_cmd:<pad$} # what CI will run"),
+    ];
+    write_fenced_sh(&mut s, &loop_lines);
     let _ = writeln!(
         s,
         "{}\n",
@@ -6707,10 +6849,10 @@ pub fn render_agents_md(c: &AgentContract, written_by: Option<&WrittenBy<'_>>) -
         )
     );
 
-    s.push_str(&blueprint_agent_guidance());
+    s.push_str(&blueprint_agent_guidance(&cmd));
 
     let _ = writeln!(s, "## What closes a task here\n");
-    let _ = writeln!(s, "{}", policy_lines(c));
+    let _ = writeln!(s, "{}", policy_lines(c, &cmd));
 
     if !c.tools.is_empty() {
         // Build-independent MCP guidance (`ADR-0072`, `A2-122`): never enumerate
@@ -6721,13 +6863,13 @@ pub fn render_agents_md(c: &AgentContract, written_by: Option<&WrittenBy<'_>>) -
         let _ = writeln!(
             s,
             "{}\n",
-            wrap(
-                "`aplan mcp` serves plan queries and mutations through the same gates as the CLI, \
+            wrap(&format!(
+                "{mcp_span} serves plan queries and mutations through the same gates as the CLI, \
                  so it refuses what the CLI refuses. Prefer MCP tools over shelling out, and \
                  discover the live tool catalogue and build identity from the running server \
                  (`tools/list` and `aplan_identity`) rather than assuming a static tool list in \
                  this file."
-            )
+            ))
         );
     }
 
@@ -6767,9 +6909,9 @@ fn bullet(text: &str) -> String {
 }
 
 /// The repository's own policy, in the terms a contributor meets it in.
-fn policy_lines(c: &AgentContract) -> String {
+fn policy_lines(c: &AgentContract, cmd: &str) -> String {
     let mut s = evidence_lines(c);
-    s.push_str(&rule_lines(c));
+    s.push_str(&rule_lines(c, cmd));
     // Two independent keys, so two clauses rather than four sentences: the tier
     // `deny_warnings` sets, and the exception `advisory` carves out of whatever
     // that tier is. Composed, because writing the combinations out is how the
@@ -6865,7 +7007,7 @@ fn evidence_lines(c: &AgentContract) -> String {
 }
 
 /// The rules this repository turned on, and the one that is always true.
-fn rule_lines(c: &AgentContract) -> String {
+fn rule_lines(c: &AgentContract, cmd: &str) -> String {
     let mut s = String::new();
     // True of every plan, and the one thing a task author forgets: `paths` is
     // what makes a `commit` citation mean anything, and its absence degrades
@@ -6915,14 +7057,15 @@ fn rule_lines(c: &AgentContract) -> String {
         );
     }
     if c.switches.contains(&Switch::DetectDrift) {
+        let restamp_span = markdown_code_span(&format!("{cmd} close --restamp"));
         let _ = writeln!(
             s,
             "{}",
-            bullet(
+            bullet(&format!(
                 "Closing a task stamps the `traces` sections it names, and a later edit to one \
-                 of them reports the task (`APLAN018`). Re-read the section, then `aplan close \
-                 --restamp` if it still holds."
-            )
+                 of them reports the task (`APLAN018`). Re-read the section, then {restamp_span} \
+                 if it still holds."
+            ))
         );
     }
     if c.runner_count > 0 {
@@ -6962,6 +7105,7 @@ mod agents_tests {
     fn contract() -> AgentContract {
         AgentContract {
             plan_dir: Some("plans/tasks".to_string()),
+            invocation: Vec::new(),
             id_examples: vec!["WH2-nn".to_string()],
             min_strength: vec!["commit".into(), "test".into(), "file".into()],
             exempt_tags: vec!["untestable".into()],

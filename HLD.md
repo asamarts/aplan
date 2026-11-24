@@ -1027,7 +1027,19 @@ evidence:                                       # APLAN017, off unless set
 detect_drift: true                              # APLAN018/APLAN054, stamp + watch traces/files
 effort_days_per_week: 7.5                       # ADR-0023, derive durations; no rule, no dates
 owners: [ada, grace]                            # APLAN056, canonical task owners; optional
+agent_contract:                                 # export-agents-md / APLAN041, optional
+  invocation: ["./scripts/aplan", "--strict"]   # ordered argv rendered in generated guidance; default ["aplan"]
 ```
+
+**Generated agent-contract launcher (`agent_contract.invocation`, shipped in `A2-140`).**
+Repositories that pin `aplan` behind a checked-in wrapper script can declare that launcher as an
+ordered, non-empty argv sequence under `agent_contract.invocation`. Omitting the key keeps the
+default single token `["aplan"]` byte-for-byte unchanged. `agent_contract.invocation` is rendered
+deterministically as shell-safe Markdown data in `export-agents-md` and gated by `APLAN041` /
+`export-agents-md --check`; it is **never** evaluated as shell syntax and **never** alters the
+running `aplan` executable or spawns a subprocess. Empty lists, blank tokens, scalar strings,
+control/directional characters, and over-budget declarations fail configuration rather than
+falling back.
 
 **The trust boundary lives here** (§5.5). The `test` runner, `url.check`, `version.current`
 and `version.check` are the only places a command may be named, and all are top-level config
