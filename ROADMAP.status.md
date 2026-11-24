@@ -9,13 +9,13 @@
 | cut | status | done/total | ready | blocked | effort | weeks | critical path |
 | --- | --- | --- | --- | --- | --- | --- | --- |
 | v0.7 | done | 30/30 | 0 | 0 | 22.8d | 0.8 (0.0 left) | 3.5d |
-| v0.8 | todo | 35/36 | 1 | 0 | 49.2d | 1.8 (0.1 left) | 4.5d |
-| adoption | todo | 0/81 | 0 | 81 | 105.8d | 3.9 (3.9 left) | 10.0d |
-| backlog | todo | 0/1 | 0 | 1 | 1.0d | <0.1 (<0.1 left) | 1.0d |
-| hardening | todo | 0/15 | 0 | 15 | 14.8d | 0.5 (0.5 left) | 3.0d |
+| v0.8 | done | 36/36 | 0 | 0 | 49.2d | 1.8 (0.0 left) | 4.5d |
+| adoption | todo | 0/81 | 69 | 12 | 105.8d | 3.9 (3.9 left) | 10.0d |
+| backlog | todo | 0/1 | 1 | 0 | 1.0d | <0.1 (<0.1 left) | 1.0d |
+| hardening | todo | 0/15 | 15 | 0 | 14.8d | 0.5 (0.5 left) | 3.0d |
 | qualification | todo | 0/1 | 0 | 1 | 8.0d | 0.3 (0.3 left) | 8.0d |
-| tui-quality | todo | 0/2 | 0 | 2 | 4.0d | 0.1 (0.1 left) | 4.0d |
-| workflow | todo | 0/17 | 0 | 17 | 50.0d | 1.9 (1.9 left) | 17.5d |
+| tui-quality | todo | 0/2 | 1 | 1 | 4.0d | 0.1 (0.1 left) | 4.0d |
+| workflow | todo | 0/17 | 6 | 11 | 50.0d | 1.9 (1.9 left) | 17.5d |
 
 ## v0.7 Security, safe parsing and gates that tell the truth
 
@@ -70,7 +70,7 @@
 | A2-091 | APLAN019 lets a live path entry hide every dead sibling | done | - | commit:7f5832a3647f, test:tests::aplan019_reports_every_dead_entry_even_beside_a_bound_sibling, test:close_gate::a_dead_sibling_glob_is_reported_even_beside_a_bound_citation |
 | A2-095 | Report rendering treats transient WouldBlock as a plan failure | done | - | commit:604f27d1d1c0, test:output_reliability::large_report_over_nonblocking_pipe_matches_blocking_output_byte_for_byte |
 | A2-096 | The agent format appends prose after JSON and is not parseable | done | - | commit:604f27d1d1c0, test:output_reliability::agent_format_emits_one_valid_json_document_across_finding_counts_and_unchecked_evidence |
-| A2-097 | A plan with several id families cannot declare which one a cut mints | todo | - | - |
+| A2-097 | A plan with several id families cannot declare which one a cut mints | done | - | commit:f75d08f, commit:b5251dd, test:add::id_families_mints_cut_and_default_families_and_reports_mismatch |
 | A2-099 | A live catch-all paths claim fails only after the work is finished | done | - | commit:7f5832a3647f, commit:275b042befe8, test:validate::tests::universal_path_glob_fires_on_live_non_milestone_only |
 | A2-101 | File renames silently strand paths on live tasks | done | A2-056 | commit:275b042befe8, test:tests::aplan063_reports_stranded_rename_ambiguity_and_bare_dir_on_live_tasks_only, test:close_gate::retarget_path_updates_live_tasks_atomically_and_preserves_terminal_tasks |
 | A2-106 | Duplicate evidence citations are accepted and stored silently | done | - | commit:7f5832a3647f, commit:275b042befe8, test:validate::tests::duplicate_evidence_covers_zero_one_two_three_non_adjacent_and_families, test:close::tests::close_and_amend_refuse_duplicate_evidence_by_canonical_key, test:tests::verify_deduplicates_duplicate_evidence_citations |
