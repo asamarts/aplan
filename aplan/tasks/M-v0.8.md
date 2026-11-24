@@ -2,7 +2,7 @@
 id: M-v0.8
 title: Correctness and the most reported adoption failures
 phase: 2
-status: todo
+status: done
 blocked_by:
 - M-v0.7
 - A2-034
@@ -44,6 +44,9 @@ blocked_by:
 tags:
 - milestone
 - v0.8
+evidence:
+  - kind: commit
+    ref: b5251dd
 ---
 
 ## Why
@@ -55,6 +58,6 @@ that outlive the work, and drift that passes before the commit and fails after i
 
 ## Exit criteria
 
-- [ ] every member is done, with a regression test for each corrected wrong answer
+- [x] every member is done, with a regression test for each corrected wrong answer
 
 Sequenced after `M-v0.7` on purpose, so `aplan ready` lists the work in priority order. Move a task into an earlier cut with `aplan mv` to pull it forward.
