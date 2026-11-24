@@ -959,6 +959,10 @@
     {
       "name": "agent_contract.renders_configured_launcher_argv",
       "what": "`export-agents-md` and `APLAN041` render a configured non-empty `agent_contract.invocation` argv deterministically and shell-safely across every generated command and executable-identifying sentence without shell evaluation, preserve default `aplan` bytes unchanged, keep Markdown fenced and bounded, and refuse blank, empty, scalar or control-character invocations at config load"
+    },
+    {
+      "name": "claims.reconciles_terminal_lifecycle_and_surfaces_coordination",
+      "what": "successful `close` and `drop` across CLI, MCP, and TUI CAS-release a matching same-actor local claim, leave another actor's or unknown-actor claim intact with recovery guidance, and report partial local cleanup without rolling back plan closure; read surfaces distinguish active, stale terminal, and unclaimed `in_progress` claims, report takeover conflicts as ordinary typed refusals rather than store corruption, and print human UTC timestamps with stable age"
     }
   ],
   "build_capabilities": [
@@ -1486,7 +1490,7 @@
     "version.require_impact"
   ],
   "counts": {
-    "behaviours": 240,
+    "behaviours": 241,
     "build_capabilities": 1,
     "commands": 50,
     "config_keys": 131,

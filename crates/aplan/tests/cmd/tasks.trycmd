@@ -37,6 +37,7 @@ $ aplan tasks --format json
       "effort_days": 1.0,
       "owner": null,
       "claim": null,
+      "claim_state": "unclaimed",
       "tags": [
         "kind-b"
       ],
@@ -80,6 +81,7 @@ $ aplan tasks --format json
       "effort_days": 2.0,
       "owner": null,
       "claim": null,
+      "claim_state": "unclaimed",
       "tags": [
         "kind-b"
       ],
@@ -112,6 +114,7 @@ $ aplan tasks --format json
       "effort_days": 3.0,
       "owner": null,
       "claim": null,
+      "claim_state": "unclaimed",
       "tags": [
         "kind-m"
       ],
@@ -144,6 +147,7 @@ $ aplan tasks --format json
       "effort_days": 4.0,
       "owner": null,
       "claim": null,
+      "claim_state": "unclaimed",
       "tags": [
         "kind-r"
       ],

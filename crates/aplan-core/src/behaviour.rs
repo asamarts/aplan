@@ -3180,4 +3180,23 @@ pub const ALL: &[Behaviour] = &[
             "agents_md::malformed_launcher_invocation_fails_configuration",
         ],
     },
+    // `A2-152`, `ADR-0073`. `close`, `drop`, `claim`, `show`, `ready`, and TUI
+    // already existed, so neither command nor tool names distinguish a build
+    // that leaves the closer's local claim attached to terminal tasks, presents
+    // unclaimed `in_progress` work as fresh ready work, reports takeover
+    // refusals as store corruption, or prints raw Unix epoch claim times.
+    Behaviour {
+        name: "claims.reconciles_terminal_lifecycle_and_surfaces_coordination",
+        what: "successful `close` and `drop` across CLI, MCP, and TUI CAS-release a matching \
+               same-actor local claim, leave another actor's or unknown-actor claim intact with \
+               recovery guidance, and report partial local cleanup without rolling back plan \
+               closure; read surfaces distinguish active, stale terminal, and unclaimed \
+               `in_progress` claims, report takeover conflicts as ordinary typed refusals rather \
+               than store corruption, and print human UTC timestamps with stable age",
+        proof: &[
+            "claim::terminal_closure_reconciles_same_actor_other_actor_and_failed_cleanup",
+            "claim::unclaimed_in_progress_and_stale_terminal_claims_surface_across_cli_and_mcp",
+            "claim::takeover_refusal_is_typed_conflict_and_human_times_show_utc_and_age",
+        ],
+    },
 ];

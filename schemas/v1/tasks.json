@@ -1,5 +1,35 @@
 {
   "$defs": {
+    "ClaimCoordinationState": {
+      "description": "Status-versus-coordination lifecycle state of one task's local claim\n(`ADR-0073`, `A2-152`).\n\nComputed once from the task's durable status, its local claim record, and\nwhether local coordination is available, so CLI, MCP, and TUI agree on\nactive claims, stale terminal claims, and unclaimed `in_progress` work.",
+      "oneOf": [
+        {
+          "const": "active",
+          "description": "Live task held by an active local claim.",
+          "type": "string"
+        },
+        {
+          "const": "stale_terminal",
+          "description": "Terminal task (`done` or `dropped`) still carrying a leftover local\nclaim from an older build, another actor, or failed post-close cleanup.",
+          "type": "string"
+        },
+        {
+          "const": "in_progress_unclaimed",
+          "description": "Live `in_progress` task with no active local claim while coordination is\navailable: durable status and local coordination disagree.",
+          "type": "string"
+        },
+        {
+          "const": "unclaimed",
+          "description": "Ordinary task with no active claim.",
+          "type": "string"
+        },
+        {
+          "const": "unavailable",
+          "description": "Local coordination scope is unavailable (for example outside Git).",
+          "type": "string"
+        }
+      ]
+    },
     "ClaimOrigin": {
       "additionalProperties": false,
       "description": "Where an unauthenticated holder label was observed.",
@@ -198,6 +228,10 @@
           ],
           "description": "Who is working on it now, distinct from durable `owner` responsibility."
         },
+        "claim_state": {
+          "$ref": "#/$defs/ClaimCoordinationState",
+          "description": "Status-versus-coordination lifecycle state (`active`, `stale_terminal`,\n`in_progress_unclaimed`, `unclaimed`, `unavailable`) (`ADR-0073`, `A2-152`)."
+        },
         "contains": {
           "description": "The checkpoints this one contains, whose work rolls up into it at any\ndepth (ADR-0042). Not a dependency either: a milestone in `blocked_by`\n*sequences* two cuts (ADR-0013), and the two meanings are what this\nseparates.",
           "items": {
@@ -360,6 +394,7 @@
         "effort_days",
         "owner",
         "claim",
+        "claim_state",
         "tags",
         "blocked_by",
         "cut",

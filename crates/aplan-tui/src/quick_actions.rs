@@ -126,8 +126,12 @@ pub fn form(
                 catalogue.claim.as_ref().map_or_else(
                     || "unclaimed".to_string(),
                     |claim| format!(
-                        "{} since Unix time {}",
-                        claim.holder, claim.claimed_at_epoch_seconds
+                        "{} since {}",
+                        claim.holder,
+                        aplan_core::format_claim_time_human(
+                            claim.claimed_at_epoch_seconds,
+                            aplan_app::claims::now_epoch_seconds(),
+                        )
                     )
                 )
             ),

@@ -370,6 +370,7 @@ pub struct ChangeSet {
     test_execution_guard: Option<TestExecutionGuard>,
     inbox_guard: Option<super::capture::InboxGuard>,
     stale_reason: Option<String>,
+    claim_reconciliations: Vec<(String, crate::claims::TerminalClaimReconciliation)>,
 }
 
 impl ChangeSet {
@@ -393,7 +394,16 @@ impl ChangeSet {
             test_execution_guard: None,
             inbox_guard: None,
             stale_reason: None,
+            claim_reconciliations: Vec::new(),
         }
+    }
+
+    /// Post-publication local claim reconciliations for any task that
+    /// transitioned to a terminal state (`done` or `dropped`) (`ADR-0073`,
+    /// `A2-152`).
+    #[must_use]
+    pub fn claim_reconciliations(&self) -> &[(String, crate::claims::TerminalClaimReconciliation)] {
+        &self.claim_reconciliations
     }
 
     pub(crate) fn with_evidence_review(mut self, review: EvidenceReview) -> Self {
@@ -727,7 +737,10 @@ fn commit_change_set_with(
         };
     }
     match publish(&replacements, relocation.as_ref()) {
-        Ok(()) => CommitOutcome::Applied(change),
+        Ok(()) => {
+            reconcile_committed_terminal_claims(context, &mut change);
+            CommitOutcome::Applied(change)
+        }
         Err(
             aplan_core::save::SaveError::Changed { .. }
             | aplan_core::save::SaveError::Exists { .. },
@@ -744,6 +757,41 @@ fn commit_change_set_with(
                 error,
             }
         }
+    }
+}
+
+fn reconcile_committed_terminal_claims(context: &PlanContext, change: &mut ChangeSet) {
+    let mut terminal_ids = Vec::new();
+    for file in &change.files {
+        let Some(before) = file.before.as_deref() else {
+            continue;
+        };
+        let Ok(before_task) = aplan_core::mutation::task_of(before) else {
+            continue;
+        };
+        let Ok(after_task) = aplan_core::mutation::task_of(&file.after) else {
+            continue;
+        };
+        if !before_task.status.is_terminal() && after_task.status.is_terminal() {
+            terminal_ids.push(after_task.id);
+        }
+    }
+    if terminal_ids.is_empty() {
+        return;
+    }
+    let repo_root = &context.identity().repository_root;
+    let now = crate::claims::now_epoch_seconds();
+    for id in terminal_ids {
+        let reconciliation = crate::claims::reconcile_terminal_claim(repo_root, &id, || {
+            let sources = aplan_interop::identity::from_environment(None, repo_root);
+            aplan_interop::identity::resolve_detailed(&sources)
+                .ok()
+                .map(|resolved| resolved.name)
+        });
+        if let Some(summary) = reconciliation.human_summary(&id, now) {
+            change.evidence_review.notices.push(summary);
+        }
+        change.claim_reconciliations.push((id, reconciliation));
     }
 }
 
@@ -898,6 +946,7 @@ pub fn preview_dependency_batch(
             test_execution_guard: None,
             inbox_guard: None,
             stale_reason: None,
+            claim_reconciliations: Vec::new(),
         },
     })
 }
@@ -1192,6 +1241,7 @@ fn prepare_dependency(
                 test_execution_guard: None,
                 inbox_guard: None,
                 stale_reason: None,
+                claim_reconciliations: Vec::new(),
             },
         });
     }
@@ -1237,6 +1287,7 @@ fn prepare_dependency(
             test_execution_guard: None,
             inbox_guard: None,
             stale_reason: None,
+            claim_reconciliations: Vec::new(),
         },
     })
 }
@@ -1499,6 +1550,7 @@ mod tests {
             test_execution_guard: None,
             inbox_guard: None,
             stale_reason: None,
+            claim_reconciliations: Vec::new(),
         }
     }
 
@@ -1598,6 +1650,7 @@ mod tests {
             test_execution_guard: None,
             inbox_guard: None,
             stale_reason: None,
+            claim_reconciliations: Vec::new(),
         };
         let outcome = commit_change_set_with(&context, change, |_, _| {
             panic!("an unsupported relocation batch reached the publisher")
@@ -1662,6 +1715,7 @@ mod tests {
             test_execution_guard: None,
             inbox_guard: None,
             stale_reason: None,
+            claim_reconciliations: Vec::new(),
         };
 
         let outcome = commit_change_set_with(&context, change, |replacements, relocation| {
@@ -1734,6 +1788,7 @@ mod tests {
             test_execution_guard: None,
             inbox_guard: None,
             stale_reason: None,
+            claim_reconciliations: Vec::new(),
         };
         let outcome = commit_change_set_with(&context, change, |replacements, relocation| {
             assert_eq!(replacements.len(), 1);
@@ -1794,6 +1849,7 @@ mod tests {
                 test_execution_guard: None,
                 inbox_guard: None,
                 stale_reason: None,
+                claim_reconciliations: Vec::new(),
             };
             let outcome = commit_change_set_with(&context, change, |replacements, relocation| {
                 assert!(relocation.is_none());
@@ -1850,6 +1906,7 @@ mod tests {
             test_execution_guard: None,
             inbox_guard: None,
             stale_reason: None,
+            claim_reconciliations: Vec::new(),
         };
 
         let outcome = commit_change_set_with(&context, change, |replacements, relocation| {

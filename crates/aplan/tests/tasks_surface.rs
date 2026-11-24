@@ -314,6 +314,9 @@ fn every_row_field_is_declared_or_a_named_derivation() {
         // snapshot carried by the envelope; durable responsibility remains the
         // task's declared `owner` (`A1-531`).
         "claim",
+        // Status-versus-coordination lifecycle state derived from status,
+        // local claim presence, and scope availability (`ADR-0073`, `A2-152`).
+        "claim_state",
         // The label of the cut that lists it, from the roadmap.
         "cut",
         // The id of that cut, since two may share a label.

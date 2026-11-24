@@ -47,6 +47,12 @@ pub(crate) fn task_inspector(row: &TaskBrowserRow) -> aplan_app::Show {
                 .saturating_sub(claim.claimed_at_epoch_seconds)
                 .max(0)
         }),
+        claim_observed_at_epoch_seconds: row.claim_observed_at_epoch_seconds,
+        claim_state: aplan_core::ClaimCoordinationState::derive(
+            row.status,
+            row.claim.as_ref(),
+            row.coordination.available,
+        ),
         coordination: row.coordination.clone(),
         effort_days: Some(1.0),
         tags: row.tags.clone(),

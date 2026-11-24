@@ -11211,6 +11211,7 @@ fn cmd_ready(root: &std::path::Path, args: &ReadyArgs) -> Result<u8> {
                 .unwrap_or("no local coordination scope")
         );
     }
+    let mut unclaimed_in_progress = Vec::new();
     for t in &answer.ready {
         let effort = t
             .effort_days
@@ -11222,9 +11223,14 @@ fn cmd_ready(root: &std::path::Path, args: &ReadyArgs) -> Result<u8> {
         let owner = t.owner.as_deref().map_or_else(String::new, |who| {
             format!(" [owner {}]", aplan_output::sanitize::visible(who))
         });
-        let held = t.held_by.as_deref().map_or_else(String::new, |who| {
-            format!(" [claim {}]", aplan_output::sanitize::visible(who))
-        });
+        let held = if t.claim_state == aplan_core::ClaimCoordinationState::InProgressUnclaimed {
+            unclaimed_in_progress.push(t.id.as_str());
+            " [in_progress, unclaimed -- claim or stop]".to_string()
+        } else {
+            t.held_by.as_deref().map_or_else(String::new, |who| {
+                format!(" [claim {}]", aplan_output::sanitize::visible(who))
+            })
+        };
         // The title is the trailing column and the effort rides with it, so a
         // long title folds under itself rather than under the id (`A1-206`).
         let _ = writeln!(
@@ -11268,6 +11274,15 @@ fn cmd_ready(root: &std::path::Path, args: &ReadyArgs) -> Result<u8> {
             };
             let _ = writeln!(out, "    {because}");
         }
+    }
+    if !unclaimed_in_progress.is_empty() {
+        let _ = writeln!(
+            out,
+            "\nnote: {} `in_progress` task(s) have no active local claim ({}); run `aplan claim \
+             <id>` to record who is working on each or `aplan stop <id>` if work stopped.",
+            unclaimed_in_progress.len(),
+            unclaimed_in_progress.join(", ")
+        );
     }
     if answer.ready.is_empty() {
         let tasks: Vec<_> = plan.tasks.iter().map(|lt| &lt.task).collect();
@@ -13237,18 +13252,20 @@ fn cmd_close_execute(
         _ => anyhow::bail!("internal: focused close preview has no resolution ledger"),
     };
     match aplan_app::commit_change_set(&context, preview.into_change_set()) {
-        aplan_app::CommitOutcome::Applied(_) => {
+        aplan_app::CommitOutcome::Applied(change) => {
             reconcile_close_observation(repo, &obs_opts, before_material.as_deref());
             let refs = evidence
                 .iter()
                 .map(|citation| format!("{}:{}", citation.kind.as_str(), citation.reference))
                 .collect::<Vec<_>>()
                 .join(", ");
-            write_stdout(&format!(
+            let mut out = format!(
                 "closed {i}{id}{i:#} with evidence: {refs} (focused L3 executed and proved \
                  {distinct} distinct runner/test identity(ies))\n",
                 i = aplan_output::style::ID
-            ))?;
+            );
+            append_claim_reconciliations(&mut out, change.claim_reconciliations());
+            write_stdout(&out)?;
             Ok(EXIT_OK)
         }
         aplan_app::CommitOutcome::Stale { change, .. } => {
@@ -13304,6 +13321,28 @@ impl CloseMode {
             execute,
             verdict,
         }
+    }
+}
+
+fn append_claim_reconciliations(
+    out: &mut String,
+    items: &[(String, aplan_app::claims::TerminalClaimReconciliation)],
+) {
+    let now = aplan_app::claims::now_epoch_seconds();
+    for (task_id, reconciliation) in items {
+        if let Some(summary) = reconciliation.human_summary(task_id, now) {
+            let _ = writeln!(out, "  {summary}");
+        }
+    }
+}
+
+fn reconcile_and_append_close_claim(out: &mut String, repo: &std::path::Path, id: &str) {
+    let reconciliation = aplan_app::claims::reconcile_terminal_claim(repo, id, || {
+        acting_as(repo, None).ok().map(|resolved| resolved.name)
+    });
+    if let Some(summary) = reconciliation.human_summary(id, aplan_app::claims::now_epoch_seconds())
+    {
+        let _ = writeln!(out, "  {summary}");
     }
 }
 
@@ -13466,14 +13505,13 @@ fn cmd_close(
             fingerprint_counts(fingerprints.len(), evidence_fingerprints.len())
         )
     };
-    // Tolerate a closed pipe (`aplan close ... | head`), like every other
-    // stdout-writing command: the file is already written, so a `println!` panic
-    // here would exit 101 after a successful mutation.
-    write_stdout(&format!(
+    let mut out = format!(
         "closed {i}{id}{i:#} with evidence: {}{stamped}\n",
         refs.join(", "),
         i = aplan_output::style::ID
-    ))?;
+    );
+    reconcile_and_append_close_claim(&mut out, repo, id);
+    write_stdout(&out)?;
     Ok(EXIT_OK)
 }
 
@@ -17179,12 +17217,13 @@ fn cmd_claim(
         aplan_app::claims::now_epoch_seconds(),
     )?;
 
+    let now = aplan_app::claims::now_epoch_seconds();
     let mut out = String::new();
     let _ = writeln!(
         out,
-        "`{id}` is held by `{}` since Unix time {}",
+        "`{id}` is held by `{}` since {}",
         shown(&change.current.holder),
-        change.current.claimed_at_epoch_seconds
+        aplan_core::format_claim_time_human(change.current.claimed_at_epoch_seconds, now)
     );
     let _ = writeln!(
         out,
@@ -17194,9 +17233,9 @@ fn cmd_claim(
     if let Some(displaced) = &change.displaced {
         let _ = writeln!(
             out,
-            "  taken from `{}` (claimed at Unix time {}, origin: {})",
+            "  taken from `{}` (claimed {}, origin: {})",
             shown(&displaced.holder),
-            displaced.claimed_at_epoch_seconds,
+            aplan_core::format_claim_time_human(displaced.claimed_at_epoch_seconds, now),
             shown_claim_origin(&displaced.origin)
         );
     }
@@ -17234,10 +17273,11 @@ fn cmd_release(root: &std::path::Path, id: &str) -> Result<u8> {
         }
         anyhow::bail!("no task or local claim has id `{id}`");
     };
+    let now = aplan_app::claims::now_epoch_seconds();
     write_stdout(&format!(
-        "`{id}` released; it was held by `{}` since Unix time {}\n  origin: {}\n",
+        "`{id}` released; it was held by `{}` since {}\n  origin: {}\n",
         shown(&released.holder),
-        released.claimed_at_epoch_seconds,
+        aplan_core::format_claim_time_human(released.claimed_at_epoch_seconds, now),
         shown_claim_origin(&released.origin)
     ))?;
     Ok(EXIT_OK)
@@ -17359,48 +17399,58 @@ fn cmd_working(
     if let Some(previous) = cleared_revisit {
         let _ = writeln!(out, "  cleared `revisit_at` (was `{}`)", shown(&previous));
     }
-    // Who is on it is a different question, and an unclaimed task that somebody
-    // has started is the coordination gap this pair exists to close.
     if starting {
-        // A corrupt or unavailable local claim store must not block this
-        // independent durable status transition. Report that coordination is
-        // unknown; never turn the failure into "held by nobody" (`A1-531`).
-        let claims = aplan_app::claims::snapshot(root, &plan).unwrap_or_else(|error| {
-            aplan_core::ClaimSnapshot::unavailable(
-                aplan_app::claims::now_epoch_seconds(),
-                error.to_string(),
-            )
-        });
-        match claims.claim(id) {
-            None if claims.scope.available => {
-                let _ = writeln!(
-                    out,
-                    "  held by nobody: `aplan claim {id}` records who is on it"
-                );
-            }
-            Some(claim) => {
-                let _ = writeln!(
-                    out,
-                    "  held by `{}` since Unix time {}",
-                    shown(&claim.holder),
-                    claim.claimed_at_epoch_seconds
-                );
-            }
-            None => {
-                let _ = writeln!(
-                    out,
-                    "  claim coordination unavailable: {}",
-                    claims
-                        .scope
-                        .reason
-                        .as_deref()
-                        .unwrap_or("no local coordination scope")
-                );
-            }
-        }
+        append_start_claim_note(&mut out, root, &plan, id);
     }
     write_stdout(&out)?;
     Ok(EXIT_OK)
+}
+
+fn append_start_claim_note(
+    out: &mut String,
+    root: &std::path::Path,
+    plan: &aplan_core::Plan,
+    id: &str,
+) {
+    // A corrupt or unavailable local claim store must not block this
+    // independent durable status transition. Report that coordination is
+    // unknown; never turn the failure into "held by nobody" (`A1-531`).
+    let claims = aplan_app::claims::snapshot(root, plan).unwrap_or_else(|error| {
+        aplan_core::ClaimSnapshot::unavailable(
+            aplan_app::claims::now_epoch_seconds(),
+            error.to_string(),
+        )
+    });
+    match claims.claim(id) {
+        None if claims.scope.available => {
+            let _ = writeln!(
+                out,
+                "  held by nobody: `aplan claim {id}` records who is on it"
+            );
+        }
+        Some(claim) => {
+            let _ = writeln!(
+                out,
+                "  held by `{}` since {}",
+                shown(&claim.holder),
+                aplan_core::format_claim_time_human(
+                    claim.claimed_at_epoch_seconds,
+                    claims.observed_at_epoch_seconds
+                )
+            );
+        }
+        None => {
+            let _ = writeln!(
+                out,
+                "  claim coordination unavailable: {}",
+                claims
+                    .scope
+                    .reason
+                    .as_deref()
+                    .unwrap_or("no local coordination scope")
+            );
+        }
+    }
 }
 
 fn cmd_drop(
@@ -17526,6 +17576,7 @@ fn cmd_drop(
     // milestone, which is every member of the cut orphaned at once.
     save_batch(&writes, "drop")?;
 
+    let now = aplan_app::claims::now_epoch_seconds();
     let _progress_write = ProgressWriteGuard::new();
     let mut out = aplan_output::write::anstream_stdout();
     for lt in &targets {
@@ -17536,6 +17587,12 @@ fn cmd_drop(
             lt.task.title,
             i = aplan_output::style::ID
         )?;
+        let reconciliation = aplan_app::claims::reconcile_terminal_claim(root, &lt.task.id, || {
+            acting_as(root, None).ok().map(|resolved| resolved.name)
+        });
+        if let Some(summary) = reconciliation.human_summary(&lt.task.id, now) {
+            writeln!(out, "  {summary}")?;
+        }
     }
     writeln!(out, "{} task(s) dropped", targets.len())?;
     // `--help` promises this records the decision rather than deleting the
