@@ -9,7 +9,7 @@
 | cut | status | done/total | ready | blocked | effort | weeks | critical path |
 | --- | --- | --- | --- | --- | --- | --- | --- |
 | v0.7 | done | 30/30 | 0 | 0 | 22.8d | 0.8 (0.0 left) | 3.5d |
-| v0.8 | todo | 20/36 | 16 | 0 | 49.2d | 1.8 (0.8 left) | 4.5d |
+| v0.8 | todo | 25/36 | 11 | 0 | 49.2d | 1.8 (0.6 left) | 4.5d |
 | adoption | todo | 0/81 | 0 | 81 | 105.8d | 3.9 (3.9 left) | 10.0d |
 | backlog | todo | 0/1 | 0 | 1 | 1.0d | <0.1 (<0.1 left) | 1.0d |
 | hardening | todo | 0/15 | 0 | 15 | 14.8d | 0.5 (0.5 left) | 3.0d |
@@ -68,23 +68,23 @@
 | A2-081 | A stale installed binary cannot read a newer plan, and the adopter must notice | done | - | commit:d84c89db8489, file:docs/adr/0068-a-plan-declares-the-build-contract-it-requires.md, file:docs/upgrading.md |
 | A2-085 | A YAML front-matter delimiter mints a heading anchor the rendered document does not have | done | - | commit:9098490b5fa9, test:anchor::adr0069_and_frontmatter_tests::frontmatter_and_nested_metadata_delimiters_mint_no_heading_anchors, test:drift::frontmatter_and_nested_metadata_delimiters_reject_traced_keys_end_to_end |
 | A2-091 | APLAN019 lets a live path entry hide every dead sibling | done | - | commit:7f5832a3647f, test:tests::aplan019_reports_every_dead_entry_even_beside_a_bound_sibling, test:close_gate::a_dead_sibling_glob_is_reported_even_beside_a_bound_citation |
-| A2-095 | Report rendering treats transient WouldBlock as a plan failure | todo | - | - |
-| A2-096 | The agent format appends prose after JSON and is not parseable | todo | - | - |
+| A2-095 | Report rendering treats transient WouldBlock as a plan failure | done | - | commit:604f27d1d1c0, test:output_reliability::large_report_over_nonblocking_pipe_matches_blocking_output_byte_for_byte |
+| A2-096 | The agent format appends prose after JSON and is not parseable | done | - | commit:604f27d1d1c0, test:output_reliability::agent_format_emits_one_valid_json_document_across_finding_counts_and_unchecked_evidence |
 | A2-097 | A plan with several id families cannot declare which one a cut mints | todo | - | - |
 | A2-099 | A live catch-all paths claim fails only after the work is finished | done | - | commit:7f5832a3647f, commit:275b042befe8, test:validate::tests::universal_path_glob_fires_on_live_non_milestone_only |
 | A2-101 | File renames silently strand paths on live tasks | done | A2-056 | commit:275b042befe8, test:tests::aplan063_reports_stranded_rename_ambiguity_and_bare_dir_on_live_tasks_only, test:close_gate::retarget_path_updates_live_tasks_atomically_and_preserves_terminal_tasks |
 | A2-106 | Duplicate evidence citations are accepted and stored silently | done | - | commit:7f5832a3647f, commit:275b042befe8, test:validate::tests::duplicate_evidence_covers_zero_one_two_three_non_adjacent_and_families, test:close::tests::close_and_amend_refuse_duplicate_evidence_by_canonical_key, test:tests::verify_deduplicates_duplicate_evidence_citations |
 | A2-122 | Stop build-only AGENTS.md provenance drift from blocking a correct contract | done | A2-081 | commit:bacb6ab, file:docs/adr/0072-agent-contract-policy-drift-is-separate-from-build-provenance-and-live-tools.md, test:contract::tests::duplicate_and_malformed_provenance_lines_are_classified_as_malformed, test:validate::tests::agents_block::a_block_written_by_another_build_is_reported_as_a_build_difference, test:validate::tests::agents_block::malformed_or_duplicate_provenance_still_fires_aplan041, test:agent_contract_drift::provenance_only_drift_does_not_block_check_verify_or_mcp, test:agent_contract_drift::policy_only_drift_still_blocks_with_exact_repair, test:agent_contract_drift::malformed_or_duplicate_provenance_blocks_check, test:agents_md::two_builds_with_different_mcp_catalogues_keep_one_policy_body, test:agents_md::malformed_or_duplicate_provenance_still_fails_export_agents_md_check |
 | A2-140 | Let generated agent contracts name a repository launcher | todo | - | - |
-| A2-142 | Claim usage errors can publish claim state | todo | - | - |
+| A2-142 | Claim usage errors can publish claim state | done | - | commit:604f27d1d1c0, test:claim::claim_release_start_stop_usage_errors_never_mutate_claims_or_tasks |
 | A2-147 | Close a live task that already carries partial evidence without a hand edit | todo | - | - |
 | A2-152 | Reconcile task closure with ephemeral claim lifecycle | todo | - | - |
 | A2-153 | Pre-commit verification cannot see trace and file-evidence drift the commit will expose | done | - | commit:06ba528d94e0, test:tests::verify_projects_working_tree_drift_for_aplan054_and_aplan045_and_matches_committed_head |
 | A2-156 | Validate every plan state introduced by a commit range | done | - | commit:06ba528d94e0, test:close_gate::check_range_catches_intermediate_aplan018_behind_green_tip_and_handles_edge_cases |
 | A2-157 | Make add path-list syntax unambiguous and reject separator-shaped paths | todo | - | - |
-| A2-160 | `start` on parked work keeps its `revisit_at`, which `check` then reports as APLAN042 | todo | - | - |
+| A2-160 | `start` on parked work keeps its `revisit_at`, which `check` then reports as APLAN042 | done | - | commit:604f27d1d1c0, test:claim::starting_parked_task_clears_revisit_at_and_passes_check |
 | A2-161 | A withdrawn delivery has no named route: a hand reopen of a done task passes, and supersede and amend describe other cases | todo | - | - |
-| A2-182 | Stop refused mutation commands from advising --format agent when they do not accept --format | todo | - | - |
+| A2-182 | Stop refused mutation commands from advising --format agent when they do not accept --format | done | - | commit:604f27d1d1c0, test:output_reliability::refused_close_with_multiple_findings_never_advises_format_agent |
 | A2-183 | Fix APLAN015 file-evidence fix text and warn at close when a commit deletes a cited file | todo | - | - |
 | A2-192 | Scope aplan build script cache identity to product sources and handle bind-mounted worktrees | done | - | commit:f4bc3bc99434, test:build_identity::cache_identity_inputs_ignore_nested_targets_and_non_product_trees, test:build_identity::cache_identity_inputs_stay_inside_packaged_crates_io_manifest, test:version::tests::resolve_plan_base_falls_back_when_workdir_does_not_contain_repo_root |
 | A2-193 | Implement pre-schema requires build-contract declaration in .aplan.yml | done | A2-081 | commit:bacb6ab, test:published_schema_tests::build_contract_tests::pre_schema_mismatch_fires_before_unknown_future_top_level_keys, test:published_schema_tests::build_contract_tests::min_version_refuses_prerelease_pins_and_applies_semver_precedence_to_running_dev_builds, test:published_schema_tests::build_contract_tests::same_version_different_commit_and_headless_vs_tui_are_caught_precisely, test:published_schema_tests::build_contract_tests::requires_source_fails_closed_when_running_build_source_is_unknown, test:published_schema_tests::build_contract_tests::binary_sha256_unknown_subkeys_and_empty_requires_are_refused_and_schema_excludes_binary_sha256, test:server::tests::explicit_root_enforces_requires_against_injected_running_build_before_unknown_keys, test:tests::tui_launch_fails_closed_on_requires_mismatch_before_unknown_keys, test:config_error::requires_mismatch_fails_closed_before_unknown_keys_and_leaves_inspection_reachable, test:config_error::requires_refuses_prerelease_min_version_and_binary_sha256 |
