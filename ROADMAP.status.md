@@ -15,7 +15,7 @@
 | hardening | todo | 0/15 | 15 | 0 | 14.8d | 0.5 (0.5 left) | 3.0d |
 | qualification | todo | 0/1 | 0 | 1 | 8.0d | 0.3 (0.3 left) | 8.0d |
 | tui-quality | todo | 0/2 | 1 | 1 | 4.0d | 0.1 (0.1 left) | 4.0d |
-| workflow | todo | 0/17 | 6 | 11 | 50.0d | 1.9 (1.9 left) | 17.5d |
+| workflow | todo | 1/17 | 6 | 10 | 50.0d | 1.9 (1.8 left) | 17.5d |
 
 ## v0.7 Security, safe parsing and gates that tell the truth
 
@@ -222,7 +222,7 @@
 
 | task | title | status | blocked_by | evidence |
 | --- | --- | --- | --- | --- |
-| A2-108 | Decide completion-time and historical-provenance semantics | todo | - | - |
+| A2-108 | Decide completion-time and historical-provenance semantics | done | - | commit:c4b340c |
 | A2-109 | Record an atomic close timestamp on done tasks | todo | A2-108 | - |
 | A2-110 | Derive labelled legacy completion times in one Git history pass | todo | A2-109 | - |
 | A2-111 | Add completed-task history to the engine and CLI | todo | A2-110 | - |
