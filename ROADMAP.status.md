@@ -9,7 +9,7 @@
 | cut | status | done/total | ready | blocked | effort | weeks | critical path |
 | --- | --- | --- | --- | --- | --- | --- | --- |
 | v0.7 | done | 30/30 | 0 | 0 | 22.8d | 0.8 (0.0 left) | 3.5d |
-| v0.8 | todo | 33/36 | 3 | 0 | 49.2d | 1.8 (0.2 left) | 4.5d |
+| v0.8 | todo | 34/36 | 2 | 0 | 49.2d | 1.8 (0.2 left) | 4.5d |
 | adoption | todo | 0/81 | 0 | 81 | 105.8d | 3.9 (3.9 left) | 10.0d |
 | backlog | todo | 0/1 | 0 | 1 | 1.0d | <0.1 (<0.1 left) | 1.0d |
 | hardening | todo | 0/15 | 0 | 15 | 14.8d | 0.5 (0.5 left) | 3.0d |
@@ -75,7 +75,7 @@
 | A2-101 | File renames silently strand paths on live tasks | done | A2-056 | commit:275b042befe8, test:tests::aplan063_reports_stranded_rename_ambiguity_and_bare_dir_on_live_tasks_only, test:close_gate::retarget_path_updates_live_tasks_atomically_and_preserves_terminal_tasks |
 | A2-106 | Duplicate evidence citations are accepted and stored silently | done | - | commit:7f5832a3647f, commit:275b042befe8, test:validate::tests::duplicate_evidence_covers_zero_one_two_three_non_adjacent_and_families, test:close::tests::close_and_amend_refuse_duplicate_evidence_by_canonical_key, test:tests::verify_deduplicates_duplicate_evidence_citations |
 | A2-122 | Stop build-only AGENTS.md provenance drift from blocking a correct contract | done | A2-081 | commit:bacb6ab, file:docs/adr/0072-agent-contract-policy-drift-is-separate-from-build-provenance-and-live-tools.md, test:contract::tests::duplicate_and_malformed_provenance_lines_are_classified_as_malformed, test:validate::tests::agents_block::a_block_written_by_another_build_is_reported_as_a_build_difference, test:validate::tests::agents_block::malformed_or_duplicate_provenance_still_fires_aplan041, test:agent_contract_drift::provenance_only_drift_does_not_block_check_verify_or_mcp, test:agent_contract_drift::policy_only_drift_still_blocks_with_exact_repair, test:agent_contract_drift::malformed_or_duplicate_provenance_blocks_check, test:agents_md::two_builds_with_different_mcp_catalogues_keep_one_policy_body, test:agents_md::malformed_or_duplicate_provenance_still_fails_export_agents_md_check |
-| A2-140 | Let generated agent contracts name a repository launcher | todo | - | - |
+| A2-140 | Let generated agent contracts name a repository launcher | done | - | commit:b3079b5294d7, test:agents_md::configured_launcher_invocation_renders_safely_and_gates_drift |
 | A2-142 | Claim usage errors can publish claim state | done | - | commit:604f27d1d1c0, test:claim::claim_release_start_stop_usage_errors_never_mutate_claims_or_tasks |
 | A2-147 | Close a live task that already carries partial evidence without a hand edit | done | - | commit:55cf68a6c531, test:close_gate::close_combines_existing_live_evidence_across_cli_app_and_mcp |
 | A2-152 | Reconcile task closure with ephemeral claim lifecycle | todo | - | - |
