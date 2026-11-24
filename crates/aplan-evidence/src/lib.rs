@@ -623,6 +623,47 @@ pub fn head_sha(repo_root: &Path) -> Result<String, Error> {
         .ok_or_else(|| Error::NoCommits(repo_root.to_path_buf()))
 }
 
+/// Find every already-`done` task in `plan` whose `HEAD`-relative `file:`
+/// citation no longer exists at `HEAD` in `repo_root` (`A2-183`).
+///
+/// Returns sorted `(task_id, raw_file_reference)` pairs. Pinned `file:path@rev`
+/// citations are ignored because they resolve against an immutable revision
+/// rather than `HEAD`. If `repo_root` is not a readable Git repository, returns
+/// an empty list so callers never turn a missing repo into a false warning.
+#[must_use]
+pub fn broken_closed_file_citations(plan: &Plan, repo_root: &Path) -> Vec<(String, String)> {
+    let Ok(repo) = Repo::discover(repo_root) else {
+        return Vec::new();
+    };
+    let mut broken = Vec::new();
+    for lt in &plan.tasks {
+        if lt.task.status != aplan_core::Status::Done {
+            continue;
+        }
+        let mut seen = std::collections::BTreeSet::new();
+        for ev in &lt.task.evidence {
+            if ev.kind != aplan_core::EvidenceKind::File
+                || !seen.insert(aplan_core::task::canonical_evidence_key(ev))
+            {
+                continue;
+            }
+            let trimmed = ev.reference.trim();
+            let before_anchor = trimmed.split_once('#').map_or(trimmed, |(h, _)| h);
+            if before_anchor.contains('@') {
+                continue;
+            }
+            let looked_up = aplan_core::anchor::normalise(Path::new(before_anchor));
+            let path_for_git = looked_up.to_string_lossy().replace('\\', "/");
+            if matches!(repo.path_exists_at(None, &path_for_git), Ok(false)) {
+                broken.push((lt.task.id.clone(), trimmed.to_string()));
+            }
+        }
+    }
+    broken.sort();
+    broken.dedup();
+    broken
+}
+
 /// The resolvers this configuration builds, which is what decides whether a
 /// citation gets opened at all.
 ///
@@ -1981,6 +2022,40 @@ fn project_working_tree_drift(
                     "working tree ({}) modifies traced section `{trace}` while task `{}` is \
                      untouched; committing these bytes will trigger APLAN045",
                     state.as_str(),
+                    lt.task.id
+                ),
+            });
+        }
+    }
+
+    // 3. Advisory hand-reopen detection (`A2-161`): a task that is live in the
+    //    working tree while its committed `HEAD` copy had `status: done`.
+    for lt in &plan.tasks {
+        if lt.task.status.is_terminal() {
+            continue;
+        }
+        let task_rel = repository_relative_path(&lt.path, workdir.as_deref());
+        let Some((state, head_bytes, _)) = state_of(&task_rel) else {
+            continue;
+        };
+        let Ok(head_text) = std::str::from_utf8(&head_bytes) else {
+            continue;
+        };
+        if let Ok(head_task) = aplan_core::mutation::task_of(head_text)
+            && head_task.status == aplan_core::Status::Done
+        {
+            projections.push(aplan_core::CandidateProjection {
+                code: "reopen".to_string(),
+                task: lt.task.id.clone(),
+                file: lt.path.clone(),
+                subject: "status".to_string(),
+                state,
+                message: format!(
+                    "working tree ({}) changes `{}` from `done` back to `{}`; closed tasks are \
+                     never reopened directly -- file a successor with `aplan supersede {} <title>`",
+                    state.as_str(),
+                    lt.task.id,
+                    lt.task.status,
                     lt.task.id
                 ),
             });

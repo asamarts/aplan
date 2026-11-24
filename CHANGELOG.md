@@ -8,6 +8,25 @@ to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Fixed
 
+- **Close a live task that already carries partial evidence (`A2-147`,
+  `--require close.combines_existing_live_evidence`)**. `aplan close` (and `aplan_close` over
+  MCP and the typed application preview) now preserves existing citations on a live task
+  (`todo` or `in_progress`), combines them with any newly supplied citations, allows closing an
+  adequate existing set without passing a redundant `--evidence` flag, refuses duplicates or
+  invalid existing evidence before writing, and writes `done` plus every required fingerprint
+  atomically.
+- **Truthful `APLAN015` fix text and close-time warning for deleted cited files (`A2-183`,
+  closes #56)**. `APLAN015`'s fix text for `HEAD`-relative `file:` citations now directs to a
+  successor path at `HEAD` or `aplan amend` instead of a non-existent "cited rev", and
+  `aplan close` warns whenever `HEAD` breaks an already-closed task's `file:` citation.
+- **Unambiguous `aplan add --paths` syntax (`A2-157`)**. `aplan add` (CLI and application layer)
+  now rejects unescaped comma-separated `--paths` values outside glob brace groups (`{a,b}`)
+  before writing any file, printing the corrected repeated `--paths` flags while allowing
+  literal commas in filenames via `\,`.
+- **Named route for withdrawn deliveries (`A2-161`)**. `aplan verify` now flags a working-tree
+  hand-reopen of a committed `done` task in its advisory `candidate_projections` naming
+  `aplan supersede`, and `supersede` / `amend --remove-evidence` help explicitly cover withdrawn
+  or reverted deliveries with or without `traces`.
 - **Single valid JSON document on `--format agent` (`A2-096`,
   `--require agent.output_is_single_json_document`)**. `aplan check --format agent` (and
   `--format json`) now carries unchecked structural evidence inside the JSON document under

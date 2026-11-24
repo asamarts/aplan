@@ -260,6 +260,13 @@ pub const ALL: &[Behaviour] = &[
         ],
     },
     Behaviour {
+        name: "close.combines_existing_live_evidence",
+        what: "`close` on a live task (`todo` or `in_progress`) preserves existing citations, \
+               combines them with any supplied citations, resolves the complete final set, and \
+               closes atomically without hand-editing",
+        proof: &["close_gate::close_combines_existing_live_evidence_across_cli_app_and_mcp"],
+    },
+    Behaviour {
         name: "coordination.is_not_a_plan_verdict_mutation",
         what: "`claim` and `release` mutate only local ephemeral coordination state, so they do \
                not accept plan-verdict overrides or imply that the plan passed a gate",

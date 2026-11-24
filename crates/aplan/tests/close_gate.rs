@@ -2390,3 +2390,409 @@ fn check_range_handles_merge_commits_and_root_inclusive_range() {
     assert_eq!(doc_merge["range_clean"], true);
     assert!(doc_merge["commits_audited"].as_u64().unwrap_or(0) >= 2);
 }
+
+/// Proof for `close.combines_existing_live_evidence` (`A2-147`): closing a
+/// live task (`todo` or `in_progress`) preserves existing citations, combines
+/// them with newly supplied citations, allows closing an adequate existing set
+/// with no redundant flag, refuses duplicates or invalid existing citations
+/// before writing, and works across CLI and MCP.
+#[test]
+#[allow(clippy::too_many_lines)]
+fn close_combines_existing_live_evidence_across_cli_app_and_mcp() {
+    let dir = tempfile::Builder::new()
+        .tempdir_in(aplan_core::fixture::fixture_root())
+        .expect("repository");
+    let root = dir.path();
+    std::fs::create_dir_all(root.join("aplan/tasks")).expect("tasks");
+    std::fs::create_dir_all(root.join("src")).expect("src");
+    std::fs::write(root.join(".aplan.yml"), "root: aplan\n").expect("cfg");
+    std::fs::write(root.join("src/a.rs"), "pub fn a() {}\n").expect("a");
+    std::fs::write(root.join("src/b.rs"), "pub fn b() {}\n").expect("b");
+
+    git(root, &["init", "-q", "."]);
+    git(root, &["config", "user.email", "t@example.com"]);
+    git(root, &["config", "user.name", "t"]);
+    git(root, &["add", "-A"]);
+    git(root, &["commit", "-q", "-m", "first increment"]);
+    let sha1 = String::from_utf8(
+        std::process::Command::new("git")
+            .args(["rev-parse", "HEAD"])
+            .current_dir(root)
+            .output()
+            .expect("rev-parse")
+            .stdout,
+    )
+    .expect("utf8")
+    .trim()
+    .to_string();
+
+    std::fs::write(root.join("src/a.rs"), "pub fn a() { /* v2 */ }\n").expect("a2");
+    std::fs::write(root.join("src/b.rs"), "pub fn b() { /* v2 */ }\n").expect("b2");
+    git(root, &["add", "-A"]);
+    git(root, &["commit", "-q", "-m", "second increment"]);
+    let sha2 = String::from_utf8(
+        std::process::Command::new("git")
+            .args(["rev-parse", "HEAD"])
+            .current_dir(root)
+            .output()
+            .expect("rev-parse")
+            .stdout,
+    )
+    .expect("utf8")
+    .trim()
+    .to_string();
+
+    // T-1: `in_progress` with 1 existing commit -> combine with sha2.
+    std::fs::write(
+        root.join("aplan/tasks/T-1.md"),
+        format!(
+            "---\nid: T-1\ntitle: combine\nphase: 1\nstatus: in_progress\neffort_days: 1\n\
+             paths: [src/a.rs]\nevidence:\n  - kind: commit\n    ref: {sha1}\n---\n\nbody\n"
+        ),
+    )
+    .expect("T-1");
+
+    // Duplicate of existing citation must be refused before writing.
+    let (dup_out, dup_err, dup_ok) = run(
+        root,
+        &["close", "T-1", "--evidence", &format!("commit:{sha1}")],
+    );
+    assert!(
+        !dup_ok,
+        "duplicate against existing must refuse: {dup_out}{dup_err}"
+    );
+
+    let (out1, err1, ok1) = run(
+        root,
+        &["close", "T-1", "--evidence", &format!("commit:{sha2}")],
+    );
+    assert!(ok1, "combining live evidence failed: {out1}{err1}");
+    let t1_text = std::fs::read_to_string(root.join("aplan/tasks/T-1.md")).expect("read T-1");
+    assert!(t1_text.contains("status: done"), "{t1_text}");
+    assert!(
+        t1_text.contains(&sha1) && t1_text.contains(&sha2),
+        "{t1_text}"
+    );
+
+    // Already-done task still refuses and points to `amend`.
+    let (done_out, done_err, done_ok) = run(
+        root,
+        &["close", "T-1", "--evidence", &format!("commit:{sha2}")],
+    );
+    assert!(!done_ok);
+    assert!(
+        format!("{done_out}{done_err}").contains("aplan amend T-1"),
+        "already-done refusal should name amend: {done_out}{done_err}"
+    );
+
+    // T-2: `todo` with adequate existing evidence -> closes with NO `--evidence` flag.
+    std::fs::write(
+        root.join("aplan/tasks/T-2.md"),
+        format!(
+            "---\nid: T-2\ntitle: adequate existing\nphase: 1\nstatus: todo\neffort_days: 1\n\
+             paths: [src/a.rs]\nevidence:\n  - kind: commit\n    ref: {sha1}\n  - kind: file\n    ref: src/a.rs\n---\n\nbody\n"
+        ),
+    )
+    .expect("T-2");
+    let (out2, err2, ok2) = run(root, &["close", "T-2"]);
+    assert!(
+        ok2,
+        "closing adequate existing evidence failed: {out2}{err2}"
+    );
+    let t2_text = std::fs::read_to_string(root.join("aplan/tasks/T-2.md")).expect("read T-2");
+    assert!(t2_text.contains("status: done"), "{t2_text}");
+    assert!(
+        !t2_text.contains(&sha2),
+        "should not add redundant HEAD commit: {t2_text}"
+    );
+
+    // T-bad: live task with invalid existing citation -> refuses without writing.
+    std::fs::write(
+        root.join("aplan/tasks/T-bad.md"),
+        "---\nid: T-bad\ntitle: bad existing\nphase: 1\nstatus: in_progress\neffort_days: 1\n\
+         paths: [src/a.rs]\nevidence:\n  - kind: commit\n    ref: deadbeef0000\n---\n\nbody\n",
+    )
+    .expect("T-bad");
+    let (bad_out, bad_err, bad_ok) = run(
+        root,
+        &["close", "T-bad", "--evidence", &format!("commit:{sha2}")],
+    );
+    assert!(
+        !bad_ok,
+        "invalid existing evidence must refuse: {bad_out}{bad_err}"
+    );
+    let bad_after = std::fs::read_to_string(root.join("aplan/tasks/T-bad.md")).expect("read");
+    assert!(bad_after.contains("status: in_progress"), "{bad_after}");
+
+    // T-mcp: MCP `close` combines existing live evidence with supplied citation.
+    std::fs::write(
+        root.join("aplan/tasks/T-mcp.md"),
+        format!(
+            "---\nid: T-mcp\ntitle: mcp combine\nphase: 1\nstatus: in_progress\neffort_days: 1\n\
+             paths: [src/b.rs]\nevidence:\n  - kind: commit\n    ref: {sha1}\n---\n\nbody\n"
+        ),
+    )
+    .expect("T-mcp");
+    let policy = aplan_mcp::Policy {
+        id_strategy: aplan_core::IdStrategy::Sequential,
+        options: aplan_core::Options::default(),
+        verdict: aplan_core::Verdict::default(),
+        verify: aplan_evidence::VerifyOptions {
+            detect_drift: false,
+            version: None,
+            traces_root: None,
+            config_file: None,
+            execute: false,
+            test_runner: None,
+            max_unrelated_files: None,
+            observation_inputs: None,
+            url_check: None,
+        },
+        repo_root: root.to_path_buf(),
+    };
+    let mcp_res = aplan_mcp::tools::close(
+        &root.join("aplan"),
+        "T-mcp",
+        &[format!("commit:{sha2}")],
+        &policy,
+    )
+    .expect("mcp close combines live evidence");
+    assert_eq!(mcp_res["evidence"].as_array().expect("arr").len(), 2);
+}
+
+/// Regression test for `A2-183` (#56): `APLAN015` fix text for `HEAD`-relative
+/// `file:` citations names `HEAD` and `aplan amend` (never "the cited rev"),
+/// and `aplan close` warns when `HEAD` breaks an already-closed task's `file:`
+/// citation.
+#[test]
+fn close_warns_when_commit_deletes_closed_task_file_evidence_and_aplan015_fix_is_truthful() {
+    let dir = tempfile::Builder::new()
+        .tempdir_in(aplan_core::fixture::fixture_root())
+        .expect("repository");
+    let root = dir.path();
+    std::fs::create_dir_all(root.join("aplan/tasks")).expect("tasks");
+    std::fs::create_dir_all(root.join("src")).expect("src");
+    std::fs::write(root.join(".aplan.yml"), "root: aplan\n").expect("cfg");
+    std::fs::write(root.join("src/old.rs"), "pub fn old() {}\n").expect("old");
+    std::fs::write(
+        root.join("aplan/tasks/F-1.md"),
+        "---\nid: F-1\ntitle: cited file\nphase: 1\nstatus: todo\neffort_days: 1\n\
+         paths: [src/old.rs]\n---\n\nbody\n",
+    )
+    .expect("F-1");
+    std::fs::write(
+        root.join("aplan/tasks/F-2.md"),
+        "---\nid: F-2\ntitle: delete old\nphase: 1\nstatus: todo\neffort_days: 1\n\
+         paths: [src/old.rs]\n---\n\nbody\n",
+    )
+    .expect("F-2");
+
+    git(root, &["init", "-q", "."]);
+    git(root, &["config", "user.email", "t@example.com"]);
+    git(root, &["config", "user.name", "t"]);
+    git(root, &["add", "-A"]);
+    git(root, &["commit", "-q", "-m", "initial"]);
+
+    let (out1, err1, ok1) = run(root, &["close", "F-1", "--evidence", "file:src/old.rs"]);
+    assert!(ok1, "close F-1 failed: {out1}{err1}");
+    git(root, &["add", "-A"]);
+    git(root, &["commit", "-q", "-m", "close F-1"]);
+
+    // Delete src/old.rs in a later commit and close F-2.
+    std::fs::remove_file(root.join("src/old.rs")).expect("rm");
+    git(root, &["add", "-A"]);
+    git(root, &["commit", "-q", "-m", "delete old.rs"]);
+    let del_sha = String::from_utf8(
+        std::process::Command::new("git")
+            .args(["rev-parse", "HEAD"])
+            .current_dir(root)
+            .output()
+            .expect("rev-parse")
+            .stdout,
+    )
+    .expect("utf8")
+    .trim()
+    .to_string();
+
+    let (out2, err2, ok2) = run(
+        root,
+        &["close", "F-2", "--evidence", &format!("commit:{del_sha}")],
+    );
+    assert!(ok2, "close F-2 failed: {out2}{err2}");
+    assert!(
+        out2.contains("F-1") && out2.contains("file:src/old.rs") && out2.contains("APLAN015"),
+        "close should warn about broken closed file citation:\n{out2}"
+    );
+
+    let (v_out, _v_err, v_ok) = run(root, &["verify", "--format", "agent"]);
+    assert!(!v_ok, "verify should fail with APLAN015");
+    let doc: serde_json::Value = serde_json::from_str(&v_out).expect("json");
+    let aplan015 = doc["diagnostics"]
+        .as_array()
+        .expect("diags")
+        .iter()
+        .find(|d| d["code"] == "APLAN015")
+        .expect("APLAN015 finding");
+    let fix = aplan015["agent_instruction"].as_str().expect("fix");
+    assert!(
+        fix.contains("HEAD") && fix.contains("aplan amend") && !fix.contains("cited rev"),
+        "APLAN015 fix should name HEAD and aplan amend, not cited rev: {fix}"
+    );
+}
+
+/// Regression test for `A2-157`: `aplan add --paths` rejects comma-separated
+/// lists before writing any file, suggests repeated `--paths`, and accepts
+/// repeated flags, brace globs (`{a,b}`), and escaped commas (`\,`).
+#[test]
+fn add_rejects_comma_separated_paths_and_supports_repeated_braces_and_escaped_comma() {
+    let dir = tempfile::Builder::new()
+        .tempdir_in(aplan_core::fixture::fixture_root())
+        .expect("repository");
+    let root = dir.path();
+    std::fs::create_dir_all(root.join("aplan/tasks")).expect("tasks");
+    std::fs::write(root.join(".aplan.yml"), "root: aplan\n").expect("cfg");
+
+    let (bad_out, bad_err, bad_ok) = run(
+        root,
+        &[
+            "add",
+            "Comma near miss",
+            "--id",
+            "P-1",
+            "--effort",
+            "1",
+            "--paths",
+            "src/**,docs/**,tests/**",
+        ],
+    );
+    assert!(
+        !bad_ok,
+        "comma-separated paths must refuse: {bad_out}{bad_err}"
+    );
+    let combined = format!("{bad_out}{bad_err}");
+    assert!(
+        combined.contains("--paths 'src/**' --paths 'docs/**' --paths 'tests/**'"),
+        "refusal should show corrected repeated syntax:\n{combined}"
+    );
+    assert!(
+        !root.join("aplan/tasks/P-1.md").exists(),
+        "refused add must not write a task file"
+    );
+
+    let (ok_out, ok_err, ok) = run(
+        root,
+        &[
+            "add",
+            "Valid paths",
+            "--id",
+            "P-2",
+            "--effort",
+            "1",
+            "--paths",
+            "src/**",
+            "--paths",
+            "crates/{a,b}/**",
+            "--paths",
+            r"docs/notes\,v1.md",
+        ],
+    );
+    assert!(
+        ok,
+        "valid repeated/brace/escaped paths failed: {ok_out}{ok_err}"
+    );
+    let content = std::fs::read_to_string(root.join("aplan/tasks/P-2.md")).expect("read P-2");
+    let task = aplan_core::mutation::task_of(&content).expect("parse P-2");
+    assert_eq!(
+        task.paths,
+        vec![
+            "src/**".to_string(),
+            "crates/{a,b}/**".to_string(),
+            "docs/notes,v1.md".to_string()
+        ]
+    );
+}
+
+/// Regression test for `A2-161`: `verify` flags a working-tree hand-reopen of
+/// a committed `done` task and names `aplan supersede`, and CLI help for
+/// `supersede` and `amend --remove-evidence` covers withdrawn deliveries.
+#[test]
+fn verify_flags_working_tree_hand_reopen_and_help_names_supersede_and_amend() {
+    let dir = tempfile::Builder::new()
+        .tempdir_in(aplan_core::fixture::fixture_root())
+        .expect("repository");
+    let root = dir.path();
+    std::fs::create_dir_all(root.join("aplan/tasks")).expect("tasks");
+    std::fs::create_dir_all(root.join("src")).expect("src");
+    std::fs::write(root.join(".aplan.yml"), "root: aplan\n").expect("cfg");
+    std::fs::write(root.join("src/lib.rs"), "pub fn x() {}\n").expect("lib");
+    std::fs::write(
+        root.join("aplan/tasks/W-1.md"),
+        "---\nid: W-1\ntitle: delivered\nphase: 1\nstatus: todo\neffort_days: 1\n\
+         paths: [src/lib.rs]\n---\n\nbody\n",
+    )
+    .expect("W-1");
+
+    git(root, &["init", "-q", "."]);
+    git(root, &["config", "user.email", "t@example.com"]);
+    git(root, &["config", "user.name", "t"]);
+    git(root, &["add", "-A"]);
+    git(root, &["commit", "-q", "-m", "init"]);
+    let sha = String::from_utf8(
+        std::process::Command::new("git")
+            .args(["rev-parse", "HEAD"])
+            .current_dir(root)
+            .output()
+            .expect("rev-parse")
+            .stdout,
+    )
+    .expect("utf8")
+    .trim()
+    .to_string();
+
+    let (c_out, c_err, c_ok) = run(
+        root,
+        &["close", "W-1", "--evidence", &format!("commit:{sha}")],
+    );
+    assert!(c_ok, "close failed: {c_out}{c_err}");
+    git(root, &["add", "-A"]);
+    git(root, &["commit", "-q", "-m", "close W-1"]);
+
+    // Hand-reopen W-1 in the working tree back to `todo`.
+    std::fs::write(
+        root.join("aplan/tasks/W-1.md"),
+        "---\nid: W-1\ntitle: delivered\nphase: 1\nstatus: todo\neffort_days: 1\n\
+         paths: [src/lib.rs]\n---\n\nbody\n",
+    )
+    .expect("reopen W-1");
+
+    let (v_out, v_err, v_ok) = run(root, &["verify", "--format", "json"]);
+    assert!(v_ok, "verify failed: {v_out}{v_err}");
+    let doc: serde_json::Value = serde_json::from_str(&v_out).expect("json");
+    let projs = doc["candidate_projections"]
+        .as_array()
+        .expect("candidate_projections");
+    assert!(
+        projs.iter().any(|p| {
+            p["code"] == "reopen"
+                && p["task"] == "W-1"
+                && p["message"]
+                    .as_str()
+                    .is_some_and(|m| m.contains("aplan supersede W-1"))
+        }),
+        "expected advisory reopen projection naming supersede: {projs:?}"
+    );
+
+    let (s_help, _, s_ok) = run(root, &["supersede", "--help"]);
+    assert!(s_ok);
+    assert!(
+        s_help.contains("withdrawn") && s_help.contains("traces"),
+        "supersede help should cover withdrawn deliveries with or without traces:\n{s_help}"
+    );
+
+    let (a_help, _, a_ok) = run(root, &["amend", "--help"]);
+    assert!(a_ok);
+    assert!(
+        a_help.contains("removed with the work") && a_help.contains("aplan supersede"),
+        "amend help should cover citations removed with reverted work:\n{a_help}"
+    );
+}

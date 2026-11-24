@@ -145,7 +145,7 @@ file evidence resolves at the cited rev
 - **says:** file `docs/scan.bin` at HEAD is not text, so `#result` cannot be resolved
   - **fix:** Cite `docs/scan.bin` without an anchor, or point the citation at a text document whose sections can be named.
 - **says:** file `src/nope.rs` does not exist at HEAD
-  - **fix:** Point the `file` evidence at a path that exists at the cited rev (or at HEAD).
+  - **fix:** Point the `file` evidence at a successor path that exists at HEAD, or replace the citation with `aplan amend`.
 
 ## APLAN016 (warning)
 

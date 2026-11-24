@@ -1381,8 +1381,9 @@ enum Command {
     /// command does not touch them: repairing a citation is not re-reviewing a
     /// traced section.
     Amend(AmendArgs),
-    /// File the successor to a closed task whose traced outcome no longer holds,
-    /// and re-stamp the closed one as reviewed.
+    /// File the successor to a closed task whose outcome no longer holds
+    /// (including a delivery withdrawn or reverted after it closed, with or
+    /// without `traces`), and re-stamp any traced sections on the closed task.
     ///
     /// The third repair, beside `amend` and `close --restamp`. There is no
     /// reopen, deliberately: the work *was* done, and what changed is the ground
@@ -7226,7 +7227,8 @@ pub struct DepApplyArgs {
 
 #[derive(clap::Args, Debug)]
 pub struct SupersedeArgs {
-    /// The closed task whose traced outcome no longer holds.
+    /// The closed task whose outcome no longer holds (whether a traced premise
+    /// changed or a delivered change was later withdrawn or reverted).
     id: String,
     /// The successor's title: what now needs doing.
     title: String,
@@ -7567,10 +7569,12 @@ pub struct AddArgs {
     /// Explanation required when the explicit impact is below this task's floor.
     #[arg(long, value_name = "REASON", requires = "version_impact")]
     version_impact_reason: Option<String>,
-    /// A glob naming files this task is responsible for. Repeatable. This is
-    /// what lets `verify` bind a commit to the task (`APLAN012`, `APLAN023`).
-    /// Refused with `--tag milestone`, because a checkpoint owns no files.
-    #[arg(long = "paths")]
+    /// A glob naming files this task is responsible for. Repeat `--paths <GLOB>`
+    /// once per entry (do not comma-separate values; escape a literal comma as
+    /// `\,`). This is what lets `verify` bind a commit to the task (`APLAN012`,
+    /// `APLAN023`). Refused with `--tag milestone`, because a checkpoint owns no
+    /// files.
+    #[arg(long = "paths", value_name = "GLOB")]
     paths: Vec<String>,
     // `A1-116`. Refused through the same post-state check every mutation runs
     // (`A1-113`), so the refusal is `APLAN008` itself, with its own remedy,
@@ -7996,12 +8000,13 @@ fn refuse_bad_add_args(
     }
     refuse_blank_tags(&args.tags)?;
     refuse_blank_owner(args.owner.as_ref())?;
-    if args
-        .paths
-        .iter()
-        .any(|path| aplan_core::task::is_vacuous_ref(path))
-    {
-        anyhow::bail!("a task path may not be blank");
+    for path in &args.paths {
+        if aplan_core::task::is_vacuous_ref(path) {
+            anyhow::bail!("a task path may not be blank");
+        }
+        if let Err(msg) = aplan_core::task::normalize_add_path(path) {
+            anyhow::bail!("{msg}");
+        }
     }
     if args
         .traces
@@ -8487,7 +8492,13 @@ fn cmd_add(root: &std::path::Path, args: &AddArgs) -> Result<u8> {
             contains: emit::deduped(&args.contains),
             evidence: Vec::new(),
             // Repeats removed on both surfaces, in one place (`A1-116`).
-            paths: emit::deduped(&args.paths),
+            paths: emit::deduped(
+                &args
+                    .paths
+                    .iter()
+                    .map(|p| aplan_core::task::normalize_add_path(p).map_err(anyhow::Error::msg))
+                    .collect::<Result<Vec<_>>>()?,
+            ),
             traces: emit::deduped(&args.traces),
             trace_fingerprints: std::collections::BTreeMap::new(),
             evidence_fingerprints: std::collections::BTreeMap::new(),
@@ -9777,10 +9788,12 @@ pub struct AmendArgs {
     add_evidence: Option<String>,
     /// A citation to remove from a closed task, `kind:ref`.
     ///
-    /// For proof that was never proof: a citation chosen to satisfy a gate, or
-    /// one that named the deliverable rather than what proves it. Removing it is
+    /// For proof that was never proof (a citation chosen to satisfy a gate or
+    /// naming the deliverable rather than what proves it) or a citation whose
+    /// proof a later task or revert removed with the work. Removing it is
     /// refused when what remains would fail the rules, so a task cannot be
-    /// repaired below the bar its repository set.
+    /// repaired below the bar its repository set; if the entire closed outcome
+    /// was withdrawn, file a successor with `aplan supersede` instead.
     #[arg(long, value_name = "CITATION")]
     remove_evidence: Option<String>,
     /// Repository to resolve the replacement against (default: the current
@@ -13267,11 +13280,29 @@ impl CloseMode {
     }
 }
 
+fn warn_broken_closed_file_citations(
+    plan: &aplan_core::Plan,
+    repo: &std::path::Path,
+) -> Result<()> {
+    for (other_id, missing_path) in aplan_evidence::broken_closed_file_citations(plan, repo) {
+        write_stdout(&format!(
+            "warning: closed task `{other_id}` cites `file:{missing_path}`, which no longer exists \
+             at HEAD (will fail `aplan verify` with APLAN015); update it with `aplan amend \
+             {other_id} --replace-evidence ...`\n"
+        ))?;
+    }
+    Ok(())
+}
+
 fn close_evidence(
     evidence_args: &[String],
+    task: &aplan_core::Task,
     repo: &std::path::Path,
 ) -> Result<Vec<aplan_core::Evidence>> {
     if evidence_args.is_empty() {
+        if !task.status.is_terminal() && !task.evidence.is_empty() {
+            return Ok(Vec::new());
+        }
         let sha = aplan_evidence::head_sha(repo)
             .context("deriving HEAD (pass `--evidence kind:ref` to give it explicitly)")?;
         Ok(vec![aplan_core::Evidence {
@@ -13344,23 +13375,19 @@ fn cmd_close(
     let original = std::fs::read_to_string(&lt.path)
         .with_context(|| format!("reading {}", lt.path.display()))?;
 
-    // Evidence: the explicit list, or the current HEAD commit derived for free.
-    let evidence = close_evidence(evidence_args, repo)?;
+    // Evidence: the explicit list, existing partial evidence on the live task,
+    // or the current HEAD commit derived for free.
+    let evidence = close_evidence(evidence_args, &lt.task, repo)?;
 
-    // Structural refusals first: already `done`, already carrying evidence. They
-    // are hermetic and instant, and running the ladder ahead of them spent a
-    // runner subprocess to report the *wrong reason* -- an already-closed task
-    // was told its citation would fail `verify`, which was true and irrelevant.
-    // **The version a release produced is recorded when it closes** (`A1-339`,
-    // ADR-0038). Derived while open so the plan decides the number rather than
-    // grading a guess, and written into the node so a later run can ask what a
-    // release contained without re-deriving from a plan that has since moved.
+    // Structural refusals first: already `done`, duplicate evidence, etc.
     let recorded = recorded_version(&plan, &lt.task, repo, &config);
     let mut updated = aplan_core::close(&original, &evidence, &fingerprints, recorded.as_deref())
         .map_err(|e| close_err("close", id, &e))?;
+    let final_evidence = task_of(&updated, id)?.evidence;
 
-    // Then the gate, still before anything is written (`A1-109`).
-    if !no_resolve && !evidence_resolves("close", id, lt, &evidence, repo, &config, verdict)? {
+    // Then the gate over the complete final evidence set, still before writing (`A1-109`, `A2-147`).
+    if !no_resolve && !evidence_resolves("close", id, lt, &final_evidence, repo, &config, verdict)?
+    {
         return Ok(EXIT_VIOLATIONS);
     }
 
@@ -13375,7 +13402,7 @@ fn cmd_close(
         aplan_evidence::update_evidence_fingerprints(
             &lt.task.evidence,
             &lt.task.evidence_fingerprints,
-            &evidence,
+            &final_evidence,
             repo,
             false,
         )?
@@ -13396,7 +13423,11 @@ fn cmd_close(
     )?;
     save_one(&lt.path, &original, &updated, "close")?;
 
-    let refs: Vec<String> = evidence
+    if !no_resolve {
+        warn_broken_closed_file_citations(&plan, repo)?;
+    }
+
+    let refs: Vec<String> = final_evidence
         .iter()
         .map(|e| format!("{}:{}", e.kind.as_str(), e.reference))
         .collect();

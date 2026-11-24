@@ -129,12 +129,30 @@ fn a_live_task_with_evidence_is_not_sent_to_a_done_only_command() {
         .expect("tempdir");
     repo(dir.path());
 
-    let out = common::run(dir.path(), &["close", "T-2", "--evidence", "file:src/a.rs"]);
-    assert_eq!(out.code, 2, "the live task was not refused: {out:?}");
-    assert!(!out.text().contains("aplan amend"), "{out:?}");
+    // An unreplaceable `evidence: []` on a live task still refuses without
+    // pointing to `aplan amend` (which only accepts `done` tasks).
+    std::fs::write(
+        dir.path().join("aplan/tasks/T-3.md"),
+        "---\nid: T-3\ntitle: empty evidence block\nphase: 0\nstatus: todo\nowner: k\n\
+         effort_days: 1\npaths:\n- src/a.rs\nevidence: []\n---\n\nbody\n",
+    )
+    .expect("T-3");
+    let refused = common::run(dir.path(), &["close", "T-3", "--evidence", "file:src/a.rs"]);
+    assert_eq!(
+        refused.code, 2,
+        "the empty-evidence live task was not refused: {refused:?}"
+    );
+    assert!(!refused.text().contains("aplan amend"), "{refused:?}");
     assert!(
-        out.text().contains("Review") && out.text().contains("reconcile or remove"),
-        "the refusal does not say what state must be reconciled: {out:?}"
+        refused.text().contains("Review") && refused.text().contains("reconcile or remove"),
+        "the refusal does not say what state must be reconciled: {refused:?}"
+    );
+
+    // Ordinary partial evidence on a live task (`T-2`) now combines and closes (`A2-147`).
+    let closed = common::run(dir.path(), &["close", "T-2", "--evidence", "file:src/a.rs"]);
+    assert_eq!(
+        closed.code, 0,
+        "combining live evidence should succeed: {closed:?}"
     );
 }
 

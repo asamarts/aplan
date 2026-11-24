@@ -180,6 +180,47 @@ pub fn advice(error: &CloseError, id: &str) -> Option<String> {
     }
 }
 
+fn combine_and_check_evidence(
+    existing: &[Evidence],
+    added: &[Evidence],
+) -> Result<Vec<Evidence>, CloseError> {
+    let mut combined = existing.to_vec();
+    combined.extend_from_slice(added);
+    if combined.is_empty() {
+        return Err(CloseError::Produced(
+            "closing a task requires at least one evidence citation".to_string(),
+        ));
+    }
+    let mut seen = std::collections::BTreeSet::new();
+    for ev in &combined {
+        if !seen.insert(crate::task::canonical_evidence_key(ev)) {
+            return Err(CloseError::DuplicateEvidence(format!(
+                "{}:{}",
+                ev.kind.as_str(),
+                ev.reference
+            )));
+        }
+    }
+    Ok(combined)
+}
+
+fn append_live_evidence(
+    frontmatter: String,
+    existing: &[Evidence],
+    added: &[Evidence],
+    nl: &str,
+) -> Result<String, CloseError> {
+    let mut fm = frontmatter;
+    let mut running = existing.to_vec();
+    for ev in added {
+        let mut next = running.clone();
+        next.push(ev.clone());
+        fm = replace_evidence_sequence(&fm, &next, &running, nl)?;
+        running = next;
+    }
+    Ok(fm)
+}
+
 pub fn close(
     file: &str,
     evidence: &[Evidence],
@@ -202,26 +243,20 @@ pub fn close(
         });
     }
 
-    // Refuse if an `evidence:` key already exists, even `evidence: []`: `close`
-    // only *appends* a task's first block, and a second `evidence:` key would be
-    // a duplicate-key document. (This is stricter than the parsed
-    // `task.evidence`, which reads `evidence: []` as "no evidence".)
-    if top_level_mapping_has_key(frontmatter, "evidence") {
+    // A live task may already carry partial evidence (`A2-147`). An ordinary
+    // top-level `evidence:` block sequence is preserved and combined with any
+    // newly supplied citations; alternate YAML key spellings (quoted, tagged,
+    // anchored, explicit) and `evidence: []` stay refused so `close` never
+    // emits duplicate keys or mangles exotic YAML (`A1-723`).
+    let has_evidence_key = top_level_mapping_has_key(frontmatter, "evidence");
+    if has_evidence_key
+        && (!has_top_level_key(frontmatter, "evidence")
+            || ordinary_evidence_sequence(frontmatter).is_none())
+    {
         return Err(CloseError::HasEvidence);
     }
 
-    // `A2-106`: refuse duplicate citations before writing so `close` never
-    // stores inflated evidence lists.
-    let mut seen_evidence = std::collections::BTreeSet::new();
-    for ev in evidence {
-        if !seen_evidence.insert(crate::task::canonical_evidence_key(ev)) {
-            return Err(CloseError::DuplicateEvidence(format!(
-                "{}:{}",
-                ev.kind.as_str(),
-                ev.reference
-            )));
-        }
-    }
+    let combined = combine_and_check_evidence(&task.evidence, evidence)?;
 
     // Presence is a source fact, not the same thing as a typed optional value.
     // `version: null` and its alternate-key spellings load as `None`; appending
@@ -272,24 +307,38 @@ pub fn close(
         nl,
         false,
     )?;
-    let new_frontmatter = format!(
-        "{}{}{}{}",
-        with_fingerprints,
-        version.map_or_else(String::new, |v| format!("version: {v}{nl}")),
-        evidence_block(evidence, nl)?,
-        if fingerprints_were_present {
-            String::new()
-        } else {
-            fingerprints_block
-        },
-    );
+    let new_frontmatter = if has_evidence_key {
+        let base = format!(
+            "{}{}{}",
+            with_fingerprints,
+            version.map_or_else(String::new, |v| format!("version: {v}{nl}")),
+            if fingerprints_were_present {
+                String::new()
+            } else {
+                fingerprints_block
+            },
+        );
+        append_live_evidence(base, &task.evidence, evidence, nl)?
+    } else {
+        format!(
+            "{}{}{}{}",
+            with_fingerprints,
+            version.map_or_else(String::new, |v| format!("version: {v}{nl}")),
+            evidence_block(&combined, nl)?,
+            if fingerprints_were_present {
+                String::new()
+            } else {
+                fingerprints_block
+            },
+        )
+    };
 
     // Never write frontmatter that would not load: parse it back, and confirm the
     // status, the *exact* evidence, and the fingerprints round-tripped (value
     // equality, not a matching count, so a mis-serialised reference cannot slip).
     let parsed = reparse(&new_frontmatter)?;
     if parsed.status != Status::Done
-        || parsed.evidence.as_slice() != evidence
+        || parsed.evidence.as_slice() != combined.as_slice()
         || &parsed.trace_fingerprints != fingerprints
         || (version.is_some() && parsed.version.as_deref() != version)
     {
@@ -4078,14 +4127,32 @@ Because.
     }
 
     #[test]
-    fn refuses_a_task_that_already_has_evidence() {
+    fn combines_existing_evidence_on_a_live_task_and_refuses_duplicates() {
         let with_ev = TASK.replace(
             "status: todo\n",
-            "status: todo\nevidence:\n  - kind: note\n    ref: x\n    captured: 2026-07-01\n",
+            "status: in_progress\nevidence:\n  - kind: commit\n    ref: 1111111\n",
         );
+        // Combining an existing citation with a new one keeps both in order.
+        let combined = close_ev(&with_ev, &[commit("2222222")]).expect("combine");
+        let (fm, _) = split_frontmatter(&combined).expect("fm");
+        let task: Task = yaml_compat::compat::from_str(fm).expect("parse");
+        assert_eq!(task.status, Status::Done);
+        assert_eq!(task.evidence.len(), 2);
+        assert_eq!(task.evidence[0].reference, "1111111");
+        assert_eq!(task.evidence[1].reference, "2222222");
+
+        // Closing with no additional citations preserves the existing set.
+        let existing_only = close_ev(&with_ev, &[]).expect("existing only");
+        let (fm2, _) = split_frontmatter(&existing_only).expect("fm2");
+        let task2: Task = yaml_compat::compat::from_str(fm2).expect("parse2");
+        assert_eq!(task2.status, Status::Done);
+        assert_eq!(task2.evidence.len(), 1);
+        assert_eq!(task2.evidence[0].reference, "1111111");
+
+        // Supplying a duplicate of an existing citation is refused.
         assert!(matches!(
-            close_ev(&with_ev, &[commit("x")]),
-            Err(CloseError::HasEvidence)
+            close_ev(&with_ev, &[commit("1111111")]),
+            Err(CloseError::DuplicateEvidence(_))
         ));
     }
 

@@ -133,6 +133,40 @@ pub fn evidence_requirement(
     })
 }
 
+fn close_request_evidence(
+    context: &PlanContext,
+    loaded: &aplan_core::load::LoadedTask,
+    request: &CloseRequest,
+) -> Result<Vec<Evidence>, EvidenceMutationError> {
+    let evidence = if request.evidence.is_empty() {
+        if loaded.task.evidence.is_empty() {
+            vec![Evidence {
+                kind: EvidenceKind::Commit,
+                reference: aplan_evidence::head_sha(&context.identity().repository_root)?,
+                captured: None,
+            }]
+        } else {
+            Vec::new()
+        }
+    } else {
+        request.evidence.clone()
+    };
+    validate_new_evidence(&evidence)?;
+    Ok(evidence)
+}
+
+fn push_broken_closed_file_notices(context: &PlanContext, notices: &mut Vec<String>) {
+    for (other_id, missing_path) in aplan_evidence::broken_closed_file_citations(
+        context.plan(),
+        &context.identity().repository_root,
+    ) {
+        notices.push(format!(
+            "closed task `{other_id}` cites `file:{missing_path}`, which no longer exists at \
+             HEAD (APLAN015); update it with `aplan amend {other_id} --replace-evidence ...`"
+        ));
+    }
+}
+
 /// Prepare one closure without writing any plan file.
 pub fn preview_close(
     context: &PlanContext,
@@ -152,26 +186,7 @@ pub fn preview_close(
     require_clean(context)?;
     let loaded = unique_task(context, &request.id)?;
     let source = source(context, loaded)?;
-    let evidence = if request.evidence.is_empty() {
-        vec![Evidence {
-            kind: EvidenceKind::Commit,
-            reference: aplan_evidence::head_sha(&context.identity().repository_root)?,
-            captured: None,
-        }]
-    } else {
-        request.evidence.clone()
-    };
-    validate_new_evidence(&evidence)?;
-    if request.execute
-        && !evidence
-            .iter()
-            .any(|citation| citation.kind == EvidenceKind::Test)
-    {
-        return Err(EvidenceMutationError::Arguments(
-            "focused execution requires at least one `test` citation in the proposed closure"
-                .to_string(),
-        ));
-    }
+    let evidence = close_request_evidence(context, loaded, request)?;
 
     let fingerprints = if context.options().detect_drift {
         aplan_core::trace_fingerprints(&loaded.task, context.options().traces_root.as_deref())
@@ -183,13 +198,24 @@ pub fn preview_close(
         .map_err(|source| rewrite(&request.id, source))?;
     let produced_for_resolution =
         aplan_core::mutation::task_of(&updated).map_err(EvidenceMutationError::Plan)?;
+    if request.execute
+        && !produced_for_resolution
+            .evidence
+            .iter()
+            .any(|citation| citation.kind == EvidenceKind::Test)
+    {
+        return Err(EvidenceMutationError::Arguments(
+            "focused execution requires at least one `test` citation in the proposed closure"
+                .to_string(),
+        ));
+    }
     let (resolution, execution_guard) =
         resolve_close_evidence(context, loaded, &produced_for_resolution.evidence, request)?;
     let evidence_fingerprints = if context.options().detect_drift && !request.no_resolve {
         aplan_evidence::update_evidence_fingerprints(
             &loaded.task.evidence,
             &loaded.task.evidence_fingerprints,
-            &evidence,
+            &produced_for_resolution.evidence,
             &context.identity().repository_root,
             false,
         )?
@@ -199,11 +225,15 @@ pub fn preview_close(
     updated = aplan_core::set_evidence_fingerprints(&updated, &evidence_fingerprints)
         .map_err(|source| rewrite(&request.id, source))?;
     let produced = aplan_core::mutation::task_of(&updated).map_err(EvidenceMutationError::Plan)?;
+    let final_evidence = produced.evidence.clone();
     let after = aplan_core::mutation::with_replaced(context.plan(), &request.id, produced);
     let diagnostics = aplan_core::mutation::delta(context.plan(), &after, context.options());
     let denied =
         !request.no_resolve && (resolution.denied || diagnostics.refuses(context.verdict()));
     let mut notices = resolution.notices;
+    if !request.no_resolve {
+        push_broken_closed_file_notices(context, &mut notices);
+    }
     if let Some(notice) = version_notice {
         notices.push(notice);
     }
@@ -217,7 +247,7 @@ pub fn preview_close(
         )],
         vec![SemanticEffect::TaskClosed {
             task: request.id.clone(),
-            evidence,
+            evidence: final_evidence,
         }],
         diagnostics,
         denied,

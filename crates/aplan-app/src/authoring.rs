@@ -208,6 +208,11 @@ pub fn preview_add(
         validate_relations(what, context.plan(), relations, &BTreeSet::new())?;
     }
 
+    let normalized_paths = request
+        .paths
+        .iter()
+        .map(|p| aplan_core::task::normalize_add_path(p).map_err(AuthoringError::Arguments))
+        .collect::<Result<Vec<_>, _>>()?;
     let mut blocked_by = request.blocked_by.clone();
     blocked_by.extend(request.members.iter().cloned());
     let task = new_task(NewTask {
@@ -222,7 +227,7 @@ pub fn preview_add(
         ratified_by: request.ratified_by.clone(),
         contains: request.contains.clone(),
         evidence: request.evidence.clone(),
-        paths: request.paths.clone(),
+        paths: normalized_paths,
         traces: request.traces.clone(),
         tags: request.tags.clone(),
         revisit_at: request.revisit_at.clone(),
