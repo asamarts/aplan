@@ -111,6 +111,9 @@ pub enum Error {
     /// An `agent_contract` declaration the generator cannot render safely (`A2-140`).
     #[error("invalid `agent_contract` in `.aplan.yml`: {0}")]
     BadAgentContract(String),
+    /// An `id_families` declaration the plan cannot mint or validate from (`A2-097`).
+    #[error("invalid `id_families` in `.aplan.yml`: {0}")]
+    BadIdFamilies(String),
     /// A `requires` build-contract block the tool cannot act on (`ADR-0068`, `A2-193`).
     #[error("invalid `requires` in `.aplan.yml`: {0}")]
     BadRequires(String),
@@ -642,6 +645,11 @@ pub struct Config {
     /// default that arrives with an upgrade.
     #[serde(default)]
     pub id_strategy: Option<aplan_core::IdStrategy>,
+    /// Optional per-cut and default id-family declarations for multi-family
+    /// plans (`A2-097`, `APLAN064`). Absent leaves plans that treat ids as
+    /// opaque completely unchanged.
+    #[serde(default)]
+    pub id_families: Option<IdFamiliesConfig>,
     /// Directory holding the plan's task files. Default: `aplan`. A relative value
     /// is resolved against this config file's directory, so `root: plan` means
     /// `<repo>/plan` wherever the command runs. The `--root` flag overrides it.
@@ -680,6 +688,139 @@ pub struct CaptureConfig {
     /// Explicitly selected profiles; there is no implicit personal default.
     #[serde(default)]
     pub profiles: BTreeMap<String, CaptureProfile>,
+}
+
+/// Optional per-cut and default id-family declarations for plans with multiple
+/// id families (`A2-097`, `APLAN064`).
+///
+/// Absent in `.aplan.yml` leaves plans that treat ids as opaque completely
+/// unchanged.
+#[derive(Debug, Clone, Default, Deserialize, Serialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct IdFamiliesConfig {
+    /// Mapping from milestone id or cut label to its declared id family
+    /// (prefix shorthand such as `XYZ-`, or `{prefix, strategy}`).
+    #[serde(default)]
+    pub cuts: BTreeMap<String, IdFamilySpec>,
+    /// Default id family for tasks outside every cut (including
+    /// `cross-cutting` tasks), used only when neither an explicit `--id` nor a
+    /// cut-specific declaration applies.
+    #[serde(default)]
+    pub default: Option<IdFamilySpec>,
+}
+
+/// One declared id family: either a prefix string shorthand (`XYZ-`) or a
+/// mapping with `prefix` and/or `strategy` (`A2-097`).
+#[derive(Debug, Clone, Serialize, JsonSchema)]
+#[serde(untagged)]
+pub enum IdFamilySpec {
+    /// Prefix shorthand such as `"XYZ-"` or `"P0-"`, inheriting top-level
+    /// `id_strategy`.
+    Prefix(String),
+    /// Explicit mapping with optional `prefix` and/or `strategy` override.
+    Spec(aplan_core::IdFamilyRule),
+}
+
+impl<'de> serde::Deserialize<'de> for IdFamilySpec {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: serde::Deserializer<'de>,
+    {
+        struct Shape;
+        impl<'de> serde::de::Visitor<'de> for Shape {
+            type Value = IdFamilySpec;
+
+            fn expecting(&self, f: &mut std::fmt::Formatter) -> std::fmt::Result {
+                f.write_str("an id prefix string (for example `XYZ-`) or a mapping with `prefix`/`strategy`")
+            }
+
+            fn visit_str<E>(self, value: &str) -> Result<IdFamilySpec, E>
+            where
+                E: serde::de::Error,
+            {
+                Ok(IdFamilySpec::Prefix(value.to_string()))
+            }
+
+            fn visit_map<A>(self, map: A) -> Result<IdFamilySpec, A::Error>
+            where
+                A: serde::de::MapAccess<'de>,
+            {
+                serde::Deserialize::deserialize(serde::de::value::MapAccessDeserializer::new(map))
+                    .map(IdFamilySpec::Spec)
+            }
+        }
+        deserializer.deserialize_any(Shape)
+    }
+}
+
+impl IdFamilySpec {
+    /// Convert to the core [`aplan_core::IdFamilyRule`].
+    #[must_use]
+    pub fn to_rule(&self) -> aplan_core::IdFamilyRule {
+        match self {
+            Self::Prefix(prefix) => aplan_core::IdFamilyRule {
+                prefix: Some(prefix.clone()),
+                strategy: None,
+            },
+            Self::Spec(rule) => rule.clone(),
+        }
+    }
+
+    fn validate(&self, label: &str) -> Result<(), Error> {
+        let rule = self.to_rule();
+        if rule.prefix.is_none() && rule.strategy.is_none() {
+            return Err(Error::BadIdFamilies(format!(
+                "{label} declares neither `prefix` nor `strategy`"
+            )));
+        }
+        if let Some(prefix) = rule.prefix.as_deref() {
+            aplan_core::validate_id_family_prefix(prefix)
+                .map_err(|reason| Error::BadIdFamilies(format!("{label}: {reason}")))?;
+        }
+        Ok(())
+    }
+}
+
+impl IdFamiliesConfig {
+    /// Convert to the core [`aplan_core::IdFamilyPolicy`].
+    #[must_use]
+    pub fn to_policy(&self) -> aplan_core::IdFamilyPolicy {
+        aplan_core::IdFamilyPolicy {
+            cuts: self
+                .cuts
+                .iter()
+                .map(|(cut, spec)| (cut.clone(), spec.to_rule()))
+                .collect(),
+            default: self.default.as_ref().map(IdFamilySpec::to_rule),
+        }
+    }
+
+    /// Reject empty, blank, or malformed id-family declarations (`A2-097`).
+    ///
+    /// # Errors
+    /// When neither `cuts` nor `default` is declared, a cut key is blank, or
+    /// any prefix is blank or lacks a trailing separator.
+    pub fn validate(&self) -> Result<(), Error> {
+        if self.cuts.is_empty() && self.default.is_none() {
+            return Err(Error::BadIdFamilies(
+                "`id_families` declares neither `cuts` nor `default`; remove the key or declare \
+                 at least one family"
+                    .into(),
+            ));
+        }
+        for (cut, spec) in &self.cuts {
+            if aplan_core::task::is_vacuous_ref(cut) {
+                return Err(Error::BadIdFamilies(
+                    "`id_families.cuts` contains a blank cut key".into(),
+                ));
+            }
+            spec.validate(&format!("`id_families.cuts.{cut}`"))?;
+        }
+        if let Some(default) = &self.default {
+            default.validate("`id_families.default`")?;
+        }
+        Ok(())
+    }
 }
 
 /// Generated agent-contract settings (`A2-140`).
@@ -3107,6 +3248,9 @@ fn validate_all(config: &Config) -> Result<(), Error> {
     if let Some(agent_contract) = &config.agent_contract {
         agent_contract.validate()?;
     }
+    if let Some(id_families) = &config.id_families {
+        id_families.validate()?;
+    }
     config.validate_capture()?;
     if let Some(runner) = &config.test {
         runner.validate()?;
@@ -3740,6 +3884,14 @@ pub const SCAFFOLD: &str = r#"# .aplan.yml, this repository's `aplan` policy.
 # only; never evaluated as shell syntax and never alters the running process.
 # agent_contract:
 #   invocation: ['./scripts/aplan']
+
+# Optional per-cut and default id-family declarations for plans with several id
+# families (`add`, `add --from`, `blueprint apply`, APLAN064). Absent leaves
+# plans that treat ids as opaque completely unchanged.
+# id_families:
+#   cuts:
+#     ci: 'XYZ-'
+#   default: 'P0-'
 
 # A family may also say how many of it a task carries (APLAN030). The list above
 # is the short form of `{members: [...]}` with no requirement, so nothing changes
@@ -4748,6 +4900,12 @@ tag_families:
 owners: [kim]
 agent_contract:
   invocation: ['./scripts/aplan', '--strict']
+id_families:
+  cuts:
+    M-ci: XYZ-
+  default:
+    prefix: P0-
+    strategy: sequential
 roadmap:
   group_by: epic
 summary:
@@ -5095,7 +5253,7 @@ stale_after_days: 30
         let keys = accepted_keys();
         assert_eq!(
             keys.len(),
-            131,
+            136,
             "config keys changed; teach the fixture above, then update this count: {keys:?}"
         );
         for key in keys {

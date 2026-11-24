@@ -81,6 +81,14 @@ to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Added
 
+- **Per-cut and default id-family declarations (`A2-097`, `id_families`, `APLAN064`)**.
+  `.aplan.yml` now accepts an optional `id_families` block (`id_families.cuts` mapping milestone
+  ids or unique cut labels to a prefix shorthand such as `XYZ-` or `{prefix, strategy}`, plus
+  optional `id_families.default` for unplaced and `cross-cutting` work). `aplan add`, `aplan add
+  --from`, and `aplan blueprint apply` mint from the declared family when no explicit `--id` is
+  supplied while leaving plans without `id_families` completely unchanged. New rule `APLAN064`
+  (warning) reports explicit task ids that contradict their cut's declared family (naming both
+  values and `aplan rekey` / `aplan mv` repairs) as well as ambiguous cut mappings.
 - **Repository launcher argv in generated agent contracts (`A2-140`,
   `--require agent_contract.renders_configured_launcher_argv`)**. `.aplan.yml` now accepts an
   optional `agent_contract` block (`agent_contract.invocation`) declaring an ordered non-empty

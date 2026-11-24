@@ -113,7 +113,7 @@ pub use graph::{
     CriticalPath, CriticalRoute, CriticalStep, CriticalTask, EdgeKind, Graph, Rank, Weigh,
     edge_kind, graph_constructions,
 };
-pub use id::IdStrategy;
+pub use id::{IdFamilyPolicy, IdFamilyRule, IdStrategy, validate_id_family_prefix};
 pub use load::{
     IdentifiedPlan, LoadStats, Plan, PlanFileContent, PlanFileInput, is_plan_directory_path,
     is_plan_file_path, load_plan, load_plan_files, load_plan_identified,

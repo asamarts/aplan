@@ -64,6 +64,8 @@ struct Scenario {
     tag_families: Option<aplan_core::TagFamily>,
     /// Declare canonical owners (enables `APLAN056`).
     owners: &'static [&'static str],
+    /// Declare per-cut id families (enables `APLAN064`).
+    id_families: Option<aplan_core::IdFamilyPolicy>,
     /// Declare scoped evidence policies (enables `APLAN058`).
     evidence_scopes: Vec<aplan_core::validate::EvidenceScope>,
     /// Explicit top-level `evidence.require_min_strength` override (for `APLAN059`).
@@ -169,6 +171,7 @@ fn scen(name: &'static str, rule: Rule, expect: Expect, files: Vec<(String, Stri
         require_cut_membership: false,
         tag_families: None,
         owners: &[],
+        id_families: None,
         evidence_scopes: Vec::new(),
         min_strength: None,
         configured_resolvers: None,
@@ -876,6 +879,76 @@ fn duplicate_evidence_rules() -> Vec<Scenario> {
                  evidence:\n  - kind: file\n    ref: deny.toml\n  - kind: commit\n    ref: abc1234",
             )],
         ),
+        {
+            let mut s = scen(
+                "cut-id-family-mismatch-fires",
+                Rule::CutIdFamilyMismatch,
+                Fires,
+                vec![
+                    (
+                        ".aplan.yml".to_string(),
+                        "id_families:\n  cuts:\n    M-ci: XYZ-\n".to_string(),
+                    ),
+                    tf(
+                        "m-ci",
+                        "id: M-ci\ntitle: CI cut\nphase: 1\nstatus: todo\ntags: [milestone]\n\
+                         blocked_by: [ABC-001]",
+                    ),
+                    tf(
+                        "abc-1",
+                        "id: ABC-001\ntitle: wrong prefix\nphase: 1\nstatus: todo\neffort_days: 1",
+                    ),
+                ],
+            );
+            s.id_families = Some(aplan_core::IdFamilyPolicy {
+                cuts: [(
+                    "M-ci".to_string(),
+                    aplan_core::IdFamilyRule {
+                        prefix: Some("XYZ-".to_string()),
+                        strategy: None,
+                    },
+                )]
+                .into_iter()
+                .collect(),
+                default: None,
+            });
+            s
+        },
+        {
+            let mut s = scen(
+                "cut-id-family-mismatch-silent",
+                Rule::CutIdFamilyMismatch,
+                Silent,
+                vec![
+                    (
+                        ".aplan.yml".to_string(),
+                        "id_families:\n  cuts:\n    M-ci: XYZ-\n".to_string(),
+                    ),
+                    tf(
+                        "m-ci",
+                        "id: M-ci\ntitle: CI cut\nphase: 1\nstatus: todo\ntags: [milestone]\n\
+                         blocked_by: [XYZ-001]",
+                    ),
+                    tf(
+                        "xyz-1",
+                        "id: XYZ-001\ntitle: matching prefix\nphase: 1\nstatus: todo\neffort_days: 1",
+                    ),
+                ],
+            );
+            s.id_families = Some(aplan_core::IdFamilyPolicy {
+                cuts: [(
+                    "M-ci".to_string(),
+                    aplan_core::IdFamilyRule {
+                        prefix: Some("XYZ-".to_string()),
+                        strategy: None,
+                    },
+                )]
+                .into_iter()
+                .collect(),
+                default: None,
+            });
+            s
+        },
     ]
 }
 
@@ -2259,6 +2332,7 @@ fn options_for(s: &Scenario, dir: &std::path::Path) -> Options {
             std::collections::BTreeMap::new()
         },
         owners: s.owners.iter().map(|owner| (*owner).to_string()).collect(),
+        id_families: s.id_families.clone(),
         evidence_scopes: s.evidence_scopes.clone(),
         configured_resolvers: s.configured_resolvers.clone(),
         config_file: s

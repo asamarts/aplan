@@ -7504,10 +7504,12 @@ pub struct AddArgs {
     /// leaving it out.
     #[arg(long, value_name = "FILE")]
     from: Option<PathBuf>,
-    /// Task id. Default: the next free id in the convention the plan already
-    /// uses, keeping its prefix and its digit width and incrementing the
-    /// number. Under `id_strategy: ulid` it is that same prefix followed by a
-    /// ULID, which no counter derives and so no two authors can both derive.
+    /// Task id. Pass `--id` explicitly for a one-off id; otherwise, when
+    /// `.aplan.yml` declares `id_families.cuts` for `--cut` (or
+    /// `id_families.default` when no cut is given), the id is minted from that
+    /// declaration. Plans with no `id_families` declaration derive the next
+    /// free id from the plan's existing convention unchanged (or a ULID under
+    /// `id_strategy: ulid`).
     #[arg(long)]
     id: Option<String>,
     // `A1-108`: the default follows the placement, and the number stays in this
@@ -7889,9 +7891,25 @@ fn push_run_notices(
 /// that fails to load is an error rather than a silent `sequential`: the whole
 /// point of the key is that a repository chose something, and defaulting past a
 /// broken file would mint the ids the choice exists to prevent.
-fn id_strategy(root: &std::path::Path) -> Result<aplan_core::IdStrategy> {
+fn id_mint_config(
+    root: &std::path::Path,
+) -> Result<(aplan_core::IdStrategy, Option<aplan_core::IdFamilyPolicy>)> {
     let (config, _) = config_at(root)?;
-    Ok(config.id_strategy.unwrap_or_default())
+    Ok((
+        config.id_strategy.unwrap_or_default(),
+        config
+            .id_families
+            .as_ref()
+            .map(aplan_config::IdFamiliesConfig::to_policy),
+    ))
+}
+
+fn id_strategy(root: &std::path::Path) -> Result<aplan_core::IdStrategy> {
+    Ok(id_mint_config(root)?.0)
+}
+
+fn id_families_policy(root: &std::path::Path) -> Result<Option<aplan_core::IdFamilyPolicy>> {
+    Ok(id_mint_config(root)?.1)
 }
 
 /// `aplan add`, scaffold one task file (`A1-029`).
@@ -8464,7 +8482,13 @@ fn cmd_add(root: &std::path::Path, args: &AddArgs) -> Result<u8> {
         };
         let id = match &args.id {
             Some(id) => id.clone(),
-            None => ids::mint(&plan, phase, id_strategy(root)?)?,
+            None => ids::mint_with_policy(
+                &plan,
+                phase,
+                cut,
+                id_strategy(root)?,
+                id_families_policy(root)?.as_ref(),
+            )?,
         };
 
         let status = creation_status(args.status.as_deref())?;
@@ -8989,15 +9013,33 @@ fn validate_manifest_creation_entry(
     Ok(())
 }
 
+fn resolve_entry_phase_and_id(
+    entry: &aplan_interop::manifest::Entry,
+    after: &aplan_core::load::Plan,
+    cut: Option<&str>,
+    strategy: aplan_core::IdStrategy,
+    families: Option<&aplan_core::IdFamilyPolicy>,
+) -> std::result::Result<(u32, String), String> {
+    let phase = entry
+        .phase
+        .unwrap_or_else(|| aplan_interop::ids::phase_for(after, cut));
+    let id = match &entry.id {
+        Some(id) => id.clone(),
+        None => aplan_interop::ids::mint_with_policy(after, phase, cut, strategy, families)
+            .map_err(|e| e.to_string())?,
+    };
+    Ok((phase, id))
+}
+
 fn plan_the_batch(
     root: &std::path::Path,
     plan: &aplan_core::load::Plan,
     entries: &[aplan_interop::manifest::Entry],
     out_dir: &std::path::Path,
 ) -> Result<Planned> {
-    use aplan_interop::{emit, ids};
+    use aplan_interop::emit;
 
-    let strategy = id_strategy(root)?;
+    let (strategy, families_policy) = id_mint_config(root)?;
     let mut after = aplan_core::mutation::clone_of(plan);
     let mut created: Vec<String> = Vec::new();
     let mut joined: std::collections::BTreeMap<String, Vec<String>> =
@@ -9023,13 +9065,14 @@ fn plan_the_batch(
         let at = |what: String| anyhow::anyhow!("entry {} (`{}`): {what}", n + 1, entry.title);
         validate_manifest_creation_entry(entry).map_err(at)?;
         let cut = entry_cut(entry, &after, &declared).map_err(at)?;
-        let phase = entry
-            .phase
-            .unwrap_or_else(|| ids::phase_for(&after, cut.as_deref()));
-        let id = match &entry.id {
-            Some(id) => id.clone(),
-            None => ids::mint(&after, phase, strategy).map_err(|e| at(e.to_string()))?,
-        };
+        let (phase, id) = resolve_entry_phase_and_id(
+            entry,
+            &after,
+            cut.as_deref(),
+            strategy,
+            families_policy.as_ref(),
+        )
+        .map_err(at)?;
         // The same containment check `emit::write_task` makes, and the reason it
         // is shared rather than repeated: this path writes the file itself, so
         // without it a manifest id of `../../elsewhere/x` wrote outside the plan

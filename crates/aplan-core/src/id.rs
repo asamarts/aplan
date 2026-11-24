@@ -19,6 +19,8 @@
 //! not have the collision and should not pay for it, which is why `sequential`
 //! stays the default and the trade is stated where an adopter chooses.
 
+use std::collections::BTreeMap;
+
 use serde::{Deserialize, Serialize};
 
 /// How `aplan add` mints an id when the caller does not pass `--id` (`A1-047`).
@@ -50,6 +52,101 @@ impl IdStrategy {
 impl std::fmt::Display for IdStrategy {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.write_str(self.as_str())
+    }
+}
+
+/// One declared id-family rule for a cut or for work outside every cut
+/// (`A2-097`).
+///
+/// At least one of `prefix` or `strategy` is declared. A `prefix` (such as
+/// `XYZ-` or `P0-`) must end with a separator (`-`, `_`, or `.`) so prefixes
+/// cannot silently overlap across unrelated families.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct IdFamilyRule {
+    /// Required id prefix, ending in `-`, `_`, or `.` (for example `XYZ-`,
+    /// `P0-`).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub prefix: Option<String>,
+    /// Optional id strategy override (`sequential` or `ulid`) for tasks using
+    /// this family; absent inherits the top-level `id_strategy`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub strategy: Option<IdStrategy>,
+}
+
+/// Repository-declared mapping from cuts (and unplaced / `cross-cutting` work)
+/// to id families (`A2-097`).
+///
+/// Absent in `.aplan.yml` leaves plans that treat ids as opaque completely
+/// unchanged.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct IdFamilyPolicy {
+    /// Mapping from milestone id or cut label to its declared id family.
+    pub cuts: BTreeMap<String, IdFamilyRule>,
+    /// Default id family for tasks outside every cut (including
+    /// `cross-cutting` tasks), used only when neither an explicit `--id` nor a
+    /// cut declaration applies.
+    pub default: Option<IdFamilyRule>,
+}
+
+/// Validate a declared id-family prefix (`A2-097`).
+///
+/// # Errors
+/// When the prefix is blank, contains unsupported characters, lacks an ASCII
+/// alphanumeric stem, or does not end with a separator (`-`, `_`, or `.`).
+pub fn validate_id_family_prefix(prefix: &str) -> Result<(), String> {
+    if prefix.is_empty() || prefix.trim().is_empty() {
+        return Err("prefix must not be blank".to_string());
+    }
+    if !prefix
+        .bytes()
+        .all(|b| b.is_ascii_alphanumeric() || matches!(b, b'-' | b'_' | b'.'))
+    {
+        return Err(format!(
+            "prefix `{prefix}` may contain only ASCII letters, digits, `-`, `_`, and `.`"
+        ));
+    }
+    if !prefix.ends_with(['-', '_', '.']) {
+        return Err(format!(
+            "prefix `{prefix}` must end with a separator (`-`, `_`, or `.`) so families cannot \
+             silently overlap (for example `{prefix}-`)"
+        ));
+    }
+    let stem = prefix.trim_end_matches(['-', '_', '.']);
+    if !stem.bytes().any(|b| b.is_ascii_alphanumeric()) {
+        return Err(format!(
+            "prefix `{prefix}` must contain at least one ASCII letter or digit before its separator"
+        ));
+    }
+    Ok(())
+}
+
+impl IdFamilyPolicy {
+    /// Resolve the single authoritative rule declared for milestone `cut_id`
+    /// (and its optional roadmap label `cut_label`), rejecting conflicting
+    /// duplicate declarations by id and label rather than choosing by
+    /// iteration order (`A2-097`).
+    ///
+    /// # Errors
+    /// When both `cut_id` and `cut_label` are declared in `cuts` with
+    /// different rules.
+    pub fn rule_for_cut(
+        &self,
+        cut_id: &str,
+        cut_label: Option<&str>,
+    ) -> Result<Option<(&str, &IdFamilyRule)>, String> {
+        let by_id = self.cuts.get_key_value(cut_id);
+        let by_label = cut_label
+            .filter(|label| *label != cut_id)
+            .and_then(|label| self.cuts.get_key_value(label));
+        match (by_id, by_label) {
+            (Some((k1, r1)), Some((k2, r2))) if r1 != r2 => Err(format!(
+                "ambiguous `id_families.cuts` mapping for cut `{cut_id}`: `{k1}` and `{k2}` \
+                 declare conflicting families"
+            )),
+            (Some((k, r)), _) | (None, Some((k, r))) => Ok(Some((k.as_str(), r))),
+            (None, None) => Ok(None),
+        }
     }
 }
 

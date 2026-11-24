@@ -723,6 +723,7 @@ empty cut must be surfaced, not swallowed.
 | `APLAN061` | A live task's `paths` do not include a universal catch-all glob (`**`, `*`, `**/*`, `./**`) | warning | L0 | done (`A2-099`) |
 | `APLAN062` | A task cites each piece of evidence once | warning | L0 | done (`A2-106`) |
 | `APLAN063` | A live task's literal `paths` name neither a bare tracked directory nor a target renamed or removed in Git history | warning | L1 | done (`A2-101`) |
+| `APLAN064` | A task's id matches the id family declared for its cut | warning | L0 | done (`A2-097`, opt-in) |
 | `APLAN044` | A closed task claims less of the released version than its level implies, without saying why | warning | L0 | done (`A1-312`) |
 
 Every diagnostic carries a stable code, a severity, an optional task id, an optional
@@ -1029,6 +1030,10 @@ effort_days_per_week: 7.5                       # ADR-0023, derive durations; no
 owners: [ada, grace]                            # APLAN056, canonical task owners; optional
 agent_contract:                                 # export-agents-md / APLAN041, optional
   invocation: ["./scripts/aplan", "--strict"]   # ordered argv rendered in generated guidance; default ["aplan"]
+id_families:                                    # APLAN064, optional multi-family minting + check
+  cuts:
+    M-ci: XYZ-                                  # shorthand prefix or {prefix, strategy}
+  default: P0-                                  # default family for unplaced / cross-cutting work
 ```
 
 **Generated agent-contract launcher (`agent_contract.invocation`, shipped in `A2-140`).**

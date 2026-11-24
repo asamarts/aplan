@@ -1377,6 +1377,11 @@
     "evidence.max_unrelated_files",
     "evidence.observation_inputs",
     "evidence.require_min_strength",
+    "id_families",
+    "id_families.cuts",
+    "id_families.default",
+    "id_families.default.prefix",
+    "id_families.default.strategy",
     "id_strategy",
     "no_traces",
     "owners",
@@ -1493,11 +1498,11 @@
     "behaviours": 241,
     "build_capabilities": 1,
     "commands": 50,
-    "config_keys": 131,
+    "config_keys": 136,
     "evidence_kinds": 5,
     "formats": 9,
     "mcp_tools": 14,
-    "rules": 63
+    "rules": 64
   },
   "evidence_kinds": [
     "commit",
@@ -1896,6 +1901,11 @@
       "code": "APLAN063",
       "severity": "warning",
       "title": "a live task's literal paths name neither a bare tracked directory nor a target removed or renamed in history"
+    },
+    {
+      "code": "APLAN064",
+      "severity": "warning",
+      "title": "a task's id matches the id family declared for its cut"
     }
   ],
   "schema_version": "v1",

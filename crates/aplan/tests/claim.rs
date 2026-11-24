@@ -1457,3 +1457,87 @@ fn takeover_refusal_is_typed_conflict_and_human_times_show_utc_and_age() {
         "2023-11-14T22:14:05Z (in the future by 45s (clock skew))"
     );
 }
+
+/// Audit parity test for `A2-152` (`ADR-0073`): verifies linked-worktree close
+/// by claimant and by another identity, plus MCP `aplan_close` structured
+/// `claim_reconciliation` parity.
+#[test]
+fn linked_worktree_and_mcp_claim_reconciliation_parity() {
+    let dir = tmp("reconcile-linked");
+    let primary = dir.path();
+    fixture(primary);
+    std::fs::write(
+        primary.join("aplan/tasks/T-peer.md"),
+        "---\nid: T-peer\ntitle: peer work\nphase: 0\nstatus: todo\neffort_days: 1\n---\n\n## Why\n\nBody.\n",
+    )
+    .expect("write T-peer");
+    std::fs::write(primary.join("README.md"), "readme\n").expect("write readme");
+    git(primary, &["config", "user.name", "Claim Test"]);
+    git(primary, &["config", "user.email", "claim@example.invalid"]);
+    git(primary, &["add", "."]);
+    git(primary, &["commit", "-m", "fixture"]);
+
+    let peers = tmp("reconcile-linked-peer");
+    let peer = peers.path().join("peer");
+    git(
+        primary,
+        &[
+            "worktree",
+            "add",
+            "-b",
+            "reconcile-peer",
+            peer.to_str().expect("utf8"),
+        ],
+    );
+
+    // 1. Claimant claims in primary worktree, closes from linked worktree -> released.
+    let c1 = common::command(primary, &["claim", "T-free"])
+        .env("APLAN_OWNER", "alice")
+        .output()
+        .expect("claim primary");
+    assert!(c1.status.success());
+    let close_peer = common::command(
+        &peer,
+        &[
+            "close",
+            "T-free",
+            "--no-resolve",
+            "--evidence",
+            "file:README.md",
+        ],
+    )
+    .env("APLAN_OWNER", "alice")
+    .output()
+    .expect("close peer");
+    assert!(close_peer.status.success());
+    assert_eq!(
+        claim_holder(primary, "T-free"),
+        None,
+        "linked-worktree close by claimant must release shared claim"
+    );
+
+    // 2. MCP `aplan_close` returns structured `claim_reconciliation` outcome.
+    let c2 = common::command(primary, &["claim", "T-peer", "--as", "bob"])
+        .output()
+        .expect("claim T-peer");
+    assert!(c2.status.success());
+    let policy = aplan_mcp::Policy {
+        repo_root: primary.to_path_buf(),
+        options: aplan_core::Options::default(),
+        verdict: aplan_core::Verdict::default(),
+        verify: aplan_evidence::VerifyOptions::default(),
+        id_strategy: aplan_core::IdStrategy::Sequential,
+    };
+    let mcp_out = aplan_mcp::tools::close(
+        &primary.join("aplan"),
+        "T-peer",
+        &["file:README.md".to_string()],
+        &policy,
+    )
+    .expect("mcp close");
+    assert_eq!(
+        mcp_out["claim_reconciliation"]["outcome"], "retained_other_holder",
+        "MCP close by non-holder must retain bob's claim: {mcp_out}"
+    );
+    assert_eq!(claim_holder(primary, "T-peer").as_deref(), Some("bob"));
+}

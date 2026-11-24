@@ -49,6 +49,10 @@ pub enum IdError {
          and later tasks will follow whatever convention it sets"
     )]
     NoConvention,
+    /// Two `id_families.cuts` entries resolve to the same cut with conflicting
+    /// families, or a cut label matches multiple milestones (`A2-097`).
+    #[error("{0}")]
+    AmbiguousCutFamily(String),
     /// Tasks exist, but none whose id ends in a number.
     #[error(
         "no task id ends in a number, so there is no sequence to continue ({sample}); pass \
@@ -223,6 +227,65 @@ pub fn mint(plan: &Plan, phase: u32, strategy: IdStrategy) -> Result<String, IdE
     match strategy {
         IdStrategy::Sequential => next_id(plan, phase),
         IdStrategy::Ulid => ulid_id(plan, phase),
+    }
+}
+
+/// Mint the next id for a task, honoring any declared `id_families` cut or
+/// default family before falling back to the plan's inferred convention
+/// (`A2-097`).
+///
+/// Precedence:
+/// 1. `policy.cuts` matching `cut` (by milestone id or unique cut label)
+/// 2. `policy.default` when `cut` is `None` (work outside every cut, including
+///    `cross-cutting` tasks)
+/// 3. Existing plan-convention [`mint`] when no declaration applies
+///
+/// # Errors
+/// [`IdError::AmbiguousCutFamily`] when `policy.cuts` declares conflicting
+/// entries for the target cut, or any [`IdError`] from [`mint`].
+pub fn mint_with_policy(
+    plan: &Plan,
+    phase: u32,
+    cut: Option<&str>,
+    default_strategy: IdStrategy,
+    policy: Option<&aplan_core::IdFamilyPolicy>,
+) -> Result<String, IdError> {
+    let Some(policy) = policy else {
+        return mint(plan, phase, default_strategy);
+    };
+    let rule = match cut {
+        Some(cut_id) => {
+            let tasks: Vec<_> = plan.tasks.iter().map(|lt| &lt.task).collect();
+            let graph = aplan_core::Graph::new(tasks.iter().copied());
+            let roadmap = graph.roadmap();
+            let label = roadmap
+                .cuts
+                .iter()
+                .find(|c| c.milestone_id == cut_id)
+                .and_then(|c| (!c.version.is_empty()).then_some(c.version.as_str()));
+            policy
+                .rule_for_cut(cut_id, label)
+                .map_err(IdError::AmbiguousCutFamily)?
+                .map(|(_, r)| r)
+        }
+        None => policy.default.as_ref(),
+    };
+    let Some(rule) = rule else {
+        return mint(plan, phase, default_strategy);
+    };
+    let strategy = rule.strategy.unwrap_or(default_strategy);
+    let Some(prefix) = rule.prefix.as_deref() else {
+        return mint(plan, phase, strategy);
+    };
+    match strategy {
+        IdStrategy::Sequential => {
+            let all = families(plan);
+            let (width, next) = all
+                .get(prefix)
+                .map_or((3, 1), |family| (family.width, family.max + 1));
+            Ok(format!("{prefix}{next:0width$}"))
+        }
+        IdStrategy::Ulid => Ok(format!("{prefix}{}", mint_ulid()?)),
     }
 }
 
