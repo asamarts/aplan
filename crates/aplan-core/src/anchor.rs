@@ -447,6 +447,17 @@ impl ResolvedAnchor {
 
 /// Outcome of comparing a stored `trace_fingerprints` stamp against a live document
 /// (`ADR-0069`, `A2-051`).
+/// Current trace-fingerprint algorithm marker (`A2-062`).
+///
+/// Legacy stamps with no `@<algo>` suffix are treated as unknown-build stamps
+/// rather than a mismatch, so existing closed tasks never become findings on
+/// upgrade. Stamps carrying an explicit `@<other>` marker from a different
+/// hashing algorithm are reported as [`StampCheck::BuildMismatch`] instead of
+/// content drift.
+pub const CURRENT_FINGERPRINT_ALGO: &str = "f1";
+
+/// Comparison result between a stored `trace_fingerprints` stamp and the live
+/// document (`ADR-0069`, `A2-051`, `A2-062`).
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum StampCheck {
     /// Stamp matches the current target (same kind if recorded, matching current or legacy hash).
@@ -455,6 +466,11 @@ pub enum StampCheck {
     Retargeted { was: AnchorKind, now: AnchorKind },
     /// Same element kind (or legacy untagged stamp), but the target's content hash changed.
     Drifted { kind: AnchorKind },
+    /// Explicit algorithm marker in the stamp disagrees with [`CURRENT_FINGERPRINT_ALGO`].
+    BuildMismatch {
+        stamped_with: String,
+        current: &'static str,
+    },
 }
 
 /// One parsed Markdown trace document, reused throughout one validation run.
@@ -529,9 +545,30 @@ impl MarkdownDocument {
     /// `None` means the anchor itself does not resolve; `Some` classifies
     /// whether the stored stamp holds, retargeted to a different element kind,
     /// or drifted in content (`ADR-0069`, `A2-051`).
+    fn split_stamp_algo(stored: &str) -> (&str, Option<&str>) {
+        stored
+            .rsplit_once('@')
+            .filter(|(_, algo)| {
+                !algo.is_empty()
+                    && algo
+                        .chars()
+                        .all(|c| c.is_ascii_alphanumeric() || matches!(c, '-' | '_' | '.'))
+            })
+            .map_or((stored, None), |(body, algo)| (body, Some(algo)))
+    }
+
     pub(crate) fn check_stamp(&self, anchor: &str, stored: &str) -> Option<StampCheck> {
         let current = self.resolve(anchor)?;
-        let (stored_kind, stored_hash) = AnchorKind::parse_stamp(stored);
+        let (stamp_body, stored_algo) = Self::split_stamp_algo(stored);
+        if let Some(algo) = stored_algo
+            && algo != CURRENT_FINGERPRINT_ALGO
+        {
+            return Some(StampCheck::BuildMismatch {
+                stamped_with: algo.to_string(),
+                current: CURRENT_FINGERPRINT_ALGO,
+            });
+        }
+        let (stored_kind, stored_hash) = AnchorKind::parse_stamp(stamp_body);
         if let Some(was) = stored_kind
             && was != current.kind
         {
@@ -1562,7 +1599,24 @@ pub fn fingerprint_in(rel: &str, text: &str, anchor: &str) -> Option<String> {
 #[must_use]
 pub fn check_stamp_in(rel: &str, text: &str, anchor: &str, stored: &str) -> Option<StampCheck> {
     let current = resolve_in(rel, text, anchor)?;
-    let (stored_kind, stored_hash) = AnchorKind::parse_stamp(stored);
+    let (stamp_body, stored_algo) = stored
+        .rsplit_once('@')
+        .filter(|(_, algo)| {
+            !algo.is_empty()
+                && algo
+                    .chars()
+                    .all(|c| c.is_ascii_alphanumeric() || matches!(c, '-' | '_' | '.'))
+        })
+        .map_or((stored, None), |(body, algo)| (body, Some(algo)));
+    if let Some(algo) = stored_algo
+        && algo != CURRENT_FINGERPRINT_ALGO
+    {
+        return Some(StampCheck::BuildMismatch {
+            stamped_with: algo.to_string(),
+            current: CURRENT_FINGERPRINT_ALGO,
+        });
+    }
+    let (stored_kind, stored_hash) = AnchorKind::parse_stamp(stamp_body);
     if let Some(was) = stored_kind
         && was != current.kind
     {

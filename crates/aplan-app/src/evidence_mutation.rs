@@ -205,7 +205,8 @@ pub fn preview_close(
             .any(|citation| citation.kind == EvidenceKind::Test)
     {
         return Err(EvidenceMutationError::Arguments(
-            "focused execution requires at least one `test` citation in the proposed closure"
+            "focused execution requires at least one explicit `test` citation in the proposed \
+             closure (pass `--evidence test:NAME` or attach one on the task)"
                 .to_string(),
         ));
     }
@@ -1455,7 +1456,7 @@ mod tests {
             preview_close(&trusted_without_runner, &without_test)
                 .expect_err("focused close without a test citation must refuse")
                 .to_string()
-                .contains("requires at least one `test` citation")
+                .contains("`test` citation")
         );
         assert!(
             preview_close(&trusted_without_runner, &request)

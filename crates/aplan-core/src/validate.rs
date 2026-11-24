@@ -1332,6 +1332,26 @@ fn check_drift(
                 )),
             );
         }
+        crate::anchor::StampCheck::BuildMismatch {
+            stamped_with,
+            current,
+        } => {
+            return Some(
+                Diagnostic::warning(
+                    code::TRACE_DRIFT,
+                    format!(
+                        "trace fingerprint for `{trace}` was stamped with build algorithm \
+                         `{stamped_with}` (this build uses `{current}`), not a content edit to \
+                         the section"
+                    ),
+                )
+                .with_agent_instruction(format!(
+                    "Run `aplan close {task_id} --restamp` with the repository's pinned build \
+                     (or check `aplan facts --identity`) rather than assuming the traced \
+                     document changed."
+                )),
+            );
+        }
         crate::anchor::StampCheck::Drifted { .. } => {}
     }
     // Where to look, when the task cites a commit to look *from*. The reader is
@@ -3303,48 +3323,62 @@ fn check_scaffold(lt: &crate::load::LoadedTask, out: &mut Vec<Diagnostic>) {
 /// unticked by `APLAN038`, ticked by `APLAN039`. The window this covers is
 /// between authoring and closing, where the author is still in the file.
 ///
-/// **Beside other criteria, never alone.** A task whose only criterion is the
-/// prompt has not answered what `add` asked, which is a different thing and
-/// `APLAN038`'s at close. This one is about the scaffold *surviving* an answer.
+/// `APLAN043`: an open task whose body still carries the `aplan add`
+/// placeholder text -- either left behind beside criteria the author wrote,
+/// or untouched as the task's only body (`A1-299`, `A2-034`).
+///
+/// Promoted captures and hand-authored tasks whose body is real prose without
+/// the generated placeholder lines stay silent.
 fn check_scaffold_leftover(lt: &crate::load::LoadedTask, out: &mut Vec<Diagnostic>) {
     let t = &lt.task;
-    // **Ticked or not.** The rule is about the scaffold *surviving* an answer,
-    // and a tick does not make it survive less -- it makes the line assert that
-    // the instruction was met, which is worse. `APLAN039` owns the ticked case on
-    // a *closed* task, so widening here reports nothing twice; it closes the same
-    // window this rule exists for. Zero tasks on this host carry the shape today,
-    // so the widening costs no finding and removes a hole an author reaches by
-    // ticking a box (`A1-299`, audit).
-    let Some(line) = lt
-        .criteria
-        .scaffold_unticked
-        .or(lt.criteria.scaffold_ticked)
-    else {
-        return;
-    };
-    let own = lt.criteria.total.saturating_sub(lt.criteria.prompts);
-    if t.status.is_terminal() || own == 0 {
+    if t.status.is_terminal() {
         return;
     }
-    out.push(
-        Diagnostic::warning(
-            code::SCAFFOLD_LEFTOVER,
-            format!(
-                "carries the scaffold's own prompt beside {own} criteri{} of its own: `{}` is \
-                 the line `aplan add` writes to be replaced, not kept",
-                if own == 1 { "on" } else { "a" },
-                lt.criteria.scaffold_prompt.unwrap_or_default()
+    let prompt_line = lt
+        .criteria
+        .scaffold_unticked
+        .or(lt.criteria.scaffold_ticked);
+    let own = lt.criteria.total.saturating_sub(lt.criteria.prompts);
+    if let Some(line) = prompt_line
+        && own > 0
+    {
+        out.push(
+            Diagnostic::warning(
+                code::SCAFFOLD_LEFTOVER,
+                format!(
+                    "carries the scaffold's own prompt beside {own} criteri{} of its own: `{}` is \
+                     the line `aplan add` writes to be replaced, not kept",
+                    if own == 1 { "on" } else { "a" },
+                    lt.criteria.scaffold_prompt.unwrap_or_default()
+                ),
+            )
+            .with_task(&t.id)
+            .with_file(&lt.path)
+            .at(crate::diagnostic::Location { line, column: 1 })
+            .with_agent_instruction(
+                "Delete that line, and the `## Acceptance criteria` heading it was written under \
+                 if that heading now has nothing else beneath it. Keep the criteria you wrote. A \
+                 body with two of that heading is the scaffold left beside the answer.",
             ),
+        );
+        return;
+    }
+    if !t.is_milestone() && (lt.criteria.why_untouched || prompt_line.is_some()) {
+        let mut diag = Diagnostic::warning(
+            code::SCAFFOLD_LEFTOVER,
+            "body still contains the `aplan add` placeholder text",
         )
         .with_task(&t.id)
         .with_file(&lt.path)
-        .at(crate::diagnostic::Location { line, column: 1 })
         .with_agent_instruction(
-            "Delete that line, and the `## Acceptance criteria` heading it was written under if \
-             that heading now has nothing else beneath it. Keep the criteria you wrote. A body \
-             with two of that heading is the scaffold left beside the answer.",
-        ),
-    );
+            "Replace the placeholder prose under `## Why` and the placeholder criterion under \
+             `## Acceptance criteria` with this task's actual purpose and done criteria.",
+        );
+        if let Some(line) = prompt_line {
+            diag = diag.at(crate::diagnostic::Location { line, column: 1 });
+        }
+        out.push(diag);
+    }
 }
 
 /// `APLAN044`: a closed task claims less than its level implies and says why
@@ -4136,17 +4170,26 @@ mod tests {
         assert!(d.message.contains("2 criteria of its own"), "{}", d.message);
         assert_eq!(d.location.map(|l| l.line), Some(24));
 
-        // The prompt alone: `add` wrote it and nobody has answered yet, which is
-        // `APLAN038`'s at close and not a finding here.
+        // The prompt alone on an open task now warns (`A2-034`), while a real
+        // body without placeholders stays silent.
         let mut alone = plan_with_criteria(leftover());
         alone.tasks[0].task.status = Status::Todo;
         alone.tasks[0].criteria.total = 1;
         assert!(
-            !validate(&alone, &opts())
+            validate(&alone, &opts())
                 .diagnostics
                 .iter()
                 .any(|d| d.code == code::SCAFFOLD_LEFTOVER),
-            "a task with only the prompt was reported"
+            "an open task with only the placeholder prompt should be reported"
+        );
+        let mut promoted = plan_with_criteria(crate::load::Criteria::default());
+        promoted.tasks[0].task.status = Status::Todo;
+        assert!(
+            !validate(&promoted, &opts())
+                .diagnostics
+                .iter()
+                .any(|d| d.code == code::SCAFFOLD_LEFTOVER),
+            "a promoted capture or real body without placeholders must stay silent"
         );
 
         // And a closed task, where the same leftover is `APLAN038`'s or

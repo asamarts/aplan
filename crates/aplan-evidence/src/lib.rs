@@ -1095,7 +1095,11 @@ fn check_live_task_trace(
                 ));
             }
             Some(aplan_core::StampCheck::Holds) => return None,
-            Some(aplan_core::StampCheck::Drifted { .. }) | None => {}
+            Some(
+                aplan_core::StampCheck::Drifted { .. }
+                | aplan_core::StampCheck::BuildMismatch { .. },
+            )
+            | None => {}
         }
     }
 

@@ -13152,6 +13152,39 @@ fn render_focused_close_preview(
     Ok(())
 }
 
+fn observation_options_at(root: &std::path::Path) -> Result<aplan_evidence::VerifyOptions> {
+    let (config, config_dir) = config_at(root)?;
+    Ok(aplan_evidence::VerifyOptions {
+        traces_root: None,
+        detect_drift: false,
+        execute: false,
+        test_runner: config.test.clone(),
+        url_check: None,
+        version: None,
+        max_unrelated_files: None,
+        observation_inputs: config
+            .evidence
+            .as_ref()
+            .and_then(|e| e.observation_inputs.clone()),
+        config_file: selected_config_file(config_dir.as_deref()),
+    })
+}
+
+fn reconcile_close_observation(
+    repo: &std::path::Path,
+    obs_opts: &aplan_evidence::VerifyOptions,
+    before_material: Option<&str>,
+) {
+    if let Some(before) = before_material {
+        aplan_app::reconcile_observation_after_own_write(
+            repo,
+            obs_opts,
+            &aplan_app::EvidenceObservationOptions::default(),
+            before,
+        );
+    }
+}
+
 fn cmd_close_execute(
     root: &std::path::Path,
     id: &str,
@@ -13163,16 +13196,9 @@ fn cmd_close_execute(
         .iter()
         .map(|argument| parse_evidence(argument))
         .collect::<Result<Vec<_>>>()?;
-    if !evidence
-        .iter()
-        .any(|citation| citation.kind == aplan_core::EvidenceKind::Test)
-    {
-        anyhow::bail!(
-            "`close --execute` requires at least one explicit `--evidence test:NAME`; without \
-             one there is no focused L3 claim to prove"
-        );
-    }
     let context = focused_close_context(root, repo, verdict)?;
+    let obs_opts = observation_options_at(root)?;
+    let before_material = aplan_app::capture_material_identity(repo, &obs_opts);
     let preview = aplan_app::preview_close(
         &context,
         &aplan_app::CloseRequest {
@@ -13212,6 +13238,7 @@ fn cmd_close_execute(
     };
     match aplan_app::commit_change_set(&context, preview.into_change_set()) {
         aplan_app::CommitOutcome::Applied(_) => {
+            reconcile_close_observation(repo, &obs_opts, before_material.as_deref());
             let refs = evidence
                 .iter()
                 .map(|citation| format!("{}:{}", citation.kind.as_str(), citation.reference))

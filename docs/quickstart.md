@@ -15,10 +15,18 @@ atomic `aplan add --from` operation:
   title: Decide what done looks like
   cut: M-v0.1
   effort: 1
+  body: |
+    ## Why
+
+    Establish the done criteria for the first cut.
 - id: T-002
   title: Wire the gate into CI
   cut: M-v0.1
   effort: 2
+  body: |
+    ## Why
+
+    Run `aplan check` and `aplan verify` on every pull request.
 ```
 
 ```console

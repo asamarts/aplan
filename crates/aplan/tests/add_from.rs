@@ -545,7 +545,7 @@ fn an_improving_manifest_add_to_an_existing_malformed_milestone_is_not_hard_refu
         check.text()
     );
     assert!(
-        check.text().contains("1 warning(s)") && !check.text().contains("has no members"),
+        check.text().matches("APLAN021").count() == 1 && !check.text().contains("has no members"),
         "the post-state did not strictly improve the warning: {}",
         check.text()
     );
