@@ -1028,3 +1028,176 @@ fn owner_and_out_land_where_they_say_they_do() {
         "`--out` wrote to the default directory as well: {defaults:?}"
     );
 }
+
+/// End-to-end tests for `A2-097` (`id_families` + `APLAN064`):
+/// - `id_families.cuts` mints the declared prefix/strategy for `add` and `add --from`
+/// - `id_families.default` mints for unplaced / `cross-cutting` work
+/// - explicit `--id` always wins, and `check` reports `APLAN064` with both
+///   values and an actionable repair when an explicit id contradicts its cut
+/// - ambiguous cut mappings and malformed config declarations fail loudly
+/// - plans with no `id_families` declaration remain unchanged
+#[test]
+fn id_families_mints_cut_and_default_families_and_reports_mismatch() {
+    let dir = tempfile::Builder::new()
+        .tempdir_in(aplan_core::fixture::fixture_root())
+        .expect("tempdir");
+    let root = dir.path();
+    std::fs::create_dir_all(root.join("aplan/tasks")).expect("mkdir");
+    std::fs::write(
+        root.join("aplan/tasks/M-ci.md"),
+        "---\nid: M-ci\ntitle: CI cut\nphase: 1\nstatus: todo\ntags: [milestone, ci]\nblocked_by: [XYZ-001]\n---\n\n## Why\n\nCut.\n",
+    )
+    .expect("write M-ci");
+    std::fs::write(
+        root.join("aplan/tasks/XYZ-001.md"),
+        "---\nid: XYZ-001\ntitle: existing ci work\nphase: 1\nstatus: todo\neffort_days: 1\n---\n\n## Why\n\nWork.\n",
+    )
+    .expect("write XYZ-001");
+    std::fs::write(
+        root.join("aplan/tasks/ABC-055.md"),
+        "---\nid: ABC-055\ntitle: unrelated family\nphase: 1\nstatus: todo\neffort_days: 1\n---\n\n## Why\n\nWork.\n",
+    )
+    .expect("write ABC-055");
+    std::fs::write(
+        root.join(".aplan.yml"),
+        "id_families:\n  cuts:\n    M-ci: XYZ-\n  default: P0-\n",
+    )
+    .expect("write config");
+
+    // 1. `add --cut M-ci` mints `XYZ-002` instead of `ABC-056`.
+    let out = common::run(
+        root,
+        &["add", "New CI task", "--cut", "M-ci", "--effort", "1"],
+    );
+    assert_eq!(
+        out.code, 0,
+        "add --cut M-ci failed:\n{}{}",
+        out.stdout, out.stderr
+    );
+    assert!(
+        root.join("aplan/tasks/XYZ-002.md").exists(),
+        "expected XYZ-002.md to be minted:\n{}",
+        out.stdout
+    );
+
+    // 2. `add --tag cross-cutting` (no cut) mints from `id_families.default` (`P0-001`).
+    let out = common::run(
+        root,
+        &[
+            "add",
+            "Cross-cutting CI",
+            "--tag",
+            "cross-cutting",
+            "--effort",
+            "1",
+        ],
+    );
+    assert_eq!(
+        out.code, 0,
+        "add default failed:\n{}{}",
+        out.stdout, out.stderr
+    );
+    assert!(
+        root.join("aplan/tasks/P0-001.md").exists(),
+        "expected P0-001.md from id_families.default:\n{}",
+        out.stdout
+    );
+
+    // 3. `add --from` mints from `id_families.cuts` for cut entries and
+    //    `id_families.default` for unplaced entries.
+    let manifest = root.join("batch.yml");
+    std::fs::write(
+        &manifest,
+        "- title: Batch CI work\n  cut: M-ci\n  effort: 1\n- title: Batch unplaced\n  tags: [cross-cutting]\n  effort: 1\n",
+    )
+    .expect("write manifest");
+    let out = common::run(root, &["add", "--from", manifest.to_str().expect("utf8")]);
+    assert_eq!(
+        out.code, 0,
+        "add --from failed:\n{}{}",
+        out.stdout, out.stderr
+    );
+    assert!(
+        root.join("aplan/tasks/XYZ-003.md").exists(),
+        "expected XYZ-003.md"
+    );
+    assert!(
+        root.join("aplan/tasks/P0-002.md").exists(),
+        "expected P0-002.md"
+    );
+
+    // 4. Explicit `--id` always wins, `check` reports `APLAN064`, and malformed
+    //    or ambiguous declarations fail loudly.
+    assert_mismatch_bad_and_ambiguous_id_families(root);
+}
+
+fn assert_mismatch_bad_and_ambiguous_id_families(root: &std::path::Path) {
+    let out = common::run(
+        root,
+        &[
+            "add",
+            "Explicit mismatch",
+            "--id",
+            "ABC-099",
+            "--cut",
+            "M-ci",
+            "--effort",
+            "1",
+        ],
+    );
+    assert_eq!(
+        out.code, 0,
+        "explicit --id add failed:\n{}{}",
+        out.stdout, out.stderr
+    );
+    let checked = common::run(root, &["check"]);
+    assert!(
+        checked.stdout.contains("APLAN064")
+            && checked.stdout.contains("ABC-099")
+            && checked.stdout.contains("XYZ-")
+            && checked.stdout.contains("aplan rekey ABC-099"),
+        "expected APLAN064 naming both values and rekey repair:\n{}{}",
+        checked.stdout,
+        checked.stderr
+    );
+
+    // 5. Malformed `id_families` declarations fail configuration (exit 2).
+    for (label, bad_yaml) in [
+        ("empty id_families", "id_families: {}\n"),
+        (
+            "missing separator",
+            "id_families:\n  cuts:\n    M-ci: XYZ\n",
+        ),
+        ("blank cut key", "id_families:\n  cuts:\n    '   ': XYZ-\n"),
+        ("empty long spec", "id_families:\n  cuts:\n    M-ci: {}\n"),
+    ] {
+        std::fs::write(root.join(".aplan.yml"), bad_yaml).expect("write bad config");
+        let bad = common::run(root, &["check"]);
+        assert_eq!(
+            bad.code, 2,
+            "case `{label}` should fail config with exit 2:\n{}{}",
+            bad.stdout, bad.stderr
+        );
+    }
+
+    // 6. Conflicting id + label entries for the same cut refuse minting rather
+    //    than picking by iteration order.
+    std::fs::write(
+        root.join(".aplan.yml"),
+        "id_families:\n  cuts:\n    M-ci: XYZ-\n    ci: ABC-\n",
+    )
+    .expect("write conflicting config");
+    let ambig = common::run(
+        root,
+        &["add", "Ambiguous", "--cut", "M-ci", "--effort", "1"],
+    );
+    assert_ne!(
+        ambig.code, 0,
+        "conflicting cut family mapping must be refused"
+    );
+    assert!(
+        ambig.stderr.contains("ambiguous"),
+        "expected ambiguous mapping error:\n{}",
+        ambig.stderr
+    );
+}

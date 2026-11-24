@@ -416,6 +416,9 @@ pub struct Options {
     /// Canonical task owners (`APLAN056`). Empty means the repository declared
     /// no vocabulary and every owner spelling stays legal.
     pub owners: BTreeSet<String>,
+    /// Declared per-cut and default id families (`APLAN064`, `A2-097`). `None`
+    /// leaves plans that treat ids as opaque completely unchanged.
+    pub id_families: Option<crate::IdFamilyPolicy>,
     /// The generated agent-contract block, for [`code::STALE_AGENT_CONTRACT`]
     /// (`APLAN041`). `None` disables the rule, and is what a caller that cannot
     /// render one passes.
@@ -452,6 +455,7 @@ impl Default for Options {
             require_cut_membership: false,
             tag_families: BTreeMap::new(),
             owners: BTreeSet::new(),
+            id_families: None,
             agents_block: None,
             config_file: None,
         }
@@ -706,6 +710,7 @@ pub fn validate_with_graph(plan: &Plan, opts: &Options, graph: &Graph<'_>) -> Re
         check_revisit(lt, &mut report.diagnostics);
     }
     check_vocabularies(plan, opts, &mut report.diagnostics);
+    check_id_families(plan, graph, opts, &mut report.diagnostics);
     check_policy_selectors(plan, opts, &mut report.diagnostics);
     check_policy_evidence_resolvers(opts, &mut report.diagnostics);
     check_agents_block(
@@ -729,6 +734,118 @@ pub fn validate_with_graph(plan: &Plan, opts: &Options, graph: &Graph<'_>) -> Re
             .then(a.message.cmp(&b.message))
     });
     report
+}
+
+/// APLAN064: when `.aplan.yml` declares `id_families`, verify that cut
+/// mappings are unambiguous and that every non-milestone task inside a
+/// declared cut carries an id matching that cut's declared prefix (`A2-097`).
+fn check_id_families(plan: &Plan, graph: &Graph<'_>, opts: &Options, out: &mut Vec<Diagnostic>) {
+    let Some(policy) = &opts.id_families else {
+        return;
+    };
+    let roadmap = graph.roadmap();
+    let mut milestones_by_label: BTreeMap<&str, Vec<&str>> = BTreeMap::new();
+    let mut label_by_milestone: BTreeMap<&str, &str> = BTreeMap::new();
+    let mut cut_rules: BTreeMap<&str, (&str, &crate::IdFamilyRule)> = BTreeMap::new();
+    let mut cut_of_task: BTreeMap<&str, &str> = BTreeMap::new();
+    for cut in &roadmap.cuts {
+        if cut.release || cut.borrows {
+            continue;
+        }
+        let m_id = cut.milestone_id.as_str();
+        let label = cut.version.as_str();
+        if !label.is_empty() {
+            milestones_by_label.entry(label).or_default().push(m_id);
+        }
+        label_by_milestone.insert(m_id, label);
+        match policy.rule_for_cut(m_id, (!label.is_empty()).then_some(label)) {
+            Ok(Some((key, rule))) => {
+                cut_rules.insert(m_id, (key, rule));
+            }
+            Ok(None) => {}
+            Err(conflict) => out.push(id_family_diag(
+                Some(m_id.to_string()),
+                opts.config_file.clone(),
+                conflict,
+                format!("Keep only one `id_families.cuts` entry for cut `{m_id}` in `.aplan.yml`"),
+            )),
+        }
+        for member in &cut.members {
+            cut_of_task.entry(member.id.as_str()).or_insert(m_id);
+        }
+    }
+    for key in policy.cuts.keys() {
+        if let Some(milestones) = milestones_by_label.get(key.as_str())
+            && milestones.len() > 1
+            && !label_by_milestone.contains_key(key.as_str())
+        {
+            out.push(id_family_diag(
+                None,
+                opts.config_file.clone(),
+                format!(
+                    "`id_families.cuts` entry `{key}` matches {} milestones ({}); name the \
+                     exact milestone id instead so cut id-family resolution is unambiguous",
+                    milestones.len(),
+                    milestones.join(", ")
+                ),
+                format!(
+                    "Replace `{key}` in `.aplan.yml` `id_families.cuts` with the specific \
+                     milestone id(s): {}",
+                    milestones.join(", ")
+                ),
+            ));
+        }
+    }
+    for lt in &plan.tasks {
+        if lt.task.is_milestone() {
+            continue;
+        }
+        let Some(&m_id) = cut_of_task.get(lt.task.id.as_str()) else {
+            continue;
+        };
+        let Some((declared_key, rule)) = cut_rules.get(m_id) else {
+            continue;
+        };
+        let Some(prefix) = rule.prefix.as_deref() else {
+            continue;
+        };
+        if !lt.task.id.starts_with(prefix) {
+            out.push(id_family_diag(
+                Some(lt.task.id.clone()),
+                Some(lt.path.clone()),
+                format!(
+                    "{}: id `{}` does not match the `{prefix}` family declared for cut \
+                     `{declared_key}` (`{m_id}`)",
+                    lt.task.id, lt.task.id
+                ),
+                format!(
+                    "Rekey `{}` into the `{prefix}` family with `aplan rekey {} <{prefix}ID>`, \
+                     move it to the matching cut with `aplan mv {} --cut <CUT>`, or update \
+                     `id_families.cuts` in `.aplan.yml`",
+                    lt.task.id, lt.task.id, lt.task.id
+                ),
+            ));
+        }
+    }
+}
+
+fn id_family_diag(
+    task: Option<String>,
+    file: Option<std::path::PathBuf>,
+    message: String,
+    instruction: String,
+) -> Diagnostic {
+    Diagnostic {
+        code: code::CUT_ID_FAMILY_MISMATCH,
+        severity: crate::Severity::Warning,
+        task,
+        file,
+        message,
+        agent_instruction: Some(instruction),
+        repair: None,
+        location: None,
+        detail: Vec::new(),
+    }
 }
 
 /// APLAN022: every non-milestone task belongs to exactly one cut unless its
@@ -9680,5 +9797,64 @@ mod tests {
                 && d.message.contains("commit:abc1234")
                 && d.message.contains("2 times")
         }));
+    }
+
+    /// `APLAN064` (`A2-097`): explicit task ids contradicting their cut's
+    /// declared id family are reported with both the task id and the declared
+    /// prefix plus an actionable `aplan rekey` / `aplan mv` instruction, while
+    /// matching ids and plans with no `id_families` stay silent.
+    #[test]
+    fn cut_id_family_mismatch_names_task_and_declared_family() {
+        let mut m = t("M-ci", Status::Todo);
+        m.tags = vec!["milestone".into()];
+        m.blocked_by = vec!["ABC-001".into(), "XYZ-001".into()];
+        let wrong = t("ABC-001", Status::Todo);
+        let right = t("XYZ-001", Status::Todo);
+        let plan = plan_of(vec![m, wrong, right]);
+
+        // Without `id_families`, `APLAN064` is completely silent.
+        let silent = validate(&plan, &Options::default());
+        assert!(
+            !silent
+                .diagnostics
+                .iter()
+                .any(|d| d.code == code::CUT_ID_FAMILY_MISMATCH)
+        );
+
+        let opts = Options {
+            id_families: Some(crate::IdFamilyPolicy {
+                cuts: [(
+                    "M-ci".to_string(),
+                    crate::IdFamilyRule {
+                        prefix: Some("XYZ-".to_string()),
+                        strategy: None,
+                    },
+                )]
+                .into_iter()
+                .collect(),
+                default: None,
+            }),
+            ..Default::default()
+        };
+        let report = validate(&plan, &opts);
+        let a64: Vec<_> = report
+            .diagnostics
+            .iter()
+            .filter(|d| d.code == code::CUT_ID_FAMILY_MISMATCH)
+            .collect();
+        assert_eq!(a64.len(), 1, "expected 1 APLAN064 finding: {a64:#?}");
+        let d = a64[0];
+        assert_eq!(d.severity, crate::Severity::Warning);
+        assert_eq!(d.task.as_deref(), Some("ABC-001"));
+        assert!(
+            d.message.contains("ABC-001") && d.message.contains("XYZ-"),
+            "message must name both the task id and declared prefix: {}",
+            d.message
+        );
+        let instr = d.agent_instruction.as_deref().unwrap_or("");
+        assert!(
+            instr.contains("aplan rekey ABC-001"),
+            "instruction must offer actionable rekey repair: {instr}"
+        );
     }
 }

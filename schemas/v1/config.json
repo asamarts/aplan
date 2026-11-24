@@ -335,6 +335,71 @@
         }
       ]
     },
+    "IdFamiliesConfig": {
+      "additionalProperties": false,
+      "description": "Optional per-cut and default id-family declarations for plans with multiple\nid families (`A2-097`, `APLAN064`).\n\nAbsent in `.aplan.yml` leaves plans that treat ids as opaque completely\nunchanged.",
+      "properties": {
+        "cuts": {
+          "additionalProperties": {
+            "$ref": "#/$defs/IdFamilySpec"
+          },
+          "default": {},
+          "description": "Mapping from milestone id or cut label to its declared id family\n(prefix shorthand such as `XYZ-`, or `{prefix, strategy}`).",
+          "type": "object"
+        },
+        "default": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/IdFamilySpec"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "description": "Default id family for tasks outside every cut (including\n`cross-cutting` tasks), used only when neither an explicit `--id` nor a\ncut-specific declaration applies."
+        }
+      },
+      "type": "object"
+    },
+    "IdFamilyRule": {
+      "additionalProperties": false,
+      "description": "One declared id-family rule for a cut or for work outside every cut\n(`A2-097`).\n\nAt least one of `prefix` or `strategy` is declared. A `prefix` (such as\n`XYZ-` or `P0-`) must end with a separator (`-`, `_`, or `.`) so prefixes\ncannot silently overlap across unrelated families.",
+      "properties": {
+        "prefix": {
+          "description": "Required id prefix, ending in `-`, `_`, or `.` (for example `XYZ-`,\n`P0-`).",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "strategy": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/IdStrategy"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "description": "Optional id strategy override (`sequential` or `ulid`) for tasks using\nthis family; absent inherits the top-level `id_strategy`."
+        }
+      },
+      "type": "object"
+    },
+    "IdFamilySpec": {
+      "anyOf": [
+        {
+          "description": "Prefix shorthand such as `\"XYZ-\"` or `\"P0-\"`, inheriting top-level\n`id_strategy`.",
+          "type": "string"
+        },
+        {
+          "$ref": "#/$defs/IdFamilyRule",
+          "description": "Explicit mapping with optional `prefix` and/or `strategy` override."
+        }
+      ],
+      "description": "One declared id family: either a prefix string shorthand (`XYZ-`) or a\nmapping with `prefix` and/or `strategy` (`A2-097`)."
+    },
     "IdStrategy": {
       "description": "How `aplan add` mints an id when the caller does not pass `--id` (`A1-047`).",
       "oneOf": [
@@ -1287,6 +1352,18 @@
       ],
       "default": null,
       "description": "Evidence-strength policy (`APLAN017`)."
+    },
+    "id_families": {
+      "anyOf": [
+        {
+          "$ref": "#/$defs/IdFamiliesConfig"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": null,
+      "description": "Optional per-cut and default id-family declarations for multi-family\nplans (`A2-097`, `APLAN064`). Absent leaves plans that treat ids as\nopaque completely unchanged."
     },
     "id_strategy": {
       "anyOf": [

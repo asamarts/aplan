@@ -1474,6 +1474,12 @@ define_rules! {
     LivePathStranded => LIVE_PATH_STRANDED = "APLAN063", Warning,
         "a live task's literal paths name neither a bare tracked directory nor a target removed or renamed in history",
         points_at: Some("paths");
+    /// A non-milestone task's id contradicts the id family declared for its
+    /// cut in `.aplan.yml` `id_families`, or `id_families.cuts` declares an
+    /// ambiguous mapping for a cut (`A2-097`).
+    CutIdFamilyMismatch => CUT_ID_FAMILY_MISMATCH = "APLAN064", Warning,
+        "a task's id matches the id family declared for its cut",
+        points_at: Some("id");
 }
 
 /// A repository's verdict policy: what makes a report fail its build.
@@ -1901,7 +1907,7 @@ mod tests {
         // Every rule's `code()` is one of the module constants and vice versa is
         // structurally guaranteed by the macro; this pins the count so dropping
         // a row is a visible change.
-        assert_eq!(Rule::ALL.len(), 63);
+        assert_eq!(Rule::ALL.len(), 64);
     }
 
     /// Severity is declared per rule in the macro. Pin the warnings so a
@@ -1921,7 +1927,7 @@ mod tests {
                 "APLAN025", "APLAN026", "APLAN027", "APLAN029", "APLAN035", "APLAN036", "APLAN037",
                 "APLAN038", "APLAN039", "APLAN040", "APLAN041", "APLAN042", "APLAN043", "APLAN044",
                 "APLAN045", "APLAN051", "APLAN052", "APLAN053", "APLAN054", "APLAN056", "APLAN058",
-                "APLAN059", "APLAN061", "APLAN062", "APLAN063"
+                "APLAN059", "APLAN061", "APLAN062", "APLAN063", "APLAN064"
             ]
         );
     }

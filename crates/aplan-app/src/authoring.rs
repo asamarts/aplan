@@ -195,8 +195,14 @@ pub fn preview_add(
         .unwrap_or_else(|| aplan_interop::ids::phase_for(context.plan(), cut.as_deref()));
     let id = match &request.id {
         Some(id) => id.clone(),
-        None => aplan_interop::ids::mint(context.plan(), phase, id_strategy(context))
-            .map_err(|error| AuthoringError::Refused(error.to_string()))?,
+        None => aplan_interop::ids::mint_with_policy(
+            context.plan(),
+            phase,
+            cut.as_deref(),
+            id_strategy(context),
+            context.options().id_families.as_ref(),
+        )
+        .map_err(|error| AuthoringError::Refused(error.to_string()))?,
     };
     validate_new_id(context.plan(), &id)?;
     for (what, relations) in [
@@ -1007,8 +1013,14 @@ fn assign_blueprint_ids(
             .task
             .phase
             .unwrap_or_else(|| aplan_interop::ids::phase_for(&allocation, Some(cut)));
-        let id = aplan_interop::ids::mint(&allocation, phase, id_strategy(context))
-            .map_err(|error| at(error.to_string()))?;
+        let id = aplan_interop::ids::mint_with_policy(
+            &allocation,
+            phase,
+            Some(cut),
+            id_strategy(context),
+            context.options().id_families.as_ref(),
+        )
+        .map_err(|error| at(error.to_string()))?;
         validate_new_id(&allocation, &id).map_err(|error| at(error.to_string()))?;
         let scratch = manifest_task(&entry.task, &id, phase);
         let path = aplan_interop::emit::task_path(&task_dir(context), &id);
@@ -1147,8 +1159,14 @@ fn prepare_manifest(
             .unwrap_or_else(|| aplan_interop::ids::phase_for(&after, cut.as_deref()));
         let id = match &entry.id {
             Some(id) => id.clone(),
-            None => aplan_interop::ids::mint(&after, phase, id_strategy(context))
-                .map_err(|error| at(error.to_string()))?,
+            None => aplan_interop::ids::mint_with_policy(
+                &after,
+                phase,
+                cut.as_deref(),
+                id_strategy(context),
+                context.options().id_families.as_ref(),
+            )
+            .map_err(|error| at(error.to_string()))?,
         };
         validate_new_id(&after, &id).map_err(|error| at(error.to_string()))?;
         for (what, relations) in [

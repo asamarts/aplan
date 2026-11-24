@@ -60,6 +60,11 @@ const NOT_A_SWITCH: &[(&str, &str)] = &[
          `APLAN056` report people the repository may legitimately use",
     ),
     (
+        "id_families",
+        "a per-cut vocabulary mapping rather than an on/off switch. Inventing a cut-to-prefix \
+         mapping for a plan that treats ids as opaque would fabricate `APLAN064` mismatches",
+    ),
+    (
         "config_file",
         "where the configuration was read from, which no rule's predicate consults",
     ),

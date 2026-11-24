@@ -553,3 +553,10 @@ a live task's literal paths name neither a bare tracked directory nor a target r
 - **says:** `paths` entry `src` names a tracked directory rather than a file, so it matches nothing
   - **fix:** Replace `src` with `src/**` to own files under that directory (or run `aplan retarget-path src src/**`).
 
+## APLAN064 (warning)
+
+a task's id matches the id family declared for its cut
+
+- **says:** ABC-001: id `ABC-001` does not match the `XYZ-` family declared for cut `M-ci` (`M-ci`)
+  - **fix:** Rekey `ABC-001` into the `XYZ-` family with `aplan rekey ABC-001 <XYZ-ID>`, move it to the matching cut with `aplan mv ABC-001 --cut <CUT>`, or update `id_families.cuts` in `.aplan.yml`
+

@@ -589,6 +589,10 @@ pub fn configured_options(config: &Config, inputs: ConfigurationInputs<'_>) -> O
             .unwrap_or_default()
             .into_iter()
             .collect(),
+        id_families: config
+            .id_families
+            .as_ref()
+            .map(aplan_config::IdFamiliesConfig::to_policy),
         config_file: configuration_file,
     }
 }
