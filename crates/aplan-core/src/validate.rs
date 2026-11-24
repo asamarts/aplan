@@ -1037,8 +1037,9 @@ fn check_revisit(lt: &LoadedTask, out: &mut Vec<Diagnostic>) {
             .with_agent_instruction(
                 concat!(
                     "Park the task (`status: blocked`) if it is waiting on something outside ",
-                    "the plan, or drop the `revisit_at`. Reaching the instant never changes a ",
-                    "status, so it cannot be what makes this task start.",
+                    "the plan, or drop the `revisit_at` (`aplan unpark` returns parked work to ",
+                    "`todo` and clears it). Reaching the instant never changes a status, so it ",
+                    "cannot be what makes this task start.",
                 )
                 .to_string(),
             )

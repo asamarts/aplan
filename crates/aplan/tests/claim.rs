@@ -995,3 +995,117 @@ fn no_config_refuses_the_repositorys_policy_and_still_knows_who_you_are() {
         "the note overstates what was refused: {said}"
     );
 }
+
+/// Regression test for `A2-142`: syntax/usage errors on `claim`, `release`,
+/// `start`, and `stop` (such as passing `--owner` to `claim`) are rejected
+/// before claim storage or task files are opened or mutated, while valid
+/// claim, takeover, and release continue to work unchanged.
+#[test]
+fn claim_release_start_stop_usage_errors_never_mutate_claims_or_tasks() {
+    let dir = tmp("usage-before-effect");
+    let dir = dir.path();
+    fixture(dir);
+    let claims_file = dir.join(".git/aplan/claims-v1.json");
+    let _ = std::fs::remove_file(&claims_file);
+    let task_file = dir.join("aplan/tasks/T-free.md");
+    let task_before = std::fs::read(&task_file).expect("read task");
+
+    // 1. No claim store yet: `aplan claim T-free --owner some-user` must refuse
+    //    and leave the claim store absent.
+    let refused = common::run(dir, &["claim", "T-free", "--owner", "some-user"]);
+    assert_eq!(
+        refused.code, 2,
+        "unsupported --owner must exit 2: {}",
+        refused.stderr
+    );
+    assert!(
+        !claims_file.exists(),
+        "usage error created claim store at {}",
+        claims_file.display()
+    );
+    assert_eq!(claim_holder(dir, "T-free"), None);
+
+    // 2. Establish a valid claim as `alice`, snapshot the store bytes, then
+    //    verify unsupported options on claim/release/start/stop leave both
+    //    claim storage and the task file byte-identical.
+    let ok_claim = common::run(dir, &["claim", "T-free", "--as", "alice"]);
+    assert_eq!(ok_claim.code, 0, "valid claim failed: {}", ok_claim.stderr);
+    assert!(claims_file.exists(), "valid claim should create store");
+    let store_before = std::fs::read(&claims_file).expect("read claim store");
+
+    for bad_args in [
+        &["claim", "T-free", "--owner", "some-user"][..],
+        &["release", "T-free", "--owner", "some-user"][..],
+        &["start", "T-free", "--owner", "some-user"][..],
+        &["stop", "T-free", "--owner", "some-user"][..],
+    ] {
+        let out = common::run(dir, bad_args);
+        assert_eq!(
+            out.code, 2,
+            "{bad_args:?} should exit 2, got {}:\n{}",
+            out.code, out.stderr
+        );
+        assert_eq!(
+            std::fs::read(&claims_file).expect("store after refusal"),
+            store_before,
+            "{bad_args:?} mutated claim storage on usage error"
+        );
+        assert_eq!(
+            std::fs::read(&task_file).expect("task after refusal"),
+            task_before,
+            "{bad_args:?} mutated task file on usage error"
+        );
+    }
+
+    // 3. Valid takeover and release remain unchanged.
+    let takeover = common::run(dir, &["claim", "T-free", "--as", "bob", "--from", "alice"]);
+    assert_eq!(takeover.code, 0, "takeover failed: {}", takeover.stderr);
+    assert_eq!(claim_holder(dir, "T-free").as_deref(), Some("bob"));
+    let released = common::run(dir, &["release", "T-free"]);
+    assert_eq!(released.code, 0, "release failed: {}", released.stderr);
+    assert_eq!(claim_holder(dir, "T-free"), None);
+}
+
+/// Regression test for `A2-160`: `aplan start` on a parked task (`blocked`
+/// with `revisit_at`) moves it to `in_progress`, clears `revisit_at` and says
+/// so, and leaves `aplan check` clean with no `APLAN042`.
+#[test]
+fn starting_parked_task_clears_revisit_at_and_passes_check() {
+    let dir = tmp("start-parked-clears-revisit");
+    let dir = dir.path();
+    fixture(dir);
+    let parked_path = dir.join("aplan/tasks/T-parked.md");
+    std::fs::write(
+        &parked_path,
+        "---\nid: T-parked\ntitle: waiting on upstream\nphase: 0\nstatus: blocked\n\
+         effort_days: 1\nrevisit_at: 2030-12-01T00:00:00Z\n---\n\n## Why\n\nWaiting.\n",
+    )
+    .expect("write parked task");
+
+    let start_out = common::run(dir, &["start", "T-parked"]);
+    assert_eq!(
+        start_out.code, 0,
+        "start on parked task failed:\n{}{}",
+        start_out.stdout, start_out.stderr
+    );
+    assert!(
+        start_out.stdout.contains("cleared `revisit_at`"),
+        "start should announce clearing revisit_at:\n{}",
+        start_out.stdout
+    );
+    let after = std::fs::read_to_string(&parked_path).expect("read task");
+    assert!(after.contains("status: in_progress"), "{after}");
+    assert!(!after.contains("revisit_at:"), "{after}");
+
+    let check_out = common::run(dir, &["check"]);
+    assert_eq!(
+        check_out.code, 0,
+        "check should be clean after starting parked task:\n{}{}",
+        check_out.stdout, check_out.stderr
+    );
+    assert!(
+        !check_out.stdout.contains("APLAN042"),
+        "APLAN042 should not fire:\n{}",
+        check_out.stdout
+    );
+}

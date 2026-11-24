@@ -242,6 +242,8 @@ mod new_cut;
 #[cfg(unix)]
 #[path = "../no_effect_outside_the_plan.rs"]
 mod no_effect_outside_the_plan;
+#[path = "../output_reliability.rs"]
+mod output_reliability;
 #[cfg(unix)]
 #[path = "../owner_vocabulary.rs"]
 mod owner_vocabulary;

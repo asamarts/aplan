@@ -251,6 +251,15 @@ pub const ALL: &[Behaviour] = &[
         ],
     },
     Behaviour {
+        name: "agent.output_is_single_json_document",
+        what: "every `--format agent` command emits exactly one valid JSON document on stdout \
+               with no trailing prose, carrying unchecked structural evidence inside \
+               `evidence_unresolved`",
+        proof: &[
+            "output_reliability::agent_format_emits_one_valid_json_document_across_finding_counts_and_unchecked_evidence",
+        ],
+    },
+    Behaviour {
         name: "coordination.is_not_a_plan_verdict_mutation",
         what: "`claim` and `release` mutate only local ephemeral coordination state, so they do \
                not accept plan-verdict overrides or imply that the plan passed a gate",
