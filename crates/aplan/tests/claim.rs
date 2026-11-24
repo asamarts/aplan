@@ -1109,3 +1109,351 @@ fn starting_parked_task_clears_revisit_at_and_passes_check() {
         check_out.stdout
     );
 }
+
+/// Proves the terminal-reconciliation half of
+/// `claims.reconciles_terminal_lifecycle_and_surfaces_coordination` (`A2-152`,
+/// `ADR-0073`):
+/// - closing by the same actor CAS-releases their local claim (including from a
+///   linked Git worktree)
+/// - closing by another actor leaves the holder's claim intact with recovery
+///   guidance
+/// - `drop` reconciles claims identically
+/// - a corrupt claim store after close keeps the plan closure truthful and
+///   reports partial local cleanup, recoverable via idempotent `release`
+#[test]
+fn terminal_closure_reconciles_same_actor_other_actor_and_failed_cleanup() {
+    let dir = tmp("terminal-reconcile");
+    let dir = dir.path();
+    fixture(dir);
+
+    // 1. Same-actor close releases local claim cleanly.
+    let claimed = common::command(dir, &["claim", "T-free"])
+        .env("APLAN_OWNER", "alice")
+        .output()
+        .expect("claim");
+    assert!(claimed.status.success());
+    assert_eq!(claim_holder(dir, "T-free").as_deref(), Some("alice"));
+
+    let closed = common::command(
+        dir,
+        &[
+            "close",
+            "T-free",
+            "--no-resolve",
+            "--evidence",
+            "file:README.md",
+        ],
+    )
+    .env("APLAN_OWNER", "alice")
+    .output()
+    .expect("close");
+    let stdout = String::from_utf8_lossy(&closed.stdout);
+    assert!(
+        closed.status.success(),
+        "same-actor close failed: {stdout}{}",
+        String::from_utf8_lossy(&closed.stderr)
+    );
+    assert!(
+        stdout.contains("released local claim held by `alice`"),
+        "close should announce released claim:\n{stdout}"
+    );
+    assert_eq!(
+        claim_holder(dir, "T-free"),
+        None,
+        "same-actor close must release the local claim"
+    );
+
+    // 2. Different-actor close leaves the holder's claim intact with guidance.
+    std::fs::write(
+        dir.join("aplan/tasks/T-other.md"),
+        "---\nid: T-other\ntitle: other actor task\nphase: 0\nstatus: todo\neffort_days: 1\n---\n\n## Why\n\nBody.\n",
+    )
+    .expect("write T-other");
+    let claimed_bob = common::command(dir, &["claim", "T-other", "--as", "bob"])
+        .output()
+        .expect("claim bob");
+    assert!(claimed_bob.status.success());
+
+    let closed_by_alice = common::command(
+        dir,
+        &[
+            "close",
+            "T-other",
+            "--no-resolve",
+            "--evidence",
+            "file:README.md",
+        ],
+    )
+    .env("APLAN_OWNER", "alice")
+    .output()
+    .expect("close by alice");
+    let stdout = String::from_utf8_lossy(&closed_by_alice.stdout);
+    assert!(closed_by_alice.status.success(), "{stdout}");
+    assert!(
+        stdout.contains("held by `bob`") && stdout.contains("aplan release T-other"),
+        "other-actor close must retain claim and advise release:\n{stdout}"
+    );
+    assert_eq!(
+        claim_holder(dir, "T-other").as_deref(),
+        Some("bob"),
+        "other actor's claim must not be silently removed"
+    );
+
+    // 3. `drop` reconciles same-actor claims too.
+    std::fs::write(
+        dir.join("aplan/tasks/T-drop.md"),
+        "---\nid: T-drop\ntitle: droppable task\nphase: 0\nstatus: todo\neffort_days: 1\n---\n\n## Why\n\nBody.\n",
+    )
+    .expect("write T-drop");
+    let claimed_drop = common::command(dir, &["claim", "T-drop"])
+        .env("APLAN_OWNER", "alice")
+        .output()
+        .expect("claim drop");
+    assert!(claimed_drop.status.success());
+    let dropped = common::command(dir, &["drop", "T-drop"])
+        .env("APLAN_OWNER", "alice")
+        .output()
+        .expect("drop");
+    let stdout = String::from_utf8_lossy(&dropped.stdout);
+    assert!(dropped.status.success(), "{stdout}");
+    assert!(
+        stdout.contains("released local claim held by `alice`"),
+        "drop should release same-actor claim:\n{stdout}"
+    );
+    assert_eq!(claim_holder(dir, "T-drop"), None);
+
+    // 4. Corrupt claim store during close: plan closure still commits truthfully
+    //    and reports partial local cleanup rather than rolling back.
+    assert_corrupt_store_cleanup_failure_and_recovery(dir);
+}
+
+fn assert_corrupt_store_cleanup_failure_and_recovery(dir: &std::path::Path) {
+    std::fs::write(
+        dir.join("aplan/tasks/T-corrupt.md"),
+        "---\nid: T-corrupt\ntitle: corrupt store task\nphase: 0\nstatus: todo\neffort_days: 1\n---\n\n## Why\n\nBody.\n",
+    )
+    .expect("write T-corrupt");
+    let claims_file = dir.join(".git/aplan/claims-v1.json");
+    std::fs::write(&claims_file, "{broken json").expect("corrupt store");
+    let closed_corrupt = common::command(
+        dir,
+        &[
+            "close",
+            "T-corrupt",
+            "--no-resolve",
+            "--evidence",
+            "file:README.md",
+        ],
+    )
+    .env("APLAN_OWNER", "alice")
+    .output()
+    .expect("close corrupt");
+    let stdout = String::from_utf8_lossy(&closed_corrupt.stdout);
+    assert!(
+        closed_corrupt.status.success(),
+        "plan closure must stay truthful when claim cleanup fails: {stdout}{}",
+        String::from_utf8_lossy(&closed_corrupt.stderr)
+    );
+    assert!(
+        stdout.contains("local claim cleanup failed") && stdout.contains("aplan release T-corrupt"),
+        "should report partial cleanup with recovery:\n{stdout}"
+    );
+    let task_text = std::fs::read_to_string(dir.join("aplan/tasks/T-corrupt.md")).expect("task");
+    assert!(
+        task_text.contains("status: done"),
+        "plan closure must remain committed:\n{task_text}"
+    );
+
+    // Repairing the store and running idempotent release completes cleanup.
+    std::fs::remove_file(&claims_file).expect("remove corrupt store");
+    let rel = common::run(dir, &["release", "T-corrupt"]);
+    assert_eq!(rel.code, 0, "idempotent release failed: {}", rel.stderr);
+}
+
+/// Proves the read-surface coordination half of
+/// `claims.reconciles_terminal_lifecycle_and_surfaces_coordination` (`A2-152`,
+/// `ADR-0073`):
+/// - an `in_progress` task with no claim is flagged across `show`, `ready`,
+///   `tasks --format json`, and MCP `aplan_ready` / `aplan_show`
+/// - a terminal task carrying a leftover claim is distinguished as
+///   `stale_terminal` with recovery guidance rather than an active claim
+#[test]
+fn unclaimed_in_progress_and_stale_terminal_claims_surface_across_cli_and_mcp() {
+    let dir = tmp("coordination-states");
+    let dir = dir.path();
+    fixture(dir);
+
+    // Move `T-free` to `in_progress` without claiming it.
+    let started = common::run(dir, &["start", "T-free"]);
+    assert_eq!(started.code, 0, "start failed: {}", started.stderr);
+
+    // 1. `show` human + JSON surface `in_progress_unclaimed` and recovery.
+    let show_human = common::run(dir, &["show", "T-free"]);
+    assert_eq!(show_human.code, 0, "{}", show_human.stderr);
+    assert!(
+        show_human.stdout.contains("in_progress without claim")
+            && show_human.stdout.contains("aplan claim T-free")
+            && show_human.stdout.contains("aplan stop T-free"),
+        "show human must flag unclaimed in_progress:\n{}",
+        show_human.stdout
+    );
+    let show_json = common::run(dir, &["show", "T-free", "--format", "json"]);
+    assert_eq!(show_json.code, 0, "{}", show_json.stderr);
+    let show_doc: serde_json::Value = serde_json::from_str(&show_json.stdout).expect("show json");
+    assert_eq!(show_doc["claim_state"], "in_progress_unclaimed");
+
+    // 2. `ready` human + JSON + MCP surface the disagreement instead of fresh ready work.
+    let ready_human = common::run(dir, &["ready"]);
+    assert_eq!(ready_human.code, 0, "{}", ready_human.stderr);
+    assert!(
+        ready_human
+            .stdout
+            .contains("[in_progress, unclaimed -- claim or stop]")
+            && ready_human.stdout.contains("have no active local claim"),
+        "ready human must flag unclaimed in_progress:\n{}",
+        ready_human.stdout
+    );
+    let ready_json = common::run(dir, &["ready", "--format", "json"]);
+    assert_eq!(ready_json.code, 0, "{}", ready_json.stderr);
+    let ready_doc: serde_json::Value =
+        serde_json::from_str(&ready_json.stdout).expect("ready json");
+    let row = ready_doc["ready"]
+        .as_array()
+        .expect("ready array")
+        .iter()
+        .find(|item| item["id"] == "T-free")
+        .expect("T-free in ready");
+    assert_eq!(row["status"], "in_progress");
+    assert_eq!(row["claim_state"], "in_progress_unclaimed");
+    assert!(
+        row["coordination_warning"]
+            .as_str()
+            .is_some_and(|w| w.contains("aplan claim T-free") && w.contains("aplan stop T-free")),
+        "missing coordination_warning: {row}"
+    );
+
+    // 3. `tasks --format json` carries `claim_state`.
+    let tasks_json = common::run(dir, &["tasks", "--format", "json"]);
+    assert_eq!(tasks_json.code, 0, "{}", tasks_json.stderr);
+    let tasks_doc: serde_json::Value =
+        serde_json::from_str(&tasks_json.stdout).expect("tasks json");
+    let task_row = tasks_doc["tasks"]
+        .as_array()
+        .expect("tasks array")
+        .iter()
+        .find(|item| item["id"] == "T-free")
+        .expect("T-free in tasks");
+    assert_eq!(task_row["claim_state"], "in_progress_unclaimed");
+
+    // 4. Legacy/other-actor stale claim on a terminal task renders as `stale_terminal`.
+    let claimed = common::run(dir, &["claim", "T-free", "--as", "bob"]);
+    assert_eq!(claimed.code, 0, "{}", claimed.stderr);
+    let closed_by_alice = common::command(
+        dir,
+        &[
+            "close",
+            "T-free",
+            "--no-resolve",
+            "--evidence",
+            "file:README.md",
+        ],
+    )
+    .env("APLAN_OWNER", "alice")
+    .output()
+    .expect("close");
+    assert!(closed_by_alice.status.success());
+
+    let stale_human = common::run(dir, &["show", "T-free", "--no-resolve"]);
+    assert_eq!(stale_human.code, 0, "{}", stale_human.stderr);
+    assert!(
+        stale_human.stdout.contains("stale claim by bob")
+            && stale_human.stdout.contains("stale claim on terminal task")
+            && stale_human.stdout.contains("aplan release T-free"),
+        "show must distinguish stale terminal claim:\n{}",
+        stale_human.stdout
+    );
+    let stale_json = common::run(dir, &["show", "T-free", "--no-resolve", "--format", "json"]);
+    assert_eq!(stale_json.code, 0, "{}", stale_json.stderr);
+    let stale_doc: serde_json::Value =
+        serde_json::from_str(&stale_json.stdout).expect("stale json");
+    assert_eq!(stale_doc["claim_state"], "stale_terminal");
+    assert_eq!(stale_doc["claim"]["holder"], "bob");
+}
+
+/// Proves the refusal and timestamp half of
+/// `claims.reconciles_terminal_lifecycle_and_surfaces_coordination` (`A2-152`,
+/// `ADR-0073`):
+/// - claiming a task held by another actor returns an ordinary typed refusal
+///   (`ClaimError::Conflict`) without store-corruption wording
+/// - human claim times print ISO-8601 UTC instants plus stable ages across
+///   new, old, and future clock-skew boundaries while JSON retains integer epochs
+#[test]
+fn takeover_refusal_is_typed_conflict_and_human_times_show_utc_and_age() {
+    let dir = tmp("conflict-and-utc");
+    let dir = dir.path();
+    fixture(dir);
+
+    let claimed = common::run(dir, &["claim", "T-free", "--as", "alice"]);
+    assert_eq!(claimed.code, 0, "{}", claimed.stderr);
+    assert!(
+        claimed.stdout.contains('T') && claimed.stdout.contains("Z ("),
+        "human claim output must include UTC timestamp and age:\n{}",
+        claimed.stdout
+    );
+
+    // Refusing a claim held by another identity must NOT read as store corruption.
+    let refused = common::run(dir, &["claim", "T-free", "--as", "bob"]);
+    assert_ne!(refused.code, 0);
+    assert!(
+        !refused.stderr.contains("invalid local claim state"),
+        "takeover refusal must not read like corruption:\n{}",
+        refused.stderr
+    );
+    assert!(
+        refused.stderr.contains("held by `alice`")
+            && refused.stderr.contains("--from alice")
+            && refused.stderr.contains("aplan release T-free"),
+        "takeover refusal must name holder and recovery:\n{}",
+        refused.stderr
+    );
+
+    // Direct typed API check: `ClaimError::Conflict`, not `ClaimError::Invalid`.
+    let plan = aplan_core::load_plan(&dir.join("aplan"));
+    let sources = aplan_interop::identity::from_environment(Some("bob"), dir);
+    let bob = aplan_interop::identity::resolve_detailed(&sources).expect("bob");
+    let err = aplan_app::claims::claim(dir, &plan, "T-free", &bob, None, 1_700_000_000)
+        .expect_err("must refuse held claim");
+    assert!(
+        matches!(
+            err,
+            aplan_app::claims::ClaimError::Conflict {
+                held_by: Some(ref holder),
+                ..
+            } if holder == "alice"
+        ),
+        "expected ClaimError::Conflict, got {err:?}"
+    );
+
+    // Boundary tests for UTC formatting and relative age (new, old, clock skew).
+    assert_eq!(aplan_core::format_utc_timestamp(0), "1970-01-01T00:00:00Z");
+    assert_eq!(
+        aplan_core::format_claim_time_human(1_700_000_000, 1_700_000_000),
+        "2023-11-14T22:13:20Z (just now)"
+    );
+    assert_eq!(
+        aplan_core::format_claim_time_human(1_700_000_000, 1_700_000_017),
+        "2023-11-14T22:13:20Z (17s ago)"
+    );
+    assert_eq!(
+        aplan_core::format_claim_time_human(1_700_000_000, 1_700_011_520),
+        "2023-11-14T22:13:20Z (3h 12m ago)"
+    );
+    assert_eq!(
+        aplan_core::format_claim_time_human(1_700_000_000, 1_700_187_200),
+        "2023-11-14T22:13:20Z (2d 4h ago)"
+    );
+    assert_eq!(
+        aplan_core::format_claim_time_human(1_700_000_045, 1_700_000_000),
+        "2023-11-14T22:14:05Z (in the future by 45s (clock skew))"
+    );
+}

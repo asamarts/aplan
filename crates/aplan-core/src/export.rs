@@ -70,7 +70,10 @@ impl TaskExport {
         self.coordination = snapshot.scope.clone();
         self.claim_observed_at_epoch_seconds = snapshot.observed_at_epoch_seconds;
         for row in &mut self.tasks {
-            row.claim = snapshot.claim(&row.id).cloned();
+            let claim = snapshot.claim(&row.id);
+            row.claim_state =
+                crate::ClaimCoordinationState::derive(row.status, claim, snapshot.scope.available);
+            row.claim = claim.cloned();
         }
         self
     }
@@ -97,6 +100,9 @@ pub struct TaskRow {
     /// Who is working on it now, distinct from durable `owner` responsibility.
     #[schemars(with = "RequiredNullable<crate::ClaimRecord>")]
     pub claim: Option<crate::ClaimRecord>,
+    /// Status-versus-coordination lifecycle state (`active`, `stale_terminal`,
+    /// `in_progress_unclaimed`, `unclaimed`, `unavailable`) (`ADR-0073`, `A2-152`).
+    pub claim_state: crate::ClaimCoordinationState,
     pub tags: Vec<String>,
     /// Declared blockers only. The cut-sequencing edges a task inherits
     /// (ADR-0013) are implied by `cut`, and repeating them here would make a
@@ -276,6 +282,7 @@ impl Graph<'_> {
                     effort_days: t.effort_days,
                     owner: t.owner.clone(),
                     claim: None,
+                    claim_state: crate::ClaimCoordinationState::Unavailable,
                     tags: t.tags.clone(),
                     blocked_by: t.blocked_by.clone(),
                     cut,

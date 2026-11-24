@@ -11,6 +11,158 @@ use std::collections::BTreeMap;
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 
+use crate::Status;
+
+/// Status-versus-coordination lifecycle state of one task's local claim
+/// (`ADR-0073`, `A2-152`).
+///
+/// Computed once from the task's durable status, its local claim record, and
+/// whether local coordination is available, so CLI, MCP, and TUI agree on
+/// active claims, stale terminal claims, and unclaimed `in_progress` work.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "snake_case")]
+pub enum ClaimCoordinationState {
+    /// Live task held by an active local claim.
+    Active,
+    /// Terminal task (`done` or `dropped`) still carrying a leftover local
+    /// claim from an older build, another actor, or failed post-close cleanup.
+    StaleTerminal,
+    /// Live `in_progress` task with no active local claim while coordination is
+    /// available: durable status and local coordination disagree.
+    InProgressUnclaimed,
+    /// Ordinary task with no active claim.
+    Unclaimed,
+    /// Local coordination scope is unavailable (for example outside Git).
+    Unavailable,
+}
+
+impl ClaimCoordinationState {
+    /// Derive the lifecycle state from durable task status and local claim
+    /// observation.
+    #[must_use]
+    pub const fn derive(
+        status: Status,
+        claim: Option<&ClaimRecord>,
+        scope_available: bool,
+    ) -> Self {
+        if !scope_available && claim.is_none() {
+            return Self::Unavailable;
+        }
+        let is_terminal = matches!(status, Status::Done | Status::Dropped);
+        match (is_terminal, claim) {
+            (true, Some(_)) => Self::StaleTerminal,
+            (false, Some(_)) => Self::Active,
+            (false, None) if matches!(status, Status::InProgress) => Self::InProgressUnclaimed,
+            (_, None) => Self::Unclaimed,
+        }
+    }
+
+    /// Stable machine label for this state.
+    #[must_use]
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::Active => "active",
+            Self::StaleTerminal => "stale_terminal",
+            Self::InProgressUnclaimed => "in_progress_unclaimed",
+            Self::Unclaimed => "unclaimed",
+            Self::Unavailable => "unavailable",
+        }
+    }
+}
+
+/// Format a signed Unix epoch timestamp as an ISO-8601 UTC instant
+/// (`YYYY-MM-DDTHH:MM:SSZ`) without external date crates (`ADR-0073`, `A2-152`).
+#[must_use]
+pub fn format_utc_timestamp(epoch_seconds: i64) -> String {
+    let days = epoch_seconds.div_euclid(86_400);
+    let secs_of_day = epoch_seconds.rem_euclid(86_400);
+    let hour = secs_of_day / 3600;
+    let minute = (secs_of_day % 3600) / 60;
+    let second = secs_of_day % 60;
+
+    // Howard Hinnant's civil-from-days algorithm (proleptic Gregorian calendar).
+    let z = days + 719_468;
+    let era = z.div_euclid(146_097);
+    let doe = z.rem_euclid(146_097); // [0, 146096]
+    let yoe = (doe - doe / 1460 + doe / 36_524 - doe / 146_096) / 365; // [0, 399]
+    let y = yoe + era * 400;
+    let doy = doe - (365 * yoe + yoe / 4 - yoe / 100); // [0, 365]
+    let mp = (5 * doy + 2) / 153; // [0, 11]
+    let day = doy - (153 * mp + 2) / 5 + 1; // [1, 31]
+    let month = if mp < 10 { mp + 3 } else { mp - 9 }; // [1, 12]
+    let year = y + i64::from(month <= 2);
+
+    format!("{year:04}-{month:02}-{day:02}T{hour:02}:{minute:02}:{second:02}Z")
+}
+
+/// Format a non-negative duration in seconds as a compact, deterministic human
+/// span (for example `0s`, `17s`, `5m`, `3h 12m`, `2d 4h`).
+#[must_use]
+pub fn format_duration_short(seconds: i64) -> String {
+    let secs = seconds.max(0);
+    if secs < 60 {
+        return format!("{secs}s");
+    }
+    if secs < 3600 {
+        let mins = secs / 60;
+        let rem = secs % 60;
+        return if rem == 0 {
+            format!("{mins}m")
+        } else {
+            format!("{mins}m {rem}s")
+        };
+    }
+    if secs < 86_400 {
+        let hours = secs / 3600;
+        let mins = (secs % 3600) / 60;
+        return if mins == 0 {
+            format!("{hours}h")
+        } else {
+            format!("{hours}h {mins}m")
+        };
+    }
+    let days = secs / 86_400;
+    let hours = (secs % 86_400) / 3600;
+    if hours == 0 {
+        format!("{days}d")
+    } else {
+        format!("{days}d {hours}h")
+    }
+}
+
+/// Format a claim's age relative to `observed_at_epoch_seconds`, explicitly
+/// naming clock skew when `claimed_at_epoch_seconds > observed_at_epoch_seconds`.
+#[must_use]
+pub fn format_claim_age(claimed_at_epoch_seconds: i64, observed_at_epoch_seconds: i64) -> String {
+    if claimed_at_epoch_seconds > observed_at_epoch_seconds {
+        let ahead = claimed_at_epoch_seconds.saturating_sub(observed_at_epoch_seconds);
+        return format!(
+            "in the future by {} (clock skew)",
+            format_duration_short(ahead)
+        );
+    }
+    let elapsed = observed_at_epoch_seconds.saturating_sub(claimed_at_epoch_seconds);
+    if elapsed == 0 {
+        "just now".to_string()
+    } else {
+        format!("{} ago", format_duration_short(elapsed))
+    }
+}
+
+/// Format a claim timestamp for human output: absolute UTC instant plus stable
+/// relative age (`YYYY-MM-DDTHH:MM:SSZ (<age>)`).
+#[must_use]
+pub fn format_claim_time_human(
+    claimed_at_epoch_seconds: i64,
+    observed_at_epoch_seconds: i64,
+) -> String {
+    format!(
+        "{} ({})",
+        format_utc_timestamp(claimed_at_epoch_seconds),
+        format_claim_age(claimed_at_epoch_seconds, observed_at_epoch_seconds)
+    )
+}
+
 /// Where an unauthenticated holder label was observed.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields)]

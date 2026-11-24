@@ -94,7 +94,10 @@ pub use anchor::{
     heading_anchors, resolvable_anchors, resolve_in, stamp_in,
 };
 pub use capture::{Capture, CapturePolicy, CaptureSchema, CaptureState, Inbox, load_inbox};
-pub use claim::{ClaimOrigin, ClaimRecord, ClaimScope, ClaimSnapshot};
+pub use claim::{
+    ClaimCoordinationState, ClaimOrigin, ClaimRecord, ClaimScope, ClaimSnapshot, format_claim_age,
+    format_claim_time_human, format_duration_short, format_utc_timestamp,
+};
 pub use close::trace_fingerprints;
 pub use close::{
     CloseError, add_evidence, apply_repair, close, remove_evidence, replace_evidence, restamp,

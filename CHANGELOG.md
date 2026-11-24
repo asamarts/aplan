@@ -8,6 +8,16 @@ to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Fixed
 
+- **Reconcile task closure with ephemeral claim lifecycle (`A2-152`, ADR-0073,
+  `--require claims.reconciles_terminal_lifecycle_and_surfaces_coordination`)**. Successful
+  `close`, `close --execute`, `aplan_close`, `drop`, and TUI closures now CAS-release a matching
+  same-actor local claim after plan publication, leave another actor's or unknown-actor claim
+  intact with explicit `aplan release <id>` guidance, and report partial local cleanup without
+  rolling back plan closure. `show`, `ready`, `tasks`, MCP, and TUI now distinguish `active`,
+  `stale_terminal`, and `in_progress_unclaimed` (no longer presenting unclaimed `in_progress` work
+  as fresh ready work), takeover conflicts return a typed `ClaimError::Conflict` refusal rather
+  than store-corruption wording, and human claim times show ISO-8601 UTC instants plus stable age
+  while machine output keeps integer epoch seconds.
 - **Stop `aplan_add` reporting a false concurrent change on unchanged plans (`A2-055`)**.
   `aplan_add` over MCP now loads the real configured `.aplan.yml` when constructing its preview
   context instead of a synthetic default config, eliminating the false compare-and-swap mismatch

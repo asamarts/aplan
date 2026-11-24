@@ -2340,14 +2340,32 @@ fn show_facts(show: &Show) -> Vec<String> {
         facts.push(format!("owner {}", sanitize::visible(o)));
     }
     if let Some(claim) = &show.claim {
-        let age = show
-            .claim_age_seconds
-            .map_or_else(String::new, |seconds| format!(" for {seconds}s"));
-        facts.push(format!(
-            "held by {}{}",
-            sanitize::visible(&claim.holder),
-            age
-        ));
+        let age_label = if show.claim_observed_at_epoch_seconds > 0
+            && claim.claimed_at_epoch_seconds > show.claim_observed_at_epoch_seconds
+        {
+            format!(
+                " ({})",
+                aplan_core::format_claim_age(
+                    claim.claimed_at_epoch_seconds,
+                    show.claim_observed_at_epoch_seconds,
+                )
+            )
+        } else {
+            show.claim_age_seconds.map_or_else(String::new, |seconds| {
+                format!(" for {}", aplan_core::format_duration_short(seconds))
+            })
+        };
+        if show.claim_state == aplan_core::ClaimCoordinationState::StaleTerminal {
+            facts.push(format!(
+                "stale claim by {}{age_label}",
+                sanitize::visible(&claim.holder),
+            ));
+        } else {
+            facts.push(format!(
+                "held by {}{age_label}",
+                sanitize::visible(&claim.holder),
+            ));
+        }
     }
     if let Some(impact) = show.version_impact {
         facts.push(format!("version impact {impact}"));
@@ -2360,7 +2378,11 @@ fn show_facts(show: &Show) -> Vec<String> {
     // "ready no" about either reads as "blocked", which is the wrong word `why`
     // was corrected for (`A1-105`).
     if show.workable {
-        facts.push(format!("ready {}", if show.ready { "yes" } else { "no" }));
+        if show.claim_state == aplan_core::ClaimCoordinationState::InProgressUnclaimed {
+            facts.push("ready no (in_progress without claim)".to_string());
+        } else {
+            facts.push(format!("ready {}", if show.ready { "yes" } else { "no" }));
+        }
     }
     facts
 }
@@ -2481,11 +2503,32 @@ fn show_claim(s: &mut String, show: &Show) {
             (None, Some(worktree)) => format!("worktree {}", sanitize::visible(worktree)),
             (None, None) => "unknown local origin".to_string(),
         };
+        let when = aplan_core::format_claim_time_human(
+            claim.claimed_at_epoch_seconds,
+            show.claim_observed_at_epoch_seconds,
+        );
+        if show.claim_state == aplan_core::ClaimCoordinationState::StaleTerminal {
+            let _ = writeln!(
+                s,
+                "  stale claim on terminal task, recorded {when} from {origin} (identity source \
+                 {}); run `aplan release {}` to clear it",
+                sanitize::visible(&claim.identity_source),
+                show.id,
+            );
+        } else {
+            let _ = writeln!(
+                s,
+                "  claim recorded {when} from {origin} (identity source {})",
+                sanitize::visible(&claim.identity_source)
+            );
+        }
+    } else if show.claim_state == aplan_core::ClaimCoordinationState::InProgressUnclaimed {
         let _ = writeln!(
             s,
-            "  claim recorded at Unix time {} from {origin} (identity source {})",
-            claim.claimed_at_epoch_seconds,
-            sanitize::visible(&claim.identity_source)
+            "  status/coordination disagreement: task is `in_progress` with no active local \
+             claim; run `aplan claim {}` to record who is working on it or `aplan stop {}` if \
+             work stopped",
+            show.id, show.id
         );
     } else if !show.coordination.available {
         let _ = writeln!(
@@ -4181,6 +4224,8 @@ mod tests {
             owner: None,
             claim: None,
             claim_age_seconds: None,
+            claim_observed_at_epoch_seconds: 58,
+            claim_state: aplan_core::ClaimCoordinationState::Unavailable,
             coordination: ClaimScope::unavailable("not a repository"),
             effort_days: Some(1.0),
             tags: vec!["feature".into()],
@@ -4269,6 +4314,8 @@ mod tests {
         let mut claimed = show.clone();
         claimed.owner = Some("delivery-team".into());
         claimed.claim_age_seconds = Some(17);
+        claimed.claim_observed_at_epoch_seconds = 58;
+        claimed.claim_state = aplan_core::ClaimCoordinationState::Active;
         claimed.claim = Some(aplan_core::ClaimRecord {
             holder: "operator".into(),
             identity_source: "APLAN_OWNER".into(),
@@ -4282,7 +4329,7 @@ mod tests {
         for expected in [
             "owner delivery-team",
             "held by operator for 17s",
-            "claim recorded at Unix time 41",
+            "claim recorded 1970-01-01T00:00:41Z (17s ago)",
             "host build-host, worktree /repo/worktree",
             "identity source APLAN_OWNER",
         ] {
@@ -5771,6 +5818,7 @@ mod tests {
                     effort_days: Some(2.0),
                     owner: None,
                     claim: None,
+                    claim_state: aplan_core::ClaimCoordinationState::Unavailable,
                     tags: vec!["kind-b".into()],
                     blocked_by: Vec::new(),
                     cut: Some("s0".into()),
@@ -5799,6 +5847,7 @@ mod tests {
                     effort_days: None,
                     owner: None,
                     claim: None,
+                    claim_state: aplan_core::ClaimCoordinationState::Unavailable,
                     tags: Vec::new(),
                     blocked_by: vec!["A1".into()],
                     cut: None,
@@ -5827,6 +5876,7 @@ mod tests {
                     effort_days: None,
                     owner: None,
                     claim: None,
+                    claim_state: aplan_core::ClaimCoordinationState::Unavailable,
                     tags: vec!["milestone".into()],
                     blocked_by: Vec::new(),
                     cut: Some("s0".into()),
@@ -7731,9 +7781,9 @@ pub fn stale_human(report: &StaleReport) -> String {
             format!(" [owner {}]", crate::sanitize::visible(who))
         });
         let held = t.held_by.as_deref().map_or_else(String::new, |who| {
-            let age = t
-                .claim_age_seconds
-                .map_or_else(String::new, |seconds| format!(" {seconds}s"));
+            let age = t.claim_age_seconds.map_or_else(String::new, |seconds| {
+                format!(" {}", aplan_core::format_duration_short(seconds))
+            });
             format!(" [claim {}{age}]", crate::sanitize::visible(who))
         });
         let _ = writeln!(

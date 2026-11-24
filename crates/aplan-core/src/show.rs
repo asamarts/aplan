@@ -29,7 +29,7 @@ use crate::diagnostic::Repair;
 use crate::export::TaskExport;
 use crate::graph::Graph;
 use crate::task::{Evidence, Task, VersionImpact};
-use crate::{ClaimRecord, ClaimScope, ClaimSnapshot};
+use crate::{ClaimCoordinationState, ClaimRecord, ClaimScope, ClaimSnapshot};
 
 /// One task and everything resolved about it.
 #[derive(Debug, Clone, PartialEq, Serialize)]
@@ -46,6 +46,11 @@ pub struct Show {
     /// Whole seconds the snapshot had observed the claim to be held.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub claim_age_seconds: Option<i64>,
+    /// Unix epoch seconds at which the claim snapshot was observed.
+    pub claim_observed_at_epoch_seconds: i64,
+    /// Status-versus-coordination lifecycle state (`active`, `stale_terminal`,
+    /// `in_progress_unclaimed`, `unclaimed`, `unavailable`).
+    pub claim_state: ClaimCoordinationState,
     /// Coordination boundary for `claim`, including an explicit degraded state.
     pub coordination: ClaimScope,
     pub effort_days: Option<f64>,
@@ -331,6 +336,35 @@ pub struct ShowSources<'a> {
     pub claims: &'a ClaimSnapshot,
 }
 
+fn related_task(
+    graph: &Graph<'_>,
+    unloadable: &BTreeMap<String, std::path::PathBuf>,
+    other: &str,
+) -> Related {
+    if let Some(task) = graph.get(other) {
+        Related {
+            id: other.to_string(),
+            status: task.status.to_string(),
+            availability: RelatedAvailability::Loaded,
+            source: None,
+        }
+    } else if let Some(path) = unloadable.get(other) {
+        Related {
+            id: other.to_string(),
+            status: "unknown".to_string(),
+            availability: RelatedAvailability::Unloadable,
+            source: Some(path.display().to_string()),
+        }
+    } else {
+        Related {
+            id: other.to_string(),
+            status: "unknown".to_string(),
+            availability: RelatedAvailability::Missing,
+            source: None,
+        }
+    }
+}
+
 fn task_row<'a>(rows: &'a TaskExport, id: &str) -> Option<&'a crate::export::TaskRow> {
     // `Graph::task_rows` is ordered by the graph's `BTreeMap`. A complete TUI
     // snapshot asks for every inspector, so a linear search here made that
@@ -399,30 +433,7 @@ impl Show {
         } = sources;
         let task: &Task = graph.get(id)?;
         let row = task_row(rows, id);
-        let related = |other: &str| {
-            if let Some(task) = graph.get(other) {
-                Related {
-                    id: other.to_string(),
-                    status: task.status.to_string(),
-                    availability: RelatedAvailability::Loaded,
-                    source: None,
-                }
-            } else if let Some(path) = unloadable.get(other) {
-                Related {
-                    id: other.to_string(),
-                    status: "unknown".to_string(),
-                    availability: RelatedAvailability::Unloadable,
-                    source: Some(path.display().to_string()),
-                }
-            } else {
-                Related {
-                    id: other.to_string(),
-                    status: "unknown".to_string(),
-                    availability: RelatedAvailability::Missing,
-                    source: None,
-                }
-            }
-        };
+        let related = |other: &str| related_task(graph, unloadable, other);
         Some(Self {
             schema: "aplan/show/v3".to_string(),
             id: task.id.clone(),
@@ -432,6 +443,12 @@ impl Show {
             owner: task.owner.clone(),
             claim: claims.claim(id).cloned(),
             claim_age_seconds: claims.age_seconds(id),
+            claim_observed_at_epoch_seconds: claims.observed_at_epoch_seconds,
+            claim_state: ClaimCoordinationState::derive(
+                task.status,
+                claims.claim(id),
+                claims.scope.available,
+            ),
             coordination: claims.scope.clone(),
             effort_days: task.effort_days,
             tags: task.tags.clone(),

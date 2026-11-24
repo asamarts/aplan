@@ -9,7 +9,10 @@ use std::io::Read as _;
 use std::path::{Path, PathBuf};
 use std::time::{SystemTime, UNIX_EPOCH};
 
-use aplan_core::{ClaimOrigin, ClaimRecord, ClaimScope, ClaimSnapshot, Plan};
+use aplan_core::{
+    ClaimOrigin, ClaimRecord, ClaimScope, ClaimSnapshot, Plan, format_claim_time_human,
+    format_utc_timestamp,
+};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest as _, Sha256};
 
@@ -29,6 +32,16 @@ pub enum ClaimError {
     Unsafe { path: PathBuf, reason: String },
     #[error("invalid local claim state at `{path}`: {reason}")]
     Invalid { path: PathBuf, reason: String },
+    /// An ordinary coordination refusal (task already held by another identity,
+    /// mismatched `--from`, or `--from` on an unclaimed task) -- never store
+    /// corruption (`ADR-0073`, `A2-152`).
+    #[error("cannot claim `{id}`: {reason}")]
+    Conflict {
+        id: String,
+        held_by: Option<String>,
+        expected_from: Option<String>,
+        reason: String,
+    },
     #[error(
         "local claim state names task(s) this worktree cannot see: {ids}. Claims were not \
          treated as free. Switch to a worktree containing each task or run `aplan release \
@@ -66,6 +79,156 @@ pub struct ClaimChange {
 pub struct ReleaseChange {
     pub released: Option<ClaimRecord>,
     pub scope: ClaimScope,
+}
+
+/// Typed outcome of reconciling a local ephemeral claim immediately after a
+/// task transitions to a terminal state (`done` or `dropped`) (`ADR-0073`,
+/// `A2-152`).
+///
+/// Plan publication always commits first and is never rolled back if local
+/// claim cleanup fails.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[serde(tag = "outcome", rename_all = "snake_case")]
+pub enum TerminalClaimReconciliation {
+    /// No local claim was attached to this task.
+    None,
+    /// The acting identity held the claim and CAS-released it cleanly.
+    Released { record: ClaimRecord },
+    /// Another actor holds the claim; left untouched so one actor never
+    /// silently destroys another's coordination record.
+    RetainedOtherHolder { record: ClaimRecord, actor: String },
+    /// Acting identity could not be resolved; claim left untouched.
+    RetainedUnknownActor { record: ClaimRecord },
+    /// No shared local Git coordination scope exists for this plan.
+    Unavailable { reason: String },
+    /// Plan closure succeeded, but local claim cleanup failed (unsafe,
+    /// corrupt, I/O, or CAS contention). An idempotent `aplan release <id>`
+    /// completes cleanup once the store is healthy.
+    CleanupFailed {
+        reason: String,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        record: Option<ClaimRecord>,
+    },
+}
+
+impl TerminalClaimReconciliation {
+    /// One-line human summary for CLI / TUI output, or `None` when no claim
+    /// existed or coordination is simply unavailable (non-Git repo).
+    #[must_use]
+    pub fn human_summary(&self, id: &str, observed_at_epoch_seconds: i64) -> Option<String> {
+        match self {
+            Self::None | Self::Unavailable { .. } => None,
+            Self::Released { record } => Some(format!(
+                "released local claim held by `{}` since {}",
+                record.holder,
+                format_claim_time_human(record.claimed_at_epoch_seconds, observed_at_epoch_seconds)
+            )),
+            Self::RetainedOtherHolder { record, actor } => Some(format!(
+                "note: local claim for `{id}` is held by `{}` (since {}), not `{actor}`, and was \
+                 left in place; run `aplan release {id}` to clear it",
+                record.holder,
+                format_claim_time_human(record.claimed_at_epoch_seconds, observed_at_epoch_seconds),
+            )),
+            Self::RetainedUnknownActor { record } => Some(format!(
+                "note: local claim for `{id}` is held by `{}` (since {}), and acting identity is \
+                 unknown, so it was left in place; run `aplan release {id}` to clear it",
+                record.holder,
+                format_claim_time_human(record.claimed_at_epoch_seconds, observed_at_epoch_seconds),
+            )),
+            Self::CleanupFailed { reason, .. } => Some(format!(
+                "warning: task `{id}` is closed in the plan, but local claim cleanup failed \
+                 ({reason}); run `aplan release {id}` once the local claim store is healthy"
+            )),
+        }
+    }
+}
+
+/// Reconcile any local ephemeral claim for `id` immediately after `id` has
+/// been published in a terminal state (`done` or `dropped`) (`ADR-0073`,
+/// `A2-152`).
+///
+/// `resolve_actor` is invoked lazily only when a local claim for `id` actually
+/// exists, so closing or dropping an unclaimed task never spawns `git config`
+/// (`ADR-0043`).
+///
+/// Never fails the already-committed plan write: every store or contention
+/// failure is returned as [`TerminalClaimReconciliation::CleanupFailed`].
+#[must_use]
+pub fn reconcile_terminal_claim(
+    root: &Path,
+    id: &str,
+    resolve_actor: impl FnOnce() -> Option<String>,
+) -> TerminalClaimReconciliation {
+    if let Some(reason) = invalid_text(id, 256) {
+        return TerminalClaimReconciliation::CleanupFailed {
+            reason: format!("the requested task id {reason}"),
+            record: None,
+        };
+    }
+    let location = match location(root) {
+        Ok(Some(location)) => location,
+        Ok(None) => {
+            return TerminalClaimReconciliation::Unavailable {
+                reason: "the plan is not inside a Git repository; no local claim store exists"
+                    .to_string(),
+            };
+        }
+        Err(error) => {
+            return TerminalClaimReconciliation::CleanupFailed {
+                reason: error.to_string(),
+                record: None,
+            };
+        }
+    };
+    let mut cached_actor: Option<Option<String>> = None;
+    let mut resolver = Some(resolve_actor);
+    for attempt in 0..MAX_CAS_RETRIES {
+        let mut loaded = match load_state(&location) {
+            Ok(loaded) => loaded,
+            Err(error) => {
+                return TerminalClaimReconciliation::CleanupFailed {
+                    reason: error.to_string(),
+                    record: None,
+                };
+            }
+        };
+        let Some(record) = loaded.state.claims.get(id).cloned() else {
+            return TerminalClaimReconciliation::None;
+        };
+        let actor =
+            cached_actor.get_or_insert_with(|| resolver.take().and_then(|resolve| resolve()));
+        let Some(actor_name) = actor.as_deref() else {
+            return TerminalClaimReconciliation::RetainedUnknownActor { record };
+        };
+        if record.holder != actor_name {
+            return TerminalClaimReconciliation::RetainedOtherHolder {
+                record,
+                actor: actor_name.to_string(),
+            };
+        }
+        loaded.state.claims.remove(id);
+        match write_state(&location, &loaded) {
+            Ok(()) => return TerminalClaimReconciliation::Released { record },
+            Err(ClaimError::Write(
+                aplan_core::save::SaveError::Changed { .. }
+                | aplan_core::save::SaveError::Busy { .. },
+            )) if attempt + 1 < MAX_CAS_RETRIES => {
+                std::thread::yield_now();
+            }
+            Err(error) => {
+                return TerminalClaimReconciliation::CleanupFailed {
+                    reason: error.to_string(),
+                    record: Some(record),
+                };
+            }
+        }
+    }
+    TerminalClaimReconciliation::CleanupFailed {
+        reason: format!(
+            "claim state changed {MAX_CAS_RETRIES} times while releasing `{id}`; nothing was overwritten"
+        ),
+        record: None,
+    }
 }
 
 /// Compute the exact claim record and displaced value without writing them.
@@ -439,31 +602,45 @@ fn validate_claim_request(
 }
 
 fn validate_takeover(
-    path: &Path,
+    _path: &Path,
     id: &str,
     displaced: Option<&ClaimRecord>,
     from: Option<&str>,
 ) -> Result<(), ClaimError> {
-    let reason = match (displaced, from) {
-        (Some(record), None) => Some(format!(
-            "`{id}` is held by `{}`; name that holder with `--from` to record a takeover",
-            record.holder
-        )),
-        (Some(record), Some(named)) if record.holder != named => Some(format!(
-            "`{id}` is held by `{}`, not `{named}`; the displaced record changed",
-            record.holder
-        )),
-        (None, Some(named)) => Some(format!(
-            "`{id}` is held by nobody, so there is nothing to take from `{named}`"
-        )),
-        _ => None,
-    };
-    reason.map_or(Ok(()), |reason| {
-        Err(ClaimError::Invalid {
-            path: path.to_path_buf(),
-            reason,
-        })
-    })
+    match (displaced, from) {
+        (Some(record), None) => Err(ClaimError::Conflict {
+            id: id.to_string(),
+            held_by: Some(record.holder.clone()),
+            expected_from: None,
+            reason: format!(
+                "held by `{}` (recorded {}); pass `--from {}` to take it over or run \
+                 `aplan release {id}` first",
+                record.holder,
+                format_utc_timestamp(record.claimed_at_epoch_seconds),
+                record.holder
+            ),
+        }),
+        (Some(record), Some(named)) if record.holder != named => Err(ClaimError::Conflict {
+            id: id.to_string(),
+            held_by: Some(record.holder.clone()),
+            expected_from: Some(named.to_string()),
+            reason: format!(
+                "held by `{}`, not `{named}`; the displaced record changed -- retry with \
+                 `--from {}` or run `aplan release {id}`",
+                record.holder, record.holder
+            ),
+        }),
+        (None, Some(named)) => Err(ClaimError::Conflict {
+            id: id.to_string(),
+            held_by: None,
+            expected_from: Some(named.to_string()),
+            reason: format!(
+                "held by nobody, so there is nothing to take from `{named}`; run `aplan claim \
+                 {id}` without `--from`"
+            ),
+        }),
+        _ => Ok(()),
+    }
 }
 
 /// Release a claim, including one whose task is absent from this worktree.
@@ -1312,12 +1489,16 @@ mod tests {
         let path = Path::new("claims-v1.json");
         let held = record();
         for (displaced, from, expected) in [
-            (Some(&held), None, "name that holder with `--from`"),
+            (Some(&held), None, "--from ada"),
             (Some(&held), Some("grace"), "not `grace`"),
             (None, Some("ada"), "held by nobody"),
         ] {
             let error = validate_takeover(path, "T-1", displaced, from)
                 .expect_err("invalid takeover transition");
+            assert!(
+                matches!(error, ClaimError::Conflict { .. }),
+                "expected typed ClaimError::Conflict, got {error:?}"
+            );
             assert!(error.to_string().contains(expected), "{error}");
         }
         validate_takeover(path, "T-1", Some(&held), Some("ada")).expect("matching takeover");

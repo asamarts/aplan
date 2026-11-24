@@ -306,7 +306,7 @@ fn cli_and_typed_tui_boundary_refuse_terminal_transitions_and_unnamed_takeovers(
         matches!(
             direct,
             Err(aplan_app::WorkActionError::Claim(
-                aplan_app::claims::ClaimError::Invalid { .. }
+                aplan_app::claims::ClaimError::Conflict { .. }
             ))
         ),
         "unnamed TUI takeover was not refused: {direct:?}"

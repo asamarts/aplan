@@ -7229,16 +7229,41 @@ fn status_tone(status: &str, ready: bool) -> InspectorTone {
 
 fn push_claim_summary(items: &mut Vec<InspectorItem>, show: &aplan_app::Show) {
     if let Some(claim) = &show.claim {
+        let when = aplan_core::format_claim_time_human(
+            claim.claimed_at_epoch_seconds,
+            show.claim_observed_at_epoch_seconds,
+        );
         let age = show.claim_age_seconds.map_or_else(
             || "unknown age".to_string(),
-            |seconds| format!("{seconds}s"),
+            aplan_core::format_duration_short,
         );
+        let is_stale = show.claim_state == aplan_core::ClaimCoordinationState::StaleTerminal;
         items.push(InspectorItem::badge(
             "RESPONSIBILITY",
             "Claim",
-            format!("held by {} for {age}", claim.holder),
-            InspectorTone::Accent,
+            if is_stale {
+                format!("stale terminal claim by {} ({when})", claim.holder)
+            } else {
+                format!("held by {} for {age} ({when})", claim.holder)
+            },
+            if is_stale {
+                InspectorTone::Warning
+            } else {
+                InspectorTone::Accent
+            },
         ));
+        if is_stale {
+            items.push(InspectorItem::callout(
+                "RESPONSIBILITY",
+                "Stale claim recovery",
+                format!(
+                    "task is terminal (`{}`); run release (`aplan release {}`) to clear the \
+                     leftover local claim",
+                    show.status, show.id
+                ),
+                InspectorTone::Warning,
+            ));
+        }
         let mut origin = Vec::new();
         if let Some(host) = &claim.origin.host {
             origin.push(format!("host {host}"));
@@ -7254,6 +7279,17 @@ fn push_claim_summary(items: &mut Vec<InspectorItem>, show: &aplan_app::Show) {
             } else {
                 format!("{}; {}", claim.identity_source, origin.join(", "))
             },
+        ));
+    } else if show.claim_state == aplan_core::ClaimCoordinationState::InProgressUnclaimed {
+        items.push(InspectorItem::callout(
+            "RESPONSIBILITY",
+            "Coordination disagreement",
+            format!(
+                "task is `in_progress` with no active local claim; claim it (`aplan claim {}`) \
+                 or stop it (`aplan stop {}`)",
+                show.id, show.id
+            ),
+            InspectorTone::Warning,
         ));
     } else if show.coordination.available {
         items.push(InspectorItem::badge(

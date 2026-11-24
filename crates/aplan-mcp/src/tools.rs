@@ -502,6 +502,22 @@ pub struct ReadyTask {
     /// always derived from this value.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub claim: Option<aplan_core::ClaimRecord>,
+    /// Durable task status (`todo`, `in_progress`, etc.), so consumers can tell
+    /// fresh `todo` work from `in_progress` work (`ADR-0073`, `A2-152`).
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub status: String,
+    /// Status-versus-coordination lifecycle state (`active`, `stale_terminal`,
+    /// `in_progress_unclaimed`, `unclaimed`, `unavailable`) (`ADR-0073`, `A2-152`).
+    #[serde(default = "default_unclaimed_state")]
+    pub claim_state: aplan_core::ClaimCoordinationState,
+    /// Explicit recovery guidance when durable status and local coordination
+    /// disagree (for example `in_progress` with no active claim).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub coordination_warning: Option<String>,
+}
+
+const fn default_unclaimed_state() -> aplan_core::ClaimCoordinationState {
+    aplan_core::ClaimCoordinationState::Unclaimed
 }
 
 /// What `why` reports about one blocker.
@@ -551,6 +567,20 @@ pub fn ready_of(plan: &aplan_core::load::Plan, claims: &aplan_core::ClaimSnapsho
     // done, not because of what waits behind it.
     let to_task = |t: &aplan_core::Task| {
         let claim = claims.claim(&t.id).cloned();
+        let claim_state = aplan_core::ClaimCoordinationState::derive(
+            t.status,
+            claim.as_ref(),
+            claims.scope.available,
+        );
+        let coordination_warning =
+            (claim_state == aplan_core::ClaimCoordinationState::InProgressUnclaimed).then(|| {
+                format!(
+                    "status/coordination disagreement: `{}` is `in_progress` with no active local \
+                     claim; run `aplan claim {}` to record who is working on it or `aplan stop {}` \
+                     if work stopped",
+                    t.id, t.id, t.id
+                )
+            });
         ReadyTask {
             downstream_depth: 0,
             id: t.id.clone(),
@@ -569,6 +599,9 @@ pub fn ready_of(plan: &aplan_core::load::Plan, claims: &aplan_core::ClaimSnapsho
             // is independent of whether the row represents work or a checkpoint.
             held_by: claim.as_ref().map(|record| record.holder.clone()),
             claim,
+            status: t.status.to_string(),
+            claim_state,
+            coordination_warning,
         }
     };
     let releases = graph.releases_all();
@@ -1331,11 +1364,20 @@ pub fn close(
 
     save_task(&target.path, &source, &updated, "aplan_close")?;
 
+    let claim_reconciliation =
+        aplan_app::claims::reconcile_terminal_claim(&policy.repo_root, id, || {
+            let sources = aplan_interop::identity::from_environment(None, &policy.repo_root);
+            aplan_interop::identity::resolve_detailed(&sources)
+                .ok()
+                .map(|resolved| resolved.name)
+        });
+
     Ok(serde_json::json!({
         "closed": id,
         "file": target.path.display().to_string(),
         "evidence": final_evidence_refs,
         "aplan_version": env!("CARGO_PKG_VERSION"),
+        "claim_reconciliation": claim_reconciliation,
         // What a release recorded, `null` for everything else, and why when a
         // release could not record one: an agent has no stderr to read, and a
         // `null` with no explanation cannot be told from "this is not a
@@ -1543,7 +1585,8 @@ pub fn release(
 
 fn claim_error(error: &aplan_app::claims::ClaimError) -> ToolError {
     match error {
-        aplan_app::claims::ClaimError::Invalid { .. } => ToolError::Refused(error.to_string()),
+        aplan_app::claims::ClaimError::Invalid { .. }
+        | aplan_app::claims::ClaimError::Conflict { .. } => ToolError::Refused(error.to_string()),
         _ => ToolError::Plan(error.to_string()),
     }
 }
