@@ -28,6 +28,14 @@
             "null"
           ]
         },
+        "closed_at": {
+          "default": null,
+          "description": "Optional source completion timestamp for a `done` imported entry.\nValidated, normalized to canonical UTC whole seconds, and durably\nlabelled with `closed_at_source: imported`.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
         "contains": {
           "default": [],
           "description": "Cuts or tasks whose work this checkpoint borrows for rollups.",

@@ -1296,20 +1296,28 @@ pub fn close(
     // note (`A1-173`).
     let recorded = recorded_version(&plan, &target.task, policy);
     let number = recorded.as_ref().and_then(|r| r.as_ref().ok());
-    let mut updated =
-        aplan_core::close(&source, &parsed, &fingerprints, number.map(String::as_str)).map_err(
-            |e| {
-                // The same remedy the command gives, from the same place: an agent
-                // cannot close through MCP what the command refuses, and that includes
-                // being told the same way (`A1-131`, `A1-265`). The invocation named is
-                // the command's, because `amend` has no tool -- which is the honest
-                // answer rather than inventing one.
-                ToolError::Refused(match aplan_core::close::advice(&e, id) {
-                    Some(advice) => format!("{e}. {advice}"),
-                    None => e.to_string(),
-                })
-            },
-        )?;
+    let closed_at = aplan_core::format_closed_at(aplan_core::capture::Clock::now_epoch(
+        &aplan_core::capture::SystemClock,
+    ))
+    .map_err(ToolError::Refused)?;
+    let mut updated = aplan_core::close_at(
+        &source,
+        &parsed,
+        &fingerprints,
+        number.map(String::as_str),
+        Some(&closed_at),
+    )
+    .map_err(|e| {
+        // The same remedy the command gives, from the same place: an agent
+        // cannot close through MCP what the command refuses, and that includes
+        // being told the same way (`A1-131`, `A1-265`). The invocation named is
+        // the command's, because `amend` has no tool -- which is the honest
+        // answer rather than inventing one.
+        ToolError::Refused(match aplan_core::close::advice(&e, id) {
+            Some(advice) => format!("{e}. {advice}"),
+            None => e.to_string(),
+        })
+    })?;
 
     // The same gate the CLI applies, through the same function, for the reason
     // this whole surface exists to respect: an agent must not be able to close
@@ -1374,6 +1382,7 @@ pub fn close(
 
     Ok(serde_json::json!({
         "closed": id,
+        "closed_at": closed_at,
         "file": target.path.display().to_string(),
         "evidence": final_evidence_refs,
         "aplan_version": env!("CARGO_PKG_VERSION"),

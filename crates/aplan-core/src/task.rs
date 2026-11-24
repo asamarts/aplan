@@ -819,6 +819,112 @@ pub struct Task {
     /// A tag that does not survive being read back is not a record either.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub version: Option<String>,
+    /// Canonical RFC 3339 UTC whole-second instant (`YYYY-MM-DDTHH:MM:SSZ`) at
+    /// which this task's transition to `done` was accepted and recorded.
+    ///
+    /// Optional so legacy `done` tasks remain valid (`unknown` completion time).
+    /// Valid only when `status` is `done`; `APLAN065` rejects malformed values
+    /// or non-`done` use.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub closed_at: Option<String>,
+    /// Durable provenance of a persisted `closed_at` claim (`local` or
+    /// `imported`).
+    ///
+    /// Optional; absent alongside `closed_at` means recorded locally by `close`,
+    /// while `imported` durably distinguishes a validated source timestamp
+    /// preserved on import. Valid only when `closed_at` is present on a `done`
+    /// task (`APLAN065`).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub closed_at_source: Option<ClosedAtSource>,
+}
+
+crate::str_enum! {
+    /// Durable provenance of a persisted `closed_at` timestamp on a `done` task.
+    #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+    #[serde(rename_all = "snake_case")]
+    pub enum ClosedAtSource {
+        /// Recorded locally when `aplan` accepted the transition to `done`.
+        Local = "local",
+        /// Validated and preserved from an external source during explicit import.
+        Imported = "imported",
+    }
+}
+
+/// Earliest valid `closed_at` Unix timestamp (`1970-01-01T00:00:00Z`).
+pub const MIN_CLOSED_AT_EPOCH: i64 = 0;
+
+/// Latest valid `closed_at` Unix timestamp (`9999-12-31T23:59:59Z`).
+pub const MAX_CLOSED_AT_EPOCH: i64 = 253_402_300_799;
+
+/// Parse a strictly canonical `closed_at` instant (`YYYY-MM-DDTHH:MM:SSZ`) in
+/// `1970-01-01T00:00:00Z..=9999-12-31T23:59:59Z`.
+///
+/// Rejects non-UTC offsets, fractional seconds, impossible calendar dates,
+/// leap-second `:60`, pre-epoch timestamps, and non-ASCII text.
+#[must_use]
+pub fn parse_canonical_closed_at(s: &str) -> Option<i64> {
+    if s.len() != 20 || !s.is_ascii() || !s.ends_with('Z') {
+        return None;
+    }
+    let epoch = crate::validate::rfc3339_to_epoch(s)?;
+    (MIN_CLOSED_AT_EPOCH..=MAX_CLOSED_AT_EPOCH)
+        .contains(&epoch)
+        .then_some(epoch)
+}
+
+/// Format a Unix epoch second in `1970-01-01T00:00:00Z..=9999-12-31T23:59:59Z`
+/// as a canonical `closed_at` instant (`YYYY-MM-DDTHH:MM:SSZ`).
+///
+/// # Errors
+/// When `epoch_seconds` is outside `1970-01-01T00:00:00Z..=9999-12-31T23:59:59Z`.
+pub fn format_closed_at(epoch_seconds: i64) -> Result<String, String> {
+    if !(MIN_CLOSED_AT_EPOCH..=MAX_CLOSED_AT_EPOCH).contains(&epoch_seconds) {
+        return Err(format!(
+            "epoch second `{epoch_seconds}` is outside the valid `closed_at` range \
+             (`1970-01-01T00:00:00Z`..=`9999-12-31T23:59:59Z`)"
+        ));
+    }
+    Ok(crate::claim::format_utc_timestamp(epoch_seconds))
+}
+
+/// Normalize an RFC 3339 instant (accepting optional fractional seconds and
+/// `Z` or `+/-HH:MM` offsets) into a canonical `closed_at` instant
+/// (`YYYY-MM-DDTHH:MM:SSZ`) in `1970-01-01T00:00:00Z..=9999-12-31T23:59:59Z`.
+///
+/// Sub-second fractions are truncated to whole seconds.
+///
+/// # Errors
+/// When `input` is not a valid RFC 3339 calendar instant or converts outside
+/// the valid UTC range.
+pub fn normalize_closed_at(input: &str) -> Result<String, String> {
+    if !input.is_ascii() || input.len() < 20 {
+        return Err(format!("`{input}` is not a valid RFC 3339 instant"));
+    }
+    let bytes = input.as_bytes();
+    if bytes[10] != b'T' {
+        return Err(format!("`{input}` is not a valid RFC 3339 instant"));
+    }
+    let rest = &input[19..];
+    let tz = if let Some(after_dot) = rest.strip_prefix('.') {
+        let frac_len = after_dot.bytes().take_while(u8::is_ascii_digit).count();
+        if frac_len == 0 {
+            return Err(format!(
+                "`{input}` has a decimal point without fractional digits"
+            ));
+        }
+        &after_dot[frac_len..]
+    } else {
+        rest
+    };
+    let normalized_input = format!("{}{tz}", &input[..19]);
+    let epoch = crate::validate::rfc3339_to_epoch(&normalized_input)
+        .ok_or_else(|| format!("`{input}` is not a valid RFC 3339 calendar instant"))?;
+    format_closed_at(epoch).map_err(|_| {
+        format!(
+            "`{input}` converts outside the valid `closed_at` range \
+             (`1970-01-01T00:00:00Z`..=`9999-12-31T23:59:59Z`)"
+        )
+    })
 }
 
 // The version semantics were established by A1-312 and ADR-0034. Keep that
@@ -1225,6 +1331,8 @@ mod tests {
             version_impact: None,
             version_impact_reason: None,
             version: None,
+            closed_at: None,
+            closed_at_source: None,
         }
     }
 
@@ -1305,6 +1413,8 @@ mod tests {
             version_impact: None,
             version_impact_reason: None,
             version: None,
+            closed_at: None,
+            closed_at_source: None,
         };
         assert!(
             !t.is_release(),
@@ -1343,6 +1453,8 @@ mod tests {
             version_impact: None,
             version_impact_reason: None,
             version: None,
+            closed_at: None,
+            closed_at_source: None,
         };
         assert!(
             !parked.is_ready(|_| true),
@@ -1391,6 +1503,8 @@ mod tests {
                 version_impact: None,
                 version_impact_reason: None,
                 version: None,
+                closed_at: None,
+                closed_at_source: None,
             };
             t.evidence = evidence;
             t.binds_paths()
@@ -1449,6 +1563,8 @@ mod tests {
             version_impact: None,
             version_impact_reason: None,
             version: None,
+            closed_at: None,
+            closed_at_source: None,
         };
         assert!(!t.is_milestone(), "no tags: not a milestone");
         t.tags = vec!["cli".into(), "milestone".into()];

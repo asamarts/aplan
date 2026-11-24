@@ -80,6 +80,8 @@ pub(crate) fn task_inspector(row: &TaskBrowserRow) -> aplan_app::Show {
         version_impact: None,
         version_impact_reason: None,
         version: None,
+        closed_at: None,
+        closed_at_source: None,
     }
 }
 
@@ -124,6 +126,8 @@ pub(crate) fn graph_task(id: &str, title: &str, blocked_by: &[&str]) -> Task {
         version_impact: None,
         version_impact_reason: None,
         version: None,
+        closed_at: None,
+        closed_at_source: None,
     }
 }
 

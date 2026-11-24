@@ -1,6 +1,10 @@
 {
   "behaviours": [
     {
+      "name": "close.records_closed_at",
+      "what": "successful `close` across CLI, MCP and app surfaces atomically writes canonical RFC 3339 UTC whole-second `closed_at` alongside `status: done`, refused close writes nothing, and `amend`/`restamp` preserve the original `closed_at`"
+    },
+    {
       "name": "verify.test_timeout_bounds_discovery_only",
       "what": "`test.timeout_seconds` bounds test discovery (`list` and `skipped`) without cutting off or panicking test execution (`run`, `batch.run` or the miss sentinel) under `verify --execute`"
     },
@@ -1495,14 +1499,14 @@
     "version.require_impact"
   ],
   "counts": {
-    "behaviours": 241,
+    "behaviours": 242,
     "build_capabilities": 1,
     "commands": 50,
     "config_keys": 136,
     "evidence_kinds": 5,
     "formats": 9,
     "mcp_tools": 14,
-    "rules": 64
+    "rules": 65
   },
   "evidence_kinds": [
     "commit",
@@ -1906,6 +1910,11 @@
       "code": "APLAN064",
       "severity": "warning",
       "title": "a task's id matches the id family declared for its cut"
+    },
+    {
+      "code": "APLAN065",
+      "severity": "error",
+      "title": "a `closed_at` record is valid canonical UTC and only appears on a `done` task"
     }
   ],
   "schema_version": "v1",

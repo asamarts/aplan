@@ -121,6 +121,21 @@
       ],
       "type": "object"
     },
+    "ClosedAtSource": {
+      "description": "Durable provenance of a persisted `closed_at` timestamp on a `done` task.",
+      "oneOf": [
+        {
+          "const": "local",
+          "description": "Recorded locally when `aplan` accepted the transition to `done`.",
+          "type": "string"
+        },
+        {
+          "const": "imported",
+          "description": "Validated and preserved from an external source during explicit import.",
+          "type": "string"
+        }
+      ]
+    },
     "EvidenceKind": {
       "description": "What kind of proof closes a task.\n\nThe point of typing this is that \"I finished it\" is not evidence. A commit,\na URL, a committed artefact, a named test, or a dated note is.",
       "oneOf": [
@@ -231,6 +246,24 @@
         "claim_state": {
           "$ref": "#/$defs/ClaimCoordinationState",
           "description": "Status-versus-coordination lifecycle state (`active`, `stale_terminal`,\n`in_progress_unclaimed`, `unclaimed`, `unavailable`) (`ADR-0073`, `A2-152`)."
+        },
+        "closed_at": {
+          "description": "Canonical RFC 3339 UTC whole-second instant at which this task's\ntransition to `done` was accepted and recorded, `null` when absent.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "closed_at_source": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/ClosedAtSource"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "description": "Durable provenance of `closed_at` (`local` or `imported`), `null` when\nabsent."
         },
         "contains": {
           "description": "The checkpoints this one contains, whose work rolls up into it at any\ndepth (ADR-0042). Not a dependency either: a milestone in `blocked_by`\n*sequences* two cuts (ADR-0013), and the two meanings are what this\nseparates.",
@@ -413,7 +446,9 @@
         "revisit_at",
         "version_impact",
         "version_impact_reason",
-        "version"
+        "version",
+        "closed_at",
+        "closed_at_source"
       ],
       "type": "object"
     },

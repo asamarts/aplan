@@ -8446,6 +8446,7 @@ where
     }
 }
 
+#[allow(clippy::too_many_lines)]
 fn cmd_add(root: &std::path::Path, args: &AddArgs) -> Result<u8> {
     use aplan_interop::{cut, emit, ids};
 
@@ -8531,6 +8532,8 @@ fn cmd_add(root: &std::path::Path, args: &AddArgs) -> Result<u8> {
             version_impact,
             version_impact_reason: args.version_impact_reason.clone(),
             version: None,
+            closed_at: None,
+            closed_at_source: None,
         };
 
         // The whole post-state, through the one shared path (`A1-113`). The
@@ -8911,6 +8914,13 @@ fn task_from_entry(
     phase: u32,
     entry: &aplan_interop::manifest::Entry,
 ) -> aplan_core::Task {
+    let closed_at = entry
+        .closed_at
+        .as_deref()
+        .and_then(|raw| aplan_core::normalize_closed_at(raw).ok());
+    let closed_at_source = closed_at
+        .as_ref()
+        .map(|_| aplan_core::ClosedAtSource::Imported);
     aplan_core::Task {
         id: id.to_string(),
         title: entry.title.clone(),
@@ -8932,6 +8942,8 @@ fn task_from_entry(
         version_impact: entry.version_impact,
         version_impact_reason: entry.version_impact_reason.clone(),
         version: None,
+        closed_at,
+        closed_at_source,
     }
 }
 
@@ -8997,6 +9009,13 @@ fn validate_manifest_creation_entry(
                 "`revisit_at` must be an RFC 3339 instant, not `{at}`"
             ));
         }
+    }
+    if let Some(at) = entry.closed_at.as_deref() {
+        if status != aplan_core::Status::Done {
+            return Err("`closed_at` is accepted only on a `done` imported entry".to_string());
+        }
+        aplan_core::normalize_closed_at(at)
+            .map_err(|reason| format!("invalid `closed_at`: {reason}"))?;
     }
     if entry
         .version_impact_reason
@@ -12193,6 +12212,8 @@ fn successor_task(
         version_impact: None,
         version_impact_reason: None,
         version: None,
+        closed_at: None,
+        closed_at_source: None,
     }
 }
 
@@ -13437,6 +13458,7 @@ fn close_evidence(
     }
 }
 
+#[allow(clippy::too_many_lines)]
 fn cmd_close(
     root: &std::path::Path,
     id: &str,
@@ -13500,8 +13522,18 @@ fn cmd_close(
 
     // Structural refusals first: already `done`, duplicate evidence, etc.
     let recorded = recorded_version(&plan, &lt.task, repo, &config);
-    let mut updated = aplan_core::close(&original, &evidence, &fingerprints, recorded.as_deref())
-        .map_err(|e| close_err("close", id, &e))?;
+    let closed_at = aplan_core::format_closed_at(aplan_core::capture::Clock::now_epoch(
+        &aplan_core::capture::SystemClock,
+    ))
+    .map_err(|msg| anyhow::anyhow!("{msg}"))?;
+    let mut updated = aplan_core::close_at(
+        &original,
+        &evidence,
+        &fingerprints,
+        recorded.as_deref(),
+        Some(&closed_at),
+    )
+    .map_err(|e| close_err("close", id, &e))?;
     let final_evidence = task_of(&updated, id)?.evidence;
 
     // Then the gate over the complete final evidence set, still before writing (`A1-109`, `A2-147`).

@@ -1107,6 +1107,7 @@ struct ManifestPlan {
     reverse_edges: Vec<(String, String)>,
 }
 
+#[allow(clippy::too_many_lines)]
 fn prepare_manifest(
     context: &PlanContext,
     entries: &[aplan_interop::manifest::Entry],
@@ -1186,6 +1187,15 @@ fn prepare_manifest(
                 .map_err(|error| at(error.to_string()))?;
         }
         let task = manifest_task(entry, &id, phase);
+        if let Some(raw) = entry.closed_at.as_deref() {
+            if entry.status.unwrap_or(Status::Todo) != Status::Done {
+                return Err(at(
+                    "`closed_at` is accepted only on a `done` imported entry".to_string(),
+                ));
+            }
+            aplan_core::normalize_closed_at(raw)
+                .map_err(|reason| at(format!("invalid `closed_at`: {reason}")))?;
+        }
         let path = aplan_interop::emit::task_path(&task_dir(context), &id);
         after = aplan_core::mutation::with_added(&after, path, task.clone());
         if let Some(cut) = cut {
@@ -1287,7 +1297,7 @@ fn validate_manifest_entry(entry: &aplan_interop::manifest::Entry) -> Result<(),
 }
 
 fn manifest_task(entry: &aplan_interop::manifest::Entry, id: &str, phase: u32) -> Task {
-    new_task(NewTask {
+    let mut task = new_task(NewTask {
         id: id.to_string(),
         title: entry.title.clone(),
         phase,
@@ -1305,7 +1315,14 @@ fn manifest_task(entry: &aplan_interop::manifest::Entry, id: &str, phase: u32) -
         revisit_at: entry.revisit_at.clone(),
         version_impact: entry.version_impact,
         version_impact_reason: entry.version_impact_reason.clone(),
-    })
+    });
+    if let Some(raw) = entry.closed_at.as_deref()
+        && let Ok(normalized) = aplan_core::normalize_closed_at(raw)
+    {
+        task.closed_at = Some(normalized);
+        task.closed_at_source = Some(aplan_core::ClosedAtSource::Imported);
+    }
+    task
 }
 
 fn preview(
@@ -1666,6 +1683,8 @@ fn new_task(spec: NewTask) -> Task {
         version_impact,
         version_impact_reason,
         version: None,
+        closed_at: None,
+        closed_at_source: None,
     }
 }
 

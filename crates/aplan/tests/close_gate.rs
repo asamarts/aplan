@@ -3112,4 +3112,168 @@ fn trace_fingerprint_build_mismatch_reports_build_not_content_drift_and_mcp_clos
     )
     .expect("mcp close");
     assert_eq!(closed["aplan_version"], env!("CARGO_PKG_VERSION"));
+    assert!(
+        closed["closed_at"]
+            .as_str()
+            .is_some_and(|s| aplan_core::parse_canonical_closed_at(s).is_some()),
+        "mcp close must return canonical UTC closed_at: {closed:#?}"
+    );
+}
+
+/// End-to-end proof for `close.records_closed_at` (`A2-109`, ADR-0074):
+/// - CLI `close` atomically records canonical UTC `closed_at` on tasks and
+///   milestones without changing `drop`
+/// - refused `close` writes nothing
+/// - `amend` and `close --restamp` preserve the original `closed_at`
+/// - legacy `done` tasks without `closed_at` stay valid
+/// - `add --from` imported `done` entries normalize `closed_at` and durably
+///   label `closed_at_source: imported`
+/// - MCP `aplan_close` records canonical UTC `closed_at`
+#[test]
+fn close_records_atomic_closed_at_and_preserves_it_across_amend_and_restamp() {
+    let dir = tempfile::Builder::new()
+        .tempdir_in(aplan_core::fixture::fixture_root())
+        .expect("tempdir");
+    let root = dir.path();
+    std::fs::create_dir_all(root.join("aplan/tasks")).expect("mkdir");
+    std::fs::create_dir_all(root.join("src")).expect("mkdir src");
+    std::fs::write(root.join("src/lib.rs"), "pub fn ok() {}\n").expect("write lib");
+    std::fs::write(root.join("src/extra.rs"), "pub fn extra() {}\n").expect("write extra");
+    std::fs::write(root.join("SPEC.md"), "# Spec\n\nInitial.\n").expect("write spec");
+    std::fs::write(root.join(".aplan.yml"), "detect_drift: true\n").expect("write config");
+    std::fs::write(
+        root.join("aplan/tasks/C-1.md"),
+        "---\nid: C-1\ntitle: Close me\nphase: 1\nstatus: todo\neffort_days: 1\n\
+         paths: [src/**]\ntraces: [SPEC.md#spec]\n---\n\nReal work.\n",
+    )
+    .expect("write C-1");
+    std::fs::write(
+        root.join("aplan/tasks/C-2.md"),
+        "---\nid: C-2\ntitle: Drop me\nphase: 1\nstatus: todo\neffort_days: 1\n\
+         paths: [src/**]\n---\n\nAbandoned work.\n",
+    )
+    .expect("write C-2");
+    std::fs::write(
+        root.join("aplan/tasks/C-3.md"),
+        "---\nid: C-3\ntitle: Legacy done\nphase: 1\nstatus: done\neffort_days: 1\n\
+         paths: [src/**]\nevidence:\n  - kind: file\n    ref: src/lib.rs\n---\n\nLegacy.\n",
+    )
+    .expect("write C-3");
+    std::fs::write(
+        root.join("aplan/tasks/M-1.md"),
+        "---\nid: M-1\ntitle: Cut\nphase: 1\nstatus: todo\ntags: [milestone]\n\
+         blocked_by: [C-1]\n---\n\nCut.\n",
+    )
+    .expect("write M-1");
+    git(root, &["init", "-q", "."]);
+    git(root, &["config", "user.email", "t@example.com"]);
+    git(root, &["config", "user.name", "t"]);
+    git(root, &["add", "-A"]);
+    git(root, &["commit", "-q", "-m", "init"]);
+
+    // 1. Refused close writes nothing (no closed_at leaked).
+    let before_c1 = std::fs::read_to_string(root.join("aplan/tasks/C-1.md")).expect("read C-1");
+    let refused = common::run(root, &["close", "C-1", "--evidence", "file:src/missing.rs"]);
+    assert_ne!(refused.code, 0, "missing file evidence must be refused");
+    assert_eq!(
+        std::fs::read_to_string(root.join("aplan/tasks/C-1.md")).expect("read C-1 after refusal"),
+        before_c1,
+        "refused close must not modify task file"
+    );
+
+    // 2. Successful CLI close writes canonical UTC closed_at atomically.
+    let closed = common::run(root, &["close", "C-1", "--evidence", "file:src/lib.rs"]);
+    assert_eq!(
+        closed.code, 0,
+        "close C-1 failed:\n{}{}",
+        closed.stdout, closed.stderr
+    );
+    let plan = aplan_core::load_plan(&root.join("aplan"));
+    let c1 = plan.tasks.iter().find(|t| t.task.id == "C-1").expect("C-1");
+    let orig_ts = c1.task.closed_at.clone().expect("C-1 closed_at recorded");
+    assert!(
+        aplan_core::parse_canonical_closed_at(&orig_ts).is_some(),
+        "non-canonical closed_at: {orig_ts}"
+    );
+    assert_eq!(c1.task.closed_at_source, None);
+
+    // 3. Amend and restamp preserve the exact original closed_at.
+    let amended = common::run(
+        root,
+        &["amend", "C-1", "--add-evidence", "file:src/extra.rs"],
+    );
+    assert_eq!(
+        amended.code, 0,
+        "amend failed:\n{}{}",
+        amended.stdout, amended.stderr
+    );
+    std::fs::write(root.join("SPEC.md"), "# Spec\n\nUpdated.\n").expect("update spec");
+    let restamped = common::run(root, &["close", "C-1", "--restamp"]);
+    assert_eq!(
+        restamped.code, 0,
+        "restamp failed:\n{}{}",
+        restamped.stdout, restamped.stderr
+    );
+    let plan = aplan_core::load_plan(&root.join("aplan"));
+    let c1_after = plan.tasks.iter().find(|t| t.task.id == "C-1").expect("C-1");
+    assert_eq!(
+        c1_after.task.closed_at.as_deref(),
+        Some(orig_ts.as_str()),
+        "amend and restamp must preserve original closed_at"
+    );
+
+    // 4. Milestone closure records closed_at; drop leaves closed_at absent.
+    let m_closed = common::run(root, &["close", "M-1", "--evidence", "file:src/lib.rs"]);
+    assert_eq!(
+        m_closed.code, 0,
+        "close M-1 failed:\n{}{}",
+        m_closed.stdout, m_closed.stderr
+    );
+    let dropped = common::run(root, &["drop", "C-2"]);
+    assert_eq!(
+        dropped.code, 0,
+        "drop C-2 failed:\n{}{}",
+        dropped.stdout, dropped.stderr
+    );
+    let plan = aplan_core::load_plan(&root.join("aplan"));
+    let m1 = plan.tasks.iter().find(|t| t.task.id == "M-1").expect("M-1");
+    assert!(
+        m1.task.closed_at.is_some(),
+        "milestone close must record closed_at"
+    );
+    let c2 = plan.tasks.iter().find(|t| t.task.id == "C-2").expect("C-2");
+    assert_eq!(
+        c2.task.closed_at, None,
+        "dropped task must not have closed_at"
+    );
+
+    // 5. Imported done entry normalizes offset/fractional closed_at and labels `imported`.
+    let manifest = root.join("import.yml");
+    std::fs::write(
+        &manifest,
+        "- id: C-4\n  title: Imported done\n  status: done\n  effort: 1\n  paths: [src/**]\n  \
+         closed_at: 2026-10-11T21:24:08.999+02:00\n  evidence:\n    - kind: file\n      ref: src/lib.rs\n",
+    )
+    .expect("write manifest");
+    let imported = common::run(root, &["add", "--from", manifest.to_str().expect("utf8")]);
+    assert_eq!(
+        imported.code, 0,
+        "import add --from failed:\n{}{}",
+        imported.stdout, imported.stderr
+    );
+    let plan = aplan_core::load_plan(&root.join("aplan"));
+    let c4 = plan.tasks.iter().find(|t| t.task.id == "C-4").expect("C-4");
+    assert_eq!(c4.task.closed_at.as_deref(), Some("2026-10-11T19:24:08Z"));
+    assert_eq!(
+        c4.task.closed_at_source,
+        Some(aplan_core::ClosedAtSource::Imported)
+    );
+
+    // 6. Legacy `done` task (`C-3`) without `closed_at` remains valid under `check`.
+    let checked = common::run(root, &["check"]);
+    assert_eq!(
+        checked.code, 0,
+        "check failed:\n{}{}",
+        checked.stdout, checked.stderr
+    );
 }

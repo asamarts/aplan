@@ -103,6 +103,10 @@ pub struct Show {
     pub version_impact_reason: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub version: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub closed_at: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub closed_at_source: Option<crate::task::ClosedAtSource>,
 }
 
 /// One citation, as the file states it.
@@ -457,6 +461,8 @@ impl Show {
             ready: row.is_some_and(|r| r.ready),
             workable: task.status.is_workable() && !task.is_milestone(),
             revisit_at: task.revisit_at.clone(),
+            closed_at: task.closed_at.clone(),
+            closed_at_source: task.closed_at_source,
             paths: task.paths.clone(),
             traces: task.traces.clone(),
             trace_fingerprints: task.trace_fingerprints.clone(),

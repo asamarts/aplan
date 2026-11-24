@@ -2493,6 +2493,8 @@ mod tests {
             version_impact: None,
             version_impact_reason: None,
             version: None,
+            closed_at: None,
+            closed_at_source: None,
         }
     }
 
@@ -10292,6 +10294,8 @@ mod version_behind_tests {
             version_impact: impact,
             version_impact_reason: None,
             version: None,
+            closed_at: None,
+            closed_at_source: None,
         }
     }
 

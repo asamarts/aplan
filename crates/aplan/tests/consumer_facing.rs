@@ -223,6 +223,8 @@ fn no_generated_roadmap_cites_this_projects_adrs() {
         version_impact: None,
         version_impact_reason: None,
         version: None,
+        closed_at: None,
+        closed_at_source: None,
     };
     let graph = aplan_core::Graph::new(std::iter::once(&task));
     let markdown = aplan_output::render_roadmap_markdown(&graph.roadmap(), None, None);

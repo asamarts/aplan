@@ -732,6 +732,7 @@ empty cut must be surfaced, not swallowed.
 | `APLAN062` | A task cites each piece of evidence once | warning | L0 | done (`A2-106`) |
 | `APLAN063` | A live task's literal `paths` name neither a bare tracked directory nor a target renamed or removed in Git history | warning | L1 | done (`A2-101`) |
 | `APLAN064` | A task's id matches the id family declared for its cut | warning | L0 | done (`A2-097`, opt-in) |
+| `APLAN065` | A `closed_at` record is valid canonical UTC and only appears on a `done` task | error | L0 | done (`A2-109`, ADR-0074) |
 | `APLAN044` | A closed task claims less of the released version than its level implies, without saying why | warning | L0 | done (`A1-312`) |
 
 Every diagnostic carries a stable code, a severity, an optional task id, an optional

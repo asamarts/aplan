@@ -855,6 +855,7 @@ fn universal_path_glob_rules() -> Vec<Scenario> {
 /// `APLAN062` (`A2-106`): duplicate evidence citations already on disk fire on
 /// `check`, while distinct citations or same text under different kinds stay
 /// silent.
+#[allow(clippy::too_many_lines)]
 fn duplicate_evidence_rules() -> Vec<Scenario> {
     vec![
         scen(
@@ -949,6 +950,28 @@ fn duplicate_evidence_rules() -> Vec<Scenario> {
             });
             s
         },
+        scen(
+            "closed-at-invalid-fires",
+            Rule::ClosedAtInvalid,
+            Fires,
+            vec![tf(
+                "a",
+                "id: A-1\ntitle: bad closed_at\nphase: 1\nstatus: todo\neffort_days: 1\n\
+                 closed_at: 2026-10-11T19:24:08+02:00",
+            )],
+        ),
+        scen(
+            "closed-at-invalid-silent",
+            Rule::ClosedAtInvalid,
+            Silent,
+            vec![tf(
+                "a",
+                "id: A-1\ntitle: valid closed_at\nphase: 1\nstatus: done\neffort_days: 1\n\
+                 paths:\n  - deny.toml\n\
+                 closed_at: 2026-10-11T19:24:08Z\n\
+                 evidence:\n  - kind: file\n    ref: deny.toml",
+            )],
+        ),
     ]
 }
 
@@ -3876,6 +3899,8 @@ fn done(id: &str, evidence: Vec<Evidence>, paths: Vec<String>) -> Task {
         version_impact: None,
         version_impact_reason: None,
         version: None,
+        closed_at: None,
+        closed_at_source: None,
     }
 }
 

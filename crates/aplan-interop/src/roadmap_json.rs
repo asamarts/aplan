@@ -654,6 +654,8 @@ impl ProposalSource for RoadmapJson {
                 version_impact: None,
                 version_impact_reason: None,
                 version: None,
+                closed_at: None,
+                closed_at_source: None,
             });
             bodies.push(body);
         }
@@ -746,6 +748,8 @@ fn read_workstream(
                     version_impact: None,
                     version_impact_reason: None,
                     version: None,
+                    closed_at: None,
+                    closed_at_source: None,
                 });
                 bodies.push(body);
             }
@@ -795,6 +799,8 @@ fn read_workstream(
                     version_impact: None,
                     version_impact_reason: None,
                     version: None,
+                    closed_at: None,
+                    closed_at_source: None,
                 });
                 bodies.push(body);
             }

@@ -708,6 +708,7 @@ pub fn validate_with_graph(plan: &Plan, opts: &Options, graph: &Graph<'_>) -> Re
 
     for lt in &plan.tasks {
         check_revisit(lt, &mut report.diagnostics);
+        check_closed_at(lt, &mut report.diagnostics);
     }
     check_vocabularies(plan, opts, &mut report.diagnostics);
     check_id_families(plan, graph, opts, &mut report.diagnostics);
@@ -1164,6 +1165,67 @@ fn check_revisit(lt: &LoadedTask, out: &mut Vec<Diagnostic>) {
                     "cannot be what makes this task start.",
                 )
                 .to_string(),
+            )
+            .with_task(&t.id)
+            .with_file(&lt.path),
+        );
+    }
+}
+
+/// `APLAN065`: `closed_at` and `closed_at_source` are canonical UTC whole
+/// seconds and appear only on `done` tasks (`A2-109`, ADR-0074).
+fn check_closed_at(lt: &LoadedTask, out: &mut Vec<Diagnostic>) {
+    let t = &lt.task;
+    if t.closed_at_source.is_some() && t.closed_at.is_none() {
+        out.push(
+            Diagnostic::error(
+                code::CLOSED_AT_INVALID,
+                "carries `closed_at_source` without `closed_at`: provenance has no timestamp to describe",
+            )
+            .with_agent_instruction(
+                "Remove `closed_at_source`, or record a canonical UTC `closed_at` alongside it \
+                 on a `done` task."
+                    .to_string(),
+            )
+            .with_task(&t.id)
+            .with_file(&lt.path),
+        );
+    }
+    let Some(at) = &t.closed_at else {
+        return;
+    };
+    if t.status != Status::Done {
+        out.push(
+            Diagnostic::error(
+                code::CLOSED_AT_INVALID,
+                format!(
+                    "carries `closed_at` while status is `{}`: `closed_at` is valid only on `done` \
+                     tasks",
+                    t.status
+                ),
+            )
+            .with_agent_instruction(
+                "Remove `closed_at` (and any `closed_at_source`) from non-`done` tasks; dropping \
+                 or reopening work does not carry a completion timestamp."
+                    .to_string(),
+            )
+            .with_task(&t.id)
+            .with_file(&lt.path),
+        );
+    }
+    if crate::task::parse_canonical_closed_at(at).is_none() {
+        out.push(
+            Diagnostic::error(
+                code::CLOSED_AT_INVALID,
+                format!(
+                    "`closed_at: {at}` is not a canonical RFC 3339 UTC whole-second instant in \
+                     `1970-01-01T00:00:00Z`..=`9999-12-31T23:59:59Z`"
+                ),
+            )
+            .with_agent_instruction(
+                "Write `closed_at` as canonical UTC whole seconds (`YYYY-MM-DDTHH:MM:SSZ`, \
+                 without fractional seconds or non-UTC offsets), or omit it on legacy `done` tasks."
+                    .to_string(),
             )
             .with_task(&t.id)
             .with_file(&lt.path),
@@ -4171,6 +4233,8 @@ mod tests {
             version_impact: None,
             version_impact_reason: None,
             version: None,
+            closed_at: None,
+            closed_at_source: None,
         }
     }
 
@@ -9861,5 +9925,94 @@ mod tests {
             instr.contains("aplan rekey ABC-001"),
             "instruction must offer actionable rekey repair: {instr}"
         );
+    }
+
+    /// `APLAN065` (`A2-109`, ADR-0074): rejects invalid `closed_at` values
+    /// (offsets, fractional seconds, impossible calendar dates, pre-epoch),
+    /// non-`done` use, and `closed_at_source` without `closed_at`, while
+    /// accepting canonical UTC on `done` tasks and legacy `done` absence.
+    #[test]
+    fn closed_at_rule_checks_canonical_utc_status_and_provenance() {
+        let mut legacy = t("L-1", Status::Done);
+        legacy.evidence = vec![Evidence {
+            kind: EvidenceKind::File,
+            reference: "deny.toml".into(),
+            captured: None,
+        }];
+        let mut valid_local = legacy.clone();
+        valid_local.id = "V-1".into();
+        valid_local.closed_at = Some("2026-10-11T19:24:08Z".into());
+        let mut valid_imported = legacy.clone();
+        valid_imported.id = "V-2".into();
+        valid_imported.closed_at = Some("2026-10-11T19:24:08Z".into());
+        valid_imported.closed_at_source = Some(crate::ClosedAtSource::Imported);
+
+        let clean = validate(
+            &plan_of(vec![legacy, valid_local, valid_imported]),
+            &Options::default(),
+        );
+        assert!(
+            !clean
+                .diagnostics
+                .iter()
+                .any(|d| d.code == code::CLOSED_AT_INVALID),
+            "valid and legacy done tasks must not fire APLAN065: {:#?}",
+            clean.diagnostics
+        );
+
+        let mut on_dropped = t("BAD-DROP", Status::Dropped);
+        on_dropped.closed_at = Some("2026-10-11T19:24:08Z".into());
+        let mut offset = t("BAD-OFFSET", Status::Done);
+        offset.closed_at = Some("2026-10-11T19:24:08+02:00".into());
+        let mut frac = t("BAD-FRAC", Status::Done);
+        frac.closed_at = Some("2026-10-11T19:24:08.5Z".into());
+        let mut impossible = t("BAD-DATE", Status::Done);
+        impossible.closed_at = Some("2026-02-30T00:00:00Z".into());
+        let mut pre_epoch = t("BAD-PRE", Status::Done);
+        pre_epoch.closed_at = Some("1969-12-31T23:59:59Z".into());
+        let mut source_only = t("BAD-SRC", Status::Done);
+        source_only.closed_at_source = Some(crate::ClosedAtSource::Imported);
+
+        let bad = validate(
+            &plan_of(vec![
+                on_dropped,
+                offset,
+                frac,
+                impossible,
+                pre_epoch,
+                source_only,
+            ]),
+            &Options::default(),
+        );
+        let a65: Vec<_> = bad
+            .diagnostics
+            .iter()
+            .filter(|d| d.code == code::CLOSED_AT_INVALID)
+            .collect();
+        assert_eq!(a65.len(), 6, "expected 6 APLAN065 errors: {a65:#?}");
+        for d in &a65 {
+            assert_eq!(d.severity, crate::Severity::Error);
+            assert!(
+                d.agent_instruction
+                    .as_deref()
+                    .is_some_and(|s| !s.is_empty()),
+                "APLAN065 must provide an actionable agent_instruction: {d:#?}"
+            );
+        }
+        assert!(a65.iter().any(|d| {
+            d.task.as_deref() == Some("BAD-DROP") && d.message.contains("valid only on `done`")
+        }));
+        assert!(a65.iter().any(|d| {
+            d.task.as_deref() == Some("BAD-SRC")
+                && d.message.contains("`closed_at_source` without `closed_at`")
+        }));
+        // Normalization accepts offsets & fractional seconds and rejects pre-epoch/impossible dates.
+        assert_eq!(
+            crate::normalize_closed_at("2026-10-11T21:24:08.999+02:00").as_deref(),
+            Ok("2026-10-11T19:24:08Z")
+        );
+        assert!(crate::normalize_closed_at("1969-12-31T23:59:59Z").is_err());
+        assert!(crate::normalize_closed_at("2026-02-30T00:00:00Z").is_err());
+        assert!(crate::normalize_closed_at("2026-10-11T19:24:60Z").is_err());
     }
 }

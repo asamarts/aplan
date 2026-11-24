@@ -216,6 +216,14 @@ pub struct TaskRow {
     /// existing. `APLAN050` is the rule that keeps it on a release and readable.
     #[schemars(with = "RequiredNullable<String>")]
     pub version: Option<String>,
+    /// Canonical RFC 3339 UTC whole-second instant at which this task's
+    /// transition to `done` was accepted and recorded, `null` when absent.
+    #[schemars(with = "RequiredNullable<String>")]
+    pub closed_at: Option<String>,
+    /// Durable provenance of `closed_at` (`local` or `imported`), `null` when
+    /// absent.
+    #[schemars(with = "RequiredNullable<crate::task::ClosedAtSource>")]
+    pub closed_at_source: Option<crate::task::ClosedAtSource>,
 }
 
 /// One citation, as the data surface carries it.
@@ -302,6 +310,8 @@ impl Graph<'_> {
                     version_impact: t.version_impact,
                     version_impact_reason: t.version_impact_reason.clone(),
                     version: t.version.clone(),
+                    closed_at: t.closed_at.clone(),
+                    closed_at_source: t.closed_at_source,
                 }
             })
             .collect();
@@ -418,6 +428,8 @@ mod tests {
             version_impact: None,
             version_impact_reason: None,
             version: None,
+            closed_at: None,
+            closed_at_source: None,
         }
     }
 

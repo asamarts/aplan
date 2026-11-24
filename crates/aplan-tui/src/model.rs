@@ -863,6 +863,8 @@ fn synthetic_tasks(rows: &[aplan_app::TaskBrowserRow]) -> Vec<aplan_core::task::
             version_impact: None,
             version_impact_reason: None,
             version: None,
+            closed_at: None,
+            closed_at_source: None,
         })
         .collect()
 }

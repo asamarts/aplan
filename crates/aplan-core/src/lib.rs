@@ -100,8 +100,8 @@ pub use claim::{
 };
 pub use close::trace_fingerprints;
 pub use close::{
-    CloseError, add_evidence, apply_repair, close, remove_evidence, replace_evidence, restamp,
-    retarget_path, review, set_evidence_fingerprints, set_paths,
+    CloseError, add_evidence, apply_repair, close, close_at, remove_evidence, replace_evidence,
+    restamp, retarget_path, review, set_evidence_fingerprints, set_paths,
 };
 pub use diagnostic::{
     AgentContractProvenance, CandidateProjection, Diagnostic, Repair, Report, Rule, Severity,
@@ -124,8 +124,9 @@ pub use roadmap::{Cut, Roadmap, RoadmapTask, cut_label, parse_cut_version};
 pub use show::{Show, ShowSources};
 pub use summary::{GroupSummary, GroupedSummary, PhaseSummary, Summary};
 pub use task::{
-    Evidence, EvidenceKind, Status, SubstantiveContent, Task, canonical_evidence_key,
-    is_universal_path_glob, substantive_content,
+    ClosedAtSource, Evidence, EvidenceKind, MAX_CLOSED_AT_EPOCH, MIN_CLOSED_AT_EPOCH, Status,
+    SubstantiveContent, Task, canonical_evidence_key, format_closed_at, is_universal_path_glob,
+    normalize_closed_at, parse_canonical_closed_at, substantive_content,
 };
 pub use validate::{
     AgentsBlock, Cardinality, MilestoneScope, Options, StatusScope, TagFamily, TraceDocumentWork,
