@@ -747,7 +747,7 @@ fn check_id_families(plan: &Plan, graph: &Graph<'_>, opts: &Options, out: &mut V
     let mut milestones_by_label: BTreeMap<&str, Vec<&str>> = BTreeMap::new();
     let mut label_by_milestone: BTreeMap<&str, &str> = BTreeMap::new();
     let mut cut_rules: BTreeMap<&str, (&str, &crate::IdFamilyRule)> = BTreeMap::new();
-    let mut cut_of_task: BTreeMap<&str, &str> = BTreeMap::new();
+    let mut cut_of_task: BTreeMap<&str, Vec<&str>> = BTreeMap::new();
     for cut in &roadmap.cuts {
         if cut.release || cut.borrows {
             continue;
@@ -771,7 +771,10 @@ fn check_id_families(plan: &Plan, graph: &Graph<'_>, opts: &Options, out: &mut V
             )),
         }
         for member in &cut.members {
-            cut_of_task.entry(member.id.as_str()).or_insert(m_id);
+            cut_of_task
+                .entry(member.id.as_str())
+                .or_default()
+                .push(m_id);
         }
     }
     for key in policy.cuts.keys() {
@@ -800,31 +803,33 @@ fn check_id_families(plan: &Plan, graph: &Graph<'_>, opts: &Options, out: &mut V
         if lt.task.is_milestone() {
             continue;
         }
-        let Some(&m_id) = cut_of_task.get(lt.task.id.as_str()) else {
+        let Some(cuts) = cut_of_task.get(lt.task.id.as_str()) else {
             continue;
         };
-        let Some((declared_key, rule)) = cut_rules.get(m_id) else {
-            continue;
-        };
-        let Some(prefix) = rule.prefix.as_deref() else {
-            continue;
-        };
-        if !lt.task.id.starts_with(prefix) {
-            out.push(id_family_diag(
-                Some(lt.task.id.clone()),
-                Some(lt.path.clone()),
-                format!(
-                    "{}: id `{}` does not match the `{prefix}` family declared for cut \
-                     `{declared_key}` (`{m_id}`)",
-                    lt.task.id, lt.task.id
-                ),
-                format!(
-                    "Rekey `{}` into the `{prefix}` family with `aplan rekey {} <{prefix}ID>`, \
-                     move it to the matching cut with `aplan mv {} --cut <CUT>`, or update \
-                     `id_families.cuts` in `.aplan.yml`",
-                    lt.task.id, lt.task.id, lt.task.id
-                ),
-            ));
+        for &m_id in cuts {
+            let Some((declared_key, rule)) = cut_rules.get(m_id) else {
+                continue;
+            };
+            let Some(prefix) = rule.prefix.as_deref() else {
+                continue;
+            };
+            if !lt.task.id.starts_with(prefix) {
+                out.push(id_family_diag(
+                    Some(lt.task.id.clone()),
+                    Some(lt.path.clone()),
+                    format!(
+                        "{}: id `{}` does not match the `{prefix}` family declared for cut \
+                         `{declared_key}` (`{m_id}`)",
+                        lt.task.id, lt.task.id
+                    ),
+                    format!(
+                        "Rekey `{}` into the `{prefix}` family with `aplan rekey {} <{prefix}ID>`, \
+                         move it to the matching cut with `aplan mv {} --cut <CUT>`, or update \
+                         `id_families.cuts` in `.aplan.yml`",
+                        lt.task.id, lt.task.id, lt.task.id
+                    ),
+                ));
+            }
         }
     }
 }

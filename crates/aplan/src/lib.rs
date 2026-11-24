@@ -12227,10 +12227,20 @@ fn cmd_supersede(root: &std::path::Path, args: &SupersedeArgs) -> Result<u8> {
         }
 
         let phase = lt.task.phase;
-        let id = ids::mint(&plan, phase, id_strategy(root)?)?;
+        let (config, config_dir) = config_at(root)?;
+        let families = config
+            .id_families
+            .as_ref()
+            .map(aplan_config::IdFamiliesConfig::to_policy);
+        let id = ids::mint_with_policy(
+            &plan,
+            phase,
+            cut.as_deref(),
+            config.id_strategy.unwrap_or_default(),
+            families.as_ref(),
+        )?;
         let successor = successor_task(lt, args, &id, phase);
 
-        let (config, config_dir) = config_at(root)?;
         let opts = resolve_check_options(
             &config,
             config_dir.as_deref(),

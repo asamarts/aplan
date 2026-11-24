@@ -544,8 +544,14 @@ pub fn preview_supersede(
         )));
     }
     let cut = resolve_cut(context.plan(), request.cut.as_deref())?;
-    let id = aplan_interop::ids::mint(context.plan(), predecessor.task.phase, id_strategy(context))
-        .map_err(|error| AuthoringError::Refused(error.to_string()))?;
+    let id = aplan_interop::ids::mint_with_policy(
+        context.plan(),
+        predecessor.task.phase,
+        cut.as_deref(),
+        id_strategy(context),
+        context.options().id_families.as_ref(),
+    )
+    .map_err(|error| AuthoringError::Refused(error.to_string()))?;
     let successor = successor_task(&predecessor.task, request, &id);
     let fingerprints = if context.options().detect_drift {
         aplan_core::trace_fingerprints(&predecessor.task, context.options().traces_root.as_deref())

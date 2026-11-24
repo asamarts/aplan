@@ -1170,6 +1170,10 @@ fn assert_mismatch_bad_and_ambiguous_id_families(root: &std::path::Path) {
         ),
         ("blank cut key", "id_families:\n  cuts:\n    '   ': XYZ-\n"),
         ("empty long spec", "id_families:\n  cuts:\n    M-ci: {}\n"),
+        (
+            "overlapping prefixes",
+            "id_families:\n  cuts:\n    M-ci: A-\n    M-other: A-B-\n",
+        ),
     ] {
         std::fs::write(root.join(".aplan.yml"), bad_yaml).expect("write bad config");
         let bad = common::run(root, &["check"]);
