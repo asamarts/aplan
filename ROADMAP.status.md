@@ -9,7 +9,7 @@
 | cut | status | done/total | ready | blocked | effort | weeks | critical path |
 | --- | --- | --- | --- | --- | --- | --- | --- |
 | v0.7 | done | 30/30 | 0 | 0 | 22.8d | 0.8 (0.0 left) | 3.5d |
-| v0.8 | todo | 34/36 | 2 | 0 | 49.2d | 1.8 (0.2 left) | 4.5d |
+| v0.8 | todo | 35/36 | 1 | 0 | 49.2d | 1.8 (0.1 left) | 4.5d |
 | adoption | todo | 0/81 | 0 | 81 | 105.8d | 3.9 (3.9 left) | 10.0d |
 | backlog | todo | 0/1 | 0 | 1 | 1.0d | <0.1 (<0.1 left) | 1.0d |
 | hardening | todo | 0/15 | 0 | 15 | 14.8d | 0.5 (0.5 left) | 3.0d |
@@ -78,7 +78,7 @@
 | A2-140 | Let generated agent contracts name a repository launcher | done | - | commit:b3079b5294d7, test:agents_md::configured_launcher_invocation_renders_safely_and_gates_drift |
 | A2-142 | Claim usage errors can publish claim state | done | - | commit:604f27d1d1c0, test:claim::claim_release_start_stop_usage_errors_never_mutate_claims_or_tasks |
 | A2-147 | Close a live task that already carries partial evidence without a hand edit | done | - | commit:55cf68a6c531, test:close_gate::close_combines_existing_live_evidence_across_cli_app_and_mcp |
-| A2-152 | Reconcile task closure with ephemeral claim lifecycle | todo | - | - |
+| A2-152 | Reconcile task closure with ephemeral claim lifecycle | done | - | commit:032478660274, test:claim::terminal_closure_reconciles_same_actor_other_actor_and_failed_cleanup |
 | A2-153 | Pre-commit verification cannot see trace and file-evidence drift the commit will expose | done | - | commit:06ba528d94e0, test:tests::verify_projects_working_tree_drift_for_aplan054_and_aplan045_and_matches_committed_head |
 | A2-156 | Validate every plan state introduced by a commit range | done | - | commit:06ba528d94e0, test:close_gate::check_range_catches_intermediate_aplan018_behind_green_tip_and_handles_edge_cases |
 | A2-157 | Make add path-list syntax unambiguous and reject separator-shaped paths | done | - | commit:55cf68a6c531, test:close_gate::add_rejects_comma_separated_paths_and_supports_repeated_braces_and_escaped_comma |
