@@ -134,6 +134,7 @@ pub const RUNS: &[(&str, &[&str], Start)] = &[
     ("tag", &["tag", "add", "W-1", "kept"], Start::Populated),
     ("test", &["test", "list"], Start::Populated),
     ("tasks", &["tasks"], Start::Populated),
+    ("completed", &["completed"], Start::Populated),
     ("tree", &["tree", "W-1"], Start::Populated),
     ("unpark", &["unpark", "W-5"], Start::Populated),
     ("vacuity", &["vacuity"], Start::Populated),

@@ -317,6 +317,14 @@ retargeting a renamed or bare directory path rewrites every matching live task a
 aplan retarget-path src/old.rs src/new.rs --dry-run
 ```
 
+### `completed` (CLI-only)
+
+chronological completion history runs through the shared application boundary on the CLI; the dedicated interactive TUI completion-history view is tracked separately
+
+```sh
+aplan completed --limit 10
+```
+
 ### `blueprint` (CLI-only)
 
 blueprint application captures a caller-selected local file and renders its complete predicted graph before an explicit guarded batch write, so it remains a copyable command until the TUI has a file picker and full multi-task review form

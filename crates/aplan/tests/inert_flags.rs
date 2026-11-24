@@ -1708,6 +1708,76 @@ const HELD: &[Held] = &[
         flag: "--reduced-motion",
         why: "owned by the real-PTY launch journey and reducer clock assertion; this non-terminal pair cannot start visible progress",
     },
+    Held {
+        command: "completed",
+        flag: "--at",
+        why: "owned by completed::completed_cli_supports_ordering_filters_bounds_history_at_paging_and_json against a multi-commit Git fixture",
+    },
+    Held {
+        command: "completed",
+        flag: "--cursor",
+        why: "owned by completed::completed_cli_supports_ordering_filters_bounds_history_at_paging_and_json (cursor is bound to snapshot input identity)",
+    },
+    Held {
+        command: "completed",
+        flag: "--cut",
+        why: "owned by completed_tasks selector and completed CLI tests over a completed-work fixture",
+    },
+    Held {
+        command: "completed",
+        flag: "--format",
+        why: "owned by completed::completed_cli_supports_ordering_filters_bounds_history_at_paging_and_json (human and JSON output)",
+    },
+    Held {
+        command: "completed",
+        flag: "--history",
+        why: "owned by completed::completed_cli_supports_ordering_filters_bounds_history_at_paging_and_json (auto, never, required)",
+    },
+    Held {
+        command: "completed",
+        flag: "--limit",
+        why: "owned by completed::completed_cli_supports_ordering_filters_bounds_history_at_paging_and_json (limit and zero refusal)",
+    },
+    Held {
+        command: "completed",
+        flag: "--oldest",
+        why: "owned by completed::completed_cli_supports_ordering_filters_bounds_history_at_paging_and_json (oldest-first ordering)",
+    },
+    Held {
+        command: "completed",
+        flag: "--owner",
+        why: "owned by completed::completed_cli_supports_ordering_filters_bounds_history_at_paging_and_json (owner filter)",
+    },
+    Held {
+        command: "completed",
+        flag: "--phase",
+        why: "owned by completed_tasks selector and completed CLI tests (phase filter)",
+    },
+    Held {
+        command: "completed",
+        flag: "--since",
+        why: "owned by completed::completed_cli_supports_ordering_filters_bounds_history_at_paging_and_json (inclusive lower time bound)",
+    },
+    Held {
+        command: "completed",
+        flag: "--status",
+        why: "inherited from shared SelectArgs; completed work view only queries done work tasks",
+    },
+    Held {
+        command: "completed",
+        flag: "--tag",
+        why: "owned by completed_tasks selector and completed CLI tests (tag filter)",
+    },
+    Held {
+        command: "completed",
+        flag: "--unclaimed",
+        why: "inherited from shared SelectArgs; completed work view queries terminal done work tasks",
+    },
+    Held {
+        command: "completed",
+        flag: "--until",
+        why: "owned by completed::completed_cli_supports_ordering_filters_bounds_history_at_paging_and_json (inclusive upper time bound)",
+    },
 ];
 
 /// **Every per-command flag has a probe or a held reason.**

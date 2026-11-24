@@ -81,6 +81,12 @@ to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Added
 
+- **Completed-task history engine and `aplan completed` CLI (`A2-110`, `A2-111`, `ADR-0074`)**.
+  Added the shared `aplan-app` completed-task query (`completed_tasks`) and `aplan completed`
+  command for deterministic newest-first (or `--oldest`) completed work history with `--limit`,
+  inclusive `--since`/`--until` time bounds, `--cut`/`--phase`/`--owner`/`--tag` filters,
+  `--history auto|never|required`, `--at <REV>` committed-plan + history resolution,
+  snapshot-consistent `--cursor` pagination, and color-invariant human/JSON output (`aplan/completed/v1`).
 - **Atomic `closed_at` completion timestamps (`A2-109`, `ADR-0074`, `APLAN065`, `close.records_closed_at`)**.
   Successful `close` across CLI, MCP, and app/TUI surfaces now atomically records canonical RFC
   3339 UTC whole-second `closed_at` (`YYYY-MM-DDTHH:MM:SSZ`) alongside `status: done`, evidence,

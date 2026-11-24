@@ -431,6 +431,17 @@ pub const COMMANDS: &[CommandDiscovery] = &[
     mutation("mv", "Move tasks", MOVE),
     mutation("rekey", "Rekey a task", REKEY),
     native("tasks", "Browse tasks", &[NativeSurface::Tasks]),
+    CommandDiscovery {
+        name: "completed",
+        title: "List completed work tasks",
+        disposition: CommandDisposition::CliOnly {
+            reason: "chronological completion history runs through the shared application boundary on the CLI; the dedicated interactive TUI completion-history view is tracked separately",
+            example: "aplan completed --limit 10",
+        },
+        surfaces: &[],
+        mutations: &[],
+        boundaries: &[],
+    },
     native(
         "critical-path",
         "Inspect the critical route",

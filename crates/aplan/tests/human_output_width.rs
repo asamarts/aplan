@@ -248,6 +248,10 @@ const NOT_PROSE: &[(&str, &str)] = &[
         "prints a signed digest, which must not be re-flowed",
     ),
     (
+        "completed",
+        "prints aligned chronological rows with absolute UTC timestamps, commit hashes and continuation cursors that must not be re-flowed",
+    ),
+    (
         "check-docs",
         "a drift gate: its output is a diff, not prose",
     ),

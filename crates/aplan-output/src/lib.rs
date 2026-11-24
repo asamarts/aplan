@@ -1925,6 +1925,104 @@ fn render_summary_human(summary: &Summary) -> std::io::Result<()> {
 ///
 /// # Errors
 /// Propagates any write failure on stdout.
+/// Render a completed-task history response in human or JSON format (`A2-111`,
+/// ADR-0074).
+///
+/// Both formats are color-invariant: human output distinguishes provenance
+/// through explicit text cues (`recorded`, `imported`, `history:<sha>`,
+/// `unknown`) and never relies on ANSI color.
+///
+/// # Errors
+/// Returns an I/O error if writing to stdout fails.
+pub fn render_completed(
+    response: &aplan_core::CompletedResponse,
+    format: Format,
+) -> std::io::Result<()> {
+    let text = match format {
+        Format::Json => serde_json::to_string_pretty(response).map_err(std::io::Error::other)?,
+        _ => format_completed_human(response),
+    };
+    let mut out = std::io::stdout().lock();
+    writeln!(out, "{text}")
+}
+
+/// Format a completed-task history response for human reading without relying
+/// on color (`A2-111`, ADR-0074).
+#[must_use]
+pub fn format_completed_human(response: &aplan_core::CompletedResponse) -> String {
+    let mut s = String::new();
+    if response.items.is_empty() {
+        let _ = writeln!(s, "no completed tasks matched");
+    } else {
+        let id_w = response
+            .items
+            .iter()
+            .map(|r| r.id.len())
+            .max()
+            .unwrap_or(4)
+            .max(2);
+        for row in &response.items {
+            let when = row.instant.as_deref().unwrap_or("unknown");
+            let cue = match row.source {
+                aplan_core::CompletionTimeSource::Recorded => match row.recorded_origin {
+                    Some(aplan_core::ClosedAtSource::Imported) => "recorded:imported".to_string(),
+                    _ => "recorded".to_string(),
+                },
+                aplan_core::CompletionTimeSource::HistoryFirstSeen => {
+                    let short = row
+                        .commit
+                        .as_deref()
+                        .map_or("?", |sha| &sha[..sha.len().min(7)]);
+                    if row.incomparable_candidates > 1 {
+                        format!(
+                            "history:{short} ({} candidates)",
+                            row.incomparable_candidates
+                        )
+                    } else {
+                        format!("history:{short}")
+                    }
+                }
+                aplan_core::CompletionTimeSource::Unknown => "unknown".to_string(),
+            };
+            let cut = row.cut.as_deref().unwrap_or("-");
+            let _ = writeln!(
+                s,
+                "{when:<20}  [{cue:<22}]  {id:<id_w$}  p{phase}  {cut:<10}  {title}",
+                id = sanitize::visible(&row.id),
+                phase = row.phase,
+                cut = sanitize::visible(cut),
+                title = sanitize::visible(&row.title),
+            );
+        }
+    }
+    let order = if response.applied.oldest_first {
+        "oldest-first"
+    } else {
+        "newest-first"
+    };
+    let _ = writeln!(
+        s,
+        "\nshowing {}/{} completed work task(s) ({order}, deterministic tie-break by id; not a \
+         causal sequence)",
+        response.items.len(),
+        response.total_matched,
+    );
+    let _ = writeln!(
+        s,
+        "basis: {} | completeness: {} | history: {}",
+        sanitize::visible(&response.basis_revision),
+        response.completeness,
+        response.applied.history,
+    );
+    for limitation in &response.limitations {
+        let _ = writeln!(s, "note: {}", sanitize::visible(limitation));
+    }
+    if let Some(cursor) = &response.next_cursor {
+        let _ = writeln!(s, "next page: --cursor {}", sanitize::visible(cursor));
+    }
+    s.trim_end_matches('\n').to_string()
+}
+
 pub fn render_tasks(export: &TaskExport, format: Format) -> std::io::Result<()> {
     if format == Format::Human {
         return render_tasks_human(export);

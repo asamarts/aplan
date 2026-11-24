@@ -368,6 +368,7 @@ pub const MCP_COMMAND_POLICY: &[McpCommandPolicy] = &[
     McpCommandPolicy::excluded("tasks", CliOnlyReason::AlternateView),
     McpCommandPolicy::excluded("critical-path", CliOnlyReason::AlternateView),
     McpCommandPolicy::excluded("roadmap", CliOnlyReason::AlternateView),
+    McpCommandPolicy::excluded("completed", CliOnlyReason::AlternateView),
     McpCommandPolicy::projected(
         "close",
         &["aplan_close"],

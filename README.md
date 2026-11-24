@@ -46,7 +46,9 @@ aplan verify
 ```
 
 `check` validates the plan without external work. `verify` resolves evidence against the repository.
-Use the built-in command help and `aplan facts` for the complete current surface.
+`aplan completed` lists finished work in deterministic chronological order (`recorded` timestamps
+first, with optional bounded Git history inference for legacy `done` tasks). Use the built-in
+command help and `aplan facts` for the complete current surface.
 
 ## GitHub Actions
 

@@ -50,6 +50,8 @@ mod mutation;
 pub use mutation::*;
 mod capture;
 pub use capture::*;
+mod completed;
+pub use completed::*;
 mod work_action;
 pub use work_action::*;
 mod evidence_mutation;

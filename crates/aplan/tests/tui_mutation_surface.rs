@@ -833,6 +833,7 @@ const NON_TASK_MUTATION_LEAVES: &[&str] = &[
     "stale",
     "summary",
     "tasks",
+    "completed",
     "test list",
     "test receipt",
     "tree",
