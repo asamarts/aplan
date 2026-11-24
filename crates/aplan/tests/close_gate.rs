@@ -2212,3 +2212,181 @@ fn focused_l3_publication_error_still_names_the_runner_effect_boundary() {
         "the fixture did not run the configured command before publication"
     );
 }
+
+/// End-to-end CLI audit test for `A2-153`: `aplan verify` surfaces advisory
+/// `candidate_projections` on a dirty working tree across JSON, agent, and
+/// human formats without altering the HEAD verdict, and emits nothing extra on
+/// a clean tree.
+#[test]
+fn verify_cli_reports_candidate_projections_on_dirty_tree_and_stays_silent_when_clean() {
+    let dir = tempfile::Builder::new()
+        .tempdir_in(aplan_core::fixture::fixture_root())
+        .expect("repository");
+    let root = dir.path();
+    std::fs::create_dir_all(root.join("aplan/tasks")).expect("tasks");
+    std::fs::create_dir_all(root.join("docs")).expect("docs");
+    std::fs::create_dir_all(root.join("src")).expect("src");
+    std::fs::write(root.join("src/lib.rs"), "pub fn ok() {}\n").expect("src");
+    std::fs::write(
+        root.join("docs/spec.md"),
+        "# Spec\n\n## Section\n\nOriginal text.\n",
+    )
+    .expect("doc");
+    std::fs::write(root.join(".aplan.yml"), "root: aplan\ndetect_drift: true\n").expect("cfg");
+    std::fs::write(
+        root.join("aplan/tasks/A-1.md"),
+        "---\nid: A-1\ntitle: done traced\nphase: 1\nstatus: todo\neffort_days: 1\n\
+         paths: [src/lib.rs, docs/spec.md]\ntraces:\n  - docs/spec.md#section\n---\n\nbody\n",
+    )
+    .expect("A-1");
+    std::fs::write(
+        root.join("aplan/tasks/A-2.md"),
+        "---\nid: A-2\ntitle: live traced\nphase: 1\nstatus: todo\neffort_days: 1\n\
+         paths: [src/lib.rs]\ntraces:\n  - docs/spec.md#section\n---\n\nbody\n",
+    )
+    .expect("A-2");
+
+    git(root, &["init", "-q", "."]);
+    git(root, &["config", "user.email", "t@example.com"]);
+    git(root, &["config", "user.name", "t"]);
+    git(root, &["add", "-A"]);
+    git(root, &["commit", "-q", "-m", "initial"]);
+    let sha = String::from_utf8(
+        std::process::Command::new("git")
+            .args(["rev-parse", "HEAD"])
+            .current_dir(root)
+            .output()
+            .expect("git rev-parse")
+            .stdout,
+    )
+    .expect("utf8 sha")
+    .trim()
+    .to_string();
+
+    // Close A-1 with both commit and file evidence so it stamps
+    // `evidence_fingerprints` (for APLAN054) and `trace_fingerprints`, then commit.
+    let (out, err, ok) = run(
+        root,
+        &[
+            "close",
+            "A-1",
+            "--evidence",
+            &format!("commit:{sha}"),
+            "--evidence",
+            "file:docs/spec.md",
+        ],
+    );
+    assert!(ok, "close failed: {out}{err}");
+    git(root, &["add", "-A"]);
+    git(root, &["commit", "-q", "-m", "close A-1"]);
+
+    // Clean tree: no candidate_projections in json/agent/human.
+    let (json_clean, err_clean, ok_clean) = run(root, &["verify", "--format", "json"]);
+    assert!(ok_clean, "clean verify failed: {json_clean}{err_clean}");
+    let clean_doc: serde_json::Value = serde_json::from_str(&json_clean).expect("clean json");
+    assert!(clean_doc.get("candidate_projections").is_none());
+    let (_, human_err_clean, ok_h_clean) = run(root, &["verify"]);
+    assert!(ok_h_clean);
+    assert!(!human_err_clean.contains("candidate projection"));
+
+    // Dirty tree: edit docs/spec.md without committing.
+    std::fs::write(
+        root.join("docs/spec.md"),
+        "# Spec\n\n## Section\n\nEdited uncommitted text.\n",
+    )
+    .expect("dirty doc");
+
+    for fmt in ["json", "agent"] {
+        let (out_d, err_d, ok_d) = run(root, &["verify", "--format", fmt]);
+        assert!(
+            ok_d,
+            "dirty working tree must not alter HEAD verdict ({fmt}): {out_d}{err_d}"
+        );
+        let doc: serde_json::Value = serde_json::from_str(&out_d).expect("dirty json");
+        let projs = doc["candidate_projections"]
+            .as_array()
+            .expect("candidate_projections array");
+        assert!(
+            projs
+                .iter()
+                .any(|p| p["code"] == "APLAN054" && p["task"] == "A-1" && p["state"] == "unstaged"),
+            "expected APLAN054 projection for A-1 ({fmt}): {projs:?}"
+        );
+        assert!(
+            projs
+                .iter()
+                .any(|p| p["code"] == "APLAN045" && p["task"] == "A-2" && p["state"] == "unstaged"),
+            "expected APLAN045 projection for A-2 ({fmt}): {projs:?}"
+        );
+    }
+
+    let (_, human_err_dirty, ok_h_dirty) = run(root, &["verify"]);
+    assert!(ok_h_dirty);
+    assert!(
+        human_err_dirty.contains("candidate projection")
+            && human_err_dirty.contains("APLAN054")
+            && human_err_dirty.contains("APLAN045"),
+        "human verify should report candidate projections on stderr:\n{human_err_dirty}"
+    );
+}
+
+/// Audit test for `A2-156`: `aplan check --range` handles merge commits and
+/// root-inclusive `..HEAD` ranges deterministically.
+#[test]
+fn check_range_handles_merge_commits_and_root_inclusive_range() {
+    let dir = tempfile::Builder::new()
+        .tempdir_in(aplan_core::fixture::fixture_root())
+        .expect("repository");
+    let root = dir.path();
+    std::fs::create_dir_all(root.join("aplan/tasks")).expect("tasks");
+    std::fs::write(root.join(".aplan.yml"), "root: aplan\ndetect_drift: true\n").expect("cfg");
+    std::fs::write(
+        root.join("aplan/tasks/M-1.md"),
+        "---\nid: M-1\ntitle: base task\nphase: 1\nstatus: todo\neffort_days: 1\n---\n\nbody\n",
+    )
+    .expect("M-1");
+
+    git(root, &["init", "-q", "."]);
+    git(root, &["config", "user.email", "t@example.com"]);
+    git(root, &["config", "user.name", "t"]);
+    git(root, &["add", "-A"]);
+    git(root, &["commit", "-q", "-m", "root commit"]);
+
+    git(root, &["checkout", "-q", "-b", "side"]);
+    std::fs::write(
+        root.join("aplan/tasks/M-2.md"),
+        "---\nid: M-2\ntitle: side task\nphase: 1\nstatus: todo\neffort_days: 1\n---\n\nbody\n",
+    )
+    .expect("M-2");
+    git(root, &["add", "-A"]);
+    git(root, &["commit", "-q", "-m", "side commit"]);
+
+    git(root, &["checkout", "-q", "-"]);
+    std::fs::write(
+        root.join("aplan/tasks/M-3.md"),
+        "---\nid: M-3\ntitle: main task\nphase: 1\nstatus: todo\neffort_days: 1\n---\n\nbody\n",
+    )
+    .expect("M-3");
+    git(root, &["add", "-A"]);
+    git(root, &["commit", "-q", "-m", "main commit"]);
+    git(
+        root,
+        &["merge", "-q", "--no-ff", "side", "-m", "merge side"],
+    );
+
+    let (out_all, err_all, ok_all) = run(root, &["check", "--range", "..HEAD", "--format", "json"]);
+    assert!(ok_all, "..HEAD failed: {out_all}{err_all}");
+    let doc_all: serde_json::Value = serde_json::from_str(&out_all).expect("json");
+    assert_eq!(doc_all["range_clean"], true);
+    assert_eq!(doc_all["commits_total"], 4);
+    assert_eq!(doc_all["commits_audited"], 4);
+
+    let (out_merge, err_merge, ok_merge) = run(
+        root,
+        &["check", "--range", "HEAD~1..HEAD", "--format", "json"],
+    );
+    assert!(ok_merge, "HEAD~1..HEAD failed: {out_merge}{err_merge}");
+    let doc_merge: serde_json::Value = serde_json::from_str(&out_merge).expect("json");
+    assert_eq!(doc_merge["range_clean"], true);
+    assert!(doc_merge["commits_audited"].as_u64().unwrap_or(0) >= 2);
+}
