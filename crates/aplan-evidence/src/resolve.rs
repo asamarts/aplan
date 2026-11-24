@@ -1214,6 +1214,13 @@ impl EvidenceResolver for FileResolver {
         let path_for_git = path_for_git.as_ref();
         if !repo.path_exists_at(rev, path_for_git)? {
             let at = rev.map_or_else(|| "HEAD".to_string(), |r| format!("`{r}`"));
+            let instruction = if rev.is_some() {
+                "Point the `file` evidence at a path that exists at the cited rev, or replace \
+                 the citation with `aplan amend`."
+            } else {
+                "Point the `file` evidence at a successor path that exists at HEAD, or replace \
+                 the citation with `aplan amend`."
+            };
             out.push(
                 Diagnostic::error(
                     code::FILE_UNRESOLVED,
@@ -1221,10 +1228,7 @@ impl EvidenceResolver for FileResolver {
                 )
                 .with_task(&task.id)
                 .with_file(file)
-                .with_agent_instruction(
-                    "Point the `file` evidence at a path that exists at the cited rev (or at \
-                     HEAD).",
-                ),
+                .with_agent_instruction(instruction),
             );
             // "It is not there" and "it is not yours" are different faults, and a
             // path that does not exist cannot be judged for relevance.

@@ -1171,6 +1171,44 @@ fn recorded_version(
     ))
 }
 
+fn resolve_mcp_close_evidence(
+    target: &aplan_core::load::LoadedTask,
+    id: &str,
+    evidence: &[aplan_core::Evidence],
+    policy: &crate::Policy,
+) -> Result<Vec<&'static str>, ToolError> {
+    let closing = aplan_evidence::VerifyOptions {
+        detect_drift: false,
+        version: None,
+        traces_root: None,
+        execute: false,
+        url_check: None,
+        config_file: None,
+        ..policy.verify.clone()
+    };
+    let resolution = aplan_evidence::resolve_proposed(
+        &target.task,
+        &target.path,
+        evidence,
+        &policy.repo_root,
+        &closing,
+    )
+    .map_err(|e| ToolError::Plan(format!("resolving the evidence: {e}")))?;
+    if resolution.refuses(&policy.verdict) {
+        return Err(ToolError::Refused(format!(
+            "cannot close `{id}`: this evidence would fail `aplan verify`: {}",
+            resolution
+                .report
+                .diagnostics
+                .iter()
+                .map(|d| d.message.clone())
+                .collect::<Vec<_>>()
+                .join("; ")
+        )));
+    }
+    Ok(resolution.unchecked_names())
+}
+
 pub fn close(
     root: &Path,
     id: &str,
@@ -1178,14 +1216,6 @@ pub fn close(
     policy: &crate::Policy,
 ) -> Result<serde_json::Value, ToolError> {
     let options = &policy.options;
-    if evidence.is_empty() {
-        return Err(ToolError::Args(
-            "`evidence` is required: a status is a claim, and MCP does not get to make it \
-             without one. Cite a commit, test, file, or url."
-                .to_string(),
-        ));
-    }
-
     let plan = load_plan(root);
 
     // Never edit a task inside a plan that does not load: its neighbours may be
@@ -1200,6 +1230,13 @@ pub fn close(
     // declare is not a citation problem, and telling an agent to fix its
     // evidence would send it to the wrong half of the question (`A1-135`).
     let target = locate(&plan, id)?;
+    if evidence.is_empty() && target.task.evidence.is_empty() {
+        return Err(ToolError::Args(
+            "`evidence` is required: a status is a claim, and MCP does not get to make it \
+             without one. Cite a commit, test, file, or url."
+                .to_string(),
+        ));
+    }
     let parsed = parse_evidence(evidence)?;
 
     let source = std::fs::read_to_string(&target.path)
@@ -1253,41 +1290,16 @@ pub fn close(
     // under `deny_warnings` an agent was refused a closure the command records.
     // "An agent cannot close through MCP what it could not close here" has to
     // hold in both directions (`A1-131`).
-    let closing = aplan_evidence::VerifyOptions {
-        detect_drift: false,
-        version: None,
-        traces_root: None,
-        execute: false,
-        url_check: None,
-        config_file: None,
-        ..policy.verify.clone()
-    };
-    let resolution = aplan_evidence::resolve_proposed(
-        &target.task,
-        &target.path,
-        &parsed,
-        &policy.repo_root,
-        &closing,
-    )
-    .map_err(|e| ToolError::Plan(format!("resolving the evidence: {e}")))?;
-    if resolution.refuses(&policy.verdict) {
-        return Err(ToolError::Refused(format!(
-            "cannot close `{id}`: this evidence would fail `aplan verify`: {}",
-            resolution
-                .report
-                .diagnostics
-                .iter()
-                .map(|d| d.message.clone())
-                .collect::<Vec<_>>()
-                .join("; ")
-        )));
-    }
+    let combined_for_resolution = aplan_core::mutation::task_of(&updated)
+        .map_err(|e| ToolError::Plan(format!("`{id}`: {e}")))?
+        .evidence;
+    let unchecked = resolve_mcp_close_evidence(target, id, &combined_for_resolution, policy)?;
 
     let evidence_fingerprints = if options.detect_drift {
         aplan_evidence::update_evidence_fingerprints(
             &target.task.evidence,
             &target.task.evidence_fingerprints,
-            &parsed,
+            &combined_for_resolution,
             &policy.repo_root,
             false,
         )
@@ -1302,6 +1314,11 @@ pub fn close(
     // behaviour and `A1-104`'s audit fails (`A1-113`).
     let produced = aplan_core::mutation::task_of(&updated)
         .map_err(|e| ToolError::Plan(format!("`{id}`: {e}")))?;
+    let final_evidence_refs: Vec<String> = produced
+        .evidence
+        .iter()
+        .map(|e| format!("{}:{}", e.kind.as_str(), e.reference))
+        .collect();
     let after = aplan_core::mutation::with_replaced(&plan, id, produced);
     let delta = aplan_core::mutation::delta(&plan, &after, &policy.options);
     if delta.refuses(&policy.verdict) {
@@ -1317,7 +1334,7 @@ pub fn close(
     Ok(serde_json::json!({
         "closed": id,
         "file": target.path.display().to_string(),
-        "evidence": evidence,
+        "evidence": final_evidence_refs,
         // What a release recorded, `null` for everything else, and why when a
         // release could not record one: an agent has no stderr to read, and a
         // `null` with no explanation cannot be told from "this is not a
@@ -1326,7 +1343,7 @@ pub fn close(
         "version_not_recorded": recorded.as_ref().and_then(|r| r.as_ref().err()),
         // Named rather than implied: a caller cannot tell a citation that was
         // checked from one nothing could check, and silence reads as passed.
-        "unchecked": resolution.unchecked_names(),
+        "unchecked": unchecked,
         "evidence_fingerprints": evidence_fingerprints.len(),
         // What the closure cost, when it did not cost enough to refuse it. The
         // same `delta.lines()` `add` and `dep` have always returned under this

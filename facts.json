@@ -81,6 +81,10 @@
       "what": "every `--format agent` command emits exactly one valid JSON document on stdout with no trailing prose, carrying unchecked structural evidence inside `evidence_unresolved`"
     },
     {
+      "name": "close.combines_existing_live_evidence",
+      "what": "`close` on a live task (`todo` or `in_progress`) preserves existing citations, combines them with any supplied citations, resolves the complete final set, and closes atomically without hand-editing"
+    },
+    {
       "name": "coordination.is_not_a_plan_verdict_mutation",
       "what": "`claim` and `release` mutate only local ephemeral coordination state, so they do not accept plan-verdict overrides or imply that the plan passed a gate"
     },
@@ -1276,7 +1280,7 @@
       "name": "amend"
     },
     {
-      "about": "File the successor to a closed task whose traced outcome no longer holds, and re-stamp the closed one as reviewed",
+      "about": "File the successor to a closed task whose outcome no longer holds (including a delivery withdrawn or reverted after it closed, with or without `traces`), and re-stamp any traced sections on the closed task",
       "default_format": null,
       "formats": [],
       "name": "supersede"
@@ -1476,7 +1480,7 @@
     "version.require_impact"
   ],
   "counts": {
-    "behaviours": 238,
+    "behaviours": 239,
     "build_capabilities": 1,
     "commands": 50,
     "config_keys": 129,

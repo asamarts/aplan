@@ -1080,6 +1080,61 @@ pub fn canonical_evidence_key(ev: &Evidence) -> (EvidenceKind, String) {
     (ev.kind, canonical)
 }
 
+/// Validate and normalize one `--paths` argument supplied to `add` (`A2-157`).
+///
+/// Rejects an unescaped comma outside a glob brace group (`{a,b}`), which
+/// strongly indicates an attempted comma-separated list instead of repeating
+/// `--paths`. A literal comma in a repository filename may be supplied with an
+/// explicit `\,` escape, which is unescaped to `,` in the returned path.
+pub fn normalize_add_path(raw: &str) -> Result<String, String> {
+    let mut out = String::with_capacity(raw.len());
+    let mut brace_depth = 0usize;
+    let mut chars = raw.chars().peekable();
+    while let Some(ch) = chars.next() {
+        match ch {
+            '\\' => {
+                if brace_depth == 0 && chars.peek() == Some(&',') {
+                    chars.next();
+                    out.push(',');
+                } else {
+                    out.push('\\');
+                    if let Some(next) = chars.next() {
+                        out.push(next);
+                    }
+                }
+            }
+            '{' => {
+                brace_depth += 1;
+                out.push('{');
+            }
+            '}' => {
+                brace_depth = brace_depth.saturating_sub(1);
+                out.push('}');
+            }
+            ',' if brace_depth == 0 => {
+                let parts: Vec<String> = raw
+                    .split(',')
+                    .map(str::trim)
+                    .filter(|s| !s.is_empty())
+                    .map(|p| format!("--paths '{p}'"))
+                    .collect();
+                let suggestion = if parts.is_empty() {
+                    "--paths <GLOB>".to_string()
+                } else {
+                    parts.join(" ")
+                };
+                return Err(format!(
+                    "`--paths` accepts one path or glob per flag, not a comma-separated list \
+                     (`{raw}`). Repeat the flag once per entry: {suggestion}. If a filename \
+                     genuinely contains a comma, escape it as `\\,`."
+                ));
+            }
+            other => out.push(other),
+        }
+    }
+    Ok(out)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
