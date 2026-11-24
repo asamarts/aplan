@@ -1174,6 +1174,15 @@
       "name": "check-docs"
     },
     {
+      "about": "List completed work tasks in deterministic chronological order",
+      "default_format": "human",
+      "formats": [
+        "human",
+        "json"
+      ],
+      "name": "completed"
+    },
+    {
       "about": "Roll the plan up by phase, or by `summary.group_by`: tasks, effort, and readiness",
       "default_format": "human",
       "formats": [
@@ -1501,7 +1510,7 @@
   "counts": {
     "behaviours": 242,
     "build_capabilities": 1,
-    "commands": 50,
+    "commands": 51,
     "config_keys": 136,
     "evidence_kinds": 5,
     "formats": 9,

@@ -404,5 +404,7 @@ mod warning_tier;
 #[path = "../why_reach.rs"]
 mod why_reach;
 
+#[path = "../completed.rs"]
+mod completed;
 #[path = "../tui_portability.rs"]
 mod tui_portability;

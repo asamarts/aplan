@@ -1100,6 +1100,49 @@ enum Command {
         #[arg(long, default_value = "human")]
         format: String,
     },
+    /// List completed work tasks in deterministic chronological order.
+    ///
+    /// Defaults to newest-first with recorded `closed_at` values taking
+    /// precedence over best-effort single-pass Git history observations
+    /// (`history_first_seen`). Milestones and dropped tasks are excluded from
+    /// this work view. Timestamp-plus-id sorting is a deterministic report
+    /// order, not an exact causal sequence across simultaneous closes or
+    /// concurrent branches.
+    Completed {
+        /// Maximum number of completed work tasks to return after filtering
+        /// and cursor advancement. Zero is refused.
+        #[arg(long, value_name = "N")]
+        limit: Option<usize>,
+        /// Inclusive lower completion-time bound (`YYYY-MM-DD` or RFC 3339).
+        /// Tasks with unknown completion time never match a time bound.
+        #[arg(long, value_name = "INSTANT")]
+        since: Option<String>,
+        /// Inclusive upper completion-time bound (`YYYY-MM-DD` or RFC 3339).
+        /// Tasks with unknown completion time never match a time bound.
+        #[arg(long, value_name = "INSTANT")]
+        until: Option<String>,
+        /// Sort oldest-first instead of newest-first. Unknown completion times
+        /// still sort after known ones.
+        #[arg(long)]
+        oldest: bool,
+        /// How to resolve legacy done tasks without `closed_at`: `auto`
+        /// (default), `never`, or `required`.
+        #[arg(long, default_value = "auto", value_name = "POLICY")]
+        history: String,
+        /// Opaque snapshot-consistent continuation cursor from a previous page.
+        #[arg(long, value_name = "CURSOR")]
+        cursor: Option<String>,
+        /// Read the committed plan and derive Git history relative to this
+        /// same revision.
+        #[arg(long, value_name = "REV")]
+        at: Option<String>,
+        /// Output format: human or json.
+        #[arg(long, default_value = "human")]
+        format: String,
+        /// Narrow to a subset of completed work tasks before applying limits.
+        #[command(flatten)]
+        select: SelectArgs,
+    },
     /// Roll the plan up by phase, or by `summary.group_by`: tasks, effort, and readiness.
     ///
     /// A plan with an unreadable task file is refused rather than rolled up: this
@@ -1556,6 +1599,7 @@ fn command_progress_profile(command: &Command) -> CommandProgressProfile {
         | Command::Deprecations { format }
         | Command::Vacuity { format, .. }
         | Command::Tasks { format, .. }
+        | Command::Completed { format, .. }
         | Command::CheckDocs { format, .. }
         | Command::Summary { format, .. }
         | Command::Blueprint { format, .. }
@@ -6075,6 +6119,7 @@ fn cmd_test(root: &std::path::Path, command: &TestCommand, format: Option<&str>)
     }
 }
 
+#[allow(clippy::too_many_lines)]
 fn dispatch(command: Command, cli_root: Option<PathBuf>) -> Result<u8> {
     match command {
         Command::Capture(_) | Command::Inbox(_) => dispatch_capture(command, cli_root),
@@ -6160,6 +6205,30 @@ fn dispatch(command: Command, cli_root: Option<PathBuf>) -> Result<u8> {
         | Command::Review { .. }
         | Command::RetargetPath { .. } => dispatch_placement(command, cli_root),
         Command::Tasks { format, select } => cmd_tasks(&resolve_root(cli_root)?, &format, &select),
+        Command::Completed {
+            limit,
+            since,
+            until,
+            oldest,
+            history,
+            cursor,
+            at,
+            format,
+            select,
+        } => cmd_completed(
+            cli_root.as_deref(),
+            CompletedCliArgs {
+                limit,
+                since,
+                until,
+                oldest,
+                history,
+                cursor,
+                at,
+                format,
+                select,
+            },
+        ),
         Command::Roadmap(args) => cmd_roadmap(&resolve_root(cli_root)?, &args),
 
         Command::Close {
@@ -14537,6 +14606,11 @@ pub const COMMAND_SURFACES: &[(&str, Surface, Option<&str>)] = &[
     ("check-docs", Surface::Report, None),
     ("summary", Surface::Report, None),
     ("tasks", Surface::Report, None),
+    (
+        "completed",
+        Surface::Report,
+        Some("completed work tasks in deterministic chronological order"),
+    ),
     ("critical-path", Surface::Report, None),
     (
         "blueprint",
@@ -18853,6 +18927,146 @@ fn report_phase(edits: &[PhaseEdit], phase: u32, out: &mut impl std::io::Write) 
 /// exactly the fact this tool owns (`A1-075`). Configured family grouping now
 /// answers one deliberate alternate view; this data surface remains the answer
 /// for every ad hoc rollup.
+struct CompletedCliArgs {
+    limit: Option<usize>,
+    since: Option<String>,
+    until: Option<String>,
+    oldest: bool,
+    history: String,
+    cursor: Option<String>,
+    at: Option<String>,
+    format: String,
+    select: SelectArgs,
+}
+
+fn parse_history_policy(raw: &str) -> Result<aplan_core::HistoryPolicy> {
+    match raw {
+        "auto" => Ok(aplan_core::HistoryPolicy::Auto),
+        "never" => Ok(aplan_core::HistoryPolicy::Never),
+        "required" => Ok(aplan_core::HistoryPolicy::Required),
+        other => anyhow::bail!(
+            "unknown `--history` policy `{other}`: expected `auto`, `never`, or `required`"
+        ),
+    }
+}
+
+#[allow(clippy::too_many_lines)]
+fn cmd_completed(cli_root: Option<&std::path::Path>, args: CompletedCliArgs) -> Result<u8> {
+    let format = format_for("completed", &args.format)?;
+    let history = parse_history_policy(&args.history)?;
+    let selector = args.select.selector()?;
+
+    let (plan, input_identity, repo_root, plan_root_rel, basis_revision) =
+        if let Some(revision) = args.at.as_deref() {
+            let source = CONFIG_SOURCE
+                .get()
+                .cloned()
+                .unwrap_or(aplan_config::ConfigSource::Discover);
+            let (repo, commit, root) = match source {
+                aplan_config::ConfigSource::Discover => {
+                    let probe = cli_root.unwrap_or_else(|| std::path::Path::new("."));
+                    let repo_probe = revision_plan_repository(probe);
+                    let repo = aplan_evidence::Repo::discover(&repo_probe)?;
+                    let workdir = repo
+                        .effective_workdir(&repo_probe)
+                        .ok_or_else(|| anyhow::anyhow!("a historical plan needs a Git worktree"))?;
+                    let commit = repo.resolve_revision(revision).ok_or_else(|| {
+                        anyhow::anyhow!("revision `{revision}` does not resolve to a commit")
+                    })?;
+                    let (config, config_dir) =
+                        config_at_revision(&repo, &commit, &workdir).map_err(config_err)?;
+                    let root = cli_root.map_or_else(
+                        || root_from_config(config.root.clone(), config_dir.as_deref()),
+                        std::path::Path::to_path_buf,
+                    );
+                    (repo, commit, root)
+                }
+                aplan_config::ConfigSource::File(_) | aplan_config::ConfigSource::None => {
+                    let (config, config_dir) = config_at(std::path::Path::new("."))?;
+                    let root = cli_root.map_or_else(
+                        || root_from_config(config.root.clone(), config_dir.as_deref()),
+                        std::path::Path::to_path_buf,
+                    );
+                    let repo = aplan_evidence::Repo::discover(&revision_plan_repository(&root))?;
+                    let commit = repo.resolve_revision(revision).ok_or_else(|| {
+                        anyhow::anyhow!("revision `{revision}` does not resolve to a commit")
+                    })?;
+                    (repo, commit, root)
+                }
+            };
+            let workdir = repo
+                .effective_workdir(&revision_plan_repository(&root))
+                .ok_or_else(|| anyhow::anyhow!("a historical plan needs a Git worktree"))?;
+            let relative_root = repository_relative(&workdir, &root, "plan root")?;
+            let snapshot = repo
+                .plan_files_at(&commit, &relative_root)?
+                .ok_or_else(|| {
+                    anyhow::anyhow!("resolved commit `{commit}` disappeared while reading it")
+                })?;
+            if !snapshot.root_found {
+                anyhow::bail!(
+                    "revision `{}` does not contain plan root `{}`",
+                    snapshot.commit,
+                    relative_root.display()
+                );
+            }
+            let plan = load_plan_files(&root, snapshot.files);
+            errln!(
+                "aplan: completed reads committed plan at {} (resolved from `{revision}`).",
+                snapshot.commit
+            );
+            if !loaded_cleanly(&plan) {
+                return Ok(EXIT_VIOLATIONS);
+            }
+            let identity = format!("commit:{}", snapshot.commit);
+            (
+                plan,
+                identity,
+                workdir,
+                relative_root,
+                Some(snapshot.commit),
+            )
+        } else {
+            let root = resolve_root(cli_root.map(std::path::Path::to_path_buf))?;
+            let identified = aplan_core::load_plan_identified(&root);
+            if !loaded_cleanly(&identified.plan) {
+                return Ok(EXIT_VIOLATIONS);
+            }
+            let identity = aplan_app::plan_inputs_identity(&identified.inputs);
+            let repo_probe = plan_repository(&root);
+            let (repo_root, plan_root_rel) = match aplan_evidence::Repo::discover(&repo_probe) {
+                Ok(repo) => {
+                    if let Some(workdir) = repo.effective_workdir(&repo_probe) {
+                        let rel = repository_relative(&workdir, &root, "plan root")
+                            .unwrap_or_else(|_| std::path::PathBuf::from("aplan"));
+                        (workdir, rel)
+                    } else {
+                        (repo_probe, std::path::PathBuf::from("aplan"))
+                    }
+                }
+                Err(_) => (repo_probe, std::path::PathBuf::from("aplan")),
+            };
+            (identified.plan, identity, repo_root, plan_root_rel, None)
+        };
+
+    let request = aplan_app::CompletedRequest {
+        selector,
+        since: args.since,
+        until: args.until,
+        oldest_first: args.oldest,
+        history,
+        limit: args.limit,
+        cursor: args.cursor,
+        basis_revision,
+        limits: aplan_core::HistoryLimits::default(),
+    };
+    let response =
+        aplan_app::completed_tasks(&plan, &input_identity, &repo_root, &plan_root_rel, &request)
+            .map_err(|err| anyhow::anyhow!("{err}"))?;
+    aplan_output::render_completed(&response, format)?;
+    Ok(EXIT_OK)
+}
+
 fn cmd_tasks(root: &std::path::Path, format: &str, select: &SelectArgs) -> Result<u8> {
     let format = format_for("tasks", format)?;
     let plan = load_checked(root)?;

@@ -1383,6 +1383,11 @@ const UNSTYLED: &[(&str, &str, Option<&[&str]>)] = &[
         None,
     ),
     (
+        "completed",
+        "deliberately color-invariant chronological table distinguishing provenance with explicit text cues rather than ANSI color",
+        None,
+    ),
+    (
         "export-roadmap-json",
         "writes a contract file; what it prints is the path it wrote",
         None,

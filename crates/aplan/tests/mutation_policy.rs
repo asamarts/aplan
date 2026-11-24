@@ -270,6 +270,10 @@ const UNGATED: &[(&str, &str)] = &[
         "tasks",
         "lists the plan's tasks and reports; it changes no file",
     ),
+    (
+        "completed",
+        "lists completed work tasks in chronological order; it changes no file",
+    ),
     ("critical-path", "derives the longest chain and reports"),
     (
         "roadmap",

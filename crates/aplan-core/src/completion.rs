@@ -228,3 +228,62 @@ impl std::fmt::Display for CompletionTimeSource {
         f.write_str(self.as_str())
     }
 }
+
+/// Selector dimensions applied to a completed-task history query (`A2-111`).
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct AppliedCompletedSelector {
+    pub cuts: Vec<String>,
+    pub phases: Vec<u32>,
+    pub owners: Vec<String>,
+    pub tags: Vec<String>,
+}
+
+/// Normalized request parameters echoed in [`CompletedResponse`] (`A2-111`).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct AppliedCompletedRequest {
+    pub since: Option<String>,
+    pub until: Option<String>,
+    pub oldest_first: bool,
+    pub history: HistoryPolicy,
+    pub limit: Option<usize>,
+    pub selector: AppliedCompletedSelector,
+}
+
+/// One completed work task row in [`CompletedResponse`] (`A2-111`, ADR-0074).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct CompletedTaskRow {
+    pub id: String,
+    pub title: String,
+    pub phase: u32,
+    pub owner: Option<String>,
+    pub cut: Option<String>,
+    pub milestone: Option<String>,
+    pub tags: Vec<String>,
+    /// Canonical RFC 3339 UTC whole-second instant, or `None` when `unknown`.
+    pub instant: Option<String>,
+    /// Non-overlapping provenance discriminator.
+    pub source: CompletionTimeSource,
+    /// Durable origin (`local` or `imported`) when `source == recorded`.
+    pub recorded_origin: Option<ClosedAtSource>,
+    /// Full commit OID when `source == history_first_seen`.
+    pub commit: Option<String>,
+    /// Number of incomparable minimal transition candidates when > 1, else 0.
+    pub incomparable_candidates: usize,
+}
+
+/// Stable typed response shared across CLI, MCP, and TUI completion-history
+/// views (`A2-111`, ADR-0074).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct CompletedResponse {
+    pub schema: String,
+    pub input_identity: String,
+    pub basis_revision: String,
+    pub completeness: HistoryCompleteness,
+    pub limitations: Vec<String>,
+    pub commits_walked: usize,
+    pub applied: AppliedCompletedRequest,
+    pub total_matched: usize,
+    pub truncated: bool,
+    pub next_cursor: Option<String>,
+    pub items: Vec<CompletedTaskRow>,
+}

@@ -105,6 +105,7 @@ pub use close::{
     restamp, retarget_path, review, set_evidence_fingerprints, set_paths,
 };
 pub use completion::{
+    AppliedCompletedRequest, AppliedCompletedSelector, CompletedResponse, CompletedTaskRow,
     CompletionHistoryError, CompletionHistoryReport, CompletionTime, CompletionTimeSource,
     HistoryCompleteness, HistoryLimits, HistoryPolicy,
 };

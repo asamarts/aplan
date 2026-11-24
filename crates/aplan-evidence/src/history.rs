@@ -630,10 +630,10 @@ fn detect_unambiguous_rekey(
     None
 }
 
-/// Check whether `oid` is listed in `.git/shallow` (a shallow graft boundary).
+/// Check whether `oid` is listed in `<git-common-dir>/shallow` (a shallow graft boundary).
 fn is_shallow_graft(repo: &Repository, oid: Oid) -> bool {
     let hex = oid.to_string();
-    let shallow_path = repo.path().join("shallow");
+    let shallow_path = repo.commondir().join("shallow");
     std::fs::read_to_string(shallow_path)
         .is_ok_and(|contents| contents.lines().any(|line| line.trim() == hex))
 }
