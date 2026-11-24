@@ -45,6 +45,7 @@ pub const ENTRY_FIELDS: &[&str] = &[
     "ratified_by",
     "contains",
     "revisit_at",
+    "closed_at",
     "version_impact",
     "version_impact_reason",
     "evidence",
@@ -117,6 +118,11 @@ pub struct Entry {
     /// RFC 3339 instant at which an initially parked task is worth reviewing.
     #[serde(default)]
     pub revisit_at: Option<String>,
+    /// Optional source completion timestamp for a `done` imported entry.
+    /// Validated, normalized to canonical UTC whole seconds, and durably
+    /// labelled with `closed_at_source: imported`.
+    #[serde(default)]
+    pub closed_at: Option<String>,
     /// Effect on the released artifact.
     #[serde(default)]
     pub version_impact: Option<VersionImpact>,
@@ -293,6 +299,7 @@ mod tests {
                 ratified_by: Vec::new(),
                 contains: Vec::new(),
                 revisit_at: None,
+                closed_at: None,
                 version_impact: None,
                 version_impact_reason: None,
                 evidence: Vec::new(),

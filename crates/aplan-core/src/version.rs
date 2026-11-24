@@ -325,6 +325,8 @@ mod tests {
             version_impact: impact,
             version_impact_reason: None,
             version: None,
+            closed_at: None,
+            closed_at_source: None,
         }
     }
 

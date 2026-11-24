@@ -1480,6 +1480,11 @@ define_rules! {
     CutIdFamilyMismatch => CUT_ID_FAMILY_MISMATCH = "APLAN064", Warning,
         "a task's id matches the id family declared for its cut",
         points_at: Some("id");
+    /// A `closed_at` or `closed_at_source` record is malformed, out of range,
+    /// paired inconsistently, or placed on a non-`done` task (`A2-109`, ADR-0074).
+    ClosedAtInvalid => CLOSED_AT_INVALID = "APLAN065", Error,
+        "a `closed_at` record is valid canonical UTC and only appears on a `done` task",
+        points_at: Some("closed_at");
 }
 
 /// A repository's verdict policy: what makes a report fail its build.
@@ -1907,7 +1912,7 @@ mod tests {
         // Every rule's `code()` is one of the module constants and vice versa is
         // structurally guaranteed by the macro; this pins the count so dropping
         // a row is a visible change.
-        assert_eq!(Rule::ALL.len(), 64);
+        assert_eq!(Rule::ALL.len(), 65);
     }
 
     /// Severity is declared per rule in the macro. Pin the warnings so a

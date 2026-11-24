@@ -575,6 +575,14 @@ fn every_field_the_schema_declares_is_carried_or_named() {
          evidence:\n  - kind: note\n    ref: shipped\n    captured: 2026-09-24\n\
          ---\n\n## Why\n\nBecause.\n",
     );
+    write_task(
+        dir.path(),
+        "T-006",
+        "---\nid: T-006\ntitle: Completed work with recorded timestamp\nphase: 2\nstatus: done\n\
+         effort_days: 1.0\nclosed_at: '2026-10-11T19:24:08Z'\nclosed_at_source: imported\n\
+         evidence:\n  - kind: note\n    ref: done\n    captured: 2026-10-11\n\
+         ---\n\n## Why\n\nBecause.\n",
+    );
 
     let out = run(dir.path(), &["export", "--format", "checklist"]);
     assert_eq!(out.code, 0, "{}", out.text());

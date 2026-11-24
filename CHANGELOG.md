@@ -81,6 +81,16 @@ to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Added
 
+- **Atomic `closed_at` completion timestamps (`A2-109`, `ADR-0074`, `APLAN065`, `close.records_closed_at`)**.
+  Successful `close` across CLI, MCP, and app/TUI surfaces now atomically records canonical RFC
+  3339 UTC whole-second `closed_at` (`YYYY-MM-DDTHH:MM:SSZ`) alongside `status: done`, evidence,
+  stamps, and any release version. Refused closes write nothing, `amend` and `close --restamp`
+  preserve the original `closed_at`, `drop` leaves it absent, and legacy `done` tasks without
+  `closed_at` remain valid (`unknown`). Explicit `add --from` imports carrying `closed_at` on
+  `done` entries normalize offsets/fractional seconds to canonical UTC and durably record
+  `closed_at_source: imported`. New error rule `APLAN065` (`ClosedAtInvalid`) rejects invalid,
+  non-canonical, pre-epoch, or out-of-range `closed_at` values, non-`done` use, and
+  `closed_at_source` without `closed_at`.
 - **Per-cut and default id-family declarations (`A2-097`, `id_families`, `APLAN064`)**.
   `.aplan.yml` now accepts an optional `id_families` block (`id_families.cuts` mapping milestone
   ids or unique cut labels to a prefix shorthand such as `XYZ-` or `{prefix, strategy}`, plus

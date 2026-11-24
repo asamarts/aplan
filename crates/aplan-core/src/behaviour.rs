@@ -60,6 +60,20 @@ pub struct Behaviour {
 
 /// Every named behaviour this build has.
 pub const ALL: &[Behaviour] = &[
+    // `A2-109` (`ADR-0074`). Existing `close` wrote `status: done`, evidence,
+    // stamps and any release version without a completion timestamp. Recording
+    // canonical UTC `closed_at` atomically on every successful close changes
+    // what `close` writes while leaving legacy `done` tasks valid and
+    // `amend`/`restamp` unchanged.
+    Behaviour {
+        name: "close.records_closed_at",
+        what: "successful `close` across CLI, MCP and app surfaces atomically writes canonical \
+               RFC 3339 UTC whole-second `closed_at` alongside `status: done`, refused close \
+               writes nothing, and `amend`/`restamp` preserve the original `closed_at`",
+        proof: &[
+            "close_gate::close_records_atomic_closed_at_and_preserves_it_across_amend_and_restamp",
+        ],
+    },
     // `A2-181`. `test.timeout_seconds` is documented (ADR-0054, HLD section 5.5)
     // as bounding test discovery (`list` and `skipped`) rather than test
     // execution, but sharing `CommandPolicy` caused `test.run`,

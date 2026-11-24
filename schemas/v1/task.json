@@ -1,5 +1,20 @@
 {
   "$defs": {
+    "ClosedAtSource": {
+      "description": "Durable provenance of a persisted `closed_at` timestamp on a `done` task.",
+      "oneOf": [
+        {
+          "const": "local",
+          "description": "Recorded locally when `aplan` accepted the transition to `done`.",
+          "type": "string"
+        },
+        {
+          "const": "imported",
+          "description": "Validated and preserved from an external source during explicit import.",
+          "type": "string"
+        }
+      ]
+    },
     "Evidence": {
       "additionalProperties": false,
       "description": "A single piece of proof attached to a task.",
@@ -122,6 +137,24 @@
         "type": "string"
       },
       "type": "array"
+    },
+    "closed_at": {
+      "description": "Canonical RFC 3339 UTC whole-second instant (`YYYY-MM-DDTHH:MM:SSZ`) at\nwhich this task's transition to `done` was accepted and recorded.\n\nOptional so legacy `done` tasks remain valid (`unknown` completion time).\nValid only when `status` is `done`; `APLAN065` rejects malformed values\nor non-`done` use.",
+      "type": [
+        "string",
+        "null"
+      ]
+    },
+    "closed_at_source": {
+      "anyOf": [
+        {
+          "$ref": "#/$defs/ClosedAtSource"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "description": "Durable provenance of a persisted `closed_at` claim (`local` or\n`imported`).\n\nOptional; absent alongside `closed_at` means recorded locally by `close`,\nwhile `imported` durably distinguishes a validated source timestamp\npreserved on import. Valid only when `closed_at` is present on a `done`\ntask (`APLAN065`)."
     },
     "contains": {
       "description": "The milestones this one **contains**: its children, whose work rolls up\ninto it at any depth (`A1-333`, ADR-0042).\n\nThe third thing `blocked_by` was being asked to mean. ADR-0013 decided\nthat a milestone listing another milestone there *sequences* the two\ncuts, and the member filter excludes it deliberately -- so an author who\nwrites it intending containment gets a rollup of `0.0d` over real work\nand an `APLAN021` saying their cut is empty, with nothing anywhere using\nthe word \"sequence\". Measured on a four-level plan (`A1-317`'s audit),\nand misdiagnosed there as a traversal defect.\n\n`prefer_after`'s precedent again (ADR-0025), and `ratified_by`'s\n(ADR-0036): a second meaning earns a second field, never a second kind\nof edge. A release is now the special case of this rather than the\nmechanism for it.\n\n**This is not a second task-membership level** (ADR-0014): a task still\nbelongs to exactly one cut, the one that lists it. A container *borrows*\nthe work beneath it, which is the word ADR-0022 already used for a\nrelease.",

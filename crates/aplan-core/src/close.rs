@@ -56,6 +56,13 @@ pub enum CloseError {
          the task; reconcile or remove that field, then retry"
     )]
     HasEvidence,
+    #[error(
+        "this live task already has a `closed_at` or `closed_at_source` field; remove invalid \
+         completion-time fields before closing"
+    )]
+    HasClosedAt,
+    #[error("`closed_at` value `{0}` is not a canonical RFC 3339 UTC whole-second instant")]
+    InvalidClosedAt(String),
     /// The source mapping already owns the release record's key, but its null
     /// value deserialises to `None`. Appending the derived record would create
     /// a duplicate key rather than fill that authored field (`A1-724`).
@@ -227,6 +234,29 @@ pub fn close(
     fingerprints: &BTreeMap<String, String>,
     version: Option<&str>,
 ) -> Result<String, CloseError> {
+    close_at(file, evidence, fingerprints, version, None)
+}
+
+/// Return `file` with the task set `done`, `evidence` appended, and optional
+/// canonical UTC `closed_at` written in one atomic replacement (`A2-109`,
+/// ADR-0074).
+///
+/// # Errors
+/// Any [`CloseError`] when the task is already terminal, carries an existing
+/// `closed_at` / `closed_at_source` key on a live task, is given a non-canonical
+/// `closed_at`, or fails the post-rewrite round-trip guard.
+pub fn close_at(
+    file: &str,
+    evidence: &[Evidence],
+    fingerprints: &BTreeMap<String, String>,
+    version: Option<&str>,
+    closed_at: Option<&str>,
+) -> Result<String, CloseError> {
+    if let Some(ts) = closed_at
+        && crate::task::parse_canonical_closed_at(ts).is_none()
+    {
+        return Err(CloseError::InvalidClosedAt(ts.to_string()));
+    }
     let bom = leading_bom(file);
     let (frontmatter, body) = split_frontmatter(file).ok_or(CloseError::NotATask)?;
     let task: Task =
@@ -241,6 +271,12 @@ pub fn close(
         } else {
             CloseError::Terminal(task.status)
         });
+    }
+
+    if top_level_mapping_has_key(frontmatter, "closed_at")
+        || top_level_mapping_has_key(frontmatter, "closed_at_source")
+    {
+        return Err(CloseError::HasClosedAt);
     }
 
     // A live task may already carry partial evidence (`A2-147`). An ordinary
@@ -291,6 +327,7 @@ pub fn close(
     // Already present and agreeing: leave the file's own line alone rather than
     // writing a second key, which would be a duplicate-key document.
     let version = version.filter(|_| !version_was_present);
+    let closed_at_line = closed_at.map_or_else(String::new, |ts| format!("closed_at: {ts}{nl}"));
     let fingerprints_were_present = top_level_mapping_has_key(frontmatter, "trace_fingerprints");
     let fingerprints_block = fingerprint_block("trace_fingerprints", fingerprints, nl)?;
     let with_status = set_status_in(frontmatter, Status::Done)?;
@@ -309,9 +346,10 @@ pub fn close(
     )?;
     let new_frontmatter = if has_evidence_key {
         let base = format!(
-            "{}{}{}",
+            "{}{}{}{}",
             with_fingerprints,
             version.map_or_else(String::new, |v| format!("version: {v}{nl}")),
+            closed_at_line,
             if fingerprints_were_present {
                 String::new()
             } else {
@@ -321,9 +359,10 @@ pub fn close(
         append_live_evidence(base, &task.evidence, evidence, nl)?
     } else {
         format!(
-            "{}{}{}{}",
+            "{}{}{}{}{}",
             with_fingerprints,
             version.map_or_else(String::new, |v| format!("version: {v}{nl}")),
+            closed_at_line,
             evidence_block(&combined, nl)?,
             if fingerprints_were_present {
                 String::new()
@@ -334,16 +373,19 @@ pub fn close(
     };
 
     // Never write frontmatter that would not load: parse it back, and confirm the
-    // status, the *exact* evidence, and the fingerprints round-tripped (value
-    // equality, not a matching count, so a mis-serialised reference cannot slip).
+    // status, the *exact* evidence, the fingerprints, and any `closed_at`
+    // round-tripped (value equality, not a matching count, so a mis-serialised
+    // reference cannot slip).
     let parsed = reparse(&new_frontmatter)?;
     if parsed.status != Status::Done
         || parsed.evidence.as_slice() != combined.as_slice()
         || &parsed.trace_fingerprints != fingerprints
         || (version.is_some() && parsed.version.as_deref() != version)
+        || parsed.closed_at.as_deref() != closed_at
     {
         return Err(CloseError::Produced(
-            "the status, evidence, version or fingerprints did not round-trip".to_string(),
+            "the status, evidence, version, closed_at or fingerprints did not round-trip"
+                .to_string(),
         ));
     }
 

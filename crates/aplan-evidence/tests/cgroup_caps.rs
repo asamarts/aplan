@@ -133,6 +133,8 @@ fn done_task(id: &str, evidence: Vec<Evidence>) -> Task {
         version_impact: None,
         version_impact_reason: None,
         version: None,
+        closed_at: None,
+        closed_at_source: None,
     }
 }
 

@@ -560,3 +560,12 @@ a task's id matches the id family declared for its cut
 - **says:** ABC-001: id `ABC-001` does not match the `XYZ-` family declared for cut `M-ci` (`M-ci`)
   - **fix:** Rekey `ABC-001` into the `XYZ-` family with `aplan rekey ABC-001 <XYZ-ID>`, move it to the matching cut with `aplan mv ABC-001 --cut <CUT>`, or update `id_families.cuts` in `.aplan.yml`
 
+## APLAN065 (error)
+
+a `closed_at` record is valid canonical UTC and only appears on a `done` task
+
+- **says:** `closed_at: 2026-10-11T19:24:08+02:00` is not a canonical RFC 3339 UTC whole-second instant in `1970-01-01T00:00:00Z`..=`9999-12-31T23:59:59Z`
+  - **fix:** Write `closed_at` as canonical UTC whole seconds (`YYYY-MM-DDTHH:MM:SSZ`, without fractional seconds or non-UTC offsets), or omit it on legacy `done` tasks.
+- **says:** carries `closed_at` while status is `todo`: `closed_at` is valid only on `done` tasks
+  - **fix:** Remove `closed_at` (and any `closed_at_source`) from non-`done` tasks; dropping or reopening work does not carry a completion timestamp.
+

@@ -2644,6 +2644,16 @@ pub fn render_show(show: &Show) -> String {
             sanitize::visible(at)
         );
     }
+    if let Some(at) = &show.closed_at {
+        let origin = show
+            .closed_at_source
+            .map_or("local", aplan_core::ClosedAtSource::as_str);
+        let _ = writeln!(
+            s,
+            "  closed at {} (recorded: {origin})",
+            sanitize::visible(at)
+        );
+    }
     if let Some(reason) = &show.version_impact_reason {
         let _ = writeln!(s, "  version impact reason: {}", sanitize::visible(reason));
     }
@@ -4283,6 +4293,8 @@ mod tests {
             version_impact: None,
             version_impact_reason: Some("consumer contract changes".into()),
             version: Some("1.0.0".into()),
+            closed_at: None,
+            closed_at_source: None,
         };
 
         let rendered = plain(&render_show(&show));
@@ -5027,6 +5039,8 @@ mod tests {
             version_impact: None,
             version_impact_reason: None,
             version: None,
+            closed_at: None,
+            closed_at_source: None,
         }
     }
 
@@ -5305,6 +5319,8 @@ mod tests {
             version_impact: None,
             version_impact_reason: None,
             version: None,
+            closed_at: None,
+            closed_at_source: None,
         };
         let g = Graph::new([&t]);
         for line in mermaid(&g).lines().skip(1).filter(|l| !l.trim().is_empty()) {
@@ -5801,6 +5817,7 @@ mod tests {
     }
 
     #[test]
+    #[allow(clippy::too_many_lines)]
     fn tasks_render_in_both_formats() {
         // The corpus runs the binary in another process, where coverage cannot
         // see these lines, and the human table has branches the JSON does not:
@@ -5838,6 +5855,8 @@ mod tests {
                     version_impact: None,
                     version_impact_reason: None,
                     version: None,
+                    closed_at: None,
+                    closed_at_source: None,
                 },
                 TaskRow {
                     id: "B1".into(),
@@ -5867,6 +5886,8 @@ mod tests {
                     version_impact: None,
                     version_impact_reason: None,
                     version: None,
+                    closed_at: None,
+                    closed_at_source: None,
                 },
                 TaskRow {
                     id: "M-s0".into(),
@@ -5896,6 +5917,8 @@ mod tests {
                     version_impact: None,
                     version_impact_reason: None,
                     version: None,
+                    closed_at: None,
+                    closed_at_source: None,
                 },
             ],
         };

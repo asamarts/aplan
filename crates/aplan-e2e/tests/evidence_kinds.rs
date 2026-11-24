@@ -326,6 +326,8 @@ fn resolution_capabilities_drive_both_unopened_reports() {
         version_impact: None,
         version_impact_reason: None,
         version: None,
+        closed_at: None,
+        closed_at_source: None,
     };
     let plan = Plan {
         tasks: vec![aplan_core::load::LoadedTask {

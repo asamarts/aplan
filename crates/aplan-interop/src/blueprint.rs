@@ -722,6 +722,7 @@ fn bind_entry(
         ratified_by: bind_list(binder, &at("ratified_by"), &entry.ratified_by)?,
         contains: bind_list(binder, &at("contains"), &entry.contains)?,
         revisit_at: bind_optional(binder, &at("revisit_at"), entry.revisit_at.as_deref())?,
+        closed_at: bind_optional(binder, &at("closed_at"), entry.closed_at.as_deref())?,
         version_impact: entry.version_impact,
         version_impact_reason: bind_optional(
             binder,

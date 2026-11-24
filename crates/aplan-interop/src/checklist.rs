@@ -825,6 +825,8 @@ impl ProposalSource for Checklist {
                 version_impact: None,
                 version_impact_reason: None,
                 version: None,
+                closed_at: None,
+                closed_at_source: None,
             });
         }
 
@@ -924,6 +926,16 @@ const NOT_CARRIED: &[NotCarried] = &[
         "version_impact_reason",
         |t| t.version_impact_reason.is_some(),
         "why that claim is lower than the task's level implies, which is the half a reviewer reads",
+    ),
+    NotCarried(
+        "closed_at",
+        |t| t.closed_at.is_some(),
+        "the recorded UTC close instant, which a checkbox cannot carry",
+    ),
+    NotCarried(
+        "closed_at_source",
+        |t| t.closed_at_source.is_some(),
+        "whether `closed_at` was recorded locally or preserved on import",
     ),
 ];
 
@@ -1951,6 +1963,8 @@ mod tests {
             version_impact: None,
             version_impact_reason: None,
             version: None,
+            closed_at: None,
+            closed_at_source: None,
         }
     }
 

@@ -172,6 +172,18 @@ pub fn preview_close(
     context: &PlanContext,
     request: &CloseRequest,
 ) -> Result<EvidenceMutationPreview, EvidenceMutationError> {
+    preview_close_with_clock(context, request, &aplan_core::capture::SystemClock)
+}
+
+/// Prepare one closure using an explicit [`aplan_core::capture::Clock`] so
+/// tests and deterministic callers can control the recorded `closed_at`
+/// instant (`A2-109`, ADR-0074).
+#[allow(clippy::too_many_lines)]
+pub fn preview_close_with_clock(
+    context: &PlanContext,
+    request: &CloseRequest,
+    clock: &impl aplan_core::capture::Clock,
+) -> Result<EvidenceMutationPreview, EvidenceMutationError> {
     if request.execute && request.no_resolve {
         return Err(EvidenceMutationError::Arguments(
             "focused execution conflicts with unresolved mutation mode".to_string(),
@@ -194,8 +206,16 @@ pub fn preview_close(
         BTreeMap::new()
     };
     let (version, version_notice) = recorded_version(context, &loaded.task);
-    let mut updated = aplan_core::close(&source, &evidence, &fingerprints, version.as_deref())
-        .map_err(|source| rewrite(&request.id, source))?;
+    let closed_at =
+        aplan_core::format_closed_at(clock.now_epoch()).map_err(EvidenceMutationError::Refused)?;
+    let mut updated = aplan_core::close_at(
+        &source,
+        &evidence,
+        &fingerprints,
+        version.as_deref(),
+        Some(&closed_at),
+    )
+    .map_err(|source| rewrite(&request.id, source))?;
     let produced_for_resolution =
         aplan_core::mutation::task_of(&updated).map_err(EvidenceMutationError::Plan)?;
     if request.execute
@@ -2281,6 +2301,71 @@ mod tests {
                 .added
                 .iter()
                 .any(|finding| finding.code == "APLAN017")
+        );
+    }
+
+    /// `A2-109` (`ADR-0074`): `preview_close_with_clock` records canonical UTC
+    /// `closed_at` from an injected clock, supports same-instant closes,
+    /// re-samples on retry after snapshot contention, and refuses duplicate
+    /// retries on already-closed tasks.
+    #[test]
+    fn preview_close_with_clock_records_canonical_utc_and_retries_resample() {
+        let fixture = Fixture::new(
+            "---\nid: A-1\ntitle: Close me\nphase: 1\nstatus: todo\neffort_days: 1\n\
+             paths:\n  - src/**\n---\n\nBody.\n",
+        );
+        let context = fixture_context(&fixture, test_options(), None);
+        let request = CloseRequest {
+            id: "A-1".to_string(),
+            evidence: vec![Evidence {
+                kind: EvidenceKind::File,
+                reference: "README.md".to_string(),
+                captured: None,
+            }],
+            no_resolve: true,
+            execute: false,
+        };
+        let clock_a = aplan_core::capture::FixedClock(1_791_746_648); // 2026-10-11T19:24:08Z
+        let preview_a = preview_close_with_clock(&context, &request, &clock_a)
+            .expect("first close preview with injected clock");
+        let after_a = preview_a.change_set().files()[0].after();
+        assert!(
+            after_a.contains("closed_at: 2026-10-11T19:24:08Z"),
+            "expected canonical UTC closed_at:\n{after_a}"
+        );
+        // Same-instant close produces the exact same canonical UTC instant.
+        let preview_same = preview_close_with_clock(&context, &request, &clock_a)
+            .expect("same-instant close preview");
+        assert_eq!(
+            preview_same.change_set().files()[0].after(),
+            preview_a.change_set().files()[0].after()
+        );
+        // A later retry samples the new clock instant.
+        let clock_b = aplan_core::capture::FixedClock(1_791_746_655); // 2026-10-11T19:24:15Z
+        let preview_b = preview_close_with_clock(&context, &request, &clock_b)
+            .expect("retry preview resamples clock");
+        let after_b = preview_b.change_set().files()[0].after();
+        assert!(
+            after_b.contains("closed_at: 2026-10-11T19:24:15Z"),
+            "expected resampled closed_at:\n{after_b}"
+        );
+        // Apply `preview_b`, then confirm a competing writer holding `preview_a`
+        // fails snapshot contention and a duplicate retry is refused.
+        assert!(matches!(
+            commit_change_set(&context, preview_b.into_change_set()),
+            CommitOutcome::Applied(_)
+        ));
+        assert!(
+            !matches!(
+                commit_change_set(&context, preview_a.into_change_set()),
+                CommitOutcome::Applied(_)
+            ),
+            "stale competing close must fail snapshot contention"
+        );
+        let reloaded = fixture_context(&fixture, test_options(), None);
+        assert!(
+            preview_close_with_clock(&reloaded, &request, &clock_b).is_err(),
+            "duplicate retry after published close must be refused"
         );
     }
 }
