@@ -27,6 +27,7 @@
 
 mod batch;
 pub mod excerpt;
+pub mod history;
 mod material;
 pub mod range;
 mod repo;
@@ -39,6 +40,7 @@ pub use batch::{
     TestBatchManifest, TestBatchOutcome, TestBatchResult, TestBatchResultEntry,
     validate_result_entry,
 };
+pub use history::resolve_completion_times;
 pub use material::{
     TestMaterialIdentity, TestRuntimeIdentity, test_material_identity, test_material_includes_path,
     test_runtime_identity,

@@ -64,6 +64,7 @@ pub mod behaviour;
 pub mod capture;
 pub mod claim;
 pub mod close;
+pub mod completion;
 pub mod contract;
 pub mod deprecation;
 pub mod diagnostic;
@@ -102,6 +103,10 @@ pub use close::trace_fingerprints;
 pub use close::{
     CloseError, add_evidence, apply_repair, close, close_at, remove_evidence, replace_evidence,
     restamp, retarget_path, review, set_evidence_fingerprints, set_paths,
+};
+pub use completion::{
+    CompletionHistoryError, CompletionHistoryReport, CompletionTime, CompletionTimeSource,
+    HistoryCompleteness, HistoryLimits, HistoryPolicy,
 };
 pub use diagnostic::{
     AgentContractProvenance, CandidateProjection, Diagnostic, Repair, Report, Rule, Severity,
