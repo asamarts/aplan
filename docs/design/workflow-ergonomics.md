@@ -109,6 +109,11 @@ not authorization tokens or replayable patches.
 
 ## 1. Completion chronology
 
+> Decision recorded in `ADR-0074` (`A2-108`): durable storage (`closed_at` + optional
+> `closed_at_source: local | imported`), typed provenance (`recorded`, `history_first_seen`,
+> `unknown`), single-pass Git history semantics, scoped completeness, deterministic non-causal
+> ordering, shared CLI/MCP/TUI query/pagination rules, and separation from `A2-063` measured time.
+
 ### Semantics
 
 Use this optional task field:

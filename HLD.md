@@ -219,6 +219,14 @@ repositories are outside the worktree transaction. Terminal work needs `--allow-
 boundary cannot be crossed accidentally. An id carrying a local active claim must be released
 first, so rekeying cannot strand the old key while the new one appears free.
 
+**Completion chronology is a lifecycle claim, not measured effort (`ADR-0074`, `A2-108`).**
+`closed_at` (canonical RFC 3339 UTC whole seconds, with optional `closed_at_source: local |
+imported` to distinguish preserved imports from local closes) records when `aplan` accepted a
+transition to `done`, never real-world completion or work duration (`A2-063`). Legacy `done` tasks
+without `closed_at` remain valid (`unknown`); bounded single-pass Git history inference reports
+`history_first_seen` with its basis revision, selected commit OID, and scoped completeness without
+ever writing inferred timestamps back into task files.
+
 **A capture is intake, not a task** (ADR-0063). A capture has no task status, phase, cut,
 dependency edge, effort, path, trace or evidence, and therefore cannot affect readiness, critical
 path, roadmap or release claims. Promotion atomically creates one ordinary validated task and
