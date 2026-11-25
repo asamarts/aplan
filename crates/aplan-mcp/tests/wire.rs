@@ -93,6 +93,53 @@ fn close_requires_evidence_and_offers_no_way_to_self_assess() {
 fn every_tool_declares_an_object_schema() {
     for t in wire_tools() {
         let schema = serde_json::to_value(&*t.input_schema).unwrap();
-        assert_eq!(schema["type"], "object", "{} has no object schema", t.name);
+        assert_eq!(
+            schema["type"], "object",
+            "{} has no object input schema",
+            t.name
+        );
+        let out_raw = t
+            .output_schema
+            .as_ref()
+            .unwrap_or_else(|| panic!("{} has no output schema", t.name));
+        let out_schema = serde_json::to_value(&**out_raw).unwrap();
+        assert_eq!(
+            out_schema["type"], "object",
+            "{} has no object output schema",
+            t.name
+        );
+        let props = out_schema["properties"]
+            .as_object()
+            .unwrap_or_else(|| panic!("{} output schema has no properties", t.name));
+        for required_key in ["contract_version", "tool", "subject", "denied", "effect"] {
+            assert!(
+                props.contains_key(required_key),
+                "{} output schema missing `{required_key}`",
+                t.name
+            );
+        }
+    }
+}
+
+#[test]
+fn resources_and_templates_are_bounded_and_confined_to_aplan_scheme() {
+    let resources = aplan_mcp::resources::wire_resources();
+    assert_eq!(resources.len(), aplan_mcp::resources::RESOURCES.len());
+    for res in &resources {
+        assert!(res.uri.starts_with("aplan://"), "{}", res.uri);
+        assert_eq!(res.mime_type.as_deref(), Some("application/json"));
+    }
+    let templates = aplan_mcp::resources::wire_resource_templates();
+    assert_eq!(
+        templates.len(),
+        aplan_mcp::resources::RESOURCE_TEMPLATES.len()
+    );
+    for tmpl in &templates {
+        assert!(
+            tmpl.uri_template.starts_with("aplan://"),
+            "{}",
+            tmpl.uri_template
+        );
+        assert_eq!(tmpl.mime_type.as_deref(), Some("application/json"));
     }
 }

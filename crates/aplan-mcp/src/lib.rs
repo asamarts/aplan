@@ -16,6 +16,8 @@
 //! The tool surface is deliberately small ([`tools::TOOLS`]), and pinned by a
 //! test so it cannot grow silently.
 
+pub mod contract;
+pub mod resources;
 pub mod server;
 pub mod tools;
 
@@ -49,5 +51,6 @@ pub struct Policy {
     pub id_strategy: aplan_core::IdStrategy,
 }
 
+pub use contract::MCP_CONTRACT_VERSION;
 pub use server::{AplanServer, serve, serve_unconfigured};
 pub use tools::{TOOLS, ToolError, ToolSpec};

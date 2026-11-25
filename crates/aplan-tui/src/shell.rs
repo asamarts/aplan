@@ -8232,6 +8232,7 @@ pub(crate) mod tests {
                 internal: 3,
             },
             formats: vec!["human".to_string()],
+            mcp_contract_version: "aplan/mcp/v2".to_string(),
             mcp_tools: vec![aplan_app::McpToolFact {
                 name: "aplan_check".to_string(),
                 description: "validate a plan".to_string(),

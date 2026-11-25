@@ -66,6 +66,10 @@ const SCHEMAS: &[(&str, SchemaFn)] = &[
         aplan_config::user::derived_schema,
     ),
     ("schemas/v1/tasks.json", aplan_core::export::derived_schema),
+    (
+        "schemas/v1/mcp-contract.json",
+        aplan_mcp::contract::derived_schema,
+    ),
 ];
 
 mod cli_surface;

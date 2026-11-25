@@ -1163,6 +1163,30 @@ costs more than it looks: those `paths` then tell `APLAN012` that a commit touch
 is relevant to every one of those tasks, and tell `APLAN024` the same paths are related. One
 accommodation, two rules quietly weakened.
 
+## MCP structured outputs and bounded resources (`aplan/mcp/v2`, `A2-118`, `--require mcp.structured_outputs_and_bounded_resources`)
+
+`aplan mcp` now advertises contract version `aplan/mcp/v2` in `aplan_identity`, `aplan facts`, and
+`schemas/v1/mcp-contract.json` while retaining the locked `rmcp 3.9.0` SDK:
+
+- **Generated schemas**: every tool in `tools/list` exposes a generated `inputSchema` and an
+  object-enveloped `outputSchema` derived from concrete Rust request/response types. Unknown
+  fields (such as self-assessment scores on `aplan_close`) are refused at argument validation.
+- **Protocol compatibility**:
+  - Clients negotiating `2024-11-05` or `2025-03-26` continue receiving legacy JSON in
+    `content[0].text` with no `structuredContent` and no `resultType`.
+  - Clients negotiating `2025-06-18` or `2025-11-25` (handshake-era structured clients) receive an
+    object-enveloped `structuredContent` (`contract_version`, `tool`, `subject`, `denied`, `effect`,
+    optional `context`, and typed `data` or `error`) plus sanitized concise compatibility text in
+    `content[0].text`. Unknown resources return JSON-RPC `-32002` (`RESOURCE_NOT_FOUND`).
+  - Clients using `2026-07-28` (stateless inline lifecycle via `server/discover` and per-request `_meta`)
+    additionally receive `resultType: "complete"`, `ttlMs: 0`, and `cacheScope: "private"` on
+    cacheable catalogue and resource replies, and `-32602` (`INVALID_PARAMS`) for unknown resources.
+- **Bounded resources**: `aplan://plan/summary`, `aplan://tasks/{id}`, and
+  `aplan://collections/ready{?limit,cursor}` enforce a 64 KiB page cap, `limit` in `1..=50`, strict
+  `aplan://` URI confinement, and 128-byte opaque cursors bound to both input identity
+  (`plan_sha256`, `config_sha256`) and canonical query parameters. Editing the plan between pages
+  refuses a stale cursor cleanly rather than returning mixed-snapshot results.
+
 ## The full list
 
 [`CHANGELOG.md`](../CHANGELOG.md) is the complete record, including everything with no adoption

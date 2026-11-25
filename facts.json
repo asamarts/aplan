@@ -5,6 +5,10 @@
       "what": "human `show --body` pretty-renders task Markdown with semantic styling, aligned tables and sanitization, `--raw-body` writes verbatim stored body bytes under the final-newline rule, and JSON plus Markdown artifact commands stay unchanged"
     },
     {
+      "name": "mcp.structured_outputs_and_bounded_resources",
+      "what": "every MCP tool declares generated input and output schemas (`aplan/mcp/v2`), returns schema-conforming object-enveloped `structuredContent` plus concise text on structured protocol revisions while preserving legacy JSON text for pre-2025-06-18 clients, and serves bounded URI-addressed resources with snapshot-bound cursors and private zero-freshness cache semantics"
+    },
+    {
       "name": "close.records_closed_at",
       "what": "successful `close` across CLI, MCP and app surfaces atomically writes canonical RFC 3339 UTC whole-second `closed_at` alongside `status: done`, refused close writes nothing, and `amend`/`restamp` preserve the original `closed_at`"
     },
@@ -1512,7 +1516,7 @@
     "version.require_impact"
   ],
   "counts": {
-    "behaviours": 243,
+    "behaviours": 244,
     "build_capabilities": 1,
     "commands": 51,
     "config_keys": 136,
@@ -1545,6 +1549,7 @@
     "dot",
     "text"
   ],
+  "mcp_contract_version": "aplan/mcp/v2",
   "mcp_tools": [
     {
       "description": "Name the build of this server: its version, the commit it was built from, and the digests of its capability document and its own image. Asking an installed CLI does not answer this -- a configured MCP process may be a different executable, which is how a pilot spent a pass on a defect the checkout had already fixed. Needs no plan and no repository.",

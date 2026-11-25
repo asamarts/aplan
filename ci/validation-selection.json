@@ -288,7 +288,7 @@
       },
       {
         "path": "Cargo.lock",
-        "sha256": "01e0d6723848e9579933595c05015c2afe3febf77b10743abbbb08c2fdea00ec"
+        "sha256": "4124c21ae91180321654eeb4aec7104d88fc6b74b71bbea37101a2b9b243692f"
       },
       {
         "path": "Cargo.toml",
@@ -324,7 +324,7 @@
       },
       {
         "path": "crates/aplan-mcp/Cargo.toml",
-        "sha256": "679845ec1ffc671d74b61cd1f4738505a603dcf5547b31342943f5325841fe8d"
+        "sha256": "0b086dadfe51ecca6abb63ed46f7651e75403ac8450ecdbeb80e5f06b1a8bb41"
       },
       {
         "path": "crates/aplan-output/Cargo.toml",
@@ -344,7 +344,7 @@
       },
       {
         "path": "xtask/Cargo.toml",
-        "sha256": "635ee4e27cd13073a65d323865624c73478e70244f27971923fabcdaf1f1c17c"
+        "sha256": "3ba73940d4af816e9b2c280e6bb34cdd3a9b2f323940dd690342c0591ff621a3"
       }
     ],
     "packages": [
@@ -450,7 +450,8 @@
         "xtask"
       ],
       "aplan-mcp": [
-        "aplan"
+        "aplan",
+        "xtask"
       ],
       "aplan-output": [
         "aplan",
@@ -459,6 +460,7 @@
         "aplan-e2e",
         "aplan-evidence",
         "aplan-interop",
+        "aplan-mcp",
         "aplan-tui",
         "xtask"
       ],
