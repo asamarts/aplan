@@ -3332,17 +3332,17 @@ const fn progress_unit_label(unit: aplan_app::ProgressUnit) -> &'static str {
 }
 
 #[derive(Debug, Clone, Copy)]
-struct Palette {
-    normal: Style,
-    muted: Style,
-    accent: Style,
-    selected: Style,
-    good: Style,
-    warning: Style,
-    error: Style,
+pub(crate) struct Palette {
+    pub(crate) normal: Style,
+    pub(crate) muted: Style,
+    pub(crate) accent: Style,
+    pub(crate) selected: Style,
+    pub(crate) good: Style,
+    pub(crate) warning: Style,
+    pub(crate) error: Style,
 }
 
-fn palette(theme: Theme) -> Palette {
+pub(crate) fn palette(theme: Theme) -> Palette {
     match theme {
         Theme::Dark => Palette {
             normal: Style::new().fg(Color::White),
@@ -5021,12 +5021,12 @@ fn route_intro(model: &Model, styles: Palette, compact: bool, width: usize) -> V
     }
 }
 
-fn inspector_lines(
+fn inspector_header_lines(
     model: &Model,
     width: usize,
     ascii: bool,
     styles: Palette,
-) -> (Vec<Line<'static>>, Option<(usize, usize)>) {
+) -> Vec<Line<'static>> {
     let mut lines = Vec::new();
     let tabs = InspectorSection::ALL
         .iter()
@@ -5077,6 +5077,112 @@ fn inspector_lines(
             styles.warning,
         ));
     }
+    lines
+}
+
+fn inspector_body_preamble(
+    model: &Model,
+    show: &aplan_app::Show,
+    width: usize,
+    ascii: bool,
+    styles: Palette,
+) -> Vec<Line<'static>> {
+    let mut lines = inspector_header_lines(model, width, ascii, styles);
+    lines.push(Line::styled(
+        text::fit(
+            &format!("Raw: aplan show --raw-body {}", show.id),
+            width,
+            ascii,
+        ),
+        styles.muted,
+    ));
+    lines.push(Line::raw(""));
+    lines
+}
+
+fn inspector_body_scroll_bounds(
+    model: &Model,
+    width: usize,
+    capacity: usize,
+    ascii: bool,
+    styles: Palette,
+) -> (usize, usize) {
+    let Some(show) = model.selected_inspector() else {
+        return (0, 0);
+    };
+    let preamble = inspector_body_preamble(model, show, width, ascii, styles);
+    let prefix_len = preamble.len();
+    let Some(body) = show.body.as_deref().filter(|b| !b.is_empty()) else {
+        let total = prefix_len + 1;
+        return resolved_inspector_scroll(model, total, None, capacity);
+    };
+    let requested_scroll = model.inspector_scroll.unwrap_or(0);
+    let target_body_lines = if requested_scroll == usize::MAX {
+        usize::MAX
+    } else {
+        requested_scroll
+            .saturating_add(capacity)
+            .saturating_add(10)
+            .saturating_sub(prefix_len)
+            .max(capacity.saturating_add(10))
+    };
+    let (body_lines, is_complete) =
+        model
+            .inspector_body_cache
+            .borrow_mut()
+            .measure(body, width, ascii, target_body_lines);
+    let total_known = prefix_len.saturating_add(body_lines);
+    let effective_total = if is_complete {
+        total_known
+    } else {
+        total_known.saturating_add(5)
+    };
+    resolved_inspector_scroll(model, effective_total, None, capacity)
+}
+
+fn inspector_body_visible_window(
+    model: &Model,
+    show: &aplan_app::Show,
+    width: usize,
+    capacity: usize,
+    ascii: bool,
+    styles: Palette,
+) -> (Vec<Line<'static>>, usize, bool) {
+    let preamble = inspector_body_preamble(model, show, width, ascii, styles);
+    let prefix_len = preamble.len();
+    if let Some(body) = show.body.as_deref().filter(|b| !b.is_empty()) {
+        let (scroll, _) = inspector_body_scroll_bounds(model, width, capacity, ascii, styles);
+        let mut visible = Vec::with_capacity(capacity);
+        for line in preamble.into_iter().skip(scroll).take(capacity) {
+            visible.push(line);
+        }
+        let remaining = capacity.saturating_sub(visible.len());
+        let body_start = scroll.saturating_sub(prefix_len);
+        let (body_window, body_materialized, is_complete) = model
+            .inspector_body_cache
+            .borrow_mut()
+            .render_window(body, width, ascii, body_start, remaining, styles);
+        visible.extend(body_window);
+        let total_materialized = prefix_len.saturating_add(body_materialized);
+        let has_more = !is_complete || scroll.saturating_add(capacity) < total_materialized;
+        (visible, scroll, has_more)
+    } else {
+        let mut all = preamble;
+        all.push(Line::styled("No body was present.", styles.muted));
+        let total = all.len();
+        let (scroll, _) = resolved_inspector_scroll(model, total, None, capacity);
+        let visible = all.into_iter().skip(scroll).take(capacity).collect();
+        (visible, scroll, scroll.saturating_add(capacity) < total)
+    }
+}
+
+fn inspector_lines(
+    model: &Model,
+    width: usize,
+    ascii: bool,
+    styles: Palette,
+) -> (Vec<Line<'static>>, Option<(usize, usize)>) {
+    let mut lines = inspector_header_lines(model, width, ascii, styles);
 
     let items = model.inspector_items();
     let label_width = inspector_label_width(&items, width);
@@ -5396,6 +5502,15 @@ fn inspector_scroll_bounds(model: &Model) -> Option<(usize, usize)> {
             usize::from(content.height),
         ));
     }
+    if model.inspector_section == InspectorSection::Body {
+        return Some(inspector_body_scroll_bounds(
+            model,
+            usize::from(content.width),
+            usize::from(content.height),
+            model.glyphs == Glyphs::Ascii,
+            palette(model.theme),
+        ));
+    }
     let (lines, selected_range) = inspector_lines(
         model,
         usize::from(content.width),
@@ -5642,22 +5757,30 @@ fn render_detail(frame: &mut Frame<'_>, model: &Model, area: Rect) {
         return;
     };
 
-    let (lines, selected_range) = inspector_lines(model, width, ascii, styles);
-
     let capacity = usize::from(content.height);
-    let (scroll, _max_scroll) =
-        resolved_inspector_scroll(model, lines.len(), selected_range, capacity);
     let title = detail_title(
         model,
         area,
         &format!("{} / {}", show.id, model.inspector_section.label()),
     );
-    let line_count = lines.len();
-    let visible_lines = lines
-        .into_iter()
-        .skip(scroll)
-        .take(capacity)
-        .collect::<Vec<_>>();
+    let (visible_lines, scroll, has_more) = if model.inspector_section == InspectorSection::Body {
+        inspector_body_visible_window(model, show, width, capacity, ascii, styles)
+    } else {
+        let (lines, selected_range) = inspector_lines(model, width, ascii, styles);
+        let (scroll, _max_scroll) =
+            resolved_inspector_scroll(model, lines.len(), selected_range, capacity);
+        let line_count = lines.len();
+        let visible = lines
+            .into_iter()
+            .skip(scroll)
+            .take(capacity)
+            .collect::<Vec<_>>();
+        (
+            visible,
+            scroll,
+            scroll.saturating_add(capacity) < line_count,
+        )
+    };
     frame.render_widget(
         Paragraph::new(visible_lines)
             .style(styles.normal)
@@ -5671,7 +5794,7 @@ fn render_detail(frame: &mut Frame<'_>, model: &Model, area: Rect) {
             Rect::new(content.right().saturating_sub(1), content.y, 1, 1),
         );
     }
-    if capacity > 0 && scroll.saturating_add(capacity) < line_count {
+    if capacity > 0 && has_more {
         // The exact wrapped-line count is `lines.len()` above; keep overflow
         // visible even when a narrow pane has room for only one content row.
         let marker = if ascii { ">" } else { "\u{2026}" };
@@ -8034,7 +8157,7 @@ fn palette_line(
 }
 
 #[cfg(test)]
-mod tests {
+pub(crate) mod tests {
     use super::*;
     use crate::form::{FieldSpec, MutationForm};
     use crate::model::{EffectCompletion, EffectOutput};
@@ -8265,7 +8388,7 @@ mod tests {
         model
     }
 
-    fn buffer(model: &mut Model, width: u16, height: u16) -> String {
+    pub(crate) fn buffer(model: &mut Model, width: u16, height: u16) -> String {
         model.update(Action::Resize {
             columns: width,
             rows: height,

@@ -1440,6 +1440,98 @@ pub fn layout_markdown(doc: &MarkdownDocument, caps: &RenderCapabilities) -> Ren
     RenderedDocument { lines }
 }
 
+/// Incremental block-by-block layout over a parsed [`MarkdownDocument`].
+///
+/// Interactive consumers (such as the TUI task inspector) can materialize only
+/// the prefix of top-level blocks required to fill the current viewport and
+/// scroll lookahead without eagerly laying out an entire large body. Once
+/// complete, [`IncrementalLayout::lines`] matches [`layout_markdown`]
+/// line-for-line.
+#[derive(Debug, Clone)]
+pub struct IncrementalLayout {
+    doc: MarkdownDocument,
+    caps: RenderCapabilities,
+    lines: Vec<RenderedLine>,
+    next_block: usize,
+    truncation_emitted: bool,
+}
+
+impl IncrementalLayout {
+    /// Start an incremental layout session over an already-parsed document.
+    #[must_use]
+    pub fn new(doc: MarkdownDocument, caps: RenderCapabilities) -> Self {
+        Self {
+            doc,
+            caps,
+            lines: Vec::new(),
+            next_block: 0,
+            truncation_emitted: false,
+        }
+    }
+
+    /// Ensure at least `target_lines` rendered lines are materialized (or the
+    /// entire document is complete, whichever comes first).
+    pub fn ensure_lines(&mut self, target_lines: usize) {
+        while self.lines.len() < target_lines && !self.is_complete() {
+            if self.next_block < self.doc.blocks.len() {
+                if self.next_block > 0 {
+                    self.lines.push(RenderedLine { spans: Vec::new() });
+                }
+                layout_blocks(
+                    &self.doc.blocks[self.next_block..=self.next_block],
+                    &[],
+                    &self.caps,
+                    &mut self.lines,
+                );
+                self.next_block += 1;
+            } else if self.doc.truncated && !self.truncation_emitted {
+                self.lines.push(RenderedLine {
+                    spans: vec![RenderedSpan {
+                        text: "[markdown content truncated to safety limit]".to_string(),
+                        role: SemanticRole::Muted,
+                    }],
+                });
+                self.truncation_emitted = true;
+            }
+        }
+    }
+
+    /// Materialize all remaining blocks in the document.
+    pub fn ensure_complete(&mut self) {
+        self.ensure_lines(usize::MAX);
+    }
+
+    /// Whether every block (and any truncation notice) has been laid out.
+    #[must_use]
+    pub fn is_complete(&self) -> bool {
+        self.next_block >= self.doc.blocks.len() && (!self.doc.truncated || self.truncation_emitted)
+    }
+
+    /// Materialized rendered lines so far.
+    #[must_use]
+    pub fn lines(&self) -> &[RenderedLine] {
+        &self.lines
+    }
+
+    /// Number of top-level blocks laid out so far.
+    #[must_use]
+    pub fn laid_out_blocks(&self) -> usize {
+        self.next_block
+    }
+
+    /// Total number of top-level blocks in the parsed document.
+    #[must_use]
+    pub fn total_blocks(&self) -> usize {
+        self.doc.blocks.len()
+    }
+
+    /// Borrow the underlying parsed semantic document.
+    #[must_use]
+    pub fn document(&self) -> &MarkdownDocument {
+        &self.doc
+    }
+}
+
 /// Serialize a [`MarkdownDocument`] to terminal text using `anstyle` when
 /// `caps.color` is `true`, or pure plain text when `false`.
 ///
@@ -1792,5 +1884,33 @@ mod tests {
         assert!(out.contains("footnote"), "{out}");
         assert!(out.contains("-- double-dash"), "{out}");
         assert!(out.contains("... ellipsis"), "{out}");
+    }
+
+    #[test]
+    fn incremental_layout_matches_eager_layout_line_for_line() {
+        let mut md = String::new();
+        for i in 0..40 {
+            let _ = writeln!(
+                md,
+                "## Block {i}\n\nParagraph {i} with `code_{i}` and *em*.\n"
+            );
+        }
+        let doc = parse_markdown(&md);
+        let caps = RenderCapabilities {
+            width: 48,
+            ascii: true,
+            ..RenderCapabilities::default()
+        };
+        let eager = layout_markdown(&doc, &caps);
+        let mut inc = IncrementalLayout::new(doc, caps);
+        inc.ensure_lines(10);
+        assert!(
+            inc.laid_out_blocks() < inc.total_blocks(),
+            "incremental layout should not materialize every block for a 10-line viewport"
+        );
+        assert!(!inc.is_complete());
+        inc.ensure_complete();
+        assert!(inc.is_complete());
+        assert_eq!(inc.lines(), eager.lines.as_slice());
     }
 }

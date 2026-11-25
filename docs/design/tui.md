@@ -1129,7 +1129,7 @@ vocabulary rather than falling back to flat prose:
 | section | semantic groups |
 |---|---|
 | Work | verdict, query controls, derived priority, preferences, revisit schedule, blockers and dependents |
-| Body | exact body text, including its source line structure |
+| Body | semantic Markdown rendered incrementally through the shared `aplan-output` document/layout boundary (monochrome/ASCII/narrow-safe, inert links and raw HTML), with a muted `aplan show --raw-body <ID>` hint for verbatim source bytes |
 | Relations | blockers, dependents, preferences, ratification and membership, with availability on each identity |
 | Paths | every declared path as an exact labelled value |
 | Traces | declared trace/fingerprint pairs and separately warned orphaned stamps |

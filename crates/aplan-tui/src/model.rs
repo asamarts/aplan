@@ -1973,6 +1973,7 @@ pub(crate) struct Model {
     /// item that started below the viewport.
     pub(crate) inspector_scroll: Option<usize>,
     inspector_history: Vec<InspectorLocation>,
+    pub(crate) inspector_body_cache: std::cell::RefCell<crate::markdown::InspectorBodyCache>,
     pub(crate) theme: Theme,
     pub(crate) glyphs: Glyphs,
     pub(crate) color_capability: ColorCapability,
@@ -2219,6 +2220,9 @@ impl Model {
             inspector_selected: 0,
             inspector_scroll: None,
             inspector_history: Vec::new(),
+            inspector_body_cache: std::cell::RefCell::new(
+                crate::markdown::InspectorBodyCache::new(),
+            ),
             theme: appearance.theme,
             glyphs: appearance.glyphs,
             color_capability: appearance.color,
@@ -5368,7 +5372,7 @@ impl Model {
     }
 
     fn set_inspector_scroll(&mut self, scroll: usize) {
-        if self.focus == Focus::Detail {
+        if self.focus == Focus::Detail && self.inspector_scroll != Some(scroll) {
             self.inspector_scroll = Some(scroll);
             self.dirty = true;
         }
