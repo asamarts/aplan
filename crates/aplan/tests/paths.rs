@@ -653,6 +653,46 @@ fn paths_match_agrees_with_evidence_verification_across_all_glob_semantics() {
     assert_eq!(empty_code, 0, "{empty_task}");
     assert!(empty_task.contains("declares no `paths`"), "{empty_task}");
 
+    // Untracked working-tree files are ignored (exact parity with `verify` index lookup).
+    std::fs::write(root.join("src/untracked.rs"), "// not staged\n").expect("untracked");
+    let (untracked_json, untracked_code) =
+        aplan(root, &["paths", "match", "src/**", "--format", "json"]);
+    assert_eq!(untracked_code, 0, "{untracked_json}");
+    assert!(
+        !untracked_json.contains("src/untracked.rs"),
+        "untracked file must not match: {untracked_json}"
+    );
+    std::fs::remove_file(root.join("src/untracked.rs")).expect("cleanup untracked");
+
+    // Running from a subdirectory resolves the enclosing Git repository cleanly.
+    let (sub_json, sub_code) = aplan(
+        &root.join("src/sub"),
+        &["paths", "match", "src/?.rs", "--format", "json"],
+    );
+    assert_eq!(sub_code, 0, "{sub_json}");
+    let sub_doc: serde_json::Value = serde_json::from_str(&sub_json).expect("sub json");
+    assert_eq!(
+        sub_doc["entries"][0]["matches"],
+        serde_json::json!(["src/a.rs"])
+    );
+
+    // `--task` with an invalid glob reports `status: "invalid"` and exits 1 (parity with APLAN032).
+    std::fs::write(
+        root.join("aplan/tasks/T-BAD-GLOB.md"),
+        "---\nid: T-BAD-GLOB\ntitle: Invalid glob task\nphase: 1\nstatus: todo\neffort_days: 1\n\
+         paths:\n- \"src/[\"\n---\n\nbody\n",
+    )
+    .expect("T-BAD-GLOB");
+    let (bad_task_json, bad_task_code) = aplan(
+        root,
+        &["paths", "match", "--task", "T-BAD-GLOB", "--format", "json"],
+    );
+    assert_eq!(bad_task_code, 1, "{bad_task_json}");
+    let bad_task_doc: serde_json::Value =
+        serde_json::from_str(&bad_task_json).expect("bad task json");
+    assert_eq!(bad_task_doc["entries"][0]["status"], "invalid");
+    std::fs::remove_file(root.join("aplan/tasks/T-BAD-GLOB.md")).expect("cleanup bad task");
+
     assert_ne!(aplan(root, &["paths", "match"]).1, 0);
     assert_ne!(aplan(root, &["paths", "match", "--task", "NO-SUCH"]).1, 0);
     assert_ne!(

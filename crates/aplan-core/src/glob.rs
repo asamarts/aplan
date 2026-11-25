@@ -38,12 +38,20 @@
 pub fn spelling(pattern: &str) -> String {
     let normalised = crate::anchor::normalise(std::path::Path::new(pattern));
     let normalised = normalised.to_string_lossy();
+    // Repository-relative globs always use POSIX `/` separators so Windows and
+    // Unix emit identical canonical spellings and match Git's forward-slash
+    // tracked paths consistently.
+    let normalised = if std::path::MAIN_SEPARATOR == '\\' {
+        normalised.replace('\\', "/")
+    } else {
+        normalised.into_owned()
+    };
     // A pattern that normalises to nothing keeps its original text, so a
     // degenerate entry is still judged as what the author wrote.
     if normalised.is_empty() {
         pattern.to_string()
     } else {
-        normalised.into_owned()
+        normalised
     }
 }
 
@@ -119,22 +127,16 @@ pub fn is_bare_tracked_directory(pattern: &str, tracked: &[String]) -> bool {
     if trimmed.is_empty() || !is_literal_path(trimmed) {
         return false;
     }
-    let dir = std::path::Path::new(trimmed);
-    tracked.iter().any(|path| {
-        let p = std::path::Path::new(path);
-        p != dir && p.starts_with(dir)
-    })
+    let prefix = format!("{trimmed}/");
+    tracked.iter().any(|path| path.starts_with(&prefix))
 }
 
-/// Evaluate one `paths` pattern against lexicographically sorted tracked paths
-/// using the exact [`compile`] matcher that `check` and `verify` share
-/// (`A2-092`).
-///
-/// `tracked` is expected to use forward-slash repository-relative paths in
-/// deterministic order; callers passing unsorted paths get the same match set
-/// but should sort first for deterministic bounded output.
-#[must_use]
-pub fn match_tracked(pattern: &str, tracked: &[String], limit: Option<usize>) -> PathMatchEntry {
+fn match_tracked_with_mask(
+    pattern: &str,
+    tracked: &[String],
+    limit: Option<usize>,
+    mut seen_any: Option<&mut [bool]>,
+) -> PathMatchEntry {
     let normalised = spelling(pattern);
     let compiled = match compile(pattern) {
         Ok(glob) => glob.compile_matcher(),
@@ -155,9 +157,12 @@ pub fn match_tracked(pattern: &str, tracked: &[String], limit: Option<usize>) ->
 
     let mut total_matched = 0usize;
     let mut matches = Vec::new();
-    for path in tracked {
+    for (idx, path) in tracked.iter().enumerate() {
         if compiled.is_match(path) {
             total_matched += 1;
+            if let Some(mask) = seen_any.as_deref_mut() {
+                mask[idx] = true;
+            }
             if limit.is_none_or(|cap| matches.len() < cap) {
                 matches.push(path.clone());
             }
@@ -188,9 +193,22 @@ pub fn match_tracked(pattern: &str, tracked: &[String], limit: Option<usize>) ->
     }
 }
 
-/// Evaluate a sequence of `paths` entries against sorted `tracked` paths,
-/// returning each per-entry result plus the exact deduplicated count of tracked
-/// files matched by at least one valid entry (`A2-092`).
+/// Evaluate one `paths` pattern against lexicographically sorted tracked paths
+/// using the exact [`compile`] matcher that `check` and `verify` share
+/// (`A2-092`).
+///
+/// `tracked` is expected to use forward-slash repository-relative paths in
+/// deterministic order; callers passing unsorted paths get the same match set
+/// but should sort first for deterministic bounded output.
+#[must_use]
+pub fn match_tracked(pattern: &str, tracked: &[String], limit: Option<usize>) -> PathMatchEntry {
+    match_tracked_with_mask(pattern, tracked, limit, None)
+}
+
+/// Evaluate a sequence of `paths` entries against sorted `tracked` paths in one
+/// compilation pass per pattern, returning each per-entry result plus the exact
+/// deduplicated count of tracked files matched by at least one valid entry
+/// (`A2-092`).
 #[must_use]
 pub fn match_tracked_batch(
     patterns: &[String],
@@ -200,17 +218,7 @@ pub fn match_tracked_batch(
     let mut entries = Vec::with_capacity(patterns.len());
     let mut any_matched = vec![false; tracked.len()];
     for pattern in patterns {
-        let entry = match_tracked(pattern, tracked, limit);
-        if entry.status == PathMatchStatus::Matched
-            && let Ok(glob) = compile(pattern)
-        {
-            let matcher = glob.compile_matcher();
-            for (idx, path) in tracked.iter().enumerate() {
-                if !any_matched[idx] && matcher.is_match(path) {
-                    any_matched[idx] = true;
-                }
-            }
-        }
+        let entry = match_tracked_with_mask(pattern, tracked, limit, Some(&mut any_matched));
         entries.push(entry);
     }
     let unique = any_matched.into_iter().filter(|hit| *hit).count();
@@ -309,12 +317,21 @@ mod tests {
         .collect();
         tracked.sort();
 
-        // Bare directory is a valid empty match flagged as a bare tracked directory.
+        // Bare directory (with or without trailing slash) is a valid empty match
+        // flagged as a bare tracked directory; a literal file is never flagged.
         let bare = match_tracked("src", &tracked, Some(50));
         assert_eq!(bare.status, PathMatchStatus::Empty);
         assert!(bare.bare_tracked_directory);
         assert_eq!(bare.total_matched, 0);
         assert!(bare.matches.is_empty());
+
+        let bare_slash = match_tracked("src/", &tracked, Some(50));
+        assert_eq!(bare_slash.status, PathMatchStatus::Empty);
+        assert!(bare_slash.bare_tracked_directory);
+
+        let literal_file = match_tracked("src/a.rs", &tracked, Some(50));
+        assert_eq!(literal_file.status, PathMatchStatus::Matched);
+        assert!(!literal_file.bare_tracked_directory);
 
         // `/**` matches nested files; `*` stays within one segment; `?` matches one non-separator char.
         let deep = match_tracked("src/**", &tracked, Some(50));
