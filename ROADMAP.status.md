@@ -15,7 +15,7 @@
 | hardening | todo | 0/15 | 15 | 0 | 14.8d | 0.5 (0.5 left) | 3.0d |
 | qualification | todo | 0/1 | 0 | 1 | 8.0d | 0.3 (0.3 left) | 8.0d |
 | tui-quality | todo | 0/2 | 1 | 1 | 4.0d | 0.1 (0.1 left) | 4.0d |
-| workflow | todo | 6/17 | 6 | 5 | 50.0d | 1.9 (1.2 left) | 17.5d |
+| workflow | todo | 7/17 | 5 | 5 | 50.0d | 1.9 (1.1 left) | 17.5d |
 
 ## v0.7 Security, safe parsing and gates that tell the truth
 
@@ -234,7 +234,7 @@
 | A2-117 | Audit and release the workflow ergonomics cut | todo | A2-112, A2-115, A2-116, A2-119, A2-120, M-tui-quality | - |
 | A2-118 | Add versioned structured MCP outputs and bounded resources | todo | - | - |
 | A2-119 | Expose completed-task history through bounded MCP resources | todo | A2-111, A2-118 | - |
-| A2-120 | Render task Markdown in the TUI inspector | todo | A2-114 | - |
+| A2-120 | Render task Markdown in the TUI inspector | done | A2-114 | commit:2dc55e4, test:markdown::tests::every_semantic_member_drives_a_tui_disposition_and_matches_cli_semantic_text, test:markdown::tests::large_body_scrolls_incrementally_without_reparse_or_redundant_redraw, test:tui_portability::portable_tui_markdown_inspector_renders_scrolls_and_reflows_on_resize |
 | A2-134 | Audit every read-only surface against the explicit latency and work budgets | todo | A2-135, A2-136 | - |
 | A2-135 | Derive vacuity from one exhaustive validation pass | todo | - | - |
 | A2-136 | Stream output-dominated read results with bounded memory and prompt first bytes | todo | - | - |
