@@ -5851,9 +5851,9 @@ fn test_catalogue_text(value: &str) -> String {
     aplan_output::fold::fold(&visible, usize::MAX, 0)
 }
 
-fn test_catalogue_count(count: usize, noun: &str) -> String {
-    let suffix = if count == 1 { "" } else { "s" };
-    format!("{count} {noun}{suffix}")
+fn test_catalogue_count(count: usize, singular: &str, plural: &str) -> String {
+    let noun = if count == 1 { singular } else { plural };
+    format!("{count} {noun}")
 }
 
 fn push_test_catalogue_runner(
@@ -5914,7 +5914,7 @@ fn push_test_catalogue_runner(
     }
 }
 
-fn render_test_catalogue_human(answer: &aplan_app::TestCatalogue) -> Result<()> {
+fn format_test_catalogue_human(answer: &aplan_app::TestCatalogue) -> String {
     use aplan_app::TestCatalogueState;
 
     let mut out = String::new();
@@ -5928,7 +5928,7 @@ fn render_test_catalogue_human(answer: &aplan_app::TestCatalogue) -> Result<()> 
         }
         TestCatalogueState::NoMatch => {
             let query = test_catalogue_text(answer.query.as_deref().unwrap_or_default());
-            let runners = test_catalogue_count(answer.summary.runners, "runner");
+            let runners = test_catalogue_count(answer.summary.runners, "runner", "runners");
             let _ = writeln!(
                 out,
                 "{heading}test catalogue:{heading:#} no names match `{query}` across {runners}"
@@ -5938,8 +5938,9 @@ fn render_test_catalogue_human(answer: &aplan_app::TestCatalogue) -> Result<()> 
             let answered = test_catalogue_count(
                 answer.summary.listed_runners + answer.summary.empty_runners,
                 "runner",
+                "runners",
             );
-            let failed = test_catalogue_count(answer.summary.failed_runners, "runner");
+            let failed = test_catalogue_count(answer.summary.failed_runners, "runner", "runners");
             let _ = writeln!(
                 out,
                 "{heading}test catalogue:{heading:#} partial - {answered} answered and {failed} failed; absence is not authoritative"
@@ -5948,16 +5949,28 @@ fn render_test_catalogue_human(answer: &aplan_app::TestCatalogue) -> Result<()> 
         TestCatalogueState::Complete => {
             if let Some(query) = &answer.query {
                 let query = test_catalogue_text(query);
-                let matches = test_catalogue_count(answer.summary.matched_names, "unique match");
-                let runners = test_catalogue_count(answer.summary.runners, "runner");
-                let names = test_catalogue_count(answer.summary.unique_names, "total unique name");
+                let matches = test_catalogue_count(
+                    answer.summary.matched_names,
+                    "unique match",
+                    "unique matches",
+                );
+                let runners = test_catalogue_count(answer.summary.runners, "runner", "runners");
+                let names = test_catalogue_count(
+                    answer.summary.unique_names,
+                    "total unique name",
+                    "total unique names",
+                );
                 let _ = writeln!(
                     out,
                     "{heading}test catalogue:{heading:#} {matches} for `{query}` across {runners} ({names})"
                 );
             } else {
-                let names = test_catalogue_count(answer.summary.unique_names, "unique name");
-                let runners = test_catalogue_count(answer.summary.runners, "runner");
+                let names = test_catalogue_count(
+                    answer.summary.unique_names,
+                    "unique name",
+                    "unique names",
+                );
+                let runners = test_catalogue_count(answer.summary.runners, "runner", "runners");
                 let _ = writeln!(
                     out,
                     "{heading}test catalogue:{heading:#} {names} from {runners}"
@@ -5989,11 +6002,11 @@ fn render_test_catalogue_human(answer: &aplan_app::TestCatalogue) -> Result<()> 
             let _ = writeln!(out, "  {heading}fix:{heading:#} {shown}");
         }
     }
-    write_stdout(&aplan_output::fold::fold_block(
-        &out,
-        aplan_output::fold::out_width(),
-        0,
-    ))
+    aplan_output::fold::fold_block(&out, aplan_output::fold::out_width(), 0)
+}
+
+fn render_test_catalogue_human(answer: &aplan_app::TestCatalogue) -> Result<()> {
+    write_stdout(&format_test_catalogue_human(answer))
 }
 
 fn render_test_catalogue(answer: &aplan_app::TestCatalogue, format: Format) -> Result<()> {
@@ -21489,14 +21502,52 @@ mod tests {
             denied: false,
         };
         assert_eq!(
-            test_catalogue_count(answer.summary.matched_names, "unique match"),
+            test_catalogue_count(
+                answer.summary.matched_names,
+                "unique match",
+                "unique matches",
+            ),
             "1 unique match"
         );
         assert_eq!(
-            test_catalogue_count(answer.summary.runners, "runner"),
+            test_catalogue_count(answer.summary.runners, "runner", "runners"),
             "2 runners"
         );
-        render_test_catalogue_human(&answer).expect("filtered complete catalogue");
+        let singular_rendered = format_test_catalogue_human(&answer);
+        assert!(
+            singular_rendered.contains(
+                "1 unique match for `module::proof` across 2 runners (3 total unique names)"
+            ),
+            "{singular_rendered}"
+        );
+
+        let mut plural = answer.clone();
+        plural.query = Some("corpus".to_string());
+        plural.summary.matched_names = 2;
+        plural.summary.matched_pairs = 2;
+        assert_eq!(
+            test_catalogue_count(
+                plural.summary.matched_names,
+                "unique match",
+                "unique matches",
+            ),
+            "2 unique matches"
+        );
+        assert_eq!(
+            test_catalogue_count(0, "unique match", "unique matches"),
+            "0 unique matches"
+        );
+        let plural_rendered = format_test_catalogue_human(&plural);
+        assert!(
+            plural_rendered
+                .contains("2 unique matches for `corpus` across 2 runners (3 total unique names)"),
+            "{plural_rendered}"
+        );
+        assert!(
+            !plural_rendered.contains("unique matchs"),
+            "{plural_rendered}"
+        );
+        render_test_catalogue_human(&plural).expect("filtered complete catalogue");
     }
 
     #[test]
