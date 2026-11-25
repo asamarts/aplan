@@ -1531,7 +1531,7 @@ fn completed_history_resource_covers_provenance_paging_shallow_caps_staleness_an
     // Commit 1: seed legacy task as `todo`, plus a milestone cut `v1.0`.
     std::fs::write(
         tasks.join("M-v1.md"),
-        "---\nid: M-v1\ntitle: Cut v1.0\nphase: 1\nstatus: in_progress\ntags:\n- milestone\n\
+        "---\nid: M-v1\ntitle: Cut v1.0\nphase: 1\nstatus: in_progress\ntags:\n- milestone\n- v1.0\n\
          blocked_by:\n- T-INF\n- T-REC-1\n- T-REC-2\n- T-REC-3\n---\n\nbody\n",
     )
     .expect("milestone");
@@ -1664,10 +1664,11 @@ fn completed_history_resource_covers_provenance_paging_shallow_caps_staleness_an
     assert_eq!(never_doc["completed"]["items"][3]["source"], "unknown");
     assert!(never_doc["completed"]["items"][3]["instant"].is_null());
 
-    // Filters (`owner`, `tag`, `since`, `until`) and `oldest=true` ordering work canonically.
+    // Filters (`cut`, `phase`, `owner`, multi-valued `tag`, `since`, `until`)
+    // and `oldest=true` ordering work canonically.
     let filtered_reply = read_in(
         "2025-11-25",
-        "aplan://collections/completed?owner=alice&since=2026-10-10&until=2026-10-16&oldest=true&limit=10",
+        "aplan://collections/completed?cut=v1.0&phase=1&owner=alice&tag=mcp&tag=history&since=2026-10-10&until=2026-10-16&oldest=true&limit=10",
     );
     let filtered_doc: serde_json::Value = serde_json::from_str(
         filtered_reply["result"]["contents"][0]["text"]
@@ -1684,30 +1685,75 @@ fn completed_history_resource_covers_provenance_paging_shallow_caps_staleness_an
         .collect();
     assert_eq!(filtered_ids, vec!["T-REC-2", "T-REC-1"]);
 
-    // Protocol compatibility across `2024-11-05`, `2025-11-25`, and `2026-07-28`:
-    // all three receive bit-for-bit identical machine-readable subject JSON, while
-    // `2026-07-28` carries `resultType: "complete"`, `ttlMs: 0`, `cacheScope: "private"`.
-    let r_2024 = read_in("2024-11-05", "aplan://collections/completed?limit=2");
-    let r_2025 = read_in("2025-11-25", "aplan://collections/completed?limit=2");
-    let r_2026 = read_in("2026-07-28", "aplan://collections/completed?limit=2");
-    assert!(r_2024["result"].get("resultType").is_none());
-    assert!(r_2025["result"].get("resultType").is_none());
-    assert_eq!(r_2026["result"]["resultType"], "complete");
-    assert_eq!(r_2026["result"]["ttlMs"], 0);
-    assert_eq!(r_2026["result"]["cacheScope"], "private");
-    assert_eq!(r_2026["result"]["contents"][0]["_meta"]["ttlMs"], 0);
-    assert_eq!(
-        r_2026["result"]["contents"][0]["_meta"]["cacheScope"],
-        "private"
+    // Verify `resources/templates/list` on `2026-07-28`: catalogue pagination
+    // (`nextCursor`) is absent (distinct from domain collection paging), cache
+    // hints enforce private zero-freshness, and `completed_tasks_page` is listed.
+    let meta_2026 = serde_json::json!({
+        "io.modelcontextprotocol/protocolVersion": "2026-07-28",
+        "io.modelcontextprotocol/clientCapabilities": {},
+    });
+    let tmpl_2026_replies = talk_in(
+        repo,
+        &[serde_json::json!({
+            "jsonrpc": "2.0", "id": 1, "method": "resources/templates/list",
+            "params": { "_meta": meta_2026 }
+        })],
     );
-    let p1_2024: serde_json::Value =
-        serde_json::from_str(r_2024["result"]["contents"][0]["text"].as_str().unwrap()).unwrap();
-    let p1_2025: serde_json::Value =
-        serde_json::from_str(r_2025["result"]["contents"][0]["text"].as_str().unwrap()).unwrap();
-    let p1_2026: serde_json::Value =
-        serde_json::from_str(r_2026["result"]["contents"][0]["text"].as_str().unwrap()).unwrap();
-    assert_eq!(p1_2024, p1_2025);
-    assert_eq!(p1_2025, p1_2026);
+    let tmpl_2026 = &reply(&tmpl_2026_replies, 1)["result"];
+    assert_eq!(tmpl_2026["resultType"], "complete");
+    assert_eq!(tmpl_2026["ttlMs"], 0);
+    assert_eq!(tmpl_2026["cacheScope"], "private");
+    assert!(tmpl_2026.get("nextCursor").is_none());
+    let completed_tmpl = tmpl_2026["resourceTemplates"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|t| t["name"] == "completed_tasks_page")
+        .expect("completed_tasks_page template");
+    assert_eq!(
+        completed_tmpl["uriTemplate"],
+        "aplan://collections/completed{?cut,phase,owner,tag,since,until,oldest,history,limit,cursor}"
+    );
+    assert_eq!(completed_tmpl["mimeType"], "application/json");
+
+    // Protocol compatibility across ALL FIVE supported protocol revisions
+    // (`2024-11-05`, `2025-03-26`, `2025-06-18`, `2025-11-25`, `2026-07-28`):
+    // every revision receives bit-for-bit identical machine-readable subject JSON,
+    // while `2026-07-28` carries `resultType: "complete"`, `ttlMs: 0`, `cacheScope: "private"`.
+    let mut baseline_p1: Option<serde_json::Value> = None;
+    for &rev in aplan_mcp::contract::SUPPORTED_PROTOCOL_REVISIONS {
+        let resp = read_in(rev, "aplan://collections/completed?limit=2");
+        if rev == "2026-07-28" {
+            assert_eq!(resp["result"]["resultType"], "complete");
+            assert_eq!(resp["result"]["ttlMs"], 0);
+            assert_eq!(resp["result"]["cacheScope"], "private");
+        } else {
+            assert!(
+                resp["result"].get("resultType").is_none(),
+                "legacy revision {rev} must omit resultType"
+            );
+        }
+        assert_eq!(
+            resp["result"]["contents"][0]["mimeType"],
+            "application/json"
+        );
+        assert_eq!(resp["result"]["contents"][0]["_meta"]["ttlMs"], 0);
+        assert_eq!(
+            resp["result"]["contents"][0]["_meta"]["cacheScope"],
+            "private"
+        );
+        let doc: serde_json::Value =
+            serde_json::from_str(resp["result"]["contents"][0]["text"].as_str().unwrap()).unwrap();
+        if let Some(expected) = &baseline_p1 {
+            assert_eq!(
+                &doc, expected,
+                "protocol revision {rev} diverged on completed resource payload"
+            );
+        } else {
+            baseline_p1 = Some(doc);
+        }
+    }
+    let p1_2025 = baseline_p1.expect("at least one protocol revision");
     assert_eq!(p1_2025["complete"], false);
     let page2_uri = p1_2025["next_uri"].as_str().expect("page2_uri").to_string();
 
@@ -1830,8 +1876,39 @@ fn completed_history_resource_covers_provenance_paging_shallow_caps_staleness_an
     // `history=required` refuses shallow incomplete history cleanly with `-32602`.
     assert_eq!(reply(&shallow_replies, 3)["error"]["code"], -32602);
 
-    // 4. Stale-page refusal: mutate a task file in the working tree -> reusing
-    //    page 1's `next_uri` is refused with `-32602` mentioning `stale`.
+    // 4a. Stale-page refusal via `basis_revision` movement: committing an
+    //     unrelated file advances HEAD while task files remain identical ->
+    //     reusing page 1's `next_uri` is refused with `-32602` mentioning `stale`.
+    std::fs::write(repo.join("NOTE.txt"), "advance head\n").expect("note");
+    git(repo, &["add", "NOTE.txt"]);
+    git_dated(
+        repo,
+        &["commit", "--quiet", "-m", "unrelated head move"],
+        "2026-10-17T00:00:00Z",
+    );
+    let head_moved_reply = read_in("2025-11-25", &page2_uri);
+    assert_eq!(head_moved_reply["error"]["code"], -32602);
+    assert!(
+        head_moved_reply["error"]["message"]
+            .as_str()
+            .unwrap()
+            .contains("stale"),
+        "{head_moved_reply:#?}"
+    );
+
+    // Re-read page 1 after HEAD moved to get a fresh cursor, then mutate a task
+    // file in the working tree -> reusing that fresh cursor fails as stale too.
+    let fresh_p1: serde_json::Value =
+        serde_json::from_str(
+            read_in("2025-11-25", "aplan://collections/completed?limit=2")["result"]["contents"][0]
+                ["text"]
+                .as_str()
+                .unwrap(),
+        )
+        .unwrap();
+    let fresh_page2_uri = fresh_p1["next_uri"].as_str().expect("fresh next_uri");
+
+    // 4b. Stale-page refusal via working-tree plan edit (`input_identity` moved).
     std::fs::write(
         tasks.join("T-REC-3.md"),
         "---\nid: T-REC-3\ntitle: Recorded T-REC-3 edited\nphase: 1\nstatus: done\nowner: bob\n\
@@ -1839,7 +1916,7 @@ fn completed_history_resource_covers_provenance_paging_shallow_caps_staleness_an
          closed_at_source: local\n---\n\nbody edited\n",
     )
     .expect("mutate T-REC-3");
-    let stale_reply = read_in("2025-11-25", &page2_uri);
+    let stale_reply = read_in("2025-11-25", fresh_page2_uri);
     assert_eq!(stale_reply["error"]["code"], -32602);
     assert!(
         stale_reply["error"]["message"]
@@ -1849,7 +1926,26 @@ fn completed_history_resource_covers_provenance_paging_shallow_caps_staleness_an
         "{stale_reply:#?}"
     );
 
-    // 5. 64 KiB size-capped collection walk over live stdio MCP transport.
+    // 4c. Unloadable task file refuses fail-closed (parity with CLI `aplan completed`)
+    //     rather than silently returning a partial completed-task list.
+    std::fs::write(
+        tasks.join("T-BROKEN.md"),
+        "---\nid: [unclosed yaml\n---\n\nbroken\n",
+    )
+    .expect("write broken task");
+    let broken_reply = read_in("2025-11-25", "aplan://collections/completed?limit=10");
+    assert_eq!(broken_reply["error"]["code"], -32603, "{broken_reply:#?}");
+    assert!(
+        broken_reply["error"]["message"]
+            .as_str()
+            .unwrap()
+            .contains("does not load cleanly"),
+        "{broken_reply:#?}"
+    );
+    std::fs::remove_file(tasks.join("T-BROKEN.md")).expect("remove broken task");
+
+    // 5. 64 KiB size-capped collection walk over live stdio MCP transport,
+    //    verifying the ACTUAL wire `contents[0].text` bytes fit under 64 KiB.
     let big_dir = tempfile::Builder::new()
         .prefix("mcp-completed-cap-e2e-")
         .tempdir_in(aplan_core::fixture::fixture_root())
@@ -1881,12 +1977,12 @@ fn completed_history_resource_covers_provenance_paging_shallow_caps_staleness_an
         let text = reply(&replies, 2)["result"]["contents"][0]["text"]
             .as_str()
             .expect("capped text");
-        let doc: serde_json::Value = serde_json::from_str(text).expect("capped json");
-        let compact_len = serde_json::to_vec(&doc).expect("compact").len();
         assert!(
-            compact_len <= aplan_mcp::contract::MAX_RESOURCE_BYTES,
-            "MCP completed page exceeded 64 KiB cap: {compact_len}"
+            text.len() <= aplan_mcp::contract::MAX_RESOURCE_BYTES,
+            "MCP completed wire payload exceeded 64 KiB cap: {} bytes",
+            text.len()
         );
+        let doc: serde_json::Value = serde_json::from_str(text).expect("capped json");
         if doc["truncated_by_size_cap"] == true {
             saw_size_cap = true;
         }

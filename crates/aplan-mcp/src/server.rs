@@ -793,6 +793,17 @@ impl AplanServer {
                 let plan = self
                     .plan_snapshot(root, policy)
                     .map_err(ResourceError::Internal)?;
+                if plan
+                    .plan
+                    .load_diagnostics
+                    .iter()
+                    .any(|d| d.severity == aplan_core::Severity::Error)
+                {
+                    return Err(ResourceError::Internal(
+                        "the plan does not load cleanly; `aplan_check` says what failed"
+                            .to_string(),
+                    ));
+                }
                 let app_input_identity = aplan_app::plan_inputs_identity(&plan.inputs);
                 let trust = if query.history == aplan_core::HistoryPolicy::Never {
                     "hermetic"

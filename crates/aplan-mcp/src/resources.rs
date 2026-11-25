@@ -721,7 +721,7 @@ pub fn build_completed_page(
             next_uri,
             completed: response.clone(),
         };
-        let serialized_len = serde_json::to_vec(&page)
+        let serialized_len = serde_json::to_string_pretty(&page)
             .map_err(|e| ResourceError::Internal(format!("serializing completed page: {e}")))?
             .len();
         if serialized_len <= MAX_RESOURCE_BYTES || response.items.len() <= 1 {
@@ -934,7 +934,7 @@ pub fn build_task_detail(
         truncated: false,
         task,
     };
-    let bytes = serde_json::to_vec(&resource)
+    let bytes = serde_json::to_string_pretty(&resource)
         .map_err(|e| ResourceError::Internal(format!("serializing task detail: {e}")))?;
     if bytes.len() > MAX_RESOURCE_BYTES {
         return Err(ResourceError::InvalidParams(format!(
@@ -1021,7 +1021,7 @@ pub fn build_ready_page(
             next_uri,
             items: all_items[offset..end].to_vec(),
         };
-        let serialized_len = serde_json::to_vec(&page)
+        let serialized_len = serde_json::to_string_pretty(&page)
             .map_err(|e| ResourceError::Internal(format!("serializing ready page: {e}")))?
             .len();
         if serialized_len <= MAX_RESOURCE_BYTES || take <= 1 {
@@ -1190,7 +1190,7 @@ mod tests {
         assert!(page.truncated_by_size_cap);
         assert!(!page.complete);
         assert!(page.returned < 40 && page.returned >= 1);
-        let serialized = serde_json::to_vec(&page).expect("serialize");
+        let serialized = serde_json::to_string_pretty(&page).expect("serialize");
         assert!(
             serialized.len() <= MAX_RESOURCE_BYTES,
             "page exceeded 64 KiB cap: {}",
@@ -1306,7 +1306,7 @@ mod tests {
             let page =
                 build_completed_page(&plan, "app-sha-1", dir.path(), Path::new("aplan"), &q, &id)
                     .expect("capped completed page");
-            let bytes = serde_json::to_vec(&page).expect("serialize");
+            let bytes = serde_json::to_string_pretty(&page).expect("serialize");
             assert!(
                 bytes.len() <= MAX_RESOURCE_BYTES,
                 "completed page exceeded 64 KiB cap: {}",
