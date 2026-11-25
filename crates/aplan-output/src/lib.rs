@@ -4759,6 +4759,23 @@ mod tests {
             compact_noop,
             format!("capture {} unchanged: captured idea\n", capture.id)
         );
+        let mut hostile = no_files.clone();
+        hostile.outcome = CaptureActionOutcome::Predicted;
+        hostile.capture.title = "safe\u{202e}line1\nline2".into();
+        hostile.files = vec!["aplan/.inbox/I.yml".into()];
+        let mut compact_hostile = Vec::new();
+        render_capture_action_compact_human_to(&mut compact_hostile, &hostile)
+            .expect("compact hostile");
+        let compact_hostile =
+            plain(&String::from_utf8(compact_hostile).expect("UTF-8 compact hostile"));
+        assert!(!compact_hostile.contains('\u{202e}'), "{compact_hostile}");
+        assert!(
+            compact_hostile.starts_with(&format!(
+                "capture {} predicted: safe\u{fffd}line1 line2\n  -> aplan/.inbox/I.yml\n",
+                capture.id
+            )),
+            "unexpected hostile compact output:\n{compact_hostile}"
+        );
         let mut details = Vec::new();
         render_capture_action_details_to(&mut details, &no_files).expect("no-op details");
         let details = plain(&String::from_utf8(details).expect("UTF-8 details"));
