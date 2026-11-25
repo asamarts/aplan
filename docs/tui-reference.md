@@ -253,6 +253,14 @@ this command starts the current interface and cannot recursively appear as an in
 aplan tui
 ```
 
+### `show --raw-body` (CLI-only)
+
+writing verbatim raw Markdown body bytes to stdout is a pipe and script workflow rather than an interactive inspector view
+
+```sh
+aplan show --raw-body T-001
+```
+
 ### `attest` (CLI-only)
 
 attestation is a clean-commit batch artifact, and optional git-note attachment belongs to the explicit command boundary

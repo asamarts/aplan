@@ -46,6 +46,8 @@ aplan verify
 ```
 
 `check` validates the plan without external work. `verify` resolves evidence against the repository.
+`aplan show <id> --body` pretty-renders task Markdown for the terminal (`--width`, `--ascii`), while
+`aplan show <id> --raw-body` emits the verbatim stored Markdown bytes for pipes and editors.
 `aplan completed` lists finished work in deterministic chronological order (`recorded` timestamps
 first, with optional bounded Git history inference for legacy `done` tasks). Use the built-in
 command help and `aplan facts` for the complete current surface.

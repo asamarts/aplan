@@ -216,6 +216,9 @@ mod machine_formats_unfolded;
 #[path = "../machine_readable.rs"]
 mod machine_readable;
 #[cfg(unix)]
+#[path = "../markdown_cli.rs"]
+mod markdown_cli;
+#[cfg(unix)]
 #[path = "../mcp.rs"]
 mod mcp;
 #[cfg(unix)]

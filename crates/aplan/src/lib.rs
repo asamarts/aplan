@@ -9951,9 +9951,22 @@ pub struct ShowArgs {
     /// this renders a task, so they are refused rather than silently ignored.
     #[arg(long, default_value = "human")]
     format: String,
-    /// Include the task's body, which is prose and can be long.
-    #[arg(long)]
+    /// Include the task's body rendered as formatted terminal Markdown.
+    #[arg(long, conflicts_with = "raw_body")]
     body: bool,
+    /// Write only the task's stored body bytes verbatim (appending one trailing
+    /// newline if non-empty and not already newline-terminated; empty if no
+    /// body). Refuses incompatible presentation flags and JSON format.
+    #[arg(long = "raw-body", conflicts_with_all = ["body", "width", "ascii"])]
+    raw_body: bool,
+    /// Maximum display columns for rendered `--body` Markdown (default:
+    /// terminal width, or 80 when redirected).
+    #[arg(long, requires = "body")]
+    width: Option<usize>,
+    /// Use plain ASCII markers instead of Unicode glyphs when rendering
+    /// `--body` Markdown.
+    #[arg(long, requires = "body")]
+    ascii: bool,
     /// Repository to resolve the evidence against (default: the current
     /// directory).
     #[arg(long, default_value = ".")]
@@ -9993,7 +10006,15 @@ fn cmd_show(root: &std::path::Path, args: &ShowArgs) -> Result<u8> {
     // (`A1-118`). Through the surface table now, so `show` cannot drift from
     // the nine that were already going through one gate (`A1-184`).
     let format = format_for("show", &args.format)?;
-    let identified = if args.body {
+    if args.raw_body && format != Format::Human {
+        anyhow::bail!(
+            "`--raw-body` writes raw task body bytes and cannot be combined with `--format {}`; \
+             use `--body --format json` for structured output",
+            args.format
+        );
+    }
+    let need_body = args.body || args.raw_body;
+    let identified = if need_body {
         Some(load_identified_checked(root)?)
     } else {
         None
@@ -10024,7 +10045,7 @@ fn cmd_show(root: &std::path::Path, args: &ShowArgs) -> Result<u8> {
     let tasks: Vec<_> = plan.tasks.iter().map(|lt| &lt.task).collect();
     let graph = timed("project", || build_graph(tasks.iter().copied()));
     let mut report = timed("validate", || {
-        validate_with_store_graph(root, args.body, plan, &check_opts, &graph)
+        validate_with_store_graph(root, need_body, plan, &check_opts, &graph)
     });
     let mut opts = aplan_app::configured_verification(
         &config,
@@ -10048,8 +10069,7 @@ fn cmd_show(root: &std::path::Path, args: &ShowArgs) -> Result<u8> {
 
     let view = timed("project", || {
         let rows = graph.task_rows();
-        let body = args
-            .body
+        let body = need_body
             .then(|| show_body(identified.as_ref(), plan, &args.id))
             .flatten()
             .map(str::to_string);
@@ -10071,19 +10091,7 @@ fn cmd_show(root: &std::path::Path, args: &ShowArgs) -> Result<u8> {
     };
     aplan_app::apply_evidence_inspection(&mut view, &inspection);
 
-    timed("render", || -> Result<()> {
-        match format {
-            Format::Json => render_tolerant(|| {
-                // `anstream` passes every byte that is not an SGR sequence through
-                // untouched, so the JSON is identical at any `--color` (`A1-286`).
-                let mut out = aplan_output::write::anstream_stdout();
-                serde_json::to_writer_pretty(&mut out, &view)?;
-                writeln!(out)
-            })?,
-            _ => write_stdout(&aplan_output::render_show(&view))?,
-        }
-        Ok(())
-    })?;
+    timed("render", || render_show_output(&view, args, format))?;
     Ok(
         if args.evidence.require_current_evidence && !view.resolved {
             EXIT_VIOLATIONS
@@ -10091,6 +10099,45 @@ fn cmd_show(root: &std::path::Path, args: &ShowArgs) -> Result<u8> {
             EXIT_OK
         },
     )
+}
+
+fn render_show_output(view: &aplan_core::Show, args: &ShowArgs, format: Format) -> Result<()> {
+    if args.raw_body {
+        return render_tolerant(|| {
+            let mut out = aplan_output::write::stdout();
+            if let Some(body) = view.body.as_deref()
+                && !body.is_empty()
+            {
+                out.write_all(body.as_bytes())?;
+                if !body.ends_with('\n') {
+                    out.write_all(b"\n")?;
+                }
+            }
+            Ok(())
+        });
+    }
+    if format == Format::Json {
+        return render_tolerant(|| {
+            // `anstream` passes every byte that is not an SGR sequence through
+            // untouched, so the JSON is identical at any `--color` (`A1-286`).
+            let mut out = aplan_output::write::anstream_stdout();
+            serde_json::to_writer_pretty(&mut out, view)?;
+            writeln!(out)
+        });
+    }
+    let width = args
+        .width
+        .unwrap_or_else(|| match aplan_output::fold::out_width() {
+            usize::MAX => 80,
+            other => other,
+        });
+    let caps = aplan_output::markdown::RenderCapabilities {
+        width,
+        ascii: args.ascii,
+        color: true,
+        ..aplan_output::markdown::RenderCapabilities::default()
+    };
+    write_stdout(&aplan_output::render_show_with_capabilities(view, &caps))
 }
 
 fn inspect_show_evidence(

@@ -1,6 +1,10 @@
 {
   "behaviours": [
     {
+      "name": "show.renders_markdown_body",
+      "what": "human `show --body` pretty-renders task Markdown with semantic styling, aligned tables and sanitization, `--raw-body` writes verbatim stored body bytes under the final-newline rule, and JSON plus Markdown artifact commands stay unchanged"
+    },
+    {
       "name": "close.records_closed_at",
       "what": "successful `close` across CLI, MCP and app surfaces atomically writes canonical RFC 3339 UTC whole-second `closed_at` alongside `status: done`, refused close writes nothing, and `amend`/`restamp` preserve the original `closed_at`"
     },
@@ -1508,7 +1512,7 @@
     "version.require_impact"
   ],
   "counts": {
-    "behaviours": 242,
+    "behaviours": 243,
     "build_capabilities": 1,
     "commands": 51,
     "config_keys": 136,
