@@ -825,7 +825,7 @@ const NON_TASK_MUTATION_LEAVES: &[&str] = &[
     "inbox show",
     "init",
     "mcp",
-    "paths",
+    "paths match",
     "ready",
     "roadmap",
     "schema",

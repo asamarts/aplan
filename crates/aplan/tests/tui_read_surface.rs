@@ -1151,6 +1151,20 @@ fn every_command_leaf_and_option_has_one_interactive_disposition() {
                         assert!(boundary.aliases.contains(&"receipt"));
                         nested_native.insert(path);
                     }
+                    "paths match" => {
+                        assert_eq!(
+                            own,
+                            BTreeSet::from(["all", "format", "globs", "limit", "repo", "task"]),
+                            "paths match is an explicit CLI-only mode inside native paths discovery"
+                        );
+                        let boundary = contract
+                            .boundaries
+                            .iter()
+                            .find(|boundary| boundary.name == path)
+                            .expect("paths match needs a user-visible CLI-only boundary");
+                        assert!(boundary.aliases.contains(&"match"));
+                        nested_native.insert(path);
+                    }
                     _ if !path.contains(' ') => {
                         let command = path.replace('-', "_");
                         for id in own {
@@ -1180,6 +1194,7 @@ fn every_command_leaf_and_option_has_one_interactive_disposition() {
             "inbox promote".to_string(),
             "inbox restore".to_string(),
             "inbox show".to_string(),
+            "paths match".to_string(),
             "test list".to_string(),
             "test receipt".to_string(),
         ]),

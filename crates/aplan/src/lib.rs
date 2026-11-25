@@ -859,17 +859,26 @@ enum Command {
     // `A1-038`, pre-public adoption evidence section 5. The pilot ids stay in this
     // comment: help is read beside the consumer's own plan (`A1-044`).
     // `A1-151`, pre-public adoption evidence item 11. Ids stay here (`A1-044`).
-    /// Measure how much of recent history each task's `paths` would match.
+    /// Measure how much of recent history each task's `paths` would match, or
+    /// inspect exact currently tracked files via `aplan paths match`.
     ///
     /// A `commit` citation is checked by asking whether that commit touched the
     /// task's declared `paths`. Where the paths cover most of what the project
     /// does, almost any commit satisfies them and the check proves little.
     ///
-    /// This measures and judges nothing: read a row against the median this
-    /// prints beside it, because the same share means "almost anything would
-    /// pass" in a plan whose median is low and nothing at all in a plan where
-    /// one component really is the work. Exits `0` whatever it finds.
+    /// `aplan paths` measures commit history and judges nothing: read a row
+    /// against the median this prints beside it, because the same share means
+    /// "almost anything would pass" in a plan whose median is low and nothing at
+    /// all in a plan where one component really is the work. Exits `0` whatever
+    /// it finds.
+    ///
+    /// `aplan paths match` runs the exact compiled glob matcher used by `verify`
+    /// against currently tracked repository files for one task (`--task <ID>`)
+    /// or explicit globs. Inspect exact current matches with `paths match` and
+    /// recent commit history with `paths`; neither proves semantic relevance.
     Paths {
+        #[command(subcommand)]
+        command: Option<PathsCommand>,
         /// How many recent commits to sample. Fewer than about 50 lets one quiet
         /// week decide the answer.
         #[arg(long, default_value_t = DEFAULT_PATH_SAMPLE, value_name = "N")]
@@ -1630,7 +1639,16 @@ fn command_progress_profile(command: &Command) -> CommandProgressProfile {
             surface: Human,
             source: ProgressSource::Inapplicable,
         },
-        Command::Paths { format, .. } | Command::Stale { format, .. } => {
+        Command::Paths {
+            command, format, ..
+        } => {
+            let effective_format = match command {
+                Some(PathsCommand::Match(args)) => args.format.as_str(),
+                None => format.as_str(),
+            };
+            progress_profile(effective_format, ProgressSource::PlanAndRepository)
+        }
+        Command::Stale { format, .. } => {
             progress_profile(format, ProgressSource::PlanAndRepository)
         }
         Command::Tree { .. }
@@ -1715,6 +1733,50 @@ fn progress_color_choice(
         },
         other => other,
     }
+}
+
+/// Default per-entry matched-file cap for `aplan paths match` (`A2-092`).
+const DEFAULT_PATHS_MATCH_LIMIT: usize = 200;
+
+/// Nested subcommands under `aplan paths`.
+#[derive(Debug, clap::Subcommand)]
+enum PathsCommand {
+    /// Report the exact tracked files matched by a task's `paths` or one or more globs.
+    ///
+    /// Uses the same compiled matcher as `verify` (`literal_separator(true)`, lexical
+    /// normalisation of `.` and `..`, bare directories treated as literal filenames).
+    /// Exits `0` when every entry compiled cleanly (matched or empty), `1` when any
+    /// entry is an invalid glob, and `2` on usage, repository, or unknown-task errors.
+    Match(PathsMatchArgs),
+}
+
+/// Arguments for `aplan paths match` (`A2-092`).
+#[derive(Debug, clap::Args)]
+struct PathsMatchArgs {
+    /// Path glob pattern(s) to evaluate against currently tracked repository files.
+    #[arg(value_name = "GLOB")]
+    globs: Vec<String>,
+    /// Inspect the declared `paths` of one task in the plan instead of explicit globs.
+    #[arg(long, value_name = "ID", conflicts_with = "globs")]
+    task: Option<String>,
+    /// Maximum matched files emitted per entry (default: 200; pass `--all` for unlimited
+    /// deterministic output). Refuses `0`.
+    #[arg(
+        long,
+        default_value_t = DEFAULT_PATHS_MATCH_LIMIT,
+        value_name = "N",
+        conflicts_with = "all"
+    )]
+    limit: usize,
+    /// Emit every matched tracked file without truncating at `--limit`.
+    #[arg(long)]
+    all: bool,
+    /// Where the git repository is (default: the current directory).
+    #[arg(long, default_value = ".")]
+    repo: std::path::PathBuf,
+    /// Output format: human or json.
+    #[arg(long, default_value = "human")]
+    format: String,
 }
 
 #[derive(Subcommand, Debug)]
@@ -6145,6 +6207,11 @@ fn dispatch(command: Command, cli_root: Option<PathBuf>) -> Result<u8> {
         },
 
         Command::Paths {
+            command: Some(PathsCommand::Match(args)),
+            ..
+        } => cmd_paths_match(cli_root, &args.repo, &args.format, &args),
+        Command::Paths {
+            command: None,
             sample,
             repo,
             format,
@@ -15021,6 +15088,81 @@ fn cmd_paths(
     // Always `0`: a measurement is not a verdict (`A1-151`, and `A1-020` before
     // it).
     Ok(EXIT_OK)
+}
+
+/// `aplan paths match`, exact tracked-file evaluation using the same compiled
+/// glob matcher `check` and `verify` share (`A2-092`).
+fn cmd_paths_match(
+    cli_root: Option<PathBuf>,
+    repo: &std::path::Path,
+    format: &str,
+    args: &PathsMatchArgs,
+) -> Result<u8> {
+    let format = format_for("paths", format)?;
+    if !args.all && args.limit == 0 {
+        anyhow::bail!("`--limit` must be at least 1; pass `--all` for unlimited output");
+    }
+    if args.task.is_none() && args.globs.is_empty() {
+        anyhow::bail!("pass at least one path glob or `--task <ID>`");
+    }
+
+    let (mode, task_info, patterns) = if let Some(id) = args.task.as_deref() {
+        let root = resolve_root(cli_root)?;
+        let plan = load_checked(&root)?;
+        if !loaded_cleanly(&plan) {
+            return Ok(EXIT_VIOLATIONS);
+        }
+        let Some(loaded) = plan.tasks.iter().find(|lt| lt.task.id == id) else {
+            anyhow::bail!("no task `{id}` in this plan");
+        };
+        (
+            aplan_output::PathsMatchMode::Task,
+            Some(aplan_output::PathsMatchTask {
+                id: loaded.task.id.clone(),
+                title: loaded.task.title.clone(),
+            }),
+            loaded.task.paths.clone(),
+        )
+    } else {
+        (
+            aplan_output::PathsMatchMode::Globs,
+            None,
+            args.globs.clone(),
+        )
+    };
+
+    let discovered = aplan_evidence::Repo::discover(repo)
+        .with_context(|| format!("opening git repository at `{}`", repo.display()))?;
+    let mut tracked: Vec<String> = discovered
+        .tracked_paths()
+        .context("reading tracked files from the git index")?
+        .into_iter()
+        .map(|p| p.to_string_lossy().replace('\\', "/"))
+        .collect();
+    tracked.sort();
+    tracked.dedup();
+
+    let limit = if args.all { None } else { Some(args.limit) };
+    let (entries, unique_matched_files) =
+        aplan_core::glob::match_tracked_batch(&patterns, &tracked, limit);
+    let has_invalid = entries
+        .iter()
+        .any(|e| e.status == aplan_core::glob::PathMatchStatus::Invalid);
+
+    let report = aplan_output::PathsMatchReport {
+        mode,
+        task: task_info,
+        tracked_files: tracked.len(),
+        limit,
+        unique_matched_files,
+        entries,
+    };
+    render_tolerant(|| aplan_output::render_paths_match(&report, format))?;
+    if has_invalid {
+        Ok(EXIT_VIOLATIONS)
+    } else {
+        Ok(EXIT_OK)
+    }
 }
 
 /// `Command::Stale`'s arm, lifted out so `dispatch` stays inside its line limit.

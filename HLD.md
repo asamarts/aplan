@@ -314,6 +314,15 @@ provably stranded historical literal paths and bare tracked directories are repo
 `verify` (`A2-101`), complementing `APLAN053` (`in_progress`) and `APLAN019` (evidence-bearing
 tasks, `A2-091`).
 
+**Live-task preflight and custom gates (`A2-092`).** Custom pre-commit or adoption gates must call
+`aplan paths match <GLOB>...` or `aplan paths match --task <ID>` (`--format json`, bounded by
+`--limit 200` by default or `--all`) rather than reimplementing `paths` glob semantics in another
+language. `paths match` runs the exact compiled matcher shared with `check` and `verify`
+(`literal_separator(true)`, lexical `.`/`..` normalisation, bare directories treated as literal
+filenames with an explicit `bare_tracked_directory` hint) and distinguishes `invalid`, `empty`, and
+`matched` entries deterministically. Inspect exact current tracked matches with `aplan paths match`
+and bounded commit-history breadth with `aplan paths`; neither proves semantic relevance.
+
 ### 5.3 Command split, and why
 
 `aplan check` stays **hermetic**: no git, no network, no subprocess. It is what runs
@@ -929,7 +938,7 @@ around every ordinary output write and on every terminal outcome without hiding 
 | `aplan tree` | `<id>`: one task's neighbourhood in both directions, `--depth N`: what must precede it, and what it releases. The inspection a *derived* order needs (ADR-0017), so `ready`'s rank is checkable rather than asserted | exists (`A1-126`) |
 | `aplan schema` | the derived JSON Schema | exists |
 | `aplan facts` | the tool's generated facts (rules, formats, commands, kinds) | exists (`A1-011`) |
-| `aplan paths` | what share of recent commits each task's `paths` would match, against the plan's own median; advisory, never blocking | exists (`A1-151`) |
+| `aplan paths` | what share of recent commits each task's `paths` would match, against the plan's own median; advisory, never blocking. `aplan paths match (<GLOB>... \| --task <ID>) [--limit N \| --all] [--format human\|json]` evaluates the exact compiled matcher shared with `verify` against tracked repository files in deterministic sorted order (distinguishing `matched`, `empty` with bare-directory hint, and `invalid`, exiting `1` on invalid globs). Inspect exact current matches with `paths match` and bounded commit history with `paths`; neither proves semantic relevance | exists (`A1-151`, `A2-092`) |
 | `aplan due` | `--as-of <instant>` (RFC 3339): parked tasks whose `revisit_at` has arrived, longest overdue first. Due for a look, never unblocked; the only command that reads a clock | exists (`A1-264`) |
 | `aplan stale` | live tasks unchanged in git for longer than a window, readiest first; parked work included, since a park is a decision with a half-life. Reports active claim age from its own observation clock without a claim refreshing task history; advisory, never blocking | exists (`A1-020`, `A1-275`, `A1-531`) |
 | `aplan vacuity` | per rule, the tasks it had a subject in and the tasks whose predicate had nothing to bind against -- the ones it ran on and could not have failed. Hermetic, advisory | exists (`A1-114`) |

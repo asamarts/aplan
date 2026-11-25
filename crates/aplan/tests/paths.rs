@@ -432,3 +432,309 @@ fn git(dir: &Path, args: &[&str]) -> (String, i32) {
         out.status.code().unwrap_or(-1),
     )
 }
+
+#[test]
+#[allow(clippy::too_many_lines)]
+fn paths_match_agrees_with_evidence_verification_across_all_glob_semantics() {
+    let dir = tempfile::Builder::new()
+        .prefix("paths-match-semantics-")
+        .tempdir_in(aplan_core::fixture::fixture_root())
+        .expect("tempdir");
+    let root = dir.path();
+
+    // Seed tracked files covering bare directories, `/**`, `/**/`, `*`, `?`,
+    // dot-prefixed paths, and separator boundaries. Deliberately no `aplan/`
+    // directory yet to prove standalone custom-gate usage needs no plan.
+    for rel in [
+        ".env.example",
+        ".github/workflows/ci.yml",
+        ".hidden/nested/file.txt",
+        "docs/guide.md",
+        "src/a.rs",
+        "src/ab.rs",
+        "src/mod.rs",
+        "src/sub/deep.rs",
+        "src/sub/mod.rs",
+        "src/a/b/mod.rs",
+    ] {
+        let p = root.join(rel);
+        std::fs::create_dir_all(p.parent().expect("parent")).expect("mkdir");
+        std::fs::write(&p, "x\n").expect("write");
+    }
+    git(root, &["init", "-q"]);
+    git(root, &["config", "user.email", "t@example.com"]);
+    git(root, &["config", "user.name", "Test"]);
+    git(root, &["add", "-A"]);
+    git(root, &["commit", "-q", "-m", "seed tracked tree"]);
+
+    // 1. Standalone glob evaluation (no plan directory) covering all semantics.
+    let (json, code) = aplan(
+        root,
+        &[
+            "paths",
+            "match",
+            "--format",
+            "json",
+            "src",
+            "src/**",
+            "src/**/mod.rs",
+            "src/*",
+            "src/?.rs",
+            ".github/workflows/*",
+            ".hidden/**",
+            "./src/?.rs",
+            "src/../src/a.rs",
+            "nowhere/**",
+        ],
+    );
+    assert_eq!(
+        code, 0,
+        "all valid globs (including empty) must exit 0: {json}"
+    );
+    let doc: serde_json::Value = serde_json::from_str(&json).expect("valid json");
+    assert_eq!(doc["schema"], "aplan/paths-match/v1");
+    assert_eq!(doc["mode"], "globs");
+    assert_eq!(doc["tracked_files"], 10);
+    assert_eq!(doc["summary"]["entries"], 10);
+    assert_eq!(doc["summary"]["matched"], 8);
+    assert_eq!(doc["summary"]["empty"], 2);
+    assert_eq!(doc["summary"]["invalid"], 0);
+
+    let entry = |pat: &str| -> &serde_json::Value {
+        doc["entries"]
+            .as_array()
+            .expect("entries")
+            .iter()
+            .find(|e| e["pattern"] == pat)
+            .unwrap_or_else(|| panic!("missing entry for {pat}: {json}"))
+    };
+    let matches_of = |pat: &str| -> Vec<String> {
+        entry(pat)["matches"]
+            .as_array()
+            .expect("matches")
+            .iter()
+            .map(|v| v.as_str().expect("str").to_string())
+            .collect()
+    };
+
+    // Bare directory: valid empty match with explicit bare_tracked_directory flag.
+    assert_eq!(entry("src")["status"], "empty");
+    assert_eq!(entry("src")["bare_tracked_directory"], true);
+    assert_eq!(entry("nowhere/**")["status"], "empty");
+    assert_eq!(entry("nowhere/**")["bare_tracked_directory"], false);
+
+    // Wildcards, separator boundaries, dot-prefixed paths, lexical normalization.
+    assert_eq!(
+        matches_of("src/**"),
+        vec![
+            "src/a.rs",
+            "src/a/b/mod.rs",
+            "src/ab.rs",
+            "src/mod.rs",
+            "src/sub/deep.rs",
+            "src/sub/mod.rs",
+        ]
+    );
+    assert_eq!(
+        matches_of("src/**/mod.rs"),
+        vec!["src/a/b/mod.rs", "src/mod.rs", "src/sub/mod.rs"]
+    );
+    assert_eq!(
+        matches_of("src/*"),
+        vec!["src/a.rs", "src/ab.rs", "src/mod.rs"]
+    );
+    assert_eq!(matches_of("src/?.rs"), vec!["src/a.rs"]);
+    assert_eq!(
+        matches_of(".github/workflows/*"),
+        vec![".github/workflows/ci.yml"]
+    );
+    assert_eq!(matches_of(".hidden/**"), vec![".hidden/nested/file.txt"]);
+    assert_eq!(entry("./src/?.rs")["normalised"], "src/?.rs");
+    assert_eq!(matches_of("./src/?.rs"), vec!["src/a.rs"]);
+    assert_eq!(entry("src/../src/a.rs")["normalised"], "src/a.rs");
+    assert_eq!(matches_of("src/../src/a.rs"), vec!["src/a.rs"]);
+
+    // 2. Mixed matched + empty + invalid batch distinguishes all three states
+    //    without parsing prose, and exits 1 because an entry is invalid.
+    let (mixed_json, mixed_code) = aplan(
+        root,
+        &[
+            "paths", "match", "--format", "json", "src/?.rs", "src", "src/[",
+        ],
+    );
+    assert_eq!(mixed_code, 1, "invalid glob must exit 1: {mixed_json}");
+    let mixed: serde_json::Value = serde_json::from_str(&mixed_json).expect("mixed json");
+    assert_eq!(mixed["summary"]["matched"], 1);
+    assert_eq!(mixed["summary"]["empty"], 1);
+    assert_eq!(mixed["summary"]["invalid"], 1);
+    assert_eq!(mixed["entries"][0]["status"], "matched");
+    assert_eq!(mixed["entries"][1]["status"], "empty");
+    assert_eq!(mixed["entries"][1]["bare_tracked_directory"], true);
+    assert_eq!(mixed["entries"][2]["status"], "invalid");
+    assert!(
+        mixed["entries"][2]["error"]
+            .as_str()
+            .is_some_and(|e| e.contains('[')),
+        "{mixed_json}"
+    );
+
+    let (mixed_human, mixed_human_code) =
+        aplan(root, &["paths", "match", "src/?.rs", "src", "src/["]);
+    assert_eq!(mixed_human_code, 1, "{mixed_human}");
+    assert!(mixed_human.contains("[matched]"), "{mixed_human}");
+    assert!(mixed_human.contains("[empty]"), "{mixed_human}");
+    assert!(mixed_human.contains("[invalid]"), "{mixed_human}");
+    assert!(mixed_human.contains("src/**"), "{mixed_human}");
+    assert!(
+        mixed_human.contains("Neither proves semantic relevance"),
+        "{mixed_human}"
+    );
+
+    // 3. Cross-check `--task <ID>` against `aplan verify` on the exact same tasks:
+    //    every task whose `paths match` is matched passes `APLAN053`/`APLAN063`,
+    //    bare directory `src` fails `verify`, and invalid glob fails `APLAN032`.
+    std::fs::create_dir_all(root.join("aplan/tasks")).expect("tasks dir");
+    std::fs::write(root.join(".aplan.yml"), "root: aplan\n").expect("config");
+    std::fs::write(
+        root.join("aplan/tasks/T-OK.md"),
+        "---\nid: T-OK\ntitle: Valid task\nphase: 1\nstatus: in_progress\neffort_days: 1\n\
+         paths:\n- src/?.rs\n- .github/workflows/*\n---\n\nbody\n",
+    )
+    .expect("T-OK");
+    std::fs::write(
+        root.join("aplan/tasks/T-BARE.md"),
+        "---\nid: T-BARE\ntitle: Bare directory task\nphase: 1\nstatus: in_progress\neffort_days: 1\n\
+         paths:\n- src\n---\n\nbody\n",
+    )
+    .expect("T-BARE");
+    std::fs::write(
+        root.join("aplan/tasks/T-EMPTY-LIST.md"),
+        "---\nid: T-EMPTY-LIST\ntitle: No paths\nphase: 1\nstatus: todo\neffort_days: 1\n---\n\nbody\n",
+    )
+    .expect("T-EMPTY-LIST");
+
+    let (task_ok_json, task_ok_code) = aplan(
+        root,
+        &["paths", "match", "--task", "T-OK", "--format", "json"],
+    );
+    assert_eq!(task_ok_code, 0, "{task_ok_json}");
+    let task_ok: serde_json::Value = serde_json::from_str(&task_ok_json).expect("task json");
+    assert_eq!(task_ok["mode"], "task");
+    assert_eq!(task_ok["task"]["id"], "T-OK");
+    assert_eq!(task_ok["summary"]["matched"], 2);
+    assert_eq!(task_ok["summary"]["unique_matched_files"], 2);
+
+    let (task_bare_json, task_bare_code) = aplan(
+        root,
+        &["paths", "match", "--task", "T-BARE", "--format", "json"],
+    );
+    assert_eq!(task_bare_code, 0, "{task_bare_json}");
+    let task_bare: serde_json::Value = serde_json::from_str(&task_bare_json).expect("bare json");
+    assert_eq!(task_bare["entries"][0]["status"], "empty");
+    assert_eq!(task_bare["entries"][0]["bare_tracked_directory"], true);
+
+    // Verify agrees: T-OK is clean, T-BARE is flagged for unmatched/bare directory.
+    let (verify_json, _) = aplan(root, &["verify", "--format", "json"]);
+    let verify_doc: serde_json::Value = serde_json::from_str(&verify_json).expect("verify json");
+    let diags = verify_doc["diagnostics"].as_array().expect("diagnostics");
+    assert!(
+        !diags.iter().any(|d| d["task"] == "T-OK"),
+        "T-OK matched in `paths match` and must have no verify path findings: {verify_json}"
+    );
+    assert!(
+        diags
+            .iter()
+            .any(|d| d["task"] == "T-BARE" && (d["code"] == "APLAN053" || d["code"] == "APLAN063")),
+        "T-BARE was empty bare dir in `paths match` and must be flagged by verify: {verify_json}"
+    );
+
+    // Empty `paths` list on a task exits 0 cleanly; missing args & unknown task refuse.
+    let (empty_task, empty_code) = aplan(root, &["paths", "match", "--task", "T-EMPTY-LIST"]);
+    assert_eq!(empty_code, 0, "{empty_task}");
+    assert!(empty_task.contains("declares no `paths`"), "{empty_task}");
+
+    assert_ne!(aplan(root, &["paths", "match"]).1, 0);
+    assert_ne!(aplan(root, &["paths", "match", "--task", "NO-SUCH"]).1, 0);
+    assert_ne!(
+        aplan(root, &["paths", "match", "--limit", "0", "src/**"]).1,
+        0
+    );
+}
+
+#[test]
+fn paths_match_enforces_deterministic_order_and_explicit_bounded_contract() {
+    let dir = tempfile::Builder::new()
+        .prefix("paths-match-bounds-")
+        .tempdir_in(aplan_core::fixture::fixture_root())
+        .expect("tempdir");
+    let root = dir.path();
+    std::fs::create_dir_all(root.join("pkg")).expect("pkg dir");
+    for i in 0..230 {
+        std::fs::write(root.join(format!("pkg/f{i:03}.rs")), "// f\n").expect("write");
+    }
+    git(root, &["init", "-q"]);
+    git(root, &["config", "user.email", "t@example.com"]);
+    git(root, &["config", "user.name", "Test"]);
+    git(root, &["add", "-A"]);
+    git(root, &["commit", "-q", "-m", "seed 230 files"]);
+
+    // Default limit (200) truncates deterministically and reports exact totals.
+    let (def_json, code) = aplan(root, &["paths", "match", "pkg/**", "--format", "json"]);
+    assert_eq!(code, 0, "{def_json}");
+    let def: serde_json::Value = serde_json::from_str(&def_json).expect("def json");
+    assert_eq!(def["limit"], 200);
+    assert_eq!(def["summary"]["truncated_entries"], 1);
+    assert_eq!(def["entries"][0]["total_matched"], 230);
+    assert_eq!(def["entries"][0]["returned"], 200);
+    assert_eq!(def["entries"][0]["truncated"], true);
+    let def_matches = def["entries"][0]["matches"].as_array().expect("matches");
+    assert_eq!(def_matches.len(), 200);
+    assert_eq!(def_matches.first().unwrap(), "pkg/f000.rs");
+    assert_eq!(def_matches.last().unwrap(), "pkg/f199.rs");
+
+    // Human output explicitly reports the omitted count.
+    let (human, human_code) = aplan(root, &["paths", "match", "pkg/**"]);
+    assert_eq!(human_code, 0, "{human}");
+    assert!(human.contains("showing 200 of 230"), "{human}");
+    assert!(human.contains("30 more matched file(s)"), "{human}");
+
+    // Custom `--limit 5` bounds cleanly.
+    let (lim_json, lim_code) = aplan(
+        root,
+        &[
+            "paths", "match", "pkg/**", "--limit", "5", "--format", "json",
+        ],
+    );
+    assert_eq!(lim_code, 0, "{lim_json}");
+    let lim: serde_json::Value = serde_json::from_str(&lim_json).expect("lim json");
+    assert_eq!(lim["limit"], 5);
+    assert_eq!(lim["entries"][0]["returned"], 5);
+    assert_eq!(lim["entries"][0]["total_matched"], 230);
+    assert_eq!(lim["entries"][0]["truncated"], true);
+    assert_eq!(
+        lim["entries"][0]["matches"],
+        serde_json::json!([
+            "pkg/f000.rs",
+            "pkg/f001.rs",
+            "pkg/f002.rs",
+            "pkg/f003.rs",
+            "pkg/f004.rs",
+        ])
+    );
+
+    // `--all` emits every matched tracked file in deterministic lexicographical order.
+    let (all_json, all_code) = aplan(
+        root,
+        &["paths", "match", "pkg/**", "--all", "--format", "json"],
+    );
+    assert_eq!(all_code, 0, "{all_json}");
+    let all: serde_json::Value = serde_json::from_str(&all_json).expect("all json");
+    assert!(all["limit"].is_null());
+    assert_eq!(all["summary"]["truncated_entries"], 0);
+    assert_eq!(all["entries"][0]["returned"], 230);
+    assert_eq!(all["entries"][0]["total_matched"], 230);
+    assert_eq!(all["entries"][0]["truncated"], false);
+    let all_matches = all["entries"][0]["matches"].as_array().expect("matches");
+    assert_eq!(all_matches.first().unwrap(), "pkg/f000.rs");
+    assert_eq!(all_matches.last().unwrap(), "pkg/f229.rs");
+}

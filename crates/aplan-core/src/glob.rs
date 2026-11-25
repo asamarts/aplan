@@ -73,9 +73,153 @@ pub fn compile(pattern: &str) -> Result<globset::Glob, globset::Error> {
         .build()
 }
 
+/// Outcome classification for evaluating one `paths` entry against tracked
+/// repository files (`A2-092`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum PathMatchStatus {
+    /// Entry compiled and matched at least one tracked file.
+    Matched,
+    /// Entry compiled cleanly, but matched zero currently tracked files.
+    Empty,
+    /// Entry failed to compile under [`compile`] (`APLAN032`).
+    Invalid,
+}
+
+/// Exact tracked-file match result for one `paths` entry (`A2-092`).
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub struct PathMatchEntry {
+    /// Original pattern text exactly as supplied by the caller or task file.
+    pub pattern: String,
+    /// Lexically normalised spelling passed to `globset` via [`spelling`].
+    pub normalised: String,
+    /// Explicit machine-readable status (`matched`, `empty`, or `invalid`).
+    pub status: PathMatchStatus,
+    /// Compiler error message when `status == invalid`, otherwise `None`.
+    pub error: Option<String>,
+    /// `true` when `status == empty` and `normalised` is a literal path naming
+    /// a directory that contains currently tracked files (missing `/**`).
+    pub bare_tracked_directory: bool,
+    /// Exact total count of tracked files matched before applying `limit`.
+    pub total_matched: usize,
+    /// Number of paths emitted in `matches`.
+    pub returned: usize,
+    /// `true` when `total_matched > returned` due to a bounded `limit`.
+    pub truncated: bool,
+    /// Lexicographically sorted matched tracked file paths (bounded by `limit`).
+    pub matches: Vec<String>,
+}
+
+/// Whether `pattern` is a literal path naming a directory that contains at
+/// least one tracked file (`ADR-0071`, `A2-092`).
+#[must_use]
+pub fn is_bare_tracked_directory(pattern: &str, tracked: &[String]) -> bool {
+    let norm = spelling(pattern);
+    let trimmed = norm.trim_end_matches('/');
+    if trimmed.is_empty() || !is_literal_path(trimmed) {
+        return false;
+    }
+    let dir = std::path::Path::new(trimmed);
+    tracked.iter().any(|path| {
+        let p = std::path::Path::new(path);
+        p != dir && p.starts_with(dir)
+    })
+}
+
+/// Evaluate one `paths` pattern against lexicographically sorted tracked paths
+/// using the exact [`compile`] matcher that `check` and `verify` share
+/// (`A2-092`).
+///
+/// `tracked` is expected to use forward-slash repository-relative paths in
+/// deterministic order; callers passing unsorted paths get the same match set
+/// but should sort first for deterministic bounded output.
+#[must_use]
+pub fn match_tracked(pattern: &str, tracked: &[String], limit: Option<usize>) -> PathMatchEntry {
+    let normalised = spelling(pattern);
+    let compiled = match compile(pattern) {
+        Ok(glob) => glob.compile_matcher(),
+        Err(err) => {
+            return PathMatchEntry {
+                pattern: pattern.to_string(),
+                normalised,
+                status: PathMatchStatus::Invalid,
+                error: Some(err.to_string()),
+                bare_tracked_directory: false,
+                total_matched: 0,
+                returned: 0,
+                truncated: false,
+                matches: Vec::new(),
+            };
+        }
+    };
+
+    let mut total_matched = 0usize;
+    let mut matches = Vec::new();
+    for path in tracked {
+        if compiled.is_match(path) {
+            total_matched += 1;
+            if limit.is_none_or(|cap| matches.len() < cap) {
+                matches.push(path.clone());
+            }
+        }
+    }
+
+    let returned = matches.len();
+    let truncated = total_matched > returned;
+    let (status, bare_tracked_directory) = if total_matched > 0 {
+        (PathMatchStatus::Matched, false)
+    } else {
+        (
+            PathMatchStatus::Empty,
+            is_bare_tracked_directory(pattern, tracked),
+        )
+    };
+
+    PathMatchEntry {
+        pattern: pattern.to_string(),
+        normalised,
+        status,
+        error: None,
+        bare_tracked_directory,
+        total_matched,
+        returned,
+        truncated,
+        matches,
+    }
+}
+
+/// Evaluate a sequence of `paths` entries against sorted `tracked` paths,
+/// returning each per-entry result plus the exact deduplicated count of tracked
+/// files matched by at least one valid entry (`A2-092`).
+#[must_use]
+pub fn match_tracked_batch(
+    patterns: &[String],
+    tracked: &[String],
+    limit: Option<usize>,
+) -> (Vec<PathMatchEntry>, usize) {
+    let mut entries = Vec::with_capacity(patterns.len());
+    let mut any_matched = vec![false; tracked.len()];
+    for pattern in patterns {
+        let entry = match_tracked(pattern, tracked, limit);
+        if entry.status == PathMatchStatus::Matched
+            && let Ok(glob) = compile(pattern)
+        {
+            let matcher = glob.compile_matcher();
+            for (idx, path) in tracked.iter().enumerate() {
+                if !any_matched[idx] && matcher.is_match(path) {
+                    any_matched[idx] = true;
+                }
+            }
+        }
+        entries.push(entry);
+    }
+    let unique = any_matched.into_iter().filter(|hit| *hit).count();
+    (entries, unique)
+}
+
 #[cfg(test)]
 mod tests {
-    use super::compile;
+    use super::{PathMatchStatus, compile, match_tracked, match_tracked_batch};
 
     #[test]
     fn a_single_star_stays_inside_one_segment() {
@@ -144,5 +288,87 @@ mod tests {
             !dot.is_match("src/a.rs"),
             "either way it does not name the tree"
         );
+    }
+
+    #[test]
+    fn match_tracked_covers_bare_dirs_wildcards_dots_separators_invalid_and_bounds() {
+        let mut tracked: Vec<String> = [
+            ".env.example",
+            ".github/workflows/ci.yml",
+            ".hidden/nested/file.txt",
+            "docs/guide.md",
+            "src/a.rs",
+            "src/ab.rs",
+            "src/mod.rs",
+            "src/sub/deep.rs",
+            "src/sub/mod.rs",
+            "src/a/b/mod.rs",
+        ]
+        .into_iter()
+        .map(str::to_string)
+        .collect();
+        tracked.sort();
+
+        // Bare directory is a valid empty match flagged as a bare tracked directory.
+        let bare = match_tracked("src", &tracked, Some(50));
+        assert_eq!(bare.status, PathMatchStatus::Empty);
+        assert!(bare.bare_tracked_directory);
+        assert_eq!(bare.total_matched, 0);
+        assert!(bare.matches.is_empty());
+
+        // `/**` matches nested files; `*` stays within one segment; `?` matches one non-separator char.
+        let deep = match_tracked("src/**", &tracked, Some(50));
+        assert_eq!(deep.status, PathMatchStatus::Matched);
+        assert_eq!(deep.total_matched, 6);
+        assert!(!deep.truncated);
+
+        let one_seg = match_tracked("src/*", &tracked, Some(50));
+        assert_eq!(one_seg.matches, vec!["src/a.rs", "src/ab.rs", "src/mod.rs"]);
+
+        let single_char = match_tracked("src/?.rs", &tracked, Some(50));
+        assert_eq!(single_char.matches, vec!["src/a.rs"]);
+
+        // `/**/` matches zero or more intermediate directories.
+        let any_depth = match_tracked("src/**/mod.rs", &tracked, Some(50));
+        assert_eq!(
+            any_depth.matches,
+            vec!["src/a/b/mod.rs", "src/mod.rs", "src/sub/mod.rs"]
+        );
+
+        // Dot-prefixed paths and `./` lexical normalisation work identically.
+        let gh = match_tracked(".github/workflows/*", &tracked, Some(50));
+        assert_eq!(gh.matches, vec![".github/workflows/ci.yml"]);
+        let hidden = match_tracked(".hidden/**", &tracked, Some(50));
+        assert_eq!(hidden.matches, vec![".hidden/nested/file.txt"]);
+        let dot_rel = match_tracked("./src/?.rs", &tracked, Some(50));
+        assert_eq!(dot_rel.normalised, "src/?.rs");
+        assert_eq!(dot_rel.matches, vec!["src/a.rs"]);
+
+        // Invalid glob is distinctly classified with its compiler error.
+        let invalid = match_tracked("src/[", &tracked, Some(50));
+        assert_eq!(invalid.status, PathMatchStatus::Invalid);
+        assert!(invalid.error.as_deref().is_some_and(|e| e.contains('[')));
+        assert!(!invalid.bare_tracked_directory);
+
+        // Bounded limit truncates deterministically and counts exact totals.
+        let bounded = match_tracked("src/**", &tracked, Some(2));
+        assert_eq!(bounded.total_matched, 6);
+        assert_eq!(bounded.returned, 2);
+        assert!(bounded.truncated);
+        assert_eq!(bounded.matches, vec!["src/a.rs", "src/a/b/mod.rs"]);
+
+        // Batch deduplicates unique matched files across overlapping patterns.
+        let (entries, unique) = match_tracked_batch(
+            &[
+                "src/*".to_string(),
+                "src/a.rs".to_string(),
+                "nowhere/**".to_string(),
+                "src/[".to_string(),
+            ],
+            &tracked,
+            Some(50),
+        );
+        assert_eq!(entries.len(), 4);
+        assert_eq!(unique, 3);
     }
 }

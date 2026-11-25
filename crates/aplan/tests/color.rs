@@ -1249,6 +1249,7 @@ const STYLED: &[(&str, &[&str], &str)] = &[
     ("critical-path", &["critical-path"], "critical path:"),
     ("vacuity", &["vacuity"], "rule/task pair"),
     ("paths", &["paths"], "commit(s) sampled"),
+    ("paths match", &["paths", "match", "**"], "[matched]"),
     ("stale", &["stale"], "idle"),
     ("deprecations", &["deprecations"], "announced in"),
     (

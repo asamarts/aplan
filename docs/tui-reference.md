@@ -262,6 +262,14 @@ writing verbatim raw Markdown body bytes to stdout is a pipe and script workflow
 aplan show --raw-body T-001
 ```
 
+### `paths match` (CLI-only)
+
+exact tracked-file glob matching is a scriptable preflight and custom-gate CLI workflow rather than an interactive history report
+
+```sh
+aplan paths match src/**
+```
+
 ### `attest` (CLI-only)
 
 attestation is a clean-commit batch artifact, and optional git-note attachment belongs to the explicit command boundary
