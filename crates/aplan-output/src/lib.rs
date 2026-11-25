@@ -164,11 +164,36 @@ pub fn render_capture_focused(
     render_capture_human_to(&mut out, &report.capture, None, None)
 }
 
+/// How much detail a human capture-action rendering includes (`A2-041`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum CaptureActionDetail {
+    /// Two-line default human summary (`aplan capture`): id, outcome, title,
+    /// and affected path(s). Findings remain visible if present.
+    Compact,
+    /// Complete capture fields and snapshot digests (`aplan capture --verbose`,
+    /// `aplan inbox amend|discard|restore|promote`).
+    Full,
+}
+
 /// Render one capture mutation result. Machine results always carry the full
 /// id even when a human selected it by prefix.
 pub fn render_capture_action(report: &CaptureActionReport, format: Format) -> std::io::Result<()> {
+    render_capture_action_with_detail(report, format, CaptureActionDetail::Full)
+}
+
+/// Render one capture mutation result with explicit human verbosity (`A2-041`).
+///
+/// Machine formats (`json`, `agent`) always emit the full structured record.
+pub fn render_capture_action_with_detail(
+    report: &CaptureActionReport,
+    format: Format,
+    detail: CaptureActionDetail,
+) -> std::io::Result<()> {
     match format {
-        Format::Human => render_capture_action_human(report),
+        Format::Human => match detail {
+            CaptureActionDetail::Compact => render_capture_action_compact_human(report),
+            CaptureActionDetail::Full => render_capture_action_human(report),
+        },
         Format::Json | Format::Agent => {
             let schema = if format == Format::Agent {
                 "aplan/agent-capture-action/v1"
@@ -216,6 +241,34 @@ const fn capture_action_agent_instruction(
             "Use the reported full capture id for any later machine request; never shorten it to the human prefix."
         }
     }
+}
+
+fn render_capture_action_compact_human(report: &CaptureActionReport) -> std::io::Result<()> {
+    let mut out = crate::write::anstream_stdout();
+    render_capture_action_compact_human_to(&mut out, report)
+}
+
+fn render_capture_action_compact_human_to(
+    out: &mut impl std::io::Write,
+    report: &CaptureActionReport,
+) -> std::io::Result<()> {
+    let heading = crate::style::HEADING;
+    let id = crate::style::ID;
+    let dim = crate::style::DIM;
+    let headline = format!(
+        "{heading}capture{heading:#} {id}{}{id:#} {}: {}",
+        report.capture.id,
+        capture_action_outcome(report.outcome),
+        one_line(&report.capture.title),
+    );
+    writeln!(out, "{}", fold::fold(&headline, fold::out_width(), 2))?;
+    for file in &report.files {
+        writeln!(out, "  {dim}-> {}{dim:#}", one_line(file))?;
+    }
+    for finding in &report.findings {
+        render_capture_field(out, "finding", &one_line(finding))?;
+    }
+    Ok(())
 }
 
 fn render_capture_action_human(report: &CaptureActionReport) -> std::io::Result<()> {
@@ -4666,9 +4719,46 @@ mod tests {
             );
         }
 
+        let mut compact = Vec::new();
+        render_capture_action_compact_human_to(&mut compact, &report).expect("compact action");
+        let compact = plain(&String::from_utf8(compact).expect("UTF-8 compact"));
+        assert!(
+            compact.starts_with(&format!(
+                "capture {} applied: captured idea\n  -> aplan/.inbox/I.yml\n",
+                capture.id
+            )),
+            "unexpected compact output:\n{compact}"
+        );
+        assert!(
+            compact.contains("finding: APLAN009 warning: estimate missing"),
+            "compact output hid a finding:\n{compact}"
+        );
+        for omitted in [
+            "input snapshot:",
+            "plan snapshot:",
+            "configuration snapshot:",
+            "inbox snapshot:",
+            "publishable:",
+        ] {
+            assert!(
+                !compact.contains(omitted),
+                "compact output leaked `{omitted}`:\n{compact}"
+            );
+        }
+
         let mut no_files = report;
         no_files.publishable = false;
         no_files.files.clear();
+        no_files.findings.clear();
+        no_files.outcome = CaptureActionOutcome::Unchanged;
+        let mut compact_noop = Vec::new();
+        render_capture_action_compact_human_to(&mut compact_noop, &no_files)
+            .expect("compact no-op");
+        let compact_noop = plain(&String::from_utf8(compact_noop).expect("UTF-8 compact no-op"));
+        assert_eq!(
+            compact_noop,
+            format!("capture {} unchanged: captured idea\n", capture.id)
+        );
         let mut details = Vec::new();
         render_capture_action_details_to(&mut details, &no_files).expect("no-op details");
         let details = plain(&String::from_utf8(details).expect("UTF-8 details"));

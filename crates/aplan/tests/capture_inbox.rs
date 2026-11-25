@@ -1549,3 +1549,234 @@ fn capture_output_is_sanitized_and_machine_color_invariant() {
     assert_eq!(always_json, never_json);
     assert!(!always.stdout.contains("\u{1b}["));
 }
+
+/// Proof for `capture.compact_human_output` (`A2-041`, #25): default human
+/// `aplan capture` prints a two-line summary (`capture <id> <outcome>: <title>`
+/// and `  -> <path>`, or one line on an idempotent `unchanged` retry), while
+/// `--verbose`, `--format json` and `--format agent` retain the full capture
+/// record and snapshot digests, and `--verbose` refuses machine formats.
+#[test]
+fn capture_default_human_output_is_compact_and_verbose_or_json_retains_full_record() {
+    const BEHAVIOUR: &str = "capture.compact_human_output";
+    assert_eq!(BEHAVIOUR, "capture.compact_human_output");
+    let dir = repository("root: aplan\n");
+
+    let preview = common::run(
+        dir.path(),
+        &[
+            "capture",
+            "Short preview title",
+            "--body",
+            "Detailed intake body",
+            "--dry-run",
+        ],
+    );
+    assert_eq!(preview.code, 0, "{}", preview.text());
+    let preview_lines: Vec<&str> = preview.stdout.lines().collect();
+    assert_eq!(preview_lines.len(), 2, "{}", preview.stdout);
+    assert!(
+        preview_lines[0].starts_with("capture I-")
+            && preview_lines[0].ends_with(" predicted: Short preview title"),
+        "unexpected preview headline: {}",
+        preview_lines[0]
+    );
+    assert!(
+        preview_lines[1].starts_with("  -> ") && preview_lines[1].contains(".inbox/I-"),
+        "unexpected preview path line: {}",
+        preview_lines[1]
+    );
+    assert_compact_omits_full_fields(&preview.stdout, Some("Detailed intake body"));
+    assert_eq!(
+        std::fs::read_dir(dir.path().join("aplan/.inbox"))
+            .unwrap()
+            .count(),
+        0,
+        "dry-run must not write a capture"
+    );
+
+    let applied = common::run(
+        dir.path(),
+        &[
+            "capture",
+            "Short applied title",
+            "--body",
+            "Detailed intake body",
+            "--source",
+            "compact:key-1",
+        ],
+    );
+    assert_eq!(applied.code, 0, "{}", applied.text());
+    let applied_lines: Vec<&str> = applied.stdout.lines().collect();
+    assert_eq!(applied_lines.len(), 2, "{}", applied.stdout);
+    assert!(
+        applied_lines[0].starts_with("capture I-")
+            && applied_lines[0].ends_with(" applied: Short applied title"),
+        "unexpected applied headline: {}",
+        applied_lines[0]
+    );
+    let capture_id = applied_lines[0]
+        .split_whitespace()
+        .nth(1)
+        .expect("capture id in headline");
+    assert_eq!(capture_id.len(), 28, "full capture id: {capture_id}");
+    assert!(
+        applied_lines[1].starts_with("  -> ")
+            && applied_lines[1].contains(&format!(".inbox/{capture_id}.yml")),
+        "unexpected applied path line: {}",
+        applied_lines[1]
+    );
+    assert_compact_omits_full_fields(&applied.stdout, Some("Detailed intake body"));
+
+    let retry = common::run(
+        dir.path(),
+        &[
+            "capture",
+            "Short applied title",
+            "--body",
+            "Detailed intake body",
+            "--source",
+            "compact:key-1",
+        ],
+    );
+    assert_eq!(retry.code, 0, "{}", retry.text());
+    assert_eq!(
+        retry.stdout,
+        format!("capture {capture_id} unchanged: Short applied title\n"),
+        "idempotent retry should emit one compact line without a path arrow"
+    );
+
+    assert_verbose_capture_outputs(dir.path());
+    assert_machine_and_refused_verbose_capture_outputs(dir.path());
+}
+
+fn assert_compact_omits_full_fields(stdout: &str, body_snippet: Option<&str>) {
+    for omitted in [
+        "input snapshot:",
+        "plan snapshot:",
+        "configuration snapshot:",
+        "inbox snapshot:",
+        "schema:",
+        "publishable:",
+    ] {
+        assert!(
+            !stdout.contains(omitted),
+            "compact capture output leaked `{omitted}`:\n{stdout}"
+        );
+    }
+    if let Some(snippet) = body_snippet {
+        assert!(
+            !stdout.contains(snippet),
+            "compact capture output leaked body `{snippet}`:\n{stdout}"
+        );
+    }
+}
+
+fn assert_verbose_capture_outputs(root: &std::path::Path) {
+    let verbose_preview = common::run(
+        root,
+        &[
+            "capture",
+            "Verbose preview title",
+            "--body",
+            "Verbose preview body",
+            "--dry-run",
+            "--verbose",
+        ],
+    );
+    assert_eq!(verbose_preview.code, 0, "{}", verbose_preview.text());
+    assert!(
+        verbose_preview.stdout.contains(": predicted")
+            && verbose_preview.stdout.contains("input snapshot:")
+            && verbose_preview.stdout.contains("Verbose preview body"),
+        "{}",
+        verbose_preview.stdout
+    );
+    assert_eq!(
+        std::fs::read_dir(root.join("aplan/.inbox"))
+            .unwrap()
+            .count(),
+        1,
+        "verbose dry-run must not write a capture"
+    );
+
+    let verbose = common::run(
+        root,
+        &[
+            "capture",
+            "Full verbose title",
+            "--body",
+            "Verbose body text",
+            "--verbose",
+        ],
+    );
+    assert_eq!(verbose.code, 0, "{}", verbose.text());
+    for required in [
+        "schema: aplan/capture/v1",
+        "title: Full verbose title",
+        "kind: task",
+        "state: open",
+        "input snapshot:",
+        "plan snapshot:",
+        "configuration snapshot:",
+        "inbox snapshot:",
+        "publishable: yes",
+        "file:",
+        "Verbose body text",
+    ] {
+        assert!(
+            verbose.stdout.contains(required),
+            "`--verbose` omitted `{required}`:\n{}",
+            verbose.stdout
+        );
+    }
+}
+
+fn assert_machine_and_refused_verbose_capture_outputs(root: &std::path::Path) {
+    let json = capture_json(
+        root,
+        &[
+            "capture",
+            "Full json title",
+            "--body",
+            "JSON body text",
+            "--format",
+            "json",
+        ],
+    );
+    assert_eq!(json["schema"], "aplan/capture-action/v1");
+    assert_eq!(json["outcome"], "applied");
+    assert_eq!(json["capture"]["title"], "Full json title");
+    assert_eq!(json["capture"]["body"], "JSON body text");
+    assert!(json["inbox_sha256"].as_str().is_some());
+
+    for machine_format in ["json", "agent"] {
+        let refused = common::run(
+            root,
+            &[
+                "capture",
+                "Should refuse",
+                "--verbose",
+                "--format",
+                machine_format,
+            ],
+        );
+        assert_eq!(
+            refused.code,
+            2,
+            "--verbose with --format {machine_format} must exit 2: {}",
+            refused.text()
+        );
+        assert!(
+            refused.stderr.contains("--verbose"),
+            "missing `--verbose` explanation: {}",
+            refused.text()
+        );
+    }
+    assert_eq!(
+        std::fs::read_dir(root.join("aplan/.inbox"))
+            .unwrap()
+            .count(),
+        3,
+        "refused --verbose machine invocations must not write captures"
+    );
+}

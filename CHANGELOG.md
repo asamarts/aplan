@@ -8,6 +8,12 @@ to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Added
 
+- **Compact default human output for `aplan capture` with `--verbose` opt-in (`A2-041`,
+  `--require capture.compact_human_output`)**. Default human `aplan capture` now prints two lines
+  (`capture I-... applied: <title>` and `  -> <path>`, or one line on an idempotent `unchanged`
+  retry) instead of seventeen lines of record fields and snapshot digests. Pass `--verbose` for
+  the full human record, or `--format json` / `--format agent` for the full machine payload
+  (`--verbose` is rejected on machine formats). `aplan inbox` subcommands remain unchanged.
 - **Bounded completed-task history MCP resource (`A2-119`, `ADR-0074`)**. `aplan mcp` now exposes
   completed-task history as a bounded resource template
   `aplan://collections/completed{?cut,phase,owner,tag,since,until,oldest,history,limit,cursor}`

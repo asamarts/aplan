@@ -60,6 +60,20 @@ pub struct Behaviour {
 
 /// Every named behaviour this build has.
 pub const ALL: &[Behaviour] = &[
+    // `A2-041`. Existing `capture` printed the complete ~17-line capture record
+    // and all four snapshot digests in default human output. Moving the default
+    // human summary to two lines (id, outcome, title and written path) while
+    // retaining the complete record via `--verbose`, `--format json` and
+    // `--format agent` changes what `capture` emits.
+    Behaviour {
+        name: "capture.compact_human_output",
+        what: "human `capture` defaults to a compact two-line summary (`capture <id> <outcome>: \
+               <title>` plus written path), while `--verbose`, `--format json` and `--format agent` \
+               retain the full capture record and snapshot digests",
+        proof: &[
+            "capture_inbox::capture_default_human_output_is_compact_and_verbose_or_json_retains_full_record",
+        ],
+    },
     // `A2-115` (`ADR-0075`). Existing `show --body` printed raw unstyled task
     // body bytes in human format. Rendering task Markdown through the semantic
     // terminal renderer (with explicit `--raw-body` for verbatim source bytes)

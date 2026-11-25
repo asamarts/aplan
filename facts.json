@@ -1,6 +1,10 @@
 {
   "behaviours": [
     {
+      "name": "capture.compact_human_output",
+      "what": "human `capture` defaults to a compact two-line summary (`capture <id> <outcome>: <title>` plus written path), while `--verbose`, `--format json` and `--format agent` retain the full capture record and snapshot digests"
+    },
+    {
       "name": "show.renders_markdown_body",
       "what": "human `show --body` pretty-renders task Markdown with semantic styling, aligned tables and sanitization, `--raw-body` writes verbatim stored body bytes under the final-newline rule, and JSON plus Markdown artifact commands stay unchanged"
     },
@@ -1516,7 +1520,7 @@
     "version.require_impact"
   ],
   "counts": {
-    "behaviours": 244,
+    "behaviours": 245,
     "build_capabilities": 1,
     "commands": 51,
     "config_keys": 136,

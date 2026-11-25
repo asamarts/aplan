@@ -56,6 +56,16 @@ binary accepts.
 So: stage the new binary, confirm `aplan check` still passes on your existing config, and only then
 add the new keys.
 
+## `aplan capture` defaults to a compact two-line human summary (`A2-041`)
+
+Human `aplan capture` now defaults to two lines (`capture I-... applied: <title>` and
+`  -> <path>`, or one line on an idempotent `unchanged` retry) instead of printing the full
+seventeen-line record and snapshot digests. Pass `--verbose` for the full human record, or
+`--format json` / `--format agent` for the complete machine payload (`--verbose` is refused on
+machine formats because they already emit the full record). `aplan inbox show`, `amend`,
+`discard`, `restore`, and `promote` are unchanged. Check capability availability with
+`aplan facts --require capture.compact_human_output`.
+
 ## `aplan show --body` renders Markdown in human output (`A2-115`)
 
 Human `aplan show ID --body` now pretty-renders task Markdown (headings, aligned tables, fenced

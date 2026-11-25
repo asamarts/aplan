@@ -571,6 +571,9 @@ struct CaptureArgs {
     /// Preview the exact record and file without publishing it.
     #[arg(long)]
     dry_run: bool,
+    /// Print the full capture record and snapshot digests in human output.
+    #[arg(long)]
+    verbose: bool,
     /// Output format: human, json, or agent.
     #[arg(long, default_value = "human")]
     format: String,
@@ -6373,6 +6376,16 @@ fn dispatch_authoring(command: Command, cli_root: Option<PathBuf>) -> Result<u8>
 
 fn cmd_capture(root: &std::path::Path, args: &CaptureArgs) -> Result<u8> {
     let format = format_for("capture", &args.format)?;
+    anyhow::ensure!(
+        !args.verbose || format == Format::Human,
+        "`--verbose` controls human output only; `--format {}` already emits the full capture record",
+        args.format
+    );
+    let detail = if args.verbose {
+        aplan_output::CaptureActionDetail::Full
+    } else {
+        aplan_output::CaptureActionDetail::Compact
+    };
     let first_context = hermetic_application_context(root, HermeticContextOptions::default())?;
     let source = args
         .source
@@ -6410,7 +6423,7 @@ fn cmd_capture(root: &std::path::Path, args: &CaptureArgs) -> Result<u8> {
         &editor_seed,
     )?;
 
-    publish_capture_create(root, &request, first_context, format, args.dry_run)
+    publish_capture_create(root, &request, first_context, format, args.dry_run, detail)
 }
 
 fn publish_capture_create(
@@ -6419,6 +6432,7 @@ fn publish_capture_create(
     first_context: aplan_app::PlanContext,
     format: Format,
     dry_run: bool,
+    detail: aplan_output::CaptureActionDetail,
 ) -> Result<u8> {
     let started = std::time::Instant::now();
     let mut attempts = 0_u32;
@@ -6463,23 +6477,25 @@ fn publish_capture_create(
             } else {
                 aplan_output::CaptureActionOutcome::Predicted
             };
-            return render_capture_preview(&preview, outcome, format);
+            return render_capture_preview_with_detail(&preview, outcome, format, detail);
         }
         let report =
             capture_action_report(&preview, aplan_output::CaptureActionOutcome::Predicted)?;
         match aplan_app::commit_change_set(&current, preview.into_change_set()) {
             aplan_app::CommitOutcome::Applied(_) => {
-                return render_capture_report(
+                return render_capture_report_with_detail(
                     report,
                     aplan_output::CaptureActionOutcome::Applied,
                     format,
+                    detail,
                 );
             }
             aplan_app::CommitOutcome::NoOp(_) => {
-                return render_capture_report(
+                return render_capture_report_with_detail(
                     report,
                     aplan_output::CaptureActionOutcome::Unchanged,
                     format,
+                    detail,
                 );
             }
             aplan_app::CommitOutcome::Stale { change, actual } if actual == *change.input() => {
@@ -6895,8 +6911,22 @@ fn render_capture_preview(
     outcome: aplan_output::CaptureActionOutcome,
     format: Format,
 ) -> Result<u8> {
+    render_capture_preview_with_detail(
+        preview,
+        outcome,
+        format,
+        aplan_output::CaptureActionDetail::Full,
+    )
+}
+
+fn render_capture_preview_with_detail(
+    preview: &aplan_app::CaptureMutationPreview,
+    outcome: aplan_output::CaptureActionOutcome,
+    format: Format,
+    detail: aplan_output::CaptureActionDetail,
+) -> Result<u8> {
     let report = capture_action_report(preview, outcome)?;
-    aplan_output::render_capture_action(&report, format)?;
+    aplan_output::render_capture_action_with_detail(&report, format, detail)?;
     Ok(EXIT_OK)
 }
 
@@ -6923,12 +6953,26 @@ fn capture_action_report(
 }
 
 fn render_capture_report(
-    mut report: aplan_output::CaptureActionReport,
+    report: aplan_output::CaptureActionReport,
     outcome: aplan_output::CaptureActionOutcome,
     format: Format,
 ) -> Result<u8> {
+    render_capture_report_with_detail(
+        report,
+        outcome,
+        format,
+        aplan_output::CaptureActionDetail::Full,
+    )
+}
+
+fn render_capture_report_with_detail(
+    mut report: aplan_output::CaptureActionReport,
+    outcome: aplan_output::CaptureActionOutcome,
+    format: Format,
+    detail: aplan_output::CaptureActionDetail,
+) -> Result<u8> {
     report.outcome = outcome;
-    aplan_output::render_capture_action(&report, format)?;
+    aplan_output::render_capture_action_with_detail(&report, format, detail)?;
     Ok(EXIT_OK)
 }
 
