@@ -1,5 +1,5 @@
  aplan x ERROR  2 tasks  1 error  2 warnings  repo/very-lon>
-[1 O] [2 T] [3 D] [4 G] [5 R] [6 I]
+[1O] [2T] [3D] [4G] [5R] [6I] [7C]
 +> Esc metrics | Overview > Snapshot identity <------------+
 |plan: repo/very-long-root sha:plan-identit                |
 |config: none selected sha:config-ident                    |

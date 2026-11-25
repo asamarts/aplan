@@ -22,16 +22,17 @@ only for navigation actions; confirmation and mutation actions require a fresh p
 | `4` | Open Graph | global destination |
 | `5` | Open Reports | global destination |
 | `6` | Open Inbox | global destination |
+| `7` | Open Completed | global destination |
 | `C-n` | Quick capture | global loaded shell |
 | `Tab` | Focus next region | loaded shell |
 | `S-Tab` | Focus previous region | loaded shell |
 | `down/j` | Move to next item or down | lists, overlays and Graph |
 | `up/k` | Move to previous item or up | lists, overlays and Graph |
 | `Enter` | Open or drill into selection | focused selectable content |
-| `/` | Search current destination | Tasks, Inbox, Diagnostics, Graph or Reports |
+| `/` | Search current destination | Tasks, Inbox, Completed, Diagnostics, Graph or Reports |
 | `d` | Edit clock or cycle graph direction | Due/Stale contexts or Graph |
-| `f` | Edit structured filters | Tasks, Inbox, Diagnostics or Graph |
-| `s` | Cycle ordering or grouping | Tasks, Diagnostics or Graph |
+| `f` | Edit structured filters | Tasks, Inbox, Completed, Diagnostics or Graph |
+| `s` | Cycle ordering or grouping | Tasks, Completed, Diagnostics or Graph |
 | `w` | Toggle blocking explanation depth | task Work inspector |
 | `x` | Clear active narrowing | a narrowed destination |
 | `[` | Previous section or direct blocker | task inspector or Graph |
@@ -325,12 +326,20 @@ retargeting a renamed or bare directory path rewrites every matching live task a
 aplan retarget-path src/old.rs src/new.rs --dry-run
 ```
 
-### `completed` (CLI-only)
+### `completed --at` (CLI-only)
 
-chronological completion history runs through the shared application boundary on the CLI; the dedicated interactive TUI completion-history view is tracked separately
+the interactive completion history inspects the loaded plan snapshot; querying an arbitrary historical Git revision tree remains an explicit CLI session boundary
 
 ```sh
-aplan completed --limit 10
+aplan completed --at HEAD
+```
+
+### `completed --cursor` (CLI-only)
+
+the interactive completion history pages forward and back in-process against the loaded snapshot; supplying a raw continuation token belongs to scripted CLI pagination
+
+```sh
+aplan completed --cursor v1 --limit 10
 ```
 
 ### `blueprint` (CLI-only)

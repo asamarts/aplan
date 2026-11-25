@@ -7,7 +7,7 @@
 
 use std::cmp::Ordering;
 use std::collections::BTreeMap;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
 use aplan_core::select::Selector;
 use aplan_core::{
@@ -16,6 +16,101 @@ use aplan_core::{
     format_closed_at, normalize_closed_at,
 };
 use sha2::{Digest as _, Sha256};
+
+use crate::PlanContext;
+
+/// Identified workspace for querying completed-task history through the shared
+/// [`completed_tasks`] operation (`A2-112`, ADR-0074).
+#[derive(Debug, Clone)]
+pub struct CompletedWorkspace {
+    plan: Plan,
+    input_identity: String,
+    repo_root: PathBuf,
+    plan_root_rel: PathBuf,
+}
+
+impl PartialEq for CompletedWorkspace {
+    fn eq(&self, other: &Self) -> bool {
+        self.input_identity == other.input_identity
+            && self.repo_root == other.repo_root
+            && self.plan_root_rel == other.plan_root_rel
+            && self.plan.tasks.len() == other.plan.tasks.len()
+    }
+}
+
+impl CompletedWorkspace {
+    /// Build a completed-history workspace bound to one identified [`PlanContext`].
+    #[must_use]
+    pub fn from_context(context: &PlanContext) -> Self {
+        let identity = context.identity();
+        let repo_root = identity.repository_root.clone();
+        let plan_root_rel = identity
+            .plan_root
+            .strip_prefix(&repo_root)
+            .unwrap_or(&identity.plan_root)
+            .to_path_buf();
+        Self {
+            plan: context.plan().clone(),
+            input_identity: identity.sha256.clone(),
+            repo_root,
+            plan_root_rel,
+        }
+    }
+
+    /// Build a completed-history workspace from explicit plan, identity, and
+    /// repository paths (for tests and synthetic fixtures).
+    #[must_use]
+    pub fn from_parts(
+        plan: Plan,
+        input_identity: String,
+        repo_root: PathBuf,
+        plan_root_rel: PathBuf,
+    ) -> Self {
+        Self {
+            plan,
+            input_identity,
+            repo_root,
+            plan_root_rel,
+        }
+    }
+
+    /// Inert empty workspace used during onboarding or synthetic snapshots with
+    /// no completed work.
+    #[must_use]
+    pub fn empty(input_identity: String) -> Self {
+        Self {
+            plan: Plan {
+                tasks: Vec::new(),
+                load_diagnostics: Vec::new(),
+                unloadable: BTreeMap::new(),
+            },
+            input_identity,
+            repo_root: PathBuf::new(),
+            plan_root_rel: PathBuf::from("aplan"),
+        }
+    }
+
+    /// The identified snapshot digest bound to this workspace.
+    #[must_use]
+    pub fn input_identity(&self) -> &str {
+        &self.input_identity
+    }
+
+    /// Execute one typed completed-task history query against this snapshot.
+    ///
+    /// # Errors
+    /// Returns [`CompletedError`] for invalid limits/bounds, stale or invalid
+    /// cursors, or `HistoryPolicy::Required` failures.
+    pub fn query(&self, request: &CompletedRequest) -> Result<CompletedResponse, CompletedError> {
+        completed_tasks(
+            &self.plan,
+            &self.input_identity,
+            &self.repo_root,
+            &self.plan_root_rel,
+            request,
+        )
+    }
+}
 
 /// Maximum accepted continuation cursor length in bytes.
 const MAX_CURSOR_BYTES: usize = 512;

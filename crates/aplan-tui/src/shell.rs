@@ -678,6 +678,7 @@ enum CommandId {
     Graph,
     Reports,
     Inbox,
+    Completed,
     QuickCapture,
     FocusNext,
     FocusPrevious,
@@ -739,7 +740,7 @@ enum CommandId {
 }
 
 impl CommandId {
-    const ALL: [Self; 67] = [
+    const ALL: [Self; 68] = [
         Self::Back,
         Self::Quit,
         Self::About,
@@ -749,6 +750,7 @@ impl CommandId {
         Self::Graph,
         Self::Reports,
         Self::Inbox,
+        Self::Completed,
         Self::QuickCapture,
         Self::FocusNext,
         Self::FocusPrevious,
@@ -840,6 +842,9 @@ impl CommandId {
             }
             Self::Inbox => {
                 KeyBinding::press_only("6", KeyChord::new(KeyCode::Char('6'), KeyModifiers::NONE))
+            }
+            Self::Completed => {
+                KeyBinding::press_only("7", KeyChord::new(KeyCode::Char('7'), KeyModifiers::NONE))
             }
             Self::QuickCapture => KeyBinding::press_only(
                 "C-n",
@@ -1047,6 +1052,7 @@ impl CommandId {
             Self::Graph => ("Open Graph", "global destination"),
             Self::Reports => ("Open Reports", "global destination"),
             Self::Inbox => ("Open Inbox", "global destination"),
+            Self::Completed => ("Open Completed", "global destination"),
             Self::QuickCapture => ("Quick capture", "global loaded shell"),
             Self::FocusNext => ("Focus next region", "loaded shell"),
             Self::FocusPrevious => ("Focus previous region", "loaded shell"),
@@ -1055,7 +1061,7 @@ impl CommandId {
             Self::Open => ("Open or drill into selection", "focused selectable content"),
             Self::Search => (
                 "Search current destination",
-                "Tasks, Inbox, Diagnostics, Graph or Reports",
+                "Tasks, Inbox, Completed, Diagnostics, Graph or Reports",
             ),
             Self::AsOfDate => (
                 "Edit clock or cycle graph direction",
@@ -1063,9 +1069,12 @@ impl CommandId {
             ),
             Self::Filters => (
                 "Edit structured filters",
-                "Tasks, Inbox, Diagnostics or Graph",
+                "Tasks, Inbox, Completed, Diagnostics or Graph",
             ),
-            Self::Sort => ("Cycle ordering or grouping", "Tasks, Diagnostics or Graph"),
+            Self::Sort => (
+                "Cycle ordering or grouping",
+                "Tasks, Completed, Diagnostics or Graph",
+            ),
             Self::WhyTraversal => ("Toggle blocking explanation depth", "task Work inspector"),
             Self::ClearNarrowing => ("Clear active narrowing", "a narrowed destination"),
             Self::PreviousSection => (
@@ -1143,6 +1152,7 @@ impl CommandId {
                 "roadmap",
             ],
             Self::Inbox => &["inbox"],
+            Self::Completed => &["completed", "history", "recent"],
             Self::QuickCapture => &["capture", "inbox", "intake"],
             Self::Open => &["show"],
             Self::WhyTraversal => &["why"],
@@ -1178,6 +1188,7 @@ impl CommandId {
             Self::Graph => "open Graph".to_string(),
             Self::Reports => "open Reports".to_string(),
             Self::Inbox => "open Inbox".to_string(),
+            Self::Completed => "open Completed".to_string(),
             Self::QuickCapture => "quick capture".to_string(),
             Self::FocusNext => "next region".to_string(),
             Self::FocusPrevious => "previous region".to_string(),
@@ -1209,6 +1220,9 @@ impl CommandId {
             Self::AsOfDate => "edit Stale work as-of date".to_string(),
             Self::Filters if model.route == Route::Diagnostics => "filter findings".to_string(),
             Self::Filters if model.route == Route::Inbox => "filter captures".to_string(),
+            Self::Filters if model.route == Route::Completed => {
+                "filter completion history".to_string()
+            }
             Self::Filters => "filter tasks".to_string(),
             Self::Sort if model.route == Route::Graph => format!(
                 "cycle peer order ({}; {})",
@@ -1218,6 +1232,14 @@ impl CommandId {
             Self::Sort if model.route == Route::Diagnostics => format!(
                 "group findings (currently {})",
                 model.diagnostic_group.label()
+            ),
+            Self::Sort if model.route == Route::Completed => format!(
+                "toggle completion order (currently {})",
+                if model.completed_request.oldest_first {
+                    "oldest-first"
+                } else {
+                    "newest-first"
+                }
             ),
             Self::Sort => format!("sort tasks (currently {})", model.task_sort.label()),
             Self::WhyTraversal => why_traversal_label(model),
@@ -1233,15 +1255,28 @@ impl CommandId {
             Self::ClearNarrowing if model.route == Route::Inbox => {
                 "clear capture search and filters".to_string()
             }
+            Self::ClearNarrowing if model.route == Route::Completed => {
+                "clear completion history filters, order and paging".to_string()
+            }
             Self::ClearNarrowing => "clear task search and filters".to_string(),
             Self::PreviousSection
                 if model.route == Route::Graph && model.focus == Focus::Primary =>
             {
                 "follow a direct blocker".to_string()
             }
+            Self::PreviousSection
+                if model.route == Route::Completed && model.focus == Focus::Primary =>
+            {
+                "previous completion page".to_string()
+            }
             Self::PreviousSection => "previous inspector section".to_string(),
             Self::NextSection if model.route == Route::Graph && model.focus == Focus::Primary => {
                 "follow a direct dependent".to_string()
+            }
+            Self::NextSection
+                if model.route == Route::Completed && model.focus == Focus::Primary =>
+            {
+                "next completion page".to_string()
             }
             Self::NextSection => "next inspector section".to_string(),
             Self::ScrollUp if model.route == Route::Graph && model.focus == Focus::Primary => {
@@ -1311,6 +1346,7 @@ impl CommandId {
             Self::Graph => Some(Route::Graph),
             Self::Reports => Some(Route::Reports),
             Self::Inbox => Some(Route::Inbox),
+            Self::Completed => Some(Route::Completed),
             _ => None,
         }
     }
@@ -1359,6 +1395,9 @@ impl CommandId {
         if let Some(reason) = inbox_command_unavailable(self, model) {
             return Some(reason);
         }
+        if let Some(reason) = completed_command_unavailable(self, model) {
+            return Some(reason);
+        }
         if let Some(reason) = task_command_unavailable(self, model) {
             return Some(reason);
         }
@@ -1367,7 +1406,8 @@ impl CommandId {
                 Some("no search or filters are active".to_string())
             }
             Self::PreviousSection | Self::NextSection
-                if !(model.route == Route::Graph && model.focus == Focus::Primary)
+                if !(matches!(model.route, Route::Graph | Route::Completed)
+                    && model.focus == Focus::Primary)
                     && (model.focus != Focus::Detail
                         || matches!(
                             model.route,
@@ -1423,17 +1463,24 @@ impl CommandId {
                         | Route::Graph
                         | Route::Reports
                         | Route::Inbox
+                        | Route::Completed
                 ) =>
             {
-                Some("available in Tasks, Inbox, Diagnostics, Graph and Reports".to_string())
+                Some(
+                    "available in Tasks, Inbox, Completed, Diagnostics, Graph and Reports"
+                        .to_string(),
+                )
             }
             Self::Sort
                 if !matches!(
                     model.route,
-                    Route::Tasks | Route::Diagnostics | Route::Graph
+                    Route::Tasks | Route::Diagnostics | Route::Graph | Route::Completed
                 ) =>
             {
-                Some("available in the Tasks, Diagnostics and Graph destinations".to_string())
+                Some(
+                    "available in the Tasks, Completed, Diagnostics and Graph destinations"
+                        .to_string(),
+                )
             }
             _ => None,
         }
@@ -1613,6 +1660,7 @@ impl CommandId {
         self.non_graph_action(model)
     }
 
+    #[allow(clippy::too_many_lines)] // Exhaustive command dispatch keeps every non-graph action in one table.
     fn non_graph_action(self, model: &Model) -> Option<Action> {
         match self {
             Self::Back
@@ -1645,9 +1693,19 @@ impl CommandId {
             {
                 Some(Action::FollowGraphBlocker)
             }
+            Self::PreviousSection
+                if model.route == Route::Completed && model.focus == Focus::Primary =>
+            {
+                Some(Action::CompletedPrevPage)
+            }
             Self::PreviousSection => Some(Action::PreviousInspectorSection),
             Self::NextSection if model.route == Route::Graph && model.focus == Focus::Primary => {
                 Some(Action::FollowGraphDependent)
+            }
+            Self::NextSection
+                if model.route == Route::Completed && model.focus == Focus::Primary =>
+            {
+                Some(Action::CompletedNextPage)
             }
             Self::NextSection => Some(Action::NextInspectorSection),
             Self::ScrollUp if model.route == Route::Graph && model.focus == Focus::Primary => {
@@ -1683,6 +1741,7 @@ impl CommandId {
             | Self::Graph
             | Self::Reports
             | Self::Inbox
+            | Self::Completed
             | Self::GraphScope
             | Self::GraphBetween
             | Self::GraphMembership
@@ -1902,6 +1961,37 @@ fn inbox_command_unavailable(command: CommandId, model: &Model) -> Option<String
     }
 }
 
+fn completed_command_unavailable(command: CommandId, model: &Model) -> Option<String> {
+    if model.route != Route::Completed {
+        return None;
+    }
+    match command {
+        CommandId::Open
+            if model.focus == Focus::Primary && model.selected_completed_row().is_none() =>
+        {
+            Some("no completed task is available to inspect".to_string())
+        }
+        CommandId::MoveNext | CommandId::MovePrevious
+            if model.modal.is_none()
+                && model.focus == Focus::Primary
+                && model.completed_rows().is_empty() =>
+        {
+            Some("the current completion history page is empty".to_string())
+        }
+        CommandId::NextSection
+            if model.focus == Focus::Primary && !model.completed_can_next_page() =>
+        {
+            Some("no next completion page is available".to_string())
+        }
+        CommandId::PreviousSection
+            if model.focus == Focus::Primary && !model.completed_can_prev_page() =>
+        {
+            Some("already on page 1 of completion history".to_string())
+        }
+        _ => None,
+    }
+}
+
 fn task_command_unavailable(command: CommandId, model: &Model) -> Option<String> {
     match command {
         CommandId::Open
@@ -1913,6 +2003,7 @@ fn task_command_unavailable(command: CommandId, model: &Model) -> Option<String>
                         | Route::Graph
                         | Route::Reports
                         | Route::Inbox
+                        | Route::Completed
                 )
                 && model.selected_task().is_none() =>
         {
@@ -1964,6 +2055,7 @@ fn task_command_unavailable(command: CommandId, model: &Model) -> Option<String>
                         | Route::Graph
                         | Route::Reports
                         | Route::Inbox
+                        | Route::Completed
                 )
                 && model.task_browser.rows.is_empty() =>
         {
@@ -2200,6 +2292,7 @@ fn no_narrowing(model: &Model) -> bool {
         Route::Graph => !model.has_graph_narrowing(),
         Route::Reports => !model.has_report_narrowing(),
         Route::Inbox => !model.has_inbox_narrowing(),
+        Route::Completed => !model.has_completed_narrowing(),
         Route::Overview | Route::Tasks => !model.has_task_narrowing(),
     }
 }
@@ -2727,6 +2820,7 @@ fn modal_item_count(model: &Model, layer: Modal) -> usize {
             model.diagnostic_filter_choices().len()
         }
         Modal::Filters if model.route == Route::Inbox => model.inbox_filter_choices().len(),
+        Modal::Filters if model.route == Route::Completed => model.completed_filter_choices().len(),
         Modal::Filters => model.filter_choices().len(),
         Modal::Help => action_states(model).len(),
         Modal::RunSheet => 4,
@@ -2808,6 +2902,7 @@ fn wheel_action(model: &Model, forward: bool) -> Option<Action> {
         Route::Diagnostics => model.diagnostic_findings().len(),
         Route::Tasks => model.task_browser.rows.len(),
         Route::Inbox => model.inbox_rows().len(),
+        Route::Completed => model.completed_rows().len(),
         Route::Graph | Route::Reports => unreachable!("handled above"),
     };
     let last = count.checked_sub(1)?;
@@ -2816,6 +2911,7 @@ fn wheel_action(model: &Model, forward: bool) -> Option<Action> {
         Route::Diagnostics => model.selected,
         Route::Tasks => model.selected_visible_index().unwrap_or(0),
         Route::Inbox => model.selected_capture_visible_index().unwrap_or(0),
+        Route::Completed => model.selected_completed_visible_index().unwrap_or(0),
         Route::Graph | Route::Reports => unreachable!("handled above"),
     }
     .min(last);
@@ -2895,6 +2991,11 @@ fn hit_test(layout: &ShellLayout, model: &Model, position: Position) -> Option<A
             layout.primary,
             model.selected_capture_visible_index().unwrap_or_default(),
             model.inbox_rows().len(),
+        ),
+        Route::Completed => item_viewport(
+            layout.primary,
+            model.selected_completed_visible_index().unwrap_or_default(),
+            model.completed_rows().len(),
         ),
         Route::Tasks => task_viewport(
             layout.primary,
@@ -3218,14 +3319,19 @@ fn render_startup_chrome(
         );
     }
 
+    let nav_inset = u16::from(layout.density == ChromeDensity::Full);
+    let nav_available = layout
+        .navigation
+        .width
+        .saturating_sub(nav_inset.saturating_mul(2));
     let navigation = if layout.class == LayoutClass::Wide {
-        route_labels(layout.class)
+        route_labels(layout.class, nav_available)
             .into_iter()
             .map(|(_, label)| Line::styled(label, styles.muted))
             .collect::<Vec<_>>()
     } else {
         vec![Line::from(
-            route_labels(layout.class)
+            route_labels(layout.class, nav_available)
                 .into_iter()
                 .flat_map(|(_, label)| [Span::styled(label, styles.muted), Span::raw(" ")])
                 .collect::<Vec<_>>(),
@@ -3513,29 +3619,60 @@ fn counted(count: usize, noun: &str) -> String {
     format!("{count} {noun}{}", if count == 1 { "" } else { "s" })
 }
 
-fn route_labels(class: LayoutClass) -> Vec<(Route, String)> {
+fn route_labels(class: LayoutClass, available_width: u16) -> Vec<(Route, String)> {
+    let full = Route::ALL
+        .into_iter()
+        .map(|route| (route, format!("[{} {}]", route.number(), route.label())))
+        .collect::<Vec<_>>();
+    if class == LayoutClass::Wide {
+        return full;
+    }
+    let full_width: usize = full
+        .iter()
+        .map(|(_, label)| text::cells(label))
+        .sum::<usize>()
+        + full.len().saturating_sub(1);
+    if class != LayoutClass::Narrow && full_width <= usize::from(available_width) {
+        return full;
+    }
+    if class != LayoutClass::Narrow && available_width >= 62 {
+        return Route::ALL
+            .into_iter()
+            .map(|route| {
+                let short = match route {
+                    Route::Overview => "Over",
+                    Route::Tasks => "Task",
+                    Route::Diagnostics => "Diag",
+                    Route::Graph => "Grph",
+                    Route::Reports => "Rpt",
+                    Route::Inbox => "Inbx",
+                    Route::Completed => "Done",
+                };
+                (route, format!("[{} {short}]", route.number()))
+            })
+            .collect();
+    }
     Route::ALL
         .into_iter()
         .map(|route| {
-            let label = if class == LayoutClass::Narrow {
-                match route {
-                    Route::Overview => "O",
-                    Route::Tasks => "T",
-                    Route::Diagnostics => "D",
-                    Route::Graph => "G",
-                    Route::Reports => "R",
-                    Route::Inbox => "I",
-                }
-            } else {
-                route.label()
+            let short = match route {
+                Route::Overview => "O",
+                Route::Tasks => "T",
+                Route::Diagnostics => "D",
+                Route::Graph => "G",
+                Route::Reports => "R",
+                Route::Inbox => "I",
+                Route::Completed => "C",
             };
-            (route, format!("[{} {label}]", route.number()))
+            (route, format!("[{}{short}]", route.number()))
         })
         .collect()
 }
 
 fn route_targets(area: Rect, class: LayoutClass, density: ChromeDensity) -> Vec<Target<Route>> {
-    let labels = route_labels(class);
+    let inset = u16::from(density == ChromeDensity::Full);
+    let available = area.width.saturating_sub(inset.saturating_mul(2));
+    let labels = route_labels(class, available);
     if class == LayoutClass::Wide {
         return labels
             .into_iter()
@@ -3552,7 +3689,6 @@ fn route_targets(area: Rect, class: LayoutClass, density: ChromeDensity) -> Vec<
             .collect();
     }
 
-    let inset = u16::from(density == ChromeDensity::Full);
     let mut x = area.x.saturating_add(inset);
     labels
         .into_iter()
@@ -3567,7 +3703,12 @@ fn route_targets(area: Rect, class: LayoutClass, density: ChromeDensity) -> Vec<
 
 fn render_navigation(frame: &mut Frame<'_>, model: &Model, layout: &ShellLayout) {
     let styles = palette(model.theme);
-    let labels = route_labels(layout.class);
+    let inset = u16::from(layout.density == ChromeDensity::Full);
+    let available = layout
+        .navigation
+        .width
+        .saturating_sub(inset.saturating_mul(2));
+    let labels = route_labels(layout.class, available);
     let lines = if layout.class == LayoutClass::Wide {
         labels
             .into_iter()
@@ -3642,6 +3783,7 @@ fn detail_title(model: &Model, area: Rect, subject: &str) -> String {
             }
             Route::Reports => "reports",
             Route::Inbox => "inbox",
+            Route::Completed => "completed",
         };
         format!(" Esc {back} | {} > {subject} ", model.route.label())
     } else {
@@ -4056,6 +4198,10 @@ fn render_primary(frame: &mut Frame<'_>, model: &Model, area: Rect, compact: boo
         }
         Route::Inbox => {
             render_inbox(frame, model, area, compact);
+            return;
+        }
+        Route::Completed => {
+            render_completed(frame, model, area, compact);
             return;
         }
         Route::Tasks => {}
@@ -4625,12 +4771,228 @@ fn overview_metric_style(model: &Model, metric: OverviewMetric, styles: Palette)
     }
 }
 
+fn completion_source_badge(source: aplan_core::CompletionTimeSource) -> &'static str {
+    match source {
+        aplan_core::CompletionTimeSource::Recorded => "[REC]",
+        aplan_core::CompletionTimeSource::HistoryFirstSeen => "[INF]",
+        aplan_core::CompletionTimeSource::Unknown => "[UNK]",
+    }
+}
+
+fn completion_source_label(source: aplan_core::CompletionTimeSource) -> &'static str {
+    match source {
+        aplan_core::CompletionTimeSource::Recorded => "recorded",
+        aplan_core::CompletionTimeSource::HistoryFirstSeen => "inferred-git",
+        aplan_core::CompletionTimeSource::Unknown => "unknown",
+    }
+}
+
+fn completion_completeness_label(completeness: aplan_core::HistoryCompleteness) -> &'static str {
+    match completeness {
+        aplan_core::HistoryCompleteness::Complete => "complete",
+        aplan_core::HistoryCompleteness::IncompleteShallow => "shallow",
+        aplan_core::HistoryCompleteness::IncompleteBounded => "bounded",
+        aplan_core::HistoryCompleteness::IncompleteUnobservable => "unobservable",
+        aplan_core::HistoryCompleteness::HistorySkipped => "skipped",
+        aplan_core::HistoryCompleteness::Unavailable => "no-git",
+    }
+}
+
+fn completion_relative_age(instant: &str, as_of_epoch: i64) -> Option<String> {
+    if as_of_epoch <= 0 {
+        return None;
+    }
+    let epoch = aplan_core::parse_canonical_closed_at(instant)?;
+    let delta = as_of_epoch.saturating_sub(epoch);
+    if delta < 0 {
+        return None;
+    }
+    let label = if delta < 60 {
+        format!("{delta}s ago")
+    } else if delta < 3_600 {
+        format!("{}m ago", delta / 60)
+    } else if delta < 86_400 {
+        format!("{}h ago", delta / 3_600)
+    } else {
+        format!("{}d ago", delta / 86_400)
+    };
+    Some(label)
+}
+
+fn format_completed_time(row: &aplan_core::CompletedTaskRow, as_of_epoch: i64) -> String {
+    match row.instant.as_deref() {
+        Some(instant) => {
+            if let Some(age) = completion_relative_age(instant, as_of_epoch) {
+                format!("{instant} ({age})")
+            } else {
+                instant.to_string()
+            }
+        }
+        None => "unknown-time".to_string(),
+    }
+}
+
+fn completed_header_lines(
+    model: &Model,
+    styles: Palette,
+    compact: bool,
+    width: usize,
+    ascii: bool,
+) -> (Vec<Line<'static>>, bool) {
+    let mut header = route_intro(model, styles, compact, width);
+    if let Some(stale) = &model.completed_stale_notice {
+        header.push(Line::styled(text::fit(stale, width, ascii), styles.warning));
+    }
+    match &model.completed_response {
+        Err(error) => {
+            header.push(Line::styled(
+                text::fit(&format!("History unavailable: {error}"), width, ascii),
+                styles.error,
+            ));
+            (header, true)
+        }
+        Ok(response) => {
+            if response.completeness != aplan_core::HistoryCompleteness::Complete
+                || !response.limitations.is_empty()
+            {
+                let lim = if response.limitations.is_empty() {
+                    format!(
+                        "Incomplete history ({}).",
+                        completion_completeness_label(response.completeness)
+                    )
+                } else {
+                    format!(
+                        "Incomplete history ({}): {}",
+                        completion_completeness_label(response.completeness),
+                        response.limitations.join("; ")
+                    )
+                };
+                header.push(Line::styled(text::fit(&lim, width, ascii), styles.warning));
+            }
+            let has_unknown = response
+                .items
+                .iter()
+                .any(|row| row.source == aplan_core::CompletionTimeSource::Unknown);
+            let has_ties = response
+                .items
+                .windows(2)
+                .any(|pair| pair[0].instant.is_some() && pair[0].instant == pair[1].instant);
+            if !compact && (has_unknown || has_ties) {
+                header.push(Line::styled(
+                    text::fit(
+                        "Deterministic order (time, then id); equal/unknown times do not imply causal sequence.",
+                        width,
+                        ascii,
+                    ),
+                    styles.muted,
+                ));
+            }
+            (header, false)
+        }
+    }
+}
+
+fn render_completed(frame: &mut Frame<'_>, model: &Model, area: Rect, compact: bool) {
+    let styles = palette(model.theme);
+    let ascii = model.glyphs == Glyphs::Ascii;
+    let content = area.inner(Margin::new(1, 1));
+    let width = usize::from(content.width);
+    let (mut lines, failed) = completed_header_lines(model, styles, compact, width, ascii);
+    if failed {
+        frame.render_widget(
+            Paragraph::new(lines).style(styles.normal).block(block(
+                model,
+                text::fit(&primary_title(model), usize::from(area.width), ascii),
+                model.focus == Focus::Primary,
+            )),
+            area,
+        );
+        return;
+    }
+    let rows = model.completed_rows();
+    let capacity = usize::from(content.height).saturating_sub(lines.len());
+    let selected_idx = model
+        .selected_completed_visible_index()
+        .unwrap_or_default()
+        .min(rows.len().saturating_sub(1));
+    let start = if rows.len() <= capacity {
+        0
+    } else {
+        selected_idx
+            .saturating_sub(capacity.saturating_sub(1) / 2)
+            .min(rows.len().saturating_sub(capacity))
+    };
+    let end = (start + capacity).min(rows.len());
+    if rows.is_empty() {
+        let message = if !model.completed_query.is_empty() {
+            "No completed task on this page matches the search."
+        } else if !model.completed_request.selector.is_empty()
+            || model.completed_request.since.is_some()
+            || model.completed_request.until.is_some()
+        {
+            "No completed work tasks match the active filters."
+        } else {
+            "No completed work tasks yet."
+        };
+        if capacity > 0 {
+            lines.push(Line::styled(text::fit(message, width, ascii), styles.muted));
+        }
+    } else {
+        let as_of = model.snapshot.overview.as_of_epoch_seconds;
+        for (index, row) in rows.iter().enumerate().skip(start).take(end - start) {
+            let selected = index == selected_idx;
+            let badge = completion_source_badge(row.source);
+            let time = format_completed_time(row, as_of);
+            let tie_cue = if row.incomparable_candidates > 0 {
+                " [incomp]"
+            } else {
+                ""
+            };
+            let prefix = if selected { "> " } else { "  " };
+            let text_row = format!("{prefix}{badge} {time}{tie_cue} {} {}", row.id, row.title);
+            let style = if selected {
+                styles.selected
+            } else if row.source == aplan_core::CompletionTimeSource::Unknown {
+                styles.muted
+            } else {
+                styles.normal
+            };
+            lines.push(Line::styled(text::fit(&text_row, width, ascii), style));
+        }
+    }
+    frame.render_widget(
+        Paragraph::new(lines).style(styles.normal).block(block(
+            model,
+            text::fit(&primary_title(model), usize::from(area.width), ascii),
+            model.focus == Focus::Primary,
+        )),
+        area,
+    );
+    if content.height > 0 && start > 0 {
+        frame.render_widget(
+            Paragraph::new(if ascii { "^" } else { "\u{2191}" }).style(styles.warning),
+            Rect::new(content.right().saturating_sub(1), content.y, 1, 1),
+        );
+    }
+    if content.height > 0 && end < rows.len() {
+        frame.render_widget(
+            Paragraph::new(if ascii { ">" } else { "\u{2026}" }).style(styles.warning),
+            Rect::new(
+                content.right().saturating_sub(1),
+                content.bottom().saturating_sub(1),
+                1,
+                1,
+            ),
+        );
+    }
+}
+
 fn render_overview(frame: &mut Frame<'_>, model: &Model, area: Rect) {
     let styles = palette(model.theme);
     let viewport = item_viewport(area, model.overview_selected, OverviewMetric::ALL.len());
     let width = usize::from(viewport.content.width);
     let ascii = model.glyphs == Glyphs::Ascii;
-    let lines = OverviewMetric::ALL
+    let mut lines = OverviewMetric::ALL
         .iter()
         .copied()
         .enumerate()
@@ -4653,6 +5015,51 @@ fn render_overview(frame: &mut Frame<'_>, model: &Model, area: Rect) {
             )
         })
         .collect::<Vec<_>>();
+    // Show recent completions on the Overview ONLY where responsive layout has
+    // useful room (non-narrow width and vertical room below the primary
+    // metrics) and at least one completed task exists.
+    let min_rows_for_recent = OverviewMetric::ALL.len() + 4;
+    if area.width >= 50
+        && usize::from(viewport.content.height) >= min_rows_for_recent
+        && let Some(recent) = model.overview_recent_completions()
+        && !recent.items.is_empty()
+    {
+        let remaining = usize::from(viewport.content.height).saturating_sub(lines.len());
+        if remaining >= 4 {
+            let completeness = if recent.completeness == aplan_core::HistoryCompleteness::Complete {
+                String::new()
+            } else {
+                format!(" [{}]", completion_completeness_label(recent.completeness))
+            };
+            lines.push(Line::from(""));
+            lines.push(Line::styled(
+                text::fit(
+                    &format!("RECENT COMPLETIONS{completeness} (7: full history)"),
+                    width,
+                    ascii,
+                ),
+                styles.accent,
+            ));
+            let row_budget = remaining.saturating_sub(2).min(5);
+            let as_of = model.snapshot.overview.as_of_epoch_seconds;
+            for row in recent.items.iter().take(row_budget) {
+                let badge = completion_source_badge(row.source);
+                let time = format_completed_time(row, as_of);
+                lines.push(Line::styled(
+                    text::fit(
+                        &format!("  {badge} {time} {} {}", row.id, row.title),
+                        width,
+                        ascii,
+                    ),
+                    if row.source == aplan_core::CompletionTimeSource::Unknown {
+                        styles.muted
+                    } else {
+                        styles.normal
+                    },
+                ));
+            }
+        }
+    }
     frame.render_widget(
         Paragraph::new(lines).style(styles.normal).block(block(
             model,
@@ -4903,8 +5310,44 @@ impl Model {
             Route::Graph => "how work is connected",
             Route::Reports => "which aggregate needs a decision",
             Route::Inbox => "which captured intake needs review",
+            Route::Completed => "what work finished and how time was known",
         }
     }
+}
+
+fn completed_route_intro(model: &Model, styles: Palette, width: usize) -> Vec<Line<'static>> {
+    let ascii = model.glyphs == Glyphs::Ascii;
+    let order = if model.completed_request.oldest_first {
+        "oldest-first"
+    } else {
+        "newest-first"
+    };
+    let history = match model.completed_request.history {
+        aplan_core::HistoryPolicy::Auto => "auto",
+        aplan_core::HistoryPolicy::Never => "never",
+        aplan_core::HistoryPolicy::Required => "required",
+    };
+    let limit = model
+        .completed_request
+        .limit
+        .map_or_else(|| "all".to_string(), |n| n.to_string());
+    let summary = match &model.completed_response {
+        Ok(response) => {
+            let more = if response.truncated { "+" } else { "" };
+            format!(
+                "{}/{} shown (page {}{more}); order: {order}; history: {history}; limit: {limit}; {}.",
+                model.completed_rows().len(),
+                response.total_matched,
+                model.completed_page,
+                completion_completeness_label(response.completeness),
+            )
+        }
+        Err(_) => format!("order: {order}; history: {history}; limit: {limit}."),
+    };
+    vec![
+        Line::styled(text::fit("COMPLETED HISTORY", width, ascii), styles.accent),
+        Line::from(text::fit(&summary, width, ascii)),
+    ]
 }
 
 fn inbox_route_intro(model: &Model, styles: Palette, width: usize) -> Vec<Line<'static>> {
@@ -5011,6 +5454,7 @@ fn route_intro(model: &Model, styles: Palette, compact: bool, width: usize) -> V
             )),
         ],
         Route::Inbox => inbox_route_intro(model, styles, width),
+        Route::Completed => completed_route_intro(model, styles, width),
     };
     if compact && model.route == Route::Tasks {
         lines.into_iter().skip(1).take(1).collect()
@@ -5019,6 +5463,41 @@ fn route_intro(model: &Model, styles: Palette, compact: bool, width: usize) -> V
     } else {
         lines
     }
+}
+
+fn completed_inspector_banner(
+    model: &Model,
+    width: usize,
+    ascii: bool,
+    styles: Palette,
+) -> Option<Line<'static>> {
+    if model.route != Route::Completed {
+        return None;
+    }
+    let row = model.selected_completed_row()?;
+    let time = format_completed_time(row, model.snapshot.overview.as_of_epoch_seconds);
+    let commit = row
+        .commit
+        .as_deref()
+        .map_or_else(String::new, |sha| format!(" commit:{sha}"));
+    let incomp = if row.incomparable_candidates > 0 {
+        " (incomparable merge candidates)"
+    } else {
+        ""
+    };
+    Some(Line::styled(
+        text::fit(
+            &format!(
+                "Completed: {} {} ({}){commit}{incomp}",
+                completion_source_badge(row.source),
+                time,
+                completion_source_label(row.source),
+            ),
+            width,
+            ascii,
+        ),
+        styles.accent,
+    ))
 }
 
 fn inspector_header_lines(
@@ -5040,6 +5519,9 @@ fn inspector_header_lines(
         .collect::<Vec<_>>()
         .join(" ");
     lines.push(Line::styled(text::fit(&tabs, width, ascii), styles.accent));
+    if let Some(banner) = completed_inspector_banner(model, width, ascii, styles) {
+        lines.push(banner);
+    }
     if model.route == Route::Graph {
         if let Some(selection) = &model.graph_explorer.selection {
             lines.push(Line::styled(
@@ -6268,6 +6750,7 @@ fn compact_command_label(id: CommandId, model: &Model) -> String {
             Route::Graph => "graph",
             Route::Reports => "reports",
             Route::Inbox => "inbox",
+            Route::Completed => "completed",
         }
         .to_string(),
         CommandId::Back
@@ -6335,6 +6818,7 @@ fn compact_command_label(id: CommandId, model: &Model) -> String {
         | CommandId::Graph
         | CommandId::Reports
         | CommandId::Inbox
+        | CommandId::Completed
         | CommandId::FocusPrevious
         | CommandId::MoveNext
         | CommandId::MovePrevious
@@ -6648,6 +7132,8 @@ fn search_modal(model: &Model, styles: Palette, inner_width: usize) -> (Vec<Line
         (&model.report_kind_query, model.report_kind_query_cursor)
     } else if model.route == Route::Inbox {
         (&model.inbox_query, model.inbox_query_cursor)
+    } else if model.route == Route::Completed {
+        (&model.completed_query, model.completed_query_cursor)
     } else {
         (&model.task_query, model.task_query_cursor)
     };
@@ -6695,6 +7181,17 @@ fn search_modal(model: &Model, styles: Palette, inner_width: usize) -> (Vec<Line
             "{}/{} bounded capture rows shown; searches id, title and body; Enter accepts.",
             model.inbox_rows().len(),
             loaded
+        )
+    } else if model.route == Route::Completed {
+        let total = model
+            .completed_response
+            .as_ref()
+            .map_or(0, |response| response.items.len());
+        format!(
+            "{}/{} rows on page {} shown; searches id, title and owner; Enter accepts.",
+            model.completed_rows().len(),
+            total,
+            model.completed_page,
         )
     } else {
         format!(
@@ -6759,6 +7256,50 @@ fn inbox_filter_modal(
     (lines, targets)
 }
 
+fn completed_filter_modal(
+    model: &Model,
+    styles: Palette,
+    inner_width: usize,
+    inner_height: usize,
+) -> (Vec<Line<'static>>, Vec<OverlayRowTarget>) {
+    let choices = model.completed_filter_choices();
+    let list_height = inner_height.saturating_sub(1);
+    let start = model
+        .modal_selected
+        .saturating_sub(list_height.saturating_sub(1));
+    let mut lines = vec![Line::styled(
+        "Enter/space selects History, Limit, Cut, Phase, Owner or Tag; c resets defaults.",
+        styles.muted,
+    )];
+    let mut targets = Vec::new();
+    for (offset, filter) in choices.iter().skip(start).take(list_height).enumerate() {
+        let index = start + offset;
+        targets.push(OverlayRowTarget::one(
+            lines.len(),
+            Action::SelectModal(index),
+        ));
+        let checked = if model.completed_filter_active(filter) {
+            "[x]"
+        } else {
+            "[ ]"
+        };
+        let style = if index == model.modal_selected {
+            styles.selected
+        } else {
+            styles.normal
+        };
+        lines.push(Line::styled(
+            text::fit(
+                &format!("{checked} {}", filter.label()),
+                inner_width,
+                model.glyphs == Glyphs::Ascii,
+            ),
+            style,
+        ));
+    }
+    (lines, targets)
+}
+
 fn filter_modal(
     model: &Model,
     styles: Palette,
@@ -6767,6 +7308,9 @@ fn filter_modal(
 ) -> (Vec<Line<'static>>, Vec<OverlayRowTarget>) {
     if model.route == Route::Inbox {
         return inbox_filter_modal(model, styles, inner_width, inner_height);
+    }
+    if model.route == Route::Completed {
+        return completed_filter_modal(model, styles, inner_width, inner_height);
     }
     if model.route == Route::Diagnostics {
         let choices = model.diagnostic_filter_choices();
@@ -9697,6 +10241,9 @@ pub(crate) mod tests {
                             crate::discovery::NativeSurface::Inbox => {
                                 state.target == PaletteTarget::Command(CommandId::Inbox)
                             }
+                            crate::discovery::NativeSurface::Completed => {
+                                state.target == PaletteTarget::Command(CommandId::Completed)
+                            }
                         });
                         assert!(
                             represented,
@@ -10319,7 +10866,10 @@ pub(crate) mod tests {
             columns: 100,
             rows: 24,
         });
-        for (key, route) in ['1', '2', '3', '4', '5', '6'].into_iter().zip(Route::ALL) {
+        for (key, route) in ['1', '2', '3', '4', '5', '6', '7']
+            .into_iter()
+            .zip(Route::ALL)
+        {
             let action = decode_key(
                 KeyEvent::new(KeyCode::Char(key), KeyModifiers::NONE),
                 &model,
@@ -11792,7 +12342,7 @@ pub(crate) mod tests {
         model.update(Action::OpenHelp);
         let help = buffer(&mut model, 100, 24);
         assert!(
-            help.contains("disabled: available in Tasks, Inbox, Diagnostics, Graph a"),
+            help.contains("disabled: available in Tasks, Inbox, Completed, Diag"),
             "{help}"
         );
         assert!(help.contains("Esc cancels"));
@@ -11810,7 +12360,7 @@ pub(crate) mod tests {
                 &model
             ),
             Some(Action::Notify(
-                "available in Tasks, Inbox, Diagnostics, Graph and Reports".to_string()
+                "available in Tasks, Inbox, Completed, Diagnostics, Graph and Reports".to_string()
             ))
         );
 
@@ -13847,5 +14397,281 @@ pub(crate) mod tests {
         assert_eq!(empty.lines().count(), 14);
         assert_eq!(model.selected, 0);
         assert_eq!(model.focus, Focus::Detail);
+    }
+
+    #[test]
+    #[allow(clippy::too_many_lines)]
+    fn completed_history_reducer_and_snapshot_journeys_cover_empty_legacy_shallow_narrow_and_large()
+    {
+        fn git(dir: &std::path::Path, args: &[&str], date: Option<&str>) {
+            let mut cmd = std::process::Command::new("git");
+            cmd.args(args).current_dir(dir);
+            if let Some(d) = date {
+                cmd.env("GIT_AUTHOR_DATE", d).env("GIT_COMMITTER_DATE", d);
+            }
+            let out = cmd.output().expect("git runs");
+            assert!(
+                out.status.success(),
+                "git {} failed: {}",
+                args.join(" "),
+                String::from_utf8_lossy(&out.stderr)
+            );
+        }
+
+        fn snapshot_for(dir: &std::path::Path) -> crate::model::Snapshot {
+            let context = aplan_app::PlanContext::new(
+                aplan_core::load_plan_identified(&dir.join("aplan")),
+                aplan_app::ContextInputs {
+                    repository_root: dir.to_path_buf(),
+                    configuration_file: None,
+                    trust: aplan_app::Trust::RepositoryRead,
+                    options: aplan_core::Options::default(),
+                    verdict: aplan_core::Verdict::default(),
+                },
+            );
+            let sheet = aplan_app::verification_run_sheet(
+                &context,
+                &aplan_evidence::VerifyOptions::default(),
+            );
+            crate::model::Snapshot::from_context(
+                &context,
+                &aplan_app::BuildIdentity::default(),
+                sheet,
+            )
+        }
+
+        // 1. Empty history: Overview omits RECENT COMPLETIONS; Completed shows empty state.
+        let mut empty_model = model();
+        let empty_overview = buffer(&mut empty_model, 100, 24);
+        assert!(!empty_overview.contains("RECENT COMPLETIONS"));
+        empty_model.update(Action::Route(Route::Completed));
+        let empty_completed = buffer(&mut empty_model, 100, 24);
+        assert!(empty_completed.contains("COMPLETED HISTORY"));
+        assert!(empty_completed.contains("0/0 shown (page 1)"));
+        assert!(empty_completed.contains("No completed work tasks yet."));
+
+        // 2. Recorded + Legacy (Git-inferred) + Equal timestamps + Unknown + Narrow vs Wide.
+        let dir = tempfile::Builder::new()
+            .prefix("tui-completed-history-")
+            .tempdir_in(aplan_core::fixture::fixture_root())
+            .expect("tempdir");
+        std::fs::create_dir_all(dir.path().join("aplan/tasks")).expect("tasks dir");
+        git(dir.path(), &["init", "-q", "."], None);
+        git(dir.path(), &["config", "user.name", "tui-test"], None);
+        git(
+            dir.path(),
+            &["config", "user.email", "tui@example.invalid"],
+            None,
+        );
+        // Commit 1: legacy task starts as todo
+        std::fs::write(
+            dir.path().join("aplan/tasks/T-LEG.md"),
+            "---\nid: T-LEG\ntitle: Legacy work\nphase: 1\nstatus: todo\neffort_days: 1\n\
+             paths: [src/**]\ntags: [cross-cutting]\n---\n",
+        )
+        .expect("legacy todo");
+        git(dir.path(), &["add", "-A"], None);
+        git(
+            dir.path(),
+            &["commit", "-q", "-m", "start legacy"],
+            Some("2026-10-01T10:00:00Z"),
+        );
+        // Commit 2: legacy task transitions to done (no closed_at), plus recorded tasks with ties
+        std::fs::write(
+            dir.path().join("aplan/tasks/T-LEG.md"),
+            "---\nid: T-LEG\ntitle: Legacy work\nphase: 1\nstatus: done\neffort_days: 1\n\
+             paths: [src/**]\ntags: [cross-cutting]\n---\n",
+        )
+        .expect("legacy done");
+        for (id, title, ts) in [
+            ("T-EQ-2", "Second tie", "2026-10-10T12:00:00Z"),
+            ("T-EQ-1", "First tie", "2026-10-10T12:00:00Z"),
+            ("T-NEW", "Newest recorded", "2026-10-12T08:00:00Z"),
+        ] {
+            std::fs::write(
+                dir.path().join(format!("aplan/tasks/{id}.md")),
+                format!(
+                    "---\nid: {id}\ntitle: {title}\nphase: 1\nstatus: done\neffort_days: 1\n\
+                     paths: [src/**]\ntags: [cross-cutting]\nclosed_at: {ts}\n\
+                     closed_at_source: local\n---\n"
+                ),
+            )
+            .expect("recorded task");
+        }
+        git(dir.path(), &["add", "-A"], None);
+        git(
+            dir.path(),
+            &["commit", "-q", "-m", "finish work"],
+            Some("2026-10-05T15:00:00Z"),
+        );
+
+        let snap = snapshot_for(dir.path());
+        let mut hist_model = Model::new(snap);
+        hist_model.theme = Theme::Monochrome;
+        hist_model.glyphs = Glyphs::Ascii;
+
+        // Overview shows RECENT COMPLETIONS at 100x24, omits it at narrow 48x14.
+        let wide_overview = buffer(&mut hist_model, 100, 24);
+        assert!(
+            wide_overview.contains("RECENT COMPLETIONS"),
+            "{wide_overview}"
+        );
+        assert!(wide_overview.contains("[REC]"), "{wide_overview}");
+        assert!(wide_overview.contains("[INF]"), "{wide_overview}");
+        assert!(
+            wide_overview.contains("2026-10-12T08:00:00Z"),
+            "{wide_overview}"
+        );
+        let narrow_overview = buffer(&mut hist_model, 48, 14);
+        assert!(
+            !narrow_overview.contains("RECENT COMPLETIONS"),
+            "{narrow_overview}"
+        );
+
+        // Completed destination: deterministic order (T-NEW, T-EQ-1, T-EQ-2, T-LEG), non-causal cue,
+        // non-color source cues [REC]/[INF], and absolute UTC time.
+        hist_model.update(Action::Route(Route::Completed));
+        let ids: Vec<&str> = hist_model
+            .completed_rows()
+            .into_iter()
+            .map(|r| r.id.as_str())
+            .collect();
+        assert_eq!(ids, vec!["T-NEW", "T-EQ-1", "T-EQ-2", "T-LEG"]);
+        let comp_buf = buffer(&mut hist_model, 120, 24);
+        assert!(
+            comp_buf.contains("[REC] 2026-10-12T08:00:00Z"),
+            "{comp_buf}"
+        );
+        assert!(
+            comp_buf.contains("[INF] 2026-10-05T15:00:00Z"),
+            "{comp_buf}"
+        );
+        assert!(
+            comp_buf.contains("Deterministic order (time, then id)"),
+            "{comp_buf}"
+        );
+
+        // Toggle oldest-first preserves semantic selection (`T-NEW`); select first row (`T-LEG`),
+        // open inspector (Enter), back (Esc) preserves history request!
+        hist_model.update(Action::CycleTaskSort);
+        assert!(hist_model.completed_request.oldest_first);
+        let oldest_ids: Vec<&str> = hist_model
+            .completed_rows()
+            .into_iter()
+            .map(|r| r.id.as_str())
+            .collect();
+        assert_eq!(oldest_ids, vec!["T-LEG", "T-EQ-1", "T-EQ-2", "T-NEW"]);
+        assert_eq!(hist_model.completed_selected_id.as_deref(), Some("T-NEW"));
+        hist_model.update(Action::SelectIndex(0));
+        hist_model.update(Action::OpenDetail);
+        assert_eq!(hist_model.focus, Focus::Detail);
+        assert_eq!(hist_model.selected_id.as_deref(), Some("T-LEG"));
+        let detail_buf = buffer(&mut hist_model, 120, 24);
+        assert!(detail_buf.contains("Completed: [INF]"), "{detail_buf}");
+        hist_model.update(Action::CloseLayer);
+        assert_eq!(hist_model.route, Route::Completed);
+        assert_eq!(hist_model.focus, Focus::Primary);
+        assert!(hist_model.completed_request.oldest_first);
+
+        // HistoryPolicy::Never -> legacy becomes [UNK] unknown-time after knowns + Incomplete history (skipped).
+        hist_model.completed_request.history = aplan_core::HistoryPolicy::Never;
+        hist_model.rebuild_completed(false);
+        let never_ids: Vec<&str> = hist_model
+            .completed_rows()
+            .into_iter()
+            .map(|r| r.id.as_str())
+            .collect();
+        assert_eq!(never_ids, vec!["T-EQ-1", "T-EQ-2", "T-NEW", "T-LEG"]);
+        let never_buf = buffer(&mut hist_model, 120, 24);
+        assert!(never_buf.contains("[UNK] unknown-time"), "{never_buf}");
+        assert!(
+            never_buf.contains("Incomplete history (skipped)"),
+            "{never_buf}"
+        );
+
+        // 3. Shallow clone -> Incomplete history (shallow) visibly reported.
+        let shallow_dir = tempfile::Builder::new()
+            .prefix("tui-completed-shallow-")
+            .tempdir_in(aplan_core::fixture::fixture_root())
+            .expect("shallow dir");
+        let origin_url = format!("file://{}", dir.path().display());
+        let clone_out = std::process::Command::new("git")
+            .args([
+                "clone",
+                "-q",
+                "--depth",
+                "1",
+                &origin_url,
+                shallow_dir.path().to_str().expect("utf8 path"),
+            ])
+            .output()
+            .expect("git clone");
+        assert!(clone_out.status.success());
+        let mut shallow_model = Model::new(snapshot_for(shallow_dir.path()));
+        shallow_model.update(Action::Route(Route::Completed));
+        let shallow_buf = buffer(&mut shallow_model, 120, 24);
+        assert!(
+            shallow_buf.contains("Incomplete history (shallow)"),
+            "{shallow_buf}"
+        );
+
+        // 4. Large history (30 tasks) + pagination + visible stale-continuation invalidation on changed identity.
+        let large_dir = tempfile::Builder::new()
+            .prefix("tui-completed-large-")
+            .tempdir_in(aplan_core::fixture::fixture_root())
+            .expect("large dir");
+        std::fs::create_dir_all(large_dir.path().join("aplan/tasks")).expect("tasks");
+        for idx in 1..=30 {
+            std::fs::write(
+                large_dir.path().join(format!("aplan/tasks/L-{idx:02}.md")),
+                format!(
+                    "---\nid: L-{idx:02}\ntitle: Large task {idx}\nphase: 1\nstatus: done\n\
+                     effort_days: 1\npaths: [src/**]\ntags: [cross-cutting]\n\
+                     closed_at: 2026-10-{:02}T12:00:00Z\nclosed_at_source: local\n---\n",
+                    (idx % 28) + 1
+                ),
+            )
+            .expect("large task");
+        }
+        let mut large_model = Model::new(snapshot_for(large_dir.path()));
+        large_model.update(Action::Route(Route::Completed));
+        large_model.completed_request.limit = Some(10);
+        large_model.rebuild_completed(false);
+        assert_eq!(large_model.completed_rows().len(), 10);
+        assert!(large_model.completed_can_next_page());
+        let page1_ids: Vec<String> = large_model
+            .completed_rows()
+            .into_iter()
+            .map(|r| r.id.clone())
+            .collect();
+        large_model.update(Action::CompletedNextPage);
+        assert_eq!(large_model.completed_page, 2);
+        let page2_ids: Vec<String> = large_model
+            .completed_rows()
+            .into_iter()
+            .map(|r| r.id.clone())
+            .collect();
+        assert_eq!(page2_ids.len(), 10);
+        assert!(page1_ids.iter().all(|id| !page2_ids.contains(id)));
+
+        // Mutate plan so input_identity changes while on page 2 -> continuation invalidated visibly!
+        std::fs::write(
+            large_dir.path().join("aplan/tasks/L-31.md"),
+            "---\nid: L-31\ntitle: Newest task\nphase: 1\nstatus: done\neffort_days: 1\n\
+             paths: [src/**]\ntags: [cross-cutting]\nclosed_at: 2026-11-01T00:00:00Z\n\
+             closed_at_source: local\n---\n",
+        )
+        .expect("new task");
+        let updated_snap = snapshot_for(large_dir.path());
+        large_model.snapshot = updated_snap;
+        large_model.rebuild_completed(true);
+        assert_eq!(large_model.completed_page, 1);
+        assert!(large_model.completed_stale_notice.is_some());
+        let stale_buf = buffer(&mut large_model, 120, 24);
+        assert!(
+            stale_buf.contains("Continuation invalidated ("),
+            "{stale_buf}"
+        );
+        assert!(stale_buf.contains("page 1."), "{stale_buf}");
     }
 }

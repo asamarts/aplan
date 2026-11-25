@@ -267,6 +267,18 @@ fn drive_native(surface: NativeSurface, dir: &Path, command: &str) {
             assert_eq!(workspace.total(), 0);
             assert!(workspace.kinds.iter().any(|kind| kind == "task"));
         }
+        NativeSurface::Completed => {
+            let workspace = aplan_app::CompletedWorkspace::from_context(&context);
+            let response = workspace
+                .query(&aplan_app::CompletedRequest::default())
+                .expect("native completed history workspace");
+            assert_eq!(response.schema, "aplan/completed/v1");
+            assert_eq!(response.input_identity, context.identity().sha256);
+            assert!(
+                response.items.iter().any(|row| row.id == "W-2"),
+                "{command} drove no completed work row"
+            );
+        }
     }
 }
 
@@ -473,7 +485,8 @@ fn option_disposition(command: &str, id: &str) -> OptionDisposition {
             | ("summary", "at")
             | ("critical_path", "to")
             | ("roadmap", "regenerate_with") => OptionDisposition::NativeControl,
-            ("inbox", "kind" | "state" | "label" | "revisit" | "search" | "limit") => {
+            ("inbox", "kind" | "state" | "label" | "revisit" | "search" | "limit")
+            | ("completed", "limit" | "since" | "until" | "oldest" | "history") => {
                 OptionDisposition::NativeControl
             }
             // A receipt import set is a caller-owned, path-bearing trust
@@ -482,6 +495,7 @@ fn option_disposition(command: &str, id: &str) -> OptionDisposition {
             // but does not ask a terminal user to select or authenticate that
             // external manifest.
             ("show", "raw_body")
+            | ("completed", "at" | "cursor")
             | ("check", "traces_root" | "range" | "fail_fast" | "repo")
             | (
                 "verify",
@@ -507,6 +521,8 @@ fn option_disposition(command: &str, id: &str) -> OptionDisposition {
 fn cli_only_boundary(command: &str, id: &str) -> Option<&'static str> {
     match (command, id) {
         ("show", "raw_body") => Some("show --raw-body"),
+        ("completed", "at") => Some("completed --at"),
+        ("completed", "cursor") => Some("completed --cursor"),
         ("check", "traces_root") => Some("check --traces-root"),
         ("check", "range") => Some("check --range"),
         ("check", "fail_fast") => Some("check --fail-fast"),
@@ -819,6 +835,29 @@ const OPTION_CASES: &[OptionCase] = &[
             ("inbox", "revisit"),
             ("inbox", "search"),
             ("inbox", "limit"),
+        ],
+    },
+    OptionCase {
+        argv: &[
+            "completed",
+            "--limit",
+            "5",
+            "--since",
+            "2020-01-01",
+            "--until",
+            "2099-12-31",
+            "--oldest",
+            "--history",
+            "never",
+            "--format",
+            "json",
+        ],
+        covers: &[
+            ("completed", "limit"),
+            ("completed", "since"),
+            ("completed", "until"),
+            ("completed", "oldest"),
+            ("completed", "history"),
         ],
     },
 ];

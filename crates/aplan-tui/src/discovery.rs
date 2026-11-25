@@ -21,6 +21,7 @@ pub enum NativeSurface {
     Explanation,
     Tasks,
     Inbox,
+    Completed,
 }
 
 /// How one top-level command is exposed by the interactive product.
@@ -231,6 +232,20 @@ const SHOW_BOUNDARIES: &[CommandBoundary] = &[CommandBoundary {
     reason: "writing verbatim raw Markdown body bytes to stdout is a pipe and script workflow rather than an interactive inspector view",
     example: "aplan show --raw-body T-001",
 }];
+const COMPLETED_BOUNDARIES: &[CommandBoundary] = &[
+    CommandBoundary {
+        name: "completed --at",
+        aliases: &["completed --at", "historical revision"],
+        reason: "the interactive completion history inspects the loaded plan snapshot; querying an arbitrary historical Git revision tree remains an explicit CLI session boundary",
+        example: "aplan completed --at HEAD",
+    },
+    CommandBoundary {
+        name: "completed --cursor",
+        aliases: &["completed --cursor", "continuation cursor"],
+        reason: "the interactive completion history pages forward and back in-process against the loaded snapshot; supplying a raw continuation token belongs to scripted CLI pagination",
+        example: "aplan completed --cursor v1 --limit 10",
+    },
+];
 const FACTS_BOUNDARIES: &[CommandBoundary] = &[CommandBoundary {
     name: "facts --require",
     aliases: &[
@@ -442,17 +457,12 @@ pub const COMMANDS: &[CommandDiscovery] = &[
     mutation("mv", "Move tasks", MOVE),
     mutation("rekey", "Rekey a task", REKEY),
     native("tasks", "Browse tasks", &[NativeSurface::Tasks]),
-    CommandDiscovery {
-        name: "completed",
-        title: "List completed work tasks",
-        disposition: CommandDisposition::CliOnly {
-            reason: "chronological completion history runs through the shared application boundary on the CLI; the dedicated interactive TUI completion-history view is tracked separately",
-            example: "aplan completed --limit 10",
-        },
-        surfaces: &[],
-        mutations: &[],
-        boundaries: &[],
-    },
+    native_with_boundaries(
+        "completed",
+        "Inspect completed work history",
+        &[NativeSurface::Completed],
+        COMPLETED_BOUNDARIES,
+    ),
     native(
         "critical-path",
         "Inspect the critical route",

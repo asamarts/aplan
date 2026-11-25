@@ -4,8 +4,9 @@ use std::time::Instant;
 
 use aplan_app::{
     BuildIdentity, CapabilityView, CellScene, CellSceneJob, CellSceneOrientation, CellSceneRequest,
-    CellSceneResult, CheckOverrides, DiagnosticRun, DiagnosticScope, DiagnosticWorkbench,
-    GraphContinuation, GraphContinuationDirection, GraphExplorerIdentity, GraphExplorerLocation,
+    CellSceneResult, CheckOverrides, CompletedError, CompletedRequest, CompletedWorkspace,
+    DiagnosticRun, DiagnosticScope, DiagnosticWorkbench, GraphContinuation,
+    GraphContinuationDirection, GraphExplorerIdentity, GraphExplorerLocation,
     GraphExplorerProjection, GraphExplorerRequest, GraphExplorerSelectionOrigin, GraphProjection,
     GraphRequest, GraphScope, GraphWindowProjection, GraphWindowRequest, GraphWindowState,
     GraphWorkspace, Onboarding, PlanContext, PlanOverview, ReportKind, ReportProjection,
@@ -81,16 +82,18 @@ pub(crate) enum Route {
     Graph,
     Reports,
     Inbox,
+    Completed,
 }
 
 impl Route {
-    pub(crate) const ALL: [Self; 6] = [
+    pub(crate) const ALL: [Self; 7] = [
         Self::Overview,
         Self::Tasks,
         Self::Diagnostics,
         Self::Graph,
         Self::Reports,
         Self::Inbox,
+        Self::Completed,
     ];
 
     pub(crate) const fn label(self) -> &'static str {
@@ -101,6 +104,7 @@ impl Route {
             Self::Diagnostics => "Diagnostics",
             Self::Graph => "Graph",
             Self::Reports => "Reports",
+            Self::Completed => "Completed",
         }
     }
 
@@ -112,6 +116,41 @@ impl Route {
             Self::Graph => 4,
             Self::Reports => 5,
             Self::Inbox => 6,
+            Self::Completed => 7,
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) enum CompletedFilterChoice {
+    History(aplan_core::HistoryPolicy),
+    Limit(Option<usize>),
+    Cut(Option<String>),
+    Phase(Option<u32>),
+    Owner(Option<String>),
+    Tag(Option<String>),
+}
+
+impl CompletedFilterChoice {
+    pub(crate) fn label(&self) -> String {
+        match self {
+            Self::History(policy) => format!(
+                "History: {}",
+                match policy {
+                    aplan_core::HistoryPolicy::Auto => "auto",
+                    aplan_core::HistoryPolicy::Never => "never",
+                    aplan_core::HistoryPolicy::Required => "required",
+                }
+            ),
+            Self::Limit(Some(limit)) => format!("Page limit: {limit}"),
+            Self::Limit(None) => "Page limit: all".to_string(),
+            Self::Cut(cut) => format!("Cut: {}", cut.as_deref().unwrap_or("all")),
+            Self::Phase(phase) => format!(
+                "Phase: {}",
+                phase.map_or_else(|| "all".to_string(), |p| p.to_string())
+            ),
+            Self::Owner(owner) => format!("Owner: {}", owner.as_deref().unwrap_or("all")),
+            Self::Tag(tag) => format!("Tag: {}", tag.as_deref().unwrap_or("all")),
         }
     }
 }
@@ -454,6 +493,7 @@ pub(crate) struct Snapshot {
     pub(crate) reports: ReportWorkspace,
     pub(crate) work: WorkDiscoveryWorkspace,
     pub(crate) inbox: Result<aplan_app::CaptureWorkspace, String>,
+    pub(crate) completed: CompletedWorkspace,
 }
 
 fn onboarding_input(state: &Onboarding) -> aplan_app::InputIdentity {
@@ -565,6 +605,7 @@ impl Snapshot {
         let work = WorkDiscoveryWorkspace::from_context(context);
         let inbox = aplan_app::capture_workspace(context, &aplan_core::capture::SystemClock)
             .map_err(|error| error.to_string());
+        let completed = CompletedWorkspace::from_context(context);
         Self {
             build: build.clone(),
             overview: response.overview,
@@ -576,6 +617,7 @@ impl Snapshot {
             reports,
             work,
             inbox,
+            completed,
         }
     }
 
@@ -657,6 +699,7 @@ impl Snapshot {
             reports,
             work,
             inbox: Err("no plan is loaded during onboarding".to_string()),
+            completed: CompletedWorkspace::empty(input.sha256),
         }
     }
 
@@ -783,6 +826,7 @@ impl Snapshot {
             reports,
             work,
             inbox,
+            completed: CompletedWorkspace::empty(input.to_string()),
         }
     }
 }
@@ -1811,6 +1855,8 @@ define_actions! {
         FitGraph,
         FollowGraphBlocker,
         FollowGraphDependent,
+        CompletedPrevPage,
+        CompletedNextPage,
         PreviousGraphContinuation,
         NextGraphContinuation,
         OpenGraphContinuation,
@@ -1909,6 +1955,15 @@ pub(crate) struct Model {
     pub(crate) inbox_kind: Option<String>,
     pub(crate) inbox_label: Option<String>,
     pub(crate) selected_capture_id: Option<String>,
+    pub(crate) completed_request: CompletedRequest,
+    pub(crate) completed_response: Result<aplan_core::CompletedResponse, String>,
+    pub(crate) completed_overview_recent: Option<aplan_core::CompletedResponse>,
+    pub(crate) completed_page: usize,
+    completed_cursor_stack: Vec<Option<String>>,
+    pub(crate) completed_selected_id: Option<String>,
+    pub(crate) completed_query: String,
+    pub(crate) completed_query_cursor: usize,
+    pub(crate) completed_stale_notice: Option<String>,
     pub(crate) task_selector: Selector,
     pub(crate) task_sort: TaskSort,
     pub(crate) task_browser: TaskBrowserResponse,
@@ -2129,6 +2184,25 @@ impl Model {
         let report_projection = snapshot
             .reports
             .project(report_kind, &ReportRequest::default());
+        let completed_request = CompletedRequest {
+            limit: Some(25),
+            ..CompletedRequest::default()
+        };
+        let completed_response = snapshot
+            .completed
+            .query(&completed_request)
+            .map_err(|error| error.to_string());
+        let completed_overview_recent = snapshot
+            .completed
+            .query(&CompletedRequest {
+                limit: Some(5),
+                ..CompletedRequest::default()
+            })
+            .ok();
+        let completed_selected_id = completed_response
+            .as_ref()
+            .ok()
+            .and_then(|response| response.items.first().map(|row| row.id.clone()));
         Self {
             snapshot,
             onboarding,
@@ -2159,6 +2233,15 @@ impl Model {
             inbox_kind: None,
             inbox_label: None,
             selected_capture_id,
+            completed_request,
+            completed_response,
+            completed_overview_recent,
+            completed_page: 1,
+            completed_cursor_stack: Vec::new(),
+            completed_selected_id,
+            completed_query: String::new(),
+            completed_query_cursor: 0,
+            completed_stale_notice: None,
             task_selector: Selector::default(),
             task_sort: TaskSort::default(),
             task_browser,
@@ -2347,6 +2430,8 @@ impl Model {
             Action::FitGraph => self.fit_graph(),
             Action::FollowGraphBlocker => self.follow_graph_relation(true),
             Action::FollowGraphDependent => self.follow_graph_relation(false),
+            Action::CompletedPrevPage => self.step_completed_page(false),
+            Action::CompletedNextPage => self.step_completed_page(true),
             Action::PreviousGraphContinuation => self.move_graph_continuation(false),
             Action::NextGraphContinuation => self.move_graph_continuation(true),
             Action::OpenGraphContinuation => self.open_graph_continuation(),
@@ -2510,6 +2595,8 @@ impl Model {
             self.report_kind_query_cursor = if end { self.report_kind_query.len() } else { 0 };
         } else if self.modal == Some(Modal::Search) && self.route == Route::Inbox {
             self.inbox_query_cursor = if end { self.inbox_query.len() } else { 0 };
+        } else if self.modal == Some(Modal::Search) && self.route == Route::Completed {
+            self.completed_query_cursor = if end { self.completed_query.len() } else { 0 };
         } else if self.modal == Some(Modal::Search) {
             self.task_query_cursor = if end { self.task_query.len() } else { 0 };
         } else {
@@ -2528,6 +2615,14 @@ impl Model {
             self.inbox_kind = None;
             self.inbox_label = None;
             self.reconcile_inbox_selection();
+        } else if self.route == Route::Completed {
+            self.completed_request.selector = Selector::default();
+            self.completed_request.since = None;
+            self.completed_request.until = None;
+            self.completed_request.history = aplan_core::HistoryPolicy::Auto;
+            self.completed_request.limit = Some(25);
+            self.reset_completed_paging();
+            self.rebuild_completed(false);
         } else {
             self.task_selector = Selector::default();
             if self.route == Route::Graph {
@@ -2554,6 +2649,16 @@ impl Model {
             self.inbox_kind = None;
             self.inbox_label = None;
             self.reconcile_inbox_selection();
+        } else if self.route == Route::Completed {
+            self.completed_query.clear();
+            self.completed_query_cursor = 0;
+            self.completed_stale_notice = None;
+            self.completed_request = CompletedRequest {
+                limit: Some(25),
+                ..CompletedRequest::default()
+            };
+            self.reset_completed_paging();
+            self.rebuild_completed(false);
         } else {
             self.task_selector = Selector::default();
             self.task_scope = None;
@@ -2586,6 +2691,11 @@ impl Model {
         if self.route == Route::Diagnostics {
             self.diagnostic_group = self.diagnostic_group.next();
             self.dirty = true;
+        } else if self.route == Route::Completed {
+            self.completed_request.oldest_first = !self.completed_request.oldest_first;
+            self.completed_stale_notice = None;
+            self.reset_completed_paging();
+            self.rebuild_completed(false);
         } else if self.route != Route::Inbox {
             self.task_sort = self.task_sort.next();
             self.rebuild_task_browser();
@@ -2644,6 +2754,9 @@ impl Model {
         }
         if route == Route::Inbox {
             self.reconcile_inbox_selection();
+        }
+        if route == Route::Completed {
+            self.reconcile_completed_selection();
         }
         if previous_route == Route::Graph && route != Route::Graph {
             self.graph_relation_cursor = None;
@@ -2706,6 +2819,20 @@ impl Model {
             self.open_report_row();
         } else if self.focus == Focus::Detail {
             self.activate_inspector_item();
+        } else if self.route == Route::Completed && self.focus == Focus::Primary {
+            if let Some(id) = self.completed_selected_id.clone()
+                && self.snapshot.inspectors.iter().any(|show| show.id == id)
+            {
+                self.selected_id = Some(id);
+                self.selection_state = SelectionState::Present;
+                self.focus = Focus::Detail;
+                self.inspector_section = InspectorSection::Summary;
+                self.inspector_selected = 0;
+                self.inspector_scroll = None;
+                self.inspector_history.clear();
+                self.rebuild_work_projection();
+                self.dirty = true;
+            }
         } else if self.selected_task().is_some()
             || (self.route == Route::Graph && self.selected_inspector().is_some())
         {
@@ -3004,6 +3131,11 @@ impl Model {
                 &mut self.inbox_query_cursor,
                 standard,
             ),
+            (Some(Modal::Search), Route::Completed, _) => (
+                &mut self.completed_query,
+                &mut self.completed_query_cursor,
+                standard,
+            ),
             _ => (&mut self.task_query, &mut self.task_query_cursor, standard),
         }
     }
@@ -3057,6 +3189,8 @@ impl Model {
                 }
             } else if self.modal == Some(Modal::Search) && self.route == Route::Inbox {
                 self.reconcile_inbox_selection();
+            } else if self.modal == Some(Modal::Search) && self.route == Route::Completed {
+                self.reconcile_completed_selection();
             } else if self.modal == Some(Modal::Search) {
                 self.rebuild_task_browser();
             } else {
@@ -3097,6 +3231,12 @@ impl Model {
             )
         } else if self.modal == Some(Modal::Search) && self.route == Route::Inbox {
             text::move_cursor(&self.inbox_query, &mut self.inbox_query_cursor, forward)
+        } else if self.modal == Some(Modal::Search) && self.route == Route::Completed {
+            text::move_cursor(
+                &self.completed_query,
+                &mut self.completed_query_cursor,
+                forward,
+            )
         } else if self.modal == Some(Modal::Search) {
             text::move_cursor(&self.task_query, &mut self.task_query_cursor, forward)
         } else {
@@ -3136,6 +3276,35 @@ impl Model {
                 self.modal_selected = self
                     .modal_selected
                     .min(self.inbox_filter_choices().len().saturating_sub(1));
+            }
+        } else if self.route == Route::Completed {
+            if let Some(choice) = self.completed_filter_choices().get(index).cloned() {
+                match choice {
+                    CompletedFilterChoice::History(policy) => {
+                        self.completed_request.history = policy;
+                    }
+                    CompletedFilterChoice::Limit(limit) => {
+                        self.completed_request.limit = limit;
+                    }
+                    CompletedFilterChoice::Cut(cut) => {
+                        self.completed_request.selector.cuts = cut.into_iter().collect();
+                    }
+                    CompletedFilterChoice::Phase(phase) => {
+                        self.completed_request.selector.phases = phase.into_iter().collect();
+                    }
+                    CompletedFilterChoice::Owner(owner) => {
+                        self.completed_request.selector.owners = owner.into_iter().collect();
+                    }
+                    CompletedFilterChoice::Tag(tag) => {
+                        self.completed_request.selector.tags = tag.into_iter().collect();
+                    }
+                }
+                self.completed_stale_notice = None;
+                self.reset_completed_paging();
+                self.rebuild_completed(false);
+                self.modal_selected = self
+                    .modal_selected
+                    .min(self.completed_filter_choices().len().saturating_sub(1));
             }
         } else if let Some(filter) = self.filter_choices().get(index).cloned() {
             filter.toggle(&mut self.task_selector);
@@ -3324,6 +3493,10 @@ impl Model {
             self.inbox_query.clear();
             self.inbox_query_cursor = 0;
             self.reconcile_inbox_selection();
+        } else if self.route == Route::Completed {
+            self.completed_query.clear();
+            self.completed_query_cursor = 0;
+            self.reconcile_completed_selection();
         } else {
             self.task_query.clear();
             self.task_query_cursor = 0;
@@ -5224,6 +5397,287 @@ impl Model {
         self.dirty = true;
     }
 
+    fn reset_completed_paging(&mut self) {
+        self.completed_request.cursor = None;
+        self.completed_page = 1;
+        self.completed_cursor_stack.clear();
+    }
+
+    pub(crate) fn rebuild_completed(&mut self, from_refresh: bool) {
+        match self.snapshot.completed.query(&self.completed_request) {
+            Ok(response) => {
+                if !from_refresh {
+                    self.completed_stale_notice = None;
+                }
+                self.completed_response = Ok(response);
+            }
+            Err(CompletedError::StaleCursor { expected, actual }) => {
+                fn short(value: &str) -> &str {
+                    &value[..value.len().min(6)]
+                }
+                self.completed_stale_notice = Some(format!(
+                    "Continuation invalidated ({}->{}); page 1.",
+                    short(&expected),
+                    short(&actual)
+                ));
+                self.reset_completed_paging();
+                self.completed_response = self
+                    .snapshot
+                    .completed
+                    .query(&self.completed_request)
+                    .map_err(|error| error.to_string());
+            }
+            Err(error) => {
+                self.completed_response = Err(error.to_string());
+            }
+        }
+        self.reconcile_completed_selection();
+    }
+
+    pub(crate) fn completed_rows(&self) -> Vec<&aplan_core::CompletedTaskRow> {
+        let Ok(response) = self.completed_response.as_ref() else {
+            return Vec::new();
+        };
+        let needle = self.completed_query.trim().to_lowercase();
+        response
+            .items
+            .iter()
+            .filter(|row| {
+                needle.is_empty()
+                    || row.id.to_lowercase().contains(&needle)
+                    || row.title.to_lowercase().contains(&needle)
+                    || row
+                        .owner
+                        .as_deref()
+                        .is_some_and(|owner| owner.to_lowercase().contains(&needle))
+            })
+            .collect()
+    }
+
+    pub(crate) fn selected_completed_row(&self) -> Option<&aplan_core::CompletedTaskRow> {
+        let id = self.completed_selected_id.as_deref()?;
+        self.completed_rows().into_iter().find(|row| row.id == id)
+    }
+
+    pub(crate) fn selected_completed_visible_index(&self) -> Option<usize> {
+        let id = self.completed_selected_id.as_deref()?;
+        self.completed_rows()
+            .into_iter()
+            .position(|row| row.id == id)
+    }
+
+    pub(crate) fn reconcile_completed_selection(&mut self) {
+        let visible = self
+            .completed_rows()
+            .into_iter()
+            .map(|row| row.id.clone())
+            .collect::<Vec<_>>();
+        if self
+            .completed_selected_id
+            .as_ref()
+            .is_none_or(|selected| !visible.contains(selected))
+        {
+            self.completed_selected_id = visible.first().cloned();
+        }
+        if self.route == Route::Completed {
+            self.selected = self
+                .completed_selected_id
+                .as_ref()
+                .and_then(|selected| visible.iter().position(|id| id == selected))
+                .unwrap_or_default();
+            if let Some(id) = self.completed_selected_id.clone() {
+                self.selected_id = Some(id);
+                self.selection_state = if self.selected_inspector().is_some() {
+                    SelectionState::Present
+                } else {
+                    SelectionState::Removed
+                };
+                self.rebuild_work_projection();
+            }
+            self.inspector_scroll = None;
+        }
+        self.dirty = true;
+    }
+
+    pub(crate) fn step_completed_page(&mut self, forward: bool) {
+        if self.route != Route::Completed {
+            return;
+        }
+        if forward {
+            let next = self
+                .completed_response
+                .as_ref()
+                .ok()
+                .and_then(|response| response.next_cursor.clone());
+            let Some(cursor) = next else {
+                return;
+            };
+            self.completed_cursor_stack
+                .push(self.completed_request.cursor.clone());
+            self.completed_request.cursor = Some(cursor);
+            self.completed_page = self.completed_page.saturating_add(1);
+            self.completed_stale_notice = None;
+            self.rebuild_completed(false);
+        } else if let Some(previous) = self.completed_cursor_stack.pop() {
+            self.completed_request.cursor = previous;
+            self.completed_page = self.completed_page.saturating_sub(1).max(1);
+            self.completed_stale_notice = None;
+            self.rebuild_completed(false);
+        }
+    }
+
+    pub(crate) fn completed_can_next_page(&self) -> bool {
+        self.completed_response
+            .as_ref()
+            .is_ok_and(|response| response.truncated && response.next_cursor.is_some())
+    }
+
+    pub(crate) fn completed_can_prev_page(&self) -> bool {
+        !self.completed_cursor_stack.is_empty()
+    }
+
+    pub(crate) fn has_completed_narrowing(&self) -> bool {
+        !self.completed_query.is_empty()
+            || !self.completed_request.selector.is_empty()
+            || self.completed_request.since.is_some()
+            || self.completed_request.until.is_some()
+            || self.completed_request.oldest_first
+            || self.completed_request.history != aplan_core::HistoryPolicy::Auto
+            || self.completed_request.limit != Some(25)
+            || self.completed_request.cursor.is_some()
+            || self.completed_stale_notice.is_some()
+    }
+
+    pub(crate) fn completed_filter_choices(&self) -> Vec<CompletedFilterChoice> {
+        let mut choices = vec![
+            CompletedFilterChoice::History(aplan_core::HistoryPolicy::Auto),
+            CompletedFilterChoice::History(aplan_core::HistoryPolicy::Never),
+            CompletedFilterChoice::History(aplan_core::HistoryPolicy::Required),
+            CompletedFilterChoice::Limit(Some(10)),
+            CompletedFilterChoice::Limit(Some(25)),
+            CompletedFilterChoice::Limit(Some(50)),
+            CompletedFilterChoice::Limit(None),
+            CompletedFilterChoice::Cut(None),
+        ];
+        let mut cuts = BTreeSet::new();
+        let mut phases = BTreeSet::new();
+        let mut owners = BTreeSet::new();
+        let mut tags = BTreeSet::new();
+        for row in &self.snapshot.task_rows {
+            if let Some(cut) = &row.cut {
+                cuts.insert(cut.clone());
+            }
+            phases.insert(row.phase);
+            if let Some(owner) = &row.owner {
+                owners.insert(owner.clone());
+            }
+            for tag in &row.tags {
+                tags.insert(tag.clone());
+            }
+        }
+        choices.extend(
+            cuts.into_iter()
+                .map(|cut| CompletedFilterChoice::Cut(Some(cut))),
+        );
+        choices.push(CompletedFilterChoice::Phase(None));
+        choices.extend(
+            phases
+                .into_iter()
+                .map(|phase| CompletedFilterChoice::Phase(Some(phase))),
+        );
+        choices.push(CompletedFilterChoice::Owner(None));
+        choices.extend(
+            owners
+                .into_iter()
+                .map(|owner| CompletedFilterChoice::Owner(Some(owner))),
+        );
+        choices.push(CompletedFilterChoice::Tag(None));
+        choices.extend(
+            tags.into_iter()
+                .map(|tag| CompletedFilterChoice::Tag(Some(tag))),
+        );
+        choices
+    }
+
+    pub(crate) fn completed_filter_active(&self, choice: &CompletedFilterChoice) -> bool {
+        match choice {
+            CompletedFilterChoice::History(policy) => self.completed_request.history == *policy,
+            CompletedFilterChoice::Limit(limit) => self.completed_request.limit == *limit,
+            CompletedFilterChoice::Cut(None) => self.completed_request.selector.cuts.is_empty(),
+            CompletedFilterChoice::Cut(Some(cut)) => {
+                self.completed_request.selector.cuts.contains(cut)
+            }
+            CompletedFilterChoice::Phase(None) => self.completed_request.selector.phases.is_empty(),
+            CompletedFilterChoice::Phase(Some(phase)) => {
+                self.completed_request.selector.phases.contains(phase)
+            }
+            CompletedFilterChoice::Owner(None) => self.completed_request.selector.owners.is_empty(),
+            CompletedFilterChoice::Owner(Some(owner)) => {
+                self.completed_request.selector.owners.contains(owner)
+            }
+            CompletedFilterChoice::Tag(None) => self.completed_request.selector.tags.is_empty(),
+            CompletedFilterChoice::Tag(Some(tag)) => {
+                self.completed_request.selector.tags.contains(tag)
+            }
+        }
+    }
+
+    pub(crate) fn overview_recent_completions(&self) -> Option<&aplan_core::CompletedResponse> {
+        self.completed_overview_recent.as_ref()
+    }
+
+    fn move_completed_selection(&mut self, forward: bool) {
+        let ids = self
+            .completed_rows()
+            .into_iter()
+            .map(|row| row.id.clone())
+            .collect::<Vec<_>>();
+        if ids.is_empty() {
+            return;
+        }
+        let current = self
+            .completed_selected_id
+            .as_ref()
+            .and_then(|selected| ids.iter().position(|id| id == selected));
+        self.selected = if let Some(current) = current {
+            if forward {
+                (current + 1) % ids.len()
+            } else {
+                current.checked_sub(1).unwrap_or(ids.len() - 1)
+            }
+        } else if forward {
+            0
+        } else {
+            ids.len() - 1
+        };
+        let id = ids[self.selected].clone();
+        self.completed_selected_id = Some(id.clone());
+        self.selected_id = Some(id);
+        self.selection_state = if self.selected_inspector().is_some() {
+            SelectionState::Present
+        } else {
+            SelectionState::Removed
+        };
+        self.inspector_history.clear();
+        self.inspector_section = InspectorSection::Summary;
+        self.inspector_selected = 0;
+        self.inspector_scroll = None;
+        self.rebuild_work_projection();
+        self.dirty = true;
+    }
+
+    fn refresh_completed_for_snapshot(&mut self, identity_changed: bool) {
+        self.completed_overview_recent = self
+            .snapshot
+            .completed
+            .query(&CompletedRequest {
+                limit: Some(5),
+                ..CompletedRequest::default()
+            })
+            .ok();
+        self.rebuild_completed(identity_changed);
+    }
+
     pub(crate) fn selected_task(&self) -> Option<&TaskBrowserMatch> {
         let id = self.selected_id.as_deref()?;
         self.task_browser.rows.iter().find(|row| row.task.id == id)
@@ -5529,6 +5983,26 @@ impl Model {
             }
             return;
         }
+        if self.route == Route::Completed {
+            if let Some(id) = self.completed_rows().get(index).map(|row| row.id.clone()) {
+                self.selected = index;
+                self.completed_selected_id = Some(id.clone());
+                self.selected_id = Some(id);
+                self.selection_state = if self.selected_inspector().is_some() {
+                    SelectionState::Present
+                } else {
+                    SelectionState::Removed
+                };
+                self.focus = Focus::Primary;
+                self.inspector_history.clear();
+                self.inspector_section = InspectorSection::Summary;
+                self.inspector_selected = 0;
+                self.inspector_scroll = None;
+                self.rebuild_work_projection();
+                self.dirty = true;
+            }
+            return;
+        }
         if let Some(row) = self.task_browser.rows.get(index) {
             self.selected = index;
             self.selected_id = Some(row.task.id.clone());
@@ -5560,6 +6034,7 @@ impl Model {
         self.update(action)
     }
 
+    #[allow(clippy::too_many_lines)] // Single route dispatch keeps primary selection movement auditable.
     fn move_selection(&mut self, forward: bool) {
         if self.route == Route::Reports {
             self.move_report_selection(forward);
@@ -5607,6 +6082,10 @@ impl Model {
             } else {
                 SpatialDirection::Up
             });
+            return;
+        }
+        if self.route == Route::Completed {
+            self.move_completed_selection(forward);
             return;
         }
         if self.route == Route::Inbox {
@@ -6803,6 +7282,7 @@ impl Model {
         self.selected_capture_id = selected_capture_id;
         self.refresh_visible_projection(identity_changed);
         self.reconcile_inbox_selection();
+        self.refresh_completed_for_snapshot(identity_changed);
         self.reset_inspector_for_snapshot();
         if identity_changed {
             self.generation = self.generation.saturating_add(1);
@@ -6868,6 +7348,7 @@ impl Model {
             Route::Reports => self.rebuild_report(),
             Route::Diagnostics => self.rebuild_diagnostics(),
             Route::Inbox => self.reconcile_inbox_selection(),
+            Route::Completed => self.rebuild_completed(identity_changed),
             Route::Overview => {}
         }
         if self.route != Route::Tasks {
@@ -6876,6 +7357,8 @@ impl Model {
         if self.modal == Some(Modal::Filters) {
             let count = if self.route == Route::Inbox {
                 self.inbox_filter_choices().len()
+            } else if self.route == Route::Completed {
+                self.completed_filter_choices().len()
             } else if self.route == Route::Diagnostics {
                 self.diagnostic_filter_choices().len()
             } else {
@@ -8282,6 +8765,8 @@ mod tests {
             Action::FitGraph,
             Action::FollowGraphBlocker,
             Action::FollowGraphDependent,
+            Action::CompletedPrevPage,
+            Action::CompletedNextPage,
             Action::PreviousGraphContinuation,
             Action::NextGraphContinuation,
             Action::OpenGraphContinuation,

@@ -2422,3 +2422,31 @@ The release-quality floor is:
   navigation-benefit and useful-card gate;
 - whether custom keymaps and themes belong in the first public release or follow the built-in
   accessible choices.
+
+## Completion history and recent work (`A2-112`)
+
+The `Completed` destination (`7`) consumes the shared `aplan_app::CompletedWorkspace` /
+`completed_tasks` operation directly without parsing CLI output or duplicating ordering, filtering,
+or continuation logic:
+
+- **Deterministic non-causal ordering**: rows preserve the shared newest-first (or toggled
+  oldest-first via `s`) ordering with `id ASC` tie-breaks and unknown instants sorted after known
+  instants, accompanied by an explicit visible note whenever ties or unknown times appear.
+- **Inspectable controls and provenance**: structured filters (`f`) expose history policy (`auto`,
+  `never`, `required`), page limit (`10`, `25`, `50`, `all`), cut, phase, owner and tag; search
+  (`/`) narrows the visible page; `[` / `]` step pages using snapshot-bound cursors; non-color
+  badges (`[REC]`, `[INF]`, `[UNK]`) and absolute UTC timestamps (alongside optional relative age)
+  remain visible in monochrome and ASCII modes; incomplete history (`shallow`, `bounded`,
+  `skipped`, `unobservable`, `no-git`) is surfaced explicitly.
+- **Inspector round-trip and stale continuations**: selecting a row (`Enter`) opens the task
+  inspector with its completion provenance header, and `Esc` returns to `Completed` with the exact
+  request preserved. When a refreshed snapshot changes `input_identity` while a continuation is
+  active, the stale cursor is visibly invalidated and restarted from page 1 rather than duplicating
+  or omitting rows.
+- **Responsive Overview recent completions**: `RECENT COMPLETIONS` appears below the primary
+  Overview metrics only when the terminal has useful horizontal and vertical room (`width >= 50`
+  and at least 4 rows below the metrics) and completed work exists; narrow or short terminals omit
+  it completely.
+- **Closed command/option census**: `completed` carries a native disposition in
+  `aplan_tui::discovery::COMMANDS`, with explicit CLI-only boundaries for `completed --at` and
+  `completed --cursor`.

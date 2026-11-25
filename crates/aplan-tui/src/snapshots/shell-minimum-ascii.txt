@@ -1,5 +1,5 @@
  aplan x ERROR  2 tasks  1 error >  repo/very-l>
-[1 O] [2 T] [3 D] [4 G] [5 R] [6 I]
+[1O] [2T] [3D] [4G] [5R] [6I] [7C]
 +> Overview - where attention goes next <------+
 |> CUTS 0 | DONE 0/0 | [........]              |
 |  EFFORT 0.0/2.0d | complete estimates        |
