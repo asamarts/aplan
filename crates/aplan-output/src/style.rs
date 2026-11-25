@@ -131,6 +131,18 @@ pub fn capture_state(state: &str) -> Style {
     }
 }
 
+/// Unstyled plain text.
+pub const PLAIN: Style = Style::new();
+
+/// Italicized emphasis in rendered Markdown prose.
+pub const EMPHASIS: Style = Style::new().italic();
+
+/// Strikethrough span in rendered Markdown prose.
+pub const STRIKETHROUGH: Style = Style::new().strikethrough();
+
+/// Underlined link label in rendered Markdown prose.
+pub const LINK: Style = Style::new().underline();
+
 /// The style for a diagnostic severity, by the word it renders as.
 #[must_use]
 pub fn severity(severity: &str) -> Style {

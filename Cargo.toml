@@ -81,6 +81,9 @@ anstream = "1"
 anstyle = "1"
 unicode-width = "0.2"
 unicode-segmentation = "1.13"
+# Pure-Rust CommonMark/GFM pull parser behind aplan-output's private semantic
+# Markdown document boundary (A2-113, ADR-0075). Keep default features off.
+pulldown-cmark = { version = "0.13", default-features = false }
 terminal_size = "0.4"
 ratatui = { version = "0.30.2", default-features = false, features = ["crossterm"] }
 # Crossterm's default Unix mio source can consume a simultaneous SIGWINCH

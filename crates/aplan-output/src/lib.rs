@@ -40,6 +40,7 @@ use aplan_core::{
     Rule, RuleExplanation, Severity, Show, Status, Summary, Task, Verdict,
 };
 
+pub mod markdown;
 pub mod progress;
 pub mod write;
 
