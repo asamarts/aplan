@@ -256,12 +256,14 @@ cannot inherit pretty or raw behavior merely because its author overlooked the q
 ### Dependency decision
 
 The initial recommendation is `pulldown-cmark` with default features disabled and only required
-GFM options enabled. Its event iterator separates parsing from rendering, it is pure Rust by
-default, and its documented Rust requirement is below aplan's Rust 1.88 floor. aplan should build
-the terminal layout and styles over that parser using its existing `anstyle`, `unicode-width`,
-folding, terminal-width and sanitization machinery. Display width alone does not define grapheme
-boundaries, so the spike must measure a compatible segmentation/line-breaking dependency rather
-than claim grapheme-safe wrapping from `unicode-width`.
+GFM options enabled. Isolated measurements (`A2-113`, recorded in
+`docs/design/terminal-markdown-evaluation.md` and adopted by `ADR-0075`) confirmed this choice:
+`pulldown-cmark` (`0.13.6`, MSRV `1.71.1`, MIT) resolves in 4 crates (`+391 KiB` stripped binary
+delta, `144,258 docs/s`, `14.0 MiB` peak RSS) with zero terminal crates, while reusing
+`aplan-output` and `aplan-tui`'s existing `unicode-width` and `unicode-segmentation` dependencies
+for grapheme-safe wrapping (with `unicode-linebreak` pre-approved if UAX #14 breaks are needed).
+`termimad`, `pulldown-cmark-mdcat`, `comrak` (fallback only), and `syntect` (`+2.54 MiB`, 49
+crates) were measured and declined for the baseline.
 
 | Candidate | Strength | Mismatch or risk | Disposition before implementation |
 |---|---|---|---|
