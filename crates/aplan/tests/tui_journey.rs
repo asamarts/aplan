@@ -2453,3 +2453,72 @@ fn invalid_configuration_guides_init_about_and_retry_in_a_real_terminal() -> ter
     assert_terminal_restored(&terminal.screen());
     Ok(())
 }
+
+#[test]
+fn completed_history_pty_journey_covers_overview_completed_inspector_and_narrow()
+-> termlens::Result<()> {
+    let fixture = IdentifiedPlanFixture::new();
+    let tasks = fixture.plan_root.join("tasks");
+    std::fs::write(
+        tasks.join("T-002.md"),
+        "---\nid: T-002\ntitle: Recorded completion\nphase: 1\nstatus: done\neffort_days: 1.0\n\
+         paths: [src/**]\ntags: [cross-cutting]\nclosed_at: 2026-10-12T08:00:00Z\n\
+         closed_at_source: local\n---\n",
+    )
+    .expect("recorded done task");
+    std::fs::write(
+        tasks.join("T-003.md"),
+        "---\nid: T-003\ntitle: Legacy completion\nphase: 1\nstatus: done\neffort_days: 1.0\n\
+         paths: [src/**]\ntags: [cross-cutting]\n---\n",
+    )
+    .expect("legacy done task");
+
+    let mut terminal = common::tui_terminal(
+        fixture.directory(),
+        100,
+        28,
+        &["--root", "plan", "tui", "--ascii"],
+    )?;
+
+    // Wide Overview shows RECENT COMPLETIONS with non-color cues and absolute UTC time.
+    terminal.wait_until_for(
+        |screen| {
+            screen.contains("RECENT COMPLETIONS")
+                && screen.contains("[REC] 2026-10-12T08:00:00Z")
+                && screen.contains("T-002")
+        },
+        Duration::from_secs(10),
+    )?;
+
+    // Press '7' to open the Completed destination.
+    terminal.send(Key::Char('7'))?;
+    terminal.wait_until_for(
+        |screen| {
+            screen.contains("COMPLETED HISTORY")
+                && screen.contains("[REC] 2026-10-12T08:00:00Z")
+                && screen.contains("T-002")
+        },
+        Duration::from_secs(10),
+    )?;
+
+    // Toggle oldest-first ('s'), open inspector (Enter), return (Esc) preserving oldest-first.
+    terminal.send(Key::Char('s'))?;
+    terminal.wait_until(|screen| screen.contains("order: oldest-first"))?;
+    terminal.send(Key::Enter)?;
+    terminal.wait_until(|screen| screen.contains("Completed: [REC]"))?;
+    terminal.send(Key::Esc)?;
+    terminal.wait_until(|screen| {
+        screen.contains("COMPLETED HISTORY") && screen.contains("order: oldest-first")
+    })?;
+
+    // Resize to narrow and return to Overview: RECENT COMPLETIONS must be omitted.
+    terminal.resize(52, 15)?;
+    terminal.send(Key::Char('1'))?;
+    terminal
+        .wait_until(|screen| screen.contains("CUTS") && !screen.contains("RECENT COMPLETIONS"))?;
+
+    terminal.send(Key::Char('q'))?;
+    assert!(terminal.wait_exit()?.success());
+    assert_terminal_restored(&terminal.screen());
+    Ok(())
+}

@@ -663,11 +663,13 @@ fn show_returns_what_the_command_prints() -> Result<(), String> {
     let from_mcp = tools::show(&dir.path().join("aplan"), "A-1", &policy(dir.path(), false))
         .map_err(|e| format!("the tool failed: {e}"))?;
 
-    // The tool always resolves and the command was asked not to, which is the one
-    // field they are allowed to disagree about: compare the rest.
+    // The tool always resolves and the command was asked not to, and each
+    // surface reads wall-clock `claim_observed_at_epoch_seconds` independently:
+    // verify both carry an observation instant and compare the rest.
     let strip = |mut v: serde_json::Value| {
         if let Some(o) = v.as_object_mut() {
             o.remove("resolved");
+            o.remove("claim_observed_at_epoch_seconds");
         }
         v
     };
@@ -1039,6 +1041,30 @@ fn close_fixture_with_stale_stamp(dir: &Path) {
     std::fs::write(path, task).expect("stale live stamp");
 }
 
+fn normalize_closed_at_for_parity(text: &str, surface: &str) -> Result<String, String> {
+    let mut saw_closed_at = false;
+    let mut out = Vec::new();
+    for line in text.lines() {
+        if let Some(value) = line.strip_prefix("closed_at: ") {
+            if aplan_core::parse_canonical_closed_at(value).is_none() {
+                return Err(format!(
+                    "{surface} close wrote non-canonical closed_at: `{value}`"
+                ));
+            }
+            saw_closed_at = true;
+            out.push("closed_at: <CANONICAL_UTC>");
+        } else {
+            out.push(line);
+        }
+    }
+    if !saw_closed_at {
+        return Err(format!(
+            "{surface} close did not record canonical closed_at: {text:?}"
+        ));
+    }
+    Ok(out.join("\n"))
+}
+
 fn close_leaves_the_same_file() -> Result<(), String> {
     // `A1-100`. What `close` writes is what every later run reads, so the file
     // afterwards is the whole contract.
@@ -1142,7 +1168,13 @@ fn close_leaves_the_same_file() -> Result<(), String> {
             "close did not replace the live fingerprint block: {from_cli:?}"
         ));
     }
-    if from_cli == from_mcp {
+    // Both surfaces stamp `closed_at` from independent wall-clock reads (A2-109),
+    // so two consecutive calls can straddle a 1-second boundary. Verify both
+    // wrote a valid canonical UTC `closed_at` and `closed_at_source: local`,
+    // then normalize only the timestamp value before comparing byte-for-byte.
+    let norm_cli = normalize_closed_at_for_parity(&from_cli, "CLI")?;
+    let norm_mcp = normalize_closed_at_for_parity(&from_mcp, "MCP")?;
+    if norm_cli == norm_mcp {
         return Ok(());
     }
     Err(format!(

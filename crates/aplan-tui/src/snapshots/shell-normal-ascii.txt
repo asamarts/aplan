@@ -2,7 +2,7 @@
 | aplan x ERROR  2 tasks  1 error  2 warnings  repo/very-long-root                                 |
 +--------------------------------------------------------------------------------------------------+
 + Destinations ------------------------------------------------------------------------------------+
-|[1 Overview] [2 Tasks] [3 Diagnostics] [4 Graph] [5 Reports] [6 Inbox]                            |
+|[1 Overview] [2 Tasks] [3 Diagnostics] [4 Graph] [5 Reports] [6 Inbox] [7 Completed]              |
 +--------------------------------------------------------------------------------------------------+
 +> Overview - where attention goes next <-------------++ Snapshot identity ------------------------+
 |> CUTS 0 | DONE 0/0 | [........]                     ||plan: repo/very-long-root sha:plan-identit |
