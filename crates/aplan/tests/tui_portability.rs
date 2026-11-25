@@ -391,3 +391,84 @@ fn portable_cli_progress_interrupt_cleans_its_terminal_row() -> termlens::Result
     );
     Ok(())
 }
+
+/// Portable real-PTY journey for `A2-120`: opening a task's `Body` section in
+/// the TUI inspector renders semantic Markdown (code blocks, tables, sanitized
+/// hostile text, raw-body CLI hint), scrolls with PageDown/PageUp, reflows on
+/// terminal resize, and exits cleanly with terminal state restored.
+#[test]
+fn portable_tui_markdown_inspector_renders_scrolls_and_reflows_on_resize() -> termlens::Result<()> {
+    use std::fmt::Write as _;
+
+    let fixture = Fixture::new();
+    let mut body = String::from(
+        "---\n\
+         id: T-001\n\
+         title: Inspect Markdown body\n\
+         phase: 1\n\
+         status: todo\n\
+         effort_days: 1.0\n\
+         blocked_by: []\n\
+         paths: [src/**]\n\
+         tags: [cross-cutting]\n\
+         ---\n\n\
+         ## Why\n\n\
+         Body with **bold** and `code` and [link](https://example.invalid/doc).\n\n\
+         ```rust\n\
+         let rendered = true;\n\
+         ```\n\n\
+         Hostile \x1b[31mred\x1b[0m <script>inert</script>\n\n",
+    );
+    for i in 0..30 {
+        let _ = writeln!(body, "Paragraph number {i} for scrolling.\n");
+    }
+    std::fs::write(fixture.task(), body).expect("write markdown task");
+
+    let mut terminal = terminal(&fixture, [("NO_COLOR".to_string(), "1".to_string())])?;
+    terminal.wait_until_for(
+        |screen| screen.contains("Overview") && screen.contains("Idle") && !screen.cursor_visible(),
+        TIMEOUT,
+    )?;
+    assert_owned(&terminal.screen());
+
+    // Switch to Tasks route (key '2'), focus Detail (Tab twice from Nav or l/Tab),
+    // and advance inspector section to Body (Summary -> Work -> Body via ']').
+    terminal.send(Key::Char('2'))?;
+    terminal.wait_until_for(|screen| screen.contains("T-001 / Summary"), TIMEOUT)?;
+    terminal.send(Key::Tab)?;
+    terminal.wait_until_for(|screen| screen.contains("> T-001 / Summary <"), TIMEOUT)?;
+    terminal.send(Key::Char(']'))?;
+    terminal.send(Key::Char(']'))?;
+    terminal.wait_until_for(
+        |screen| screen.contains("T-001 / Body") && screen.contains("[code: rust]"),
+        TIMEOUT,
+    )?;
+
+    let body_screen = terminal.screen();
+    assert!(
+        body_screen.contains("aplan show --raw-body T-001"),
+        "Body inspector must advertise raw CLI route:\n{}",
+        body_screen.text()
+    );
+    assert!(
+        !body_screen.text().contains('\x1b'),
+        "sanitized TUI cells must never contain raw ESC"
+    );
+
+    // Scroll down then back up.
+    terminal.send(Key::PageDown)?;
+    terminal.send(Key::PageDown)?;
+    terminal.wait_until_for(|screen| screen.contains("Paragraph number"), TIMEOUT)?;
+
+    // Resize narrower and verify clean reflow without panic or corruption.
+    terminal.resize(72, 24)?;
+    terminal.wait_until_for(
+        |screen| screen.cols() == 72 && screen.contains("T-001 / Body"),
+        TIMEOUT,
+    )?;
+
+    terminal.send(Key::Char('q'))?;
+    assert!(terminal.wait_exit()?.success());
+    assert_restored(&terminal.screen());
+    Ok(())
+}

@@ -15,7 +15,7 @@
 | hardening | todo | 0/15 | 15 | 0 | 14.8d | 0.5 (0.5 left) | 3.0d |
 | qualification | todo | 0/1 | 0 | 1 | 8.0d | 0.3 (0.3 left) | 8.0d |
 | tui-quality | todo | 0/2 | 1 | 1 | 4.0d | 0.1 (0.1 left) | 4.0d |
-| workflow | todo | 5/17 | 7 | 5 | 50.0d | 1.9 (1.3 left) | 17.5d |
+| workflow | todo | 6/17 | 6 | 5 | 50.0d | 1.9 (1.2 left) | 17.5d |
 
 ## v0.7 Security, safe parsing and gates that tell the truth
 
@@ -229,7 +229,7 @@
 | A2-112 | Add completion history and recent work to the TUI | todo | A2-111 | - |
 | A2-113 | Measure and select the terminal Markdown dependency boundary | done | - | commit:806ce69 |
 | A2-114 | Build a safe Markdown semantic document and terminal renderer | done | A2-113 | commit:2bde58c, test:markdown::tests::every_semantic_member_parses_lays_out_and_renders_with_color_invariance, test:markdown::tests::adversarial_escapes_bidi_html_deep_nesting_and_oversized_inputs_are_safe |
-| A2-115 | Pretty-render CLI Markdown surfaces without changing artifacts | todo | A2-114 | - |
+| A2-115 | Pretty-render CLI Markdown surfaces without changing artifacts | done | A2-114 | commit:3509127, test:markdown_cli::show_body_renders_markdown_and_raw_body_preserves_exact_bytes, test:markdown_cli::cli_markdown_output_site_census_drives_every_assigned_disposition |
 | A2-116 | Expose the capture workflow through MCP and agent guidance | todo | A2-118, A2-122 | - |
 | A2-117 | Audit and release the workflow ergonomics cut | todo | A2-112, A2-115, A2-116, A2-119, A2-120, M-tui-quality | - |
 | A2-118 | Add versioned structured MCP outputs and bounded resources | todo | - | - |

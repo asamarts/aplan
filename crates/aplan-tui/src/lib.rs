@@ -12,6 +12,7 @@ pub mod form;
 mod graph_navigation;
 mod graph_widget;
 pub mod inbox;
+mod markdown;
 mod model;
 pub mod mutations;
 #[cfg(test)]
