@@ -272,7 +272,8 @@ fn fixture(dir: &Path, plan: Plan) {
         (
             "D-1",
             "---\nid: D-1\ntitle: in cut a, kim, cli, todo\nphase: 0\nstatus: todo\nowner: kim\n\
-             effort_days: 1\nblocked_by: [D-5]\npaths:\n- src/one/**\ntags: [cli]\n---\n\nbody\n",
+             effort_days: 1\nblocked_by: [D-5]\npaths:\n- src/one/**\ntags: [cli]\n---\n\n\
+             Body prose that wraps across narrow terminal widths for show.\n\n```rust\nlet x = 1;\n```\n",
         ),
         (
             "D-2",
@@ -1516,6 +1517,9 @@ const PROBES: &[Probe] = &[
     p("roadmap", "--regenerate-with", Some("x"), &[]),
     p("show", "--format", Some("json"), &["D-1"]),
     p("show", "--body", None, &["D-1"]),
+    p("show", "--raw-body", None, &["D-1"]),
+    p("show", "--width", Some("24"), &["D-1", "--body"]),
+    p("show", "--ascii", None, &["D-1", "--body"]),
     p("show", "--repo", Some("{elsewhere}"), &["D-4"]),
     p("show", "--no-resolve", None, &["D-1"]),
     p("show", "--refresh-evidence", None, &["D-12"]),

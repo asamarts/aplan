@@ -6,6 +6,20 @@ to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+### Added
+
+- **Pretty terminal Markdown rendering for `show --body` with explicit `--raw-body` route
+  (`A2-114`, `A2-115`, `ADR-0075`, `--require show.renders_markdown_body`)**. Human
+  `aplan show ID --body` now renders task Markdown through `aplan_output::markdown` with bold
+  headings, aligned tables (switching to labelled vertical cards at narrow widths), fenced-code
+  language labels, grapheme-safe wrapping (`--width`, `--ascii`), and control/bidi sanitization,
+  while preserving color invariance (`--color always` stripped equals `--color never`). Use
+  `aplan show ID --raw-body` to emit only the stored body bytes (appending one trailing newline
+  if non-empty and not already newline-terminated; 0 bytes if empty); JSON (`--body --format json`)
+  and Markdown artifact commands (`roadmap --format markdown`, `deprecations --format markdown`,
+  `export-agents-md`, `export --format checklist`) remain byte-compatible. Built-in pager spawning
+  is explicitly declined; pipe to `less -R` or use `aplan tui`.
+
 ### Fixed
 
 - **Reconcile task closure with ephemeral claim lifecycle (`A2-152`, ADR-0073,

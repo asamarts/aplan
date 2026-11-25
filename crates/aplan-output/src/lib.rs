@@ -2706,6 +2706,22 @@ fn show_findings(s: &mut String, show: &Show) {
 }
 
 pub fn render_show(show: &Show) -> String {
+    let width = match fold::out_width() {
+        usize::MAX => 80,
+        other => other,
+    };
+    let caps = markdown::RenderCapabilities {
+        width,
+        color: true,
+        ..markdown::RenderCapabilities::default()
+    };
+    render_show_with_capabilities(show, &caps)
+}
+
+/// Render a [`Show`] view using explicit terminal Markdown capabilities
+/// (`A2-115`).
+#[must_use]
+pub fn render_show_with_capabilities(show: &Show, caps: &markdown::RenderCapabilities) -> String {
     let mut s = String::new();
     let _ = writeln!(
         s,
@@ -2784,7 +2800,11 @@ pub fn render_show(show: &Show) -> String {
     show_findings(&mut s, show);
 
     if let Some(body) = &show.body {
-        let _ = writeln!(s, "\n{}", body.trim_end());
+        let trimmed = body.trim_end();
+        if !trimmed.is_empty() {
+            let rendered = markdown::render_markdown_to_terminal(trimmed, caps);
+            let _ = writeln!(s, "\n{rendered}");
+        }
     }
     s
 }

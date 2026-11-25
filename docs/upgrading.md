@@ -56,6 +56,18 @@ binary accepts.
 So: stage the new binary, confirm `aplan check` still passes on your existing config, and only then
 add the new keys.
 
+## `aplan show --body` renders Markdown in human output (`A2-115`)
+
+Human `aplan show ID --body` now pretty-renders task Markdown (headings, aligned tables, fenced
+code labels, sanitized control characters) instead of printing raw body bytes. Scripts or tools
+that want exact stored task body bytes should switch to `aplan show ID --raw-body` (which writes
+only the stored body bytes, appending one trailing newline if non-empty and not already
+newline-terminated, and refuses `--body`, `--width`, `--ascii`, and `--format json`) or
+`aplan show ID --body --format json`. Markdown artifact commands (`roadmap --format markdown`,
+`deprecations --format markdown`, `export-agents-md`, `export --format checklist`) are unchanged.
+Built-in pager spawning is intentionally declined; pipe `--color always` into `less -R` or use
+`aplan tui`. Check capability availability with `aplan facts --require show.renders_markdown_body`.
+
 **If you need an answer before you can upgrade**, `aplan --no-config ready` runs a read-only query
 and says what it did not apply, and `aplan --config ./older.yml ready` reads a file you name instead
 of discovering yours. Neither is a fix and neither belongs in a gate -- the first skips the policy your

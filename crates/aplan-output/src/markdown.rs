@@ -1468,6 +1468,72 @@ pub fn render_terminal(doc: &MarkdownDocument, caps: &RenderCapabilities) -> Str
     out
 }
 
+/// How one CLI Markdown-bearing output site treats Markdown content (`A2-115`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub enum MarkdownOutputDisposition {
+    /// Human terminal rendering through the semantic Markdown renderer.
+    Rendered,
+    /// Exact unrendered source bytes or structured JSON body string.
+    RawSource,
+    /// Byte-exact generated Markdown artifact (never pretty-rendered).
+    Artifact,
+}
+
+/// One CLI command/mode that emits Markdown-bearing content (`A2-115`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct MarkdownOutputSite {
+    pub command: &'static str,
+    pub surface: &'static str,
+    pub disposition: MarkdownOutputDisposition,
+}
+
+/// Closed executable census of CLI Markdown-bearing output sites (`A2-115`).
+///
+/// Integration tests drive every entry to prove rendered, raw-source, and
+/// artifact boundaries never drift.
+pub const CLI_MARKDOWN_SITES: &[MarkdownOutputSite] = &[
+    MarkdownOutputSite {
+        command: "show",
+        surface: "show --body (human)",
+        disposition: MarkdownOutputDisposition::Rendered,
+    },
+    MarkdownOutputSite {
+        command: "show",
+        surface: "show --raw-body",
+        disposition: MarkdownOutputDisposition::RawSource,
+    },
+    MarkdownOutputSite {
+        command: "show",
+        surface: "show --body --format json",
+        disposition: MarkdownOutputDisposition::RawSource,
+    },
+    MarkdownOutputSite {
+        command: "inbox",
+        surface: "inbox show",
+        disposition: MarkdownOutputDisposition::RawSource,
+    },
+    MarkdownOutputSite {
+        command: "roadmap",
+        surface: "roadmap --format markdown",
+        disposition: MarkdownOutputDisposition::Artifact,
+    },
+    MarkdownOutputSite {
+        command: "deprecations",
+        surface: "deprecations --format markdown",
+        disposition: MarkdownOutputDisposition::Artifact,
+    },
+    MarkdownOutputSite {
+        command: "export-agents-md",
+        surface: "export-agents-md",
+        disposition: MarkdownOutputDisposition::Artifact,
+    },
+    MarkdownOutputSite {
+        command: "export",
+        surface: "export --format checklist",
+        disposition: MarkdownOutputDisposition::Artifact,
+    },
+];
+
 /// Convenience helper: parse and render Markdown directly to terminal text.
 #[must_use]
 pub fn render_markdown_to_terminal(input: &str, caps: &RenderCapabilities) -> String {

@@ -481,7 +481,8 @@ fn option_disposition(command: &str, id: &str) -> OptionDisposition {
             // workbench renders receipt provenance in retained typed results,
             // but does not ask a terminal user to select or authenticate that
             // external manifest.
-            ("check", "traces_root" | "range" | "fail_fast" | "repo")
+            ("show", "raw_body")
+            | ("check", "traces_root" | "range" | "fail_fast" | "repo")
             | (
                 "verify",
                 "repo"
@@ -505,6 +506,7 @@ fn option_disposition(command: &str, id: &str) -> OptionDisposition {
 
 fn cli_only_boundary(command: &str, id: &str) -> Option<&'static str> {
     match (command, id) {
+        ("show", "raw_body") => Some("show --raw-body"),
         ("check", "traces_root") => Some("check --traces-root"),
         ("check", "range") => Some("check --range"),
         ("check", "fail_fast") => Some("check --fail-fast"),

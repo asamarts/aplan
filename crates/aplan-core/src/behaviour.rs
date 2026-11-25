@@ -60,6 +60,18 @@ pub struct Behaviour {
 
 /// Every named behaviour this build has.
 pub const ALL: &[Behaviour] = &[
+    // `A2-115` (`ADR-0075`). Existing `show --body` printed raw unstyled task
+    // body bytes in human format. Rendering task Markdown through the semantic
+    // terminal renderer (with explicit `--raw-body` for verbatim source bytes)
+    // changes what `show --body` emits while keeping JSON and Markdown
+    // artifacts byte-compatible.
+    Behaviour {
+        name: "show.renders_markdown_body",
+        what: "human `show --body` pretty-renders task Markdown with semantic styling, aligned \
+               tables and sanitization, `--raw-body` writes verbatim stored body bytes under the \
+               final-newline rule, and JSON plus Markdown artifact commands stay unchanged",
+        proof: &["markdown_cli::show_body_renders_markdown_and_raw_body_preserves_exact_bytes"],
+    },
     // `A2-109` (`ADR-0074`). Existing `close` wrote `status: done`, evidence,
     // stamps and any release version without a completion timestamp. Recording
     // canonical UTC `closed_at` atomically on every successful close changes

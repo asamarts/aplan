@@ -225,6 +225,12 @@ const TEST_BOUNDARIES: &[CommandBoundary] = &[CommandBoundary {
     reason: "receipt production executes one configured provider and binds external CI provenance, so it remains an explicit automation boundary rather than an interactive catalogue search",
     example: "aplan test receipt --help",
 }];
+const SHOW_BOUNDARIES: &[CommandBoundary] = &[CommandBoundary {
+    name: "show --raw-body",
+    aliases: &["show --raw-body", "raw body", "raw task body"],
+    reason: "writing verbatim raw Markdown body bytes to stdout is a pipe and script workflow rather than an interactive inspector view",
+    example: "aplan show --raw-body T-001",
+}];
 const FACTS_BOUNDARIES: &[CommandBoundary] = &[CommandBoundary {
     name: "facts --require",
     aliases: &[
@@ -285,7 +291,12 @@ pub const COMMANDS: &[CommandDiscovery] = &[
         mutations: &[],
         boundaries: &[],
     },
-    native("show", "Inspect one task", &[NativeSurface::Inspector]),
+    native_with_boundaries(
+        "show",
+        "Inspect one task",
+        &[NativeSurface::Inspector],
+        SHOW_BOUNDARIES,
+    ),
     native(
         "explain",
         "Explain a rule or vocabulary term",
