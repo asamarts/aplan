@@ -16,27 +16,25 @@ use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
 
 use rmcp::model::{
-    CallToolRequestParams, CallToolResponse, CallToolResult, ContentBlock, Implementation,
-    InitializeResult, ListToolsResult, PaginatedRequestParams, ServerCapabilities, Tool,
+    CacheScope, CallToolRequestParams, CallToolResponse, CallToolResult, ContentBlock,
+    Implementation, InitializeResult, ListResourceTemplatesResult, ListResourcesResult,
+    ListToolsResult, MetaObject, PaginatedRequestParams, ProtocolVersion,
+    ReadResourceRequestParams, ReadResourceResponse, ReadResourceResult, ResourceContents,
+    ServerCapabilities, Tool,
 };
 use rmcp::service::RequestContext;
 use rmcp::{ErrorData as McpError, RoleServer, ServerHandler};
+use sha2::{Digest as _, Sha256};
 
+use crate::contract::{
+    self, ContextProvenance, InputIdentity, MAX_TOOL_RESULT_BYTES, MCP_CONTRACT_VERSION,
+    ReadyCollectionItem, ToolEffect,
+};
+use crate::resources::{self, ParsedResourceUri, ResourceError};
 use crate::tools::{self, TOOLS};
 
 type StoreKey = (PathBuf, Option<PathBuf>);
 type PlanStores = Arc<Mutex<std::collections::BTreeMap<StoreKey, aplan_app::PlanStore>>>;
-
-#[derive(Debug, serde::Serialize)]
-struct ContextProvenance {
-    selection: aplan_app::ExplicitRootKind,
-    /// Paths are relative to the selected plan's repository. A configuration
-    /// outside it is named as such rather than exposing an unrelated host path.
-    repository_root: &'static str,
-    plan_root: String,
-    configuration: Option<String>,
-    resolved_symlink: bool,
-}
 
 struct CallContext {
     root: PathBuf,
@@ -55,6 +53,22 @@ impl CallContext {
             None => value,
         }
     }
+}
+
+/// Complete structured + legacy outcome of one MCP tool invocation.
+#[derive(Debug, Clone)]
+pub struct StructuredDispatchOutcome {
+    /// Whether this outcome represents a tool-level refusal (`isError: true`).
+    pub is_error: bool,
+    /// Object-enveloped `structuredContent` conforming to the tool's output
+    /// schema.
+    pub structured: serde_json::Value,
+    /// Concise, terminal-safe compatibility text naming subject, verdict, and
+    /// semantic effect.
+    pub concise_text: String,
+    /// Legacy JSON (or refusal string) emitted on pre-`2025-06-18` text-only
+    /// protocol revisions (`2024-11-05`, `2025-03-26`).
+    pub legacy_text: String,
 }
 
 /// The server: a plan root, the policy `check` runs under, and what this build
@@ -339,9 +353,13 @@ impl AplanServer {
             );
         }
         let policy = policy_for_resolved(&resolved, options);
+        let selection_str = serde_json::to_value(resolved.selection)
+            .ok()
+            .and_then(|v| v.as_str().map(str::to_string))
+            .unwrap_or_else(|| format!("{:?}", resolved.selection));
         let provenance = ContextProvenance {
-            selection: resolved.selection,
-            repository_root: ".",
+            selection: selection_str,
+            repository_root: ".".to_string(),
             plan_root: bounded_path(&resolved.repository_root, &resolved.plan_root),
             configuration: resolved
                 .configuration_file
@@ -520,6 +538,466 @@ impl AplanServer {
         }?;
         Ok(context.wrap(value))
     }
+
+    /// Dispatch one call and assemble both the schema-conforming
+    /// object-enveloped `structuredContent` + concise text (for `2025-06-18+`)
+    /// and the legacy JSON text (for `2024-11-05` / `2025-03-26`).
+    pub fn dispatch_structured(
+        &self,
+        name: &str,
+        args: &serde_json::Value,
+    ) -> StructuredDispatchOutcome {
+        let requested_subject = requested_subject(name, args);
+        if let Err(message) = contract::validate_tool_arguments(name, args) {
+            return refusal_outcome(name, &requested_subject, message);
+        }
+        match self.dispatch(name, args) {
+            Ok(wrapped) => {
+                let legacy_text =
+                    serde_json::to_string_pretty(&wrapped).unwrap_or_else(|e| e.to_string());
+                if legacy_text.len() > MAX_TOOL_RESULT_BYTES {
+                    return refusal_outcome(
+                        name,
+                        &requested_subject,
+                        format!(
+                            "tool `{name}` result ({} bytes) exceeds the {MAX_TOOL_RESULT_BYTES}-byte \
+                             MCP tool response limit; use bounded MCP resources (`aplan://collections/ready` \
+                             or `aplan://tasks/{{id}}`) instead",
+                            legacy_text.len()
+                        ),
+                    );
+                }
+                let (context_val, payload) =
+                    if args.get("root").is_some() && wrapped.get("context").is_some() {
+                        (
+                            wrapped.get("context").cloned(),
+                            wrapped.get("result").cloned().unwrap_or(wrapped.clone()),
+                        )
+                    } else {
+                        (None, wrapped)
+                    };
+                let (subject, denied, effect, detail) =
+                    classify_tool_outcome(name, &requested_subject, &payload);
+                let mut envelope = serde_json::json!({
+                    "contract_version": MCP_CONTRACT_VERSION,
+                    "tool": name,
+                    "subject": subject,
+                    "denied": denied,
+                    "effect": effect,
+                    "data": payload,
+                });
+                if let Some(ctx) = context_val
+                    && let Some(obj) = envelope.as_object_mut()
+                {
+                    obj.insert("context".to_string(), ctx);
+                }
+                let concise_text =
+                    contract::render_concise_tool_text(name, &subject, denied, effect, &detail);
+                StructuredDispatchOutcome {
+                    is_error: false,
+                    structured: envelope,
+                    concise_text,
+                    legacy_text,
+                }
+            }
+            Err(message) => refusal_outcome(name, &requested_subject, message),
+        }
+    }
+
+    fn input_identity_for(&self, plan: &aplan_core::IdentifiedPlan, trust: &str) -> InputIdentity {
+        let mut plan_hash = Sha256::new();
+        plan_hash.update(b"aplan-mcp-plan-v1:");
+        let mut sorted_inputs: Vec<_> = plan.inputs.iter().collect();
+        sorted_inputs.sort_by(|a, b| a.path.cmp(&b.path));
+        for input in sorted_inputs {
+            let rel = input
+                .path
+                .strip_prefix(&plan.root)
+                .unwrap_or(&input.path)
+                .to_string_lossy()
+                .replace('\\', "/");
+            plan_hash.update(rel.as_bytes());
+            plan_hash.update(b"\0");
+            match &input.content {
+                aplan_core::load::PlanFileContent::Bytes(bytes) => {
+                    plan_hash.update(b"bytes:");
+                    plan_hash.update(bytes);
+                }
+                aplan_core::load::PlanFileContent::Sha256(hex) => {
+                    plan_hash.update(b"sha256:");
+                    plan_hash.update(hex.as_bytes());
+                }
+                aplan_core::load::PlanFileContent::ReadError { kind, .. } => {
+                    plan_hash.update(b"err:");
+                    plan_hash.update(format!("{kind:?}").as_bytes());
+                }
+            }
+            plan_hash.update(b"\n");
+        }
+        let plan_sha256 = hex_encode(&plan_hash.finalize());
+
+        let config_sha256 = match self.policy.verify.config_file.as_deref() {
+            Some(path) => match std::fs::read(path) {
+                Ok(bytes) => {
+                    let mut h = Sha256::new();
+                    h.update(&bytes);
+                    hex_encode(&h.finalize())
+                }
+                Err(_) => "unreadable".to_string(),
+            },
+            None => "none".to_string(),
+        };
+
+        InputIdentity {
+            plan_sha256,
+            config_sha256,
+            source: "working_tree".to_string(),
+            trust: trust.to_string(),
+        }
+    }
+
+    #[allow(clippy::too_many_lines)] // Exhaustive resource-URI dispatch keeps all confined aplan:// routes together.
+    fn read_resource_payload(
+        &self,
+        uri: &str,
+    ) -> Result<(String, serde_json::Value, InputIdentity, bool), ResourceError> {
+        if let Some(said) = &self.unconfigured {
+            return Err(ResourceError::InvalidParams(format!(
+                "{said} -- server is unconfigured; call `aplan_identity` to inspect this build"
+            )));
+        }
+        let parsed = resources::parse_resource_uri(uri)?;
+        let root = self.root.as_path();
+        let policy = &self.policy;
+
+        match parsed {
+            ParsedResourceUri::PlanSummary => {
+                let (plan, cache) = self
+                    .plan_snapshot_with_report_cache(root, policy, None)
+                    .map_err(ResourceError::Internal)?;
+                let identity = self.input_identity_for(&plan, "hermetic");
+                let claims = aplan_app::claims::snapshot(root, &plan.plan)
+                    .map_err(|e| ResourceError::Internal(e.to_string()))?;
+                let ready = tools::ready_of(&plan.plan, &claims);
+                let ready_count = ready.ready.len();
+                let check_val = tools::check_of_cached(plan.clone(), policy, cache)
+                    .map_err(|e| ResourceError::Internal(e.to_string()))?;
+                let errors = usize::try_from(check_val["errors"].as_u64().unwrap_or(0))
+                    .unwrap_or(usize::MAX);
+                let warnings = usize::try_from(check_val["warnings"].as_u64().unwrap_or(0))
+                    .unwrap_or(usize::MAX);
+                let denied = check_val["denied"].as_bool().unwrap_or(false);
+                let summary = resources::build_plan_summary(
+                    &plan.plan,
+                    ready_count,
+                    errors,
+                    warnings,
+                    denied,
+                    identity.clone(),
+                );
+                let canonical = summary.resource.clone();
+                let value = serde_json::to_value(summary)
+                    .map_err(|e| ResourceError::Internal(e.to_string()))?;
+                Ok((canonical, value, identity, true))
+            }
+            ParsedResourceUri::TaskDetail { id } => {
+                let plan = self
+                    .plan_snapshot(root, policy)
+                    .map_err(ResourceError::Internal)?;
+                if !plan.plan.tasks.iter().any(|t| t.task.id == id) {
+                    return Err(ResourceError::NotFound(format!(
+                        "no task `{}` in this plan",
+                        aplan_output::sanitize::visible(&id)
+                    )));
+                }
+                let identity = self.input_identity_for(&plan, "repository");
+                let seed = self.report_seed(root, policy);
+                let cached = seed.as_ref().and_then(|(_, report)| report.clone());
+                let claims = aplan_app::claims::snapshot(root, &plan.plan)
+                    .map_err(|e| ResourceError::Internal(e.to_string()))?;
+                let (show_val, structural) =
+                    tools::show_of_cached_with_claims(&plan.plan, &id, policy, cached, &claims)
+                        .map_err(|e| match e {
+                            tools::ToolError::Args(msg) | tools::ToolError::Refused(msg) => {
+                                ResourceError::NotFound(msg)
+                            }
+                            tools::ToolError::Plan(msg) => ResourceError::Internal(msg),
+                        })?;
+                if let Some((key, None)) = seed {
+                    self.remember_report(root, policy, &key, &structural);
+                }
+                let detail = resources::build_task_detail(&id, show_val, identity.clone())?;
+                let canonical = detail.resource.clone();
+                let complete = detail.complete;
+                let value = serde_json::to_value(detail)
+                    .map_err(|e| ResourceError::Internal(e.to_string()))?;
+                Ok((canonical, value, identity, complete))
+            }
+            ParsedResourceUri::ReadyCollection { limit, cursor } => {
+                let plan = self
+                    .plan_snapshot(root, policy)
+                    .map_err(ResourceError::Internal)?;
+                let identity = self.input_identity_for(&plan, "hermetic");
+                let claims = aplan_app::claims::snapshot(root, &plan.plan)
+                    .map_err(|e| ResourceError::Internal(e.to_string()))?;
+                let ready = tools::ready_of(&plan.plan, &claims);
+                let task_by_id: std::collections::BTreeMap<&str, &aplan_core::Task> = plan
+                    .plan
+                    .tasks
+                    .iter()
+                    .map(|loaded| (loaded.task.id.as_str(), &loaded.task))
+                    .collect();
+                let mut cut_by_task: std::collections::BTreeMap<&str, String> =
+                    std::collections::BTreeMap::new();
+                for loaded in &plan.plan.tasks {
+                    if loaded.task.is_milestone() {
+                        let label = aplan_core::roadmap::cut_label(&loaded.task).to_string();
+                        for member in &loaded.task.blocked_by {
+                            cut_by_task
+                                .entry(member.as_str())
+                                .or_insert_with(|| label.clone());
+                        }
+                    }
+                }
+                let items: Vec<ReadyCollectionItem> = ready
+                    .ready
+                    .iter()
+                    .enumerate()
+                    .map(|(idx, row)| {
+                        let task = task_by_id.get(row.id.as_str()).copied();
+                        let cut = cut_by_task.get(row.id.as_str()).cloned();
+                        ReadyCollectionItem {
+                            id: row.id.clone(),
+                            title: row.title.clone(),
+                            status: task
+                                .map_or_else(|| "todo".to_string(), |t| t.status.to_string()),
+                            phase: task.map_or(0, |t| t.phase),
+                            rank: idx + 1,
+                            effort_days: row.effort_days,
+                            cut,
+                            owner: row.owner.clone(),
+                            held_by: row.held_by.clone(),
+                        }
+                    })
+                    .collect();
+                let page =
+                    resources::build_ready_page(&items, limit, cursor.as_deref(), &identity)?;
+                let canonical = page.resource.clone();
+                let complete = page.complete;
+                let value = serde_json::to_value(page)
+                    .map_err(|e| ResourceError::Internal(e.to_string()))?;
+                Ok((canonical, value, identity, complete))
+            }
+        }
+    }
+}
+
+fn hex_encode(bytes: &[u8]) -> String {
+    use std::fmt::Write as _;
+    let mut out = String::with_capacity(bytes.len() * 2);
+    for b in bytes {
+        let _ = write!(out, "{b:02x}");
+    }
+    out
+}
+
+fn requested_subject(name: &str, args: &serde_json::Value) -> String {
+    if name == "aplan_identity" {
+        return "server".to_string();
+    }
+    if let Some(id) = args.get("id").and_then(serde_json::Value::as_str)
+        && !id.is_empty()
+    {
+        return id.to_string();
+    }
+    "plan".to_string()
+}
+
+fn refusal_outcome(name: &str, subject: &str, message: String) -> StructuredDispatchOutcome {
+    let clean_error = aplan_output::sanitize::visible(&message).into_owned();
+    let structured = serde_json::json!({
+        "contract_version": MCP_CONTRACT_VERSION,
+        "tool": name,
+        "subject": subject,
+        "denied": true,
+        "effect": ToolEffect::Refused,
+        "error": clean_error,
+    });
+    let concise_text =
+        contract::render_concise_tool_text(name, subject, true, ToolEffect::Refused, &clean_error);
+    StructuredDispatchOutcome {
+        is_error: true,
+        structured,
+        concise_text,
+        legacy_text: message,
+    }
+}
+
+#[allow(clippy::too_many_lines)] // Exhaustive tool-outcome classification mirrors `dispatch`.
+fn classify_tool_outcome(
+    name: &str,
+    requested_subject: &str,
+    payload: &serde_json::Value,
+) -> (String, bool, ToolEffect, String) {
+    match name {
+        "aplan_identity" => {
+            let ver = payload["version"].as_str().unwrap_or("unknown");
+            (
+                "server".to_string(),
+                false,
+                ToolEffect::ReadOnly,
+                format!("version {ver}"),
+            )
+        }
+        "aplan_ready" => {
+            let count = payload["ready"].as_array().map_or(0, Vec::len);
+            (
+                "plan".to_string(),
+                false,
+                ToolEffect::ReadOnly,
+                format!("{count} ready task(s)"),
+            )
+        }
+        "aplan_why" => {
+            let blockers = payload["blocked_by"].as_array().map_or(0, Vec::len);
+            let traversal = payload["traversal"].as_str().unwrap_or("cut_bounded");
+            (
+                requested_subject.to_string(),
+                false,
+                ToolEffect::ReadOnly,
+                format!("{blockers} blocker(s) ({traversal})"),
+            )
+        }
+        "aplan_check" | "aplan_verify" => {
+            let denied = payload["denied"].as_bool().unwrap_or(false);
+            let errors = payload["errors"].as_u64().unwrap_or(0);
+            let warnings = payload["warnings"].as_u64().unwrap_or(0);
+            (
+                "plan".to_string(),
+                denied,
+                ToolEffect::ReadOnly,
+                format!("{errors} error(s), {warnings} warning(s)"),
+            )
+        }
+        "aplan_show" => {
+            let id = payload["id"]
+                .as_str()
+                .unwrap_or(requested_subject)
+                .to_string();
+            let status = payload["status"].as_str().unwrap_or("unknown");
+            (id, false, ToolEffect::ReadOnly, format!("status {status}"))
+        }
+        "aplan_add" => {
+            let id = payload["id"]
+                .as_str()
+                .unwrap_or(requested_subject)
+                .to_string();
+            (id, false, ToolEffect::Mutated, "created".to_string())
+        }
+        "aplan_dep" => {
+            let id = payload["id"]
+                .as_str()
+                .unwrap_or(requested_subject)
+                .to_string();
+            let changed = payload["changed"].as_bool().unwrap_or(false);
+            let effect = if changed {
+                ToolEffect::Mutated
+            } else {
+                ToolEffect::ReadOnly
+            };
+            (
+                id,
+                false,
+                effect,
+                if changed {
+                    "dependency updated".to_string()
+                } else {
+                    "no dependency change".to_string()
+                },
+            )
+        }
+        "aplan_close" => {
+            let id = payload["closed"]
+                .as_str()
+                .unwrap_or(requested_subject)
+                .to_string();
+            (id, false, ToolEffect::Mutated, "closed".to_string())
+        }
+        "aplan_claim" => {
+            let id = payload["id"]
+                .as_str()
+                .unwrap_or(requested_subject)
+                .to_string();
+            let holder = payload["held_by"].as_str().unwrap_or("unknown");
+            (
+                id,
+                false,
+                ToolEffect::Mutated,
+                format!("claimed by {holder}"),
+            )
+        }
+        "aplan_release" => {
+            let id = payload["id"]
+                .as_str()
+                .unwrap_or(requested_subject)
+                .to_string();
+            let changed = payload["changed"].as_bool().unwrap_or(false);
+            let effect = if changed {
+                ToolEffect::Mutated
+            } else {
+                ToolEffect::ReadOnly
+            };
+            (
+                id,
+                false,
+                effect,
+                if changed {
+                    "claim released".to_string()
+                } else {
+                    "no active claim".to_string()
+                },
+            )
+        }
+        "aplan_start" | "aplan_stop" => {
+            let id = payload["id"]
+                .as_str()
+                .unwrap_or(requested_subject)
+                .to_string();
+            let status = payload["status"].as_str().unwrap_or("unknown");
+            let changed = payload["changed"].as_bool().unwrap_or(false);
+            let effect = if changed {
+                ToolEffect::Mutated
+            } else {
+                ToolEffect::ReadOnly
+            };
+            (
+                id,
+                false,
+                effect,
+                format!("status {status} (changed={changed})"),
+            )
+        }
+        "aplan_review" => {
+            let id = payload["id"]
+                .as_str()
+                .unwrap_or(requested_subject)
+                .to_string();
+            let changed = payload["changed"].as_bool().unwrap_or(false);
+            let stamped = payload["stamped"].as_u64().unwrap_or(0);
+            let effect = if changed {
+                ToolEffect::Mutated
+            } else {
+                ToolEffect::ReadOnly
+            };
+            (id, false, effect, format!("{stamped} trace(s) stamped"))
+        }
+        _ => (
+            requested_subject.to_string(),
+            false,
+            ToolEffect::ReadOnly,
+            String::new(),
+        ),
+    }
 }
 
 fn refuse_missing_external_roots(options: &aplan_core::Options) -> Result<(), String> {
@@ -548,237 +1026,11 @@ fn bounded_path(repository: &std::path::Path, path: &std::path::Path) -> String 
     }
 }
 
-/// The JSON Schema for a tool's arguments.
-///
-/// Written out rather than derived, because the schema *is* the contract an
-/// agent reads. `close` is the one that matters: its
-/// only inputs are a task id and evidence citations, and there is deliberately
-/// no field through which a caller could assert completion.
+/// The JSON Schema for a tool's arguments, generated from its concrete typed
+/// request struct in [`crate::contract`].
+#[cfg(test)]
 fn input_schema(name: &str) -> serde_json::Value {
-    let root = serde_json::json!({
-        "type": "string",
-        "description": "Repository root containing `.aplan.yml`, or that repository's configured plan directory. The server resolves plan, configuration, traces, evidence providers and Git as one context; an ambiguous partial directory is refused. Omit this field to use the server's launch context. An explicit selection returns `{context, result}` so the resolved frame is auditable.",
-    });
-    match name {
-        // No arguments at all, not even `root`: the identity is a fact about
-        // this process, and accepting a root would suggest otherwise.
-        "aplan_identity" => serde_json::json!({
-            "type": "object",
-            "properties": {},
-            "additionalProperties": false,
-        }),
-        "aplan_why" => serde_json::json!({
-            "type": "object",
-            "properties": {
-                "id": { "type": "string", "description": "Task id." },
-                "all": {
-                    "type": "boolean",
-                    "description": "Walk through cuts into their membership as well. Off \
-                                     by default: a cut is reported as itself, with \
-                                     `behind` counting what was folded, because the \
-                                     complete closure of a sequenced plan is mostly the \
-                                     roadmap you can query separately. Every answer \
-                                     names its `traversal`.",
-                },
-                "root": root,
-            },
-            "required": ["id"],
-            "additionalProperties": false,
-        }),
-        "aplan_add" => add_schema(&root),
-        _ => other_schema(name, &root),
-    }
-}
-
-/// `aplan_add`'s own schema: the one tool with more fields than the rest put
-/// together, lifted out so [`input_schema`] stays a readable table.
-fn add_schema(root: &serde_json::Value) -> serde_json::Value {
-    serde_json::json!({
-            "type": "object",
-            "properties": {
-                "title": { "type": "string", "description": "What the task is, in a line." },
-                "id": {
-                    "type": "string",
-                    "description": "Explicit id. An ordinary add may omit it to mint from the plan convention; a non-empty members request requires it.",
-                },
-                "phase": {
-                    "type": "integer",
-                    "minimum": 0,
-                    "description": "Reporting phase. An ordinary add may omit it to derive from the selected cut or plan; a non-empty members request requires it.",
-                },
-                "cut": {
-                    "type": "string",
-                    "description": "The cut to place it in: its milestone id (`M-v0.8`) or \
-                                    the label it reports itself under (`v0.8`). A plan with \
-                                    `require_cut_membership` rejects a task in no cut.",
-                },
-                "effort_days": { "type": "number", "description": "Estimate in days." },
-                "paths": {
-                    "type": "array",
-                    "items": { "type": "string" },
-                    "description": "Globs this task owns. Without them its future evidence \
-                                    cannot be bound to it (`APLAN023`).",
-                },
-                "traces": {
-                    "type": "array",
-                    "items": { "type": "string" },
-                    "description": "Document sections this task answers to, as \
-                                    `path/to/doc.md#anchor`: what caused it, which exists, \
-                                    rather than what it will write. An anchor that does not \
-                                    resolve is refused (`APLAN008`).",
-                },
-                "tags": { "type": "array", "items": { "type": "string" } },
-                "blocked_by": { "type": "array", "items": { "type": "string" } },
-                "members": {
-                    "type": "array",
-                    "items": { "type": "string" },
-                    "uniqueItems": true,
-                    "description": "Existing live task ids moved from exactly one source cut each into the new milestone this add creates. A non-empty list requires id, phase and a tags entry equal to milestone, forbids cut, and reserves blocked_by for milestone predecessors.",
-                },
-                "owner": { "type": "string" },
-                "status": {
-                    "type": "string",
-                    "enum": ["todo", "in_progress", "blocked"],
-                    "description": "Initial live status. Terminal history uses the CLI evidence-resolving manifest ledger.",
-                },
-                "prefer_after": {
-                    "type": "array",
-                    "items": { "type": "string" },
-                    "description": "Advisory predecessor ids.",
-                },
-                "ratified_by": {
-                    "type": "array",
-                    "items": { "type": "string" },
-                    "description": "Decision-record task ids.",
-                },
-                "contains": {
-                    "type": "array",
-                    "items": { "type": "string" },
-                    "description": "Release or container member ids.",
-                },
-                "revisit_at": {
-                    "type": "string",
-                    "format": "date-time",
-                    "description": "RFC 3339 instant for an initially blocked task.",
-                },
-                "version_impact": {
-                    "type": "string",
-                    "enum": ["none", "fix", "feature", "breaking"],
-                },
-                "version_impact_reason": {
-                    "type": "string",
-                    "description": "Why the declared version impact applies.",
-                },
-                "root": root,
-            },
-        "required": ["title"],
-        "allOf": [{
-            "if": {
-                "required": ["members"],
-                "properties": { "members": { "minItems": 1 } },
-            },
-            "then": {
-                "required": ["id", "phase", "tags"],
-                "properties": {
-                    "tags": { "contains": { "const": "milestone" } },
-                },
-                "not": { "required": ["cut"] },
-            },
-        }],
-        "additionalProperties": false,
-    })
-}
-
-fn id_schema(description: &str, root: &serde_json::Value) -> serde_json::Value {
-    serde_json::json!({
-        "type": "object",
-        "properties": {
-            "id": { "type": "string", "description": description },
-            "root": root,
-        },
-        "required": ["id"],
-        "additionalProperties": false,
-    })
-}
-
-/// Every other tool's schema.
-fn other_schema(name: &str, root: &serde_json::Value) -> serde_json::Value {
-    match name {
-        "aplan_show" => id_schema("The task to show.", root),
-        "aplan_dep" => serde_json::json!({
-            "type": "object",
-            "properties": {
-                "id": { "type": "string", "description": "The task that comes second." },
-                "after": {
-                    "type": "string",
-                    "description": "The task it comes after, which must finish first.",
-                },
-                "add": {
-                    "type": "boolean",
-                    "description": "True to record the edge, false to remove it.",
-                },
-                "root": root,
-            },
-            "required": ["id", "after", "add"],
-            "additionalProperties": false,
-        }),
-        "aplan_close" => serde_json::json!({
-            "type": "object",
-            "properties": {
-                "id": { "type": "string", "description": "Task id to close." },
-                "evidence": {
-                    "type": "array",
-                    "items": { "type": "string" },
-                    "description": "Evidence as `kind:ref`, e.g. `commit:d213c9a`, \
-                                    `test:mod::name`, `file:path`, `url:https://...`. \
-                                    Required: a status is a claim, and this server will not \
-                                    make it without proof to resolve.",
-                },
-                "root": root,
-            },
-            "required": ["id", "evidence"],
-            "additionalProperties": false,
-        }),
-        // `A1-359`'s four. **Each needs its own entry**: the fallback below
-        // allows `root` alone with `additionalProperties: false`, so a tool
-        // that takes an `id` and is left to it advertises a schema that
-        // rejects its own required argument.
-        "aplan_claim" => serde_json::json!({
-            "type": "object",
-            "properties": {
-                "id": { "type": "string", "description": "The task to claim." },
-                "as": {
-                    "type": "string",
-                    "description": "The name to record. Otherwise `APLAN_OWNER`, then per-user \
-                                    `me`, this repository's `git config user.name`, then the \
-                                    operating system's user. Never read from `.aplan.yml`.",
-                },
-                "from": {
-                    "type": "string",
-                    "description": "Who the task is being taken from. Required when somebody \
-                                    holds it, and checked rather than taken on trust.",
-                },
-                "root": root,
-            },
-            "required": ["id"],
-            "additionalProperties": false,
-        }),
-        "aplan_release" => id_schema("The task to release.", root),
-        "aplan_start" | "aplan_stop" => id_schema(
-            "The task whose `in_progress` status is being set or cleared.",
-            root,
-        ),
-        "aplan_review" => id_schema(
-            "The live task whose traced sections were re-reviewed and still hold.",
-            root,
-        ),
-        // `ready`, `check` and `verify` take only the optional root.
-        _ => serde_json::json!({
-            "type": "object",
-            "properties": { "root": root },
-            "additionalProperties": false,
-        }),
-    }
+    contract::input_schema_for_tool(name)
 }
 
 /// The tool list exactly as it goes on the wire.
@@ -789,7 +1041,8 @@ pub fn wire_tools() -> Vec<Tool> {
     TOOLS
         .iter()
         .map(|spec| {
-            let schema = input_schema(spec.name);
+            let in_schema = contract::input_schema_for_tool(spec.name);
+            let out_schema = contract::output_schema_for_tool(spec.name);
             // `Tool` is `#[non_exhaustive]`, so it is built from its default
             // rather than a struct literal: fields rmcp adds later then arrive
             // with their own defaults instead of breaking the build.
@@ -797,26 +1050,47 @@ pub fn wire_tools() -> Vec<Tool> {
             tool.name = spec.name.into();
             tool.description = Some(spec.description.into());
             tool.input_schema = Arc::new(
-                schema
+                in_schema
                     .as_object()
                     .cloned()
                     .expect("input schemas are JSON objects"),
             );
+            tool.output_schema = Some(Arc::new(
+                out_schema
+                    .as_object()
+                    .cloned()
+                    .expect("output schemas are JSON objects"),
+            ));
             tool
         })
         .collect()
 }
 
+fn is_2026_07_28_or_later(context: &RequestContext<RoleServer>) -> bool {
+    context
+        .protocol_version()
+        .is_some_and(|v| v.as_str() >= ProtocolVersion::V_2026_07_28.as_str())
+}
+
+fn supports_structured_content(context: &RequestContext<RoleServer>) -> bool {
+    context
+        .protocol_version()
+        .is_none_or(|v| v.as_str() >= ProtocolVersion::V_2025_06_18.as_str())
+}
+
 impl ServerHandler for AplanServer {
     fn get_info(&self) -> InitializeResult {
         let mut info = InitializeResult::default();
-        info.capabilities = ServerCapabilities::builder().enable_tools().build();
+        info.capabilities = ServerCapabilities::builder()
+            .enable_tools()
+            .enable_resources()
+            .build();
         info.server_info = Implementation::new("aplan", env!("CARGO_PKG_VERSION"));
-        info.instructions = Some(
-            "Validate and advance an evidence-gated plan. `aplan_close` requires evidence: \
-             a citation something else resolves, never an assessment of your own work."
-                .to_string(),
-        );
+        info.instructions = Some(format!(
+            "Validate and advance an evidence-gated plan (contract {MCP_CONTRACT_VERSION}). \
+             `aplan_close` requires evidence: a citation something else resolves, never an \
+             assessment of your own work. Bounded read resources are available under `aplan://`."
+        ));
         info
     }
 
@@ -828,17 +1102,95 @@ impl ServerHandler for AplanServer {
     fn list_tools(
         &self,
         _request: Option<PaginatedRequestParams>,
-        _context: RequestContext<RoleServer>,
+        context: RequestContext<RoleServer>,
     ) -> impl std::future::Future<Output = Result<ListToolsResult, McpError>> + Send {
         let mut result = ListToolsResult::default();
         result.tools = wire_tools();
+        if is_2026_07_28_or_later(&context) {
+            result.ttl_ms = Some(0);
+            result.cache_scope = Some(CacheScope::Private);
+        }
         std::future::ready(Ok(result))
+    }
+
+    fn list_resources(
+        &self,
+        _request: Option<PaginatedRequestParams>,
+        context: RequestContext<RoleServer>,
+    ) -> impl std::future::Future<Output = Result<ListResourcesResult, McpError>> + Send {
+        let mut result = ListResourcesResult::default();
+        result.resources = resources::wire_resources();
+        if is_2026_07_28_or_later(&context) {
+            result.ttl_ms = Some(0);
+            result.cache_scope = Some(CacheScope::Private);
+        }
+        std::future::ready(Ok(result))
+    }
+
+    fn list_resource_templates(
+        &self,
+        _request: Option<PaginatedRequestParams>,
+        context: RequestContext<RoleServer>,
+    ) -> impl std::future::Future<Output = Result<ListResourceTemplatesResult, McpError>> + Send
+    {
+        let mut result = ListResourceTemplatesResult::default();
+        result.resource_templates = resources::wire_resource_templates();
+        if is_2026_07_28_or_later(&context) {
+            result.ttl_ms = Some(0);
+            result.cache_scope = Some(CacheScope::Private);
+        }
+        std::future::ready(Ok(result))
+    }
+
+    fn read_resource(
+        &self,
+        request: ReadResourceRequestParams,
+        context: RequestContext<RoleServer>,
+    ) -> impl std::future::Future<Output = Result<ReadResourceResponse, McpError>> + Send {
+        let is_current = is_2026_07_28_or_later(&context);
+        let out = match self.read_resource_payload(&request.uri) {
+            Ok((canonical_uri, value, identity, complete)) => {
+                let text = serde_json::to_string_pretty(&value).unwrap_or_else(|e| e.to_string());
+                let mut meta = MetaObject::new();
+                meta.insert(
+                    "contractVersion".to_string(),
+                    serde_json::json!(MCP_CONTRACT_VERSION),
+                );
+                meta.insert(
+                    "inputIdentity".to_string(),
+                    serde_json::to_value(&identity).unwrap_or(serde_json::Value::Null),
+                );
+                meta.insert("complete".to_string(), serde_json::json!(complete));
+                meta.insert("ttlMs".to_string(), serde_json::json!(0));
+                meta.insert("cacheScope".to_string(), serde_json::json!("private"));
+                let mut result =
+                    ReadResourceResult::new(vec![ResourceContents::TextResourceContents {
+                        uri: canonical_uri,
+                        mime_type: Some("application/json".to_string()),
+                        text,
+                        meta: Some(meta),
+                    }]);
+                if is_current {
+                    result.ttl_ms = Some(0);
+                    result.cache_scope = Some(CacheScope::Private);
+                }
+                Ok(ReadResourceResponse::Complete(result))
+            }
+            Err(ResourceError::NotFound(message)) => {
+                Err(McpError::resource_not_found(message, None))
+            }
+            Err(ResourceError::InvalidParams(message)) => {
+                Err(McpError::invalid_params(message, None))
+            }
+            Err(ResourceError::Internal(message)) => Err(McpError::internal_error(message, None)),
+        };
+        std::future::ready(out)
     }
 
     fn call_tool(
         &self,
         request: CallToolRequestParams,
-        _context: RequestContext<RoleServer>,
+        context: RequestContext<RoleServer>,
         // `rmcp` 3.x widened the reply to an enum, so a handler can also say
         // "I need input first" or "I made you a task" (`A1-331`). This one
         // never does either: every tool here answers now or refuses now, and
@@ -854,17 +1206,21 @@ impl ServerHandler for AplanServer {
         // well-formed question and the answer is no, with the reason. Reporting
         // it as a transport failure would leave an agent unable to tell "I may
         // not do that" from "the server broke".
-        let out = match self.dispatch(&request.name, &args) {
-            Ok(value) => Ok(CallToolResponse::Complete(CallToolResult::success(vec![
-                ContentBlock::text(
-                    serde_json::to_string_pretty(&value).unwrap_or_else(|e| e.to_string()),
-                ),
-            ]))),
-            Err(message) => Ok(CallToolResponse::Complete(CallToolResult::error(vec![
-                ContentBlock::text(message),
-            ]))),
+        let outcome = self.dispatch_structured(&request.name, &args);
+        let result = if supports_structured_content(&context) {
+            let mut res = if outcome.is_error {
+                CallToolResult::error(vec![ContentBlock::text(outcome.concise_text)])
+            } else {
+                CallToolResult::success(vec![ContentBlock::text(outcome.concise_text)])
+            };
+            res.structured_content = Some(outcome.structured);
+            res
+        } else if outcome.is_error {
+            CallToolResult::error(vec![ContentBlock::text(outcome.legacy_text)])
+        } else {
+            CallToolResult::success(vec![ContentBlock::text(outcome.legacy_text)])
         };
-        std::future::ready(out)
+        std::future::ready(Ok(CallToolResponse::Complete(result)))
     }
 }
 

@@ -13978,6 +13978,7 @@ fn identity_object(id: &aplan_attest::ToolIdentity) -> serde_json::Value {
         "schema": "aplan/tool-identity/v1",
         "version": id.version,
         "facts_sha256": id.facts_sha256,
+        "mcp_contract_version": aplan_mcp::MCP_CONTRACT_VERSION,
     });
     if let Some(map) = doc.as_object_mut() {
         for (key, value) in [("source", &id.source), ("binary_sha256", &id.binary_sha256)] {
@@ -14320,6 +14321,7 @@ fn build_facts_for_build(tui: bool) -> aplan_app::BuildFacts {
             internal: EXIT_INTERNAL,
         },
         formats,
+        mcp_contract_version: aplan_mcp::MCP_CONTRACT_VERSION.to_string(),
         mcp_tools,
         rules,
         schema_version: "v1".to_string(),

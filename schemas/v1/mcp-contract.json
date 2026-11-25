@@ -1,0 +1,3173 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "cache_policy": {
+    "cache_scope": "private",
+    "ttl_ms": 0
+  },
+  "contract_version": "aplan/mcp/v2",
+  "limits": {
+    "default_page_limit": 20,
+    "max_cursor_bytes": 128,
+    "max_page_limit": 50,
+    "max_resource_bytes": 65536,
+    "max_tool_result_bytes": 524288,
+    "max_uri_bytes": 512
+  },
+  "resources": {
+    "aplan://collections/ready{?limit,cursor}": {
+      "mimeType": "application/json",
+      "name": "ready_tasks_page",
+      "schema": {
+        "$defs": {
+          "InputIdentity": {
+            "description": "Cryptographic identity of the plan and configuration inputs backing a\nbounded MCP resource response.",
+            "properties": {
+              "config_sha256": {
+                "description": "Content digest of the active configuration, or `\"none\"` when unconfigured.",
+                "type": "string"
+              },
+              "plan_sha256": {
+                "description": "Content digest of the loaded plan snapshot.",
+                "type": "string"
+              },
+              "source": {
+                "description": "Where the inputs were read from (`working_tree`).",
+                "type": "string"
+              },
+              "trust": {
+                "description": "Trust boundary (`hermetic` or `repository`).",
+                "type": "string"
+              }
+            },
+            "required": [
+              "plan_sha256",
+              "config_sha256",
+              "source",
+              "trust"
+            ],
+            "type": "object"
+          },
+          "ReadyCollectionItem": {
+            "description": "One compact task entry inside `aplan://collections/ready{?limit,cursor}`.",
+            "properties": {
+              "cut": {
+                "description": "Owning cut label or milestone id, if any.",
+                "type": [
+                  "string",
+                  "null"
+                ]
+              },
+              "effort_days": {
+                "description": "Effort estimate in days, if present.",
+                "format": "double",
+                "type": [
+                  "number",
+                  "null"
+                ]
+              },
+              "held_by": {
+                "description": "Active local claim holder, if any.",
+                "type": [
+                  "string",
+                  "null"
+                ]
+              },
+              "id": {
+                "description": "Task id.",
+                "type": "string"
+              },
+              "owner": {
+                "description": "Durable owner, if any.",
+                "type": [
+                  "string",
+                  "null"
+                ]
+              },
+              "phase": {
+                "description": "Phase number.",
+                "format": "uint32",
+                "minimum": 0,
+                "type": "integer"
+              },
+              "rank": {
+                "description": "Derived ready rank (1-based).",
+                "format": "uint",
+                "minimum": 0,
+                "type": "integer"
+              },
+              "status": {
+                "description": "Status (`todo` or `in_progress`).",
+                "type": "string"
+              },
+              "title": {
+                "description": "Task title.",
+                "type": "string"
+              }
+            },
+            "required": [
+              "id",
+              "title",
+              "status",
+              "phase",
+              "rank"
+            ],
+            "type": "object"
+          }
+        },
+        "description": "Typed bounded collection page returned by MCP collection resource templates.",
+        "properties": {
+          "complete": {
+            "description": "`true` when this page reaches the end of the matching collection.",
+            "type": "boolean"
+          },
+          "contract_version": {
+            "description": "Explicit MCP contract version (`aplan/mcp/v2`).",
+            "type": "string"
+          },
+          "input_identity": {
+            "$ref": "#/$defs/InputIdentity",
+            "description": "Cryptographic input identity bound to every continuation cursor."
+          },
+          "items": {
+            "description": "Bounded page items.",
+            "items": {
+              "$ref": "#/$defs/ReadyCollectionItem"
+            },
+            "type": "array"
+          },
+          "limit": {
+            "description": "Applied maximum item count for this page (`1..=50`).",
+            "format": "uint",
+            "minimum": 0,
+            "type": "integer"
+          },
+          "next_cursor": {
+            "description": "Opaque continuation token for the next page when `!complete`.",
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "next_uri": {
+            "description": "Canonical RFC 6570 URI for the next page when `!complete`.",
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "order": {
+            "description": "Deterministic ordering rule applied before slicing.",
+            "type": "string"
+          },
+          "resource": {
+            "description": "Canonical URI of this page resource.",
+            "type": "string"
+          },
+          "returned": {
+            "description": "Number of items included in `items`.",
+            "format": "uint",
+            "minimum": 0,
+            "type": "integer"
+          },
+          "total_matching": {
+            "description": "Total matching items across the entire snapshot before slicing.",
+            "format": "uint",
+            "minimum": 0,
+            "type": "integer"
+          },
+          "truncated_by_size_cap": {
+            "description": "`true` when `items` was shortened below `limit` to stay within\n[`MAX_RESOURCE_BYTES`].",
+            "type": "boolean"
+          }
+        },
+        "required": [
+          "contract_version",
+          "resource",
+          "input_identity",
+          "order",
+          "limit",
+          "returned",
+          "total_matching",
+          "complete",
+          "truncated_by_size_cap",
+          "items"
+        ],
+        "title": "CollectionPage",
+        "type": "object"
+      }
+    },
+    "aplan://plan/summary": {
+      "mimeType": "application/json",
+      "name": "plan_summary",
+      "schema": {
+        "$defs": {
+          "InputIdentity": {
+            "description": "Cryptographic identity of the plan and configuration inputs backing a\nbounded MCP resource response.",
+            "properties": {
+              "config_sha256": {
+                "description": "Content digest of the active configuration, or `\"none\"` when unconfigured.",
+                "type": "string"
+              },
+              "plan_sha256": {
+                "description": "Content digest of the loaded plan snapshot.",
+                "type": "string"
+              },
+              "source": {
+                "description": "Where the inputs were read from (`working_tree`).",
+                "type": "string"
+              },
+              "trust": {
+                "description": "Trust boundary (`hermetic` or `repository`).",
+                "type": "string"
+              }
+            },
+            "required": [
+              "plan_sha256",
+              "config_sha256",
+              "source",
+              "trust"
+            ],
+            "type": "object"
+          }
+        },
+        "description": "Bounded summary resource returned by `aplan://plan/summary`.",
+        "properties": {
+          "complete": {
+            "description": "Always `true` for the bounded aggregate summary.",
+            "type": "boolean"
+          },
+          "contract_version": {
+            "description": "Explicit MCP contract version (`aplan/mcp/v2`).",
+            "type": "string"
+          },
+          "cut_count": {
+            "description": "Number of milestone cuts in the plan.",
+            "format": "uint",
+            "minimum": 0,
+            "type": "integer"
+          },
+          "denied": {
+            "description": "Whether the structural check is denied under the configured verdict.",
+            "type": "boolean"
+          },
+          "errors": {
+            "description": "Structural error diagnostic count under the configured policy.",
+            "format": "uint",
+            "minimum": 0,
+            "type": "integer"
+          },
+          "input_identity": {
+            "$ref": "#/$defs/InputIdentity",
+            "description": "Cryptographic identity of the plan and configuration snapshot."
+          },
+          "ready_count": {
+            "description": "Number of currently ready tasks.",
+            "format": "uint",
+            "minimum": 0,
+            "type": "integer"
+          },
+          "resource": {
+            "description": "Canonical URI (`aplan://plan/summary`).",
+            "type": "string"
+          },
+          "status_counts": {
+            "additionalProperties": {
+              "format": "uint",
+              "minimum": 0,
+              "type": "integer"
+            },
+            "description": "Task counts grouped by status name.",
+            "type": "object"
+          },
+          "total_tasks": {
+            "description": "Total loaded tasks (including milestones).",
+            "format": "uint",
+            "minimum": 0,
+            "type": "integer"
+          },
+          "warnings": {
+            "description": "Structural warning diagnostic count under the configured policy.",
+            "format": "uint",
+            "minimum": 0,
+            "type": "integer"
+          }
+        },
+        "required": [
+          "contract_version",
+          "resource",
+          "input_identity",
+          "complete",
+          "total_tasks",
+          "ready_count",
+          "cut_count",
+          "status_counts",
+          "errors",
+          "warnings",
+          "denied"
+        ],
+        "title": "PlanSummaryResource",
+        "type": "object"
+      }
+    },
+    "aplan://tasks/{id}": {
+      "mimeType": "application/json",
+      "name": "task_detail",
+      "schema": {
+        "$defs": {
+          "InputIdentity": {
+            "description": "Cryptographic identity of the plan and configuration inputs backing a\nbounded MCP resource response.",
+            "properties": {
+              "config_sha256": {
+                "description": "Content digest of the active configuration, or `\"none\"` when unconfigured.",
+                "type": "string"
+              },
+              "plan_sha256": {
+                "description": "Content digest of the loaded plan snapshot.",
+                "type": "string"
+              },
+              "source": {
+                "description": "Where the inputs were read from (`working_tree`).",
+                "type": "string"
+              },
+              "trust": {
+                "description": "Trust boundary (`hermetic` or `repository`).",
+                "type": "string"
+              }
+            },
+            "required": [
+              "plan_sha256",
+              "config_sha256",
+              "source",
+              "trust"
+            ],
+            "type": "object"
+          },
+          "ShowPayload": {
+            "additionalProperties": true,
+            "description": "Structured payload for `aplan_show`.",
+            "properties": {
+              "id": {
+                "description": "Task id.",
+                "type": "string"
+              },
+              "schema": {
+                "description": "Show schema identifier (`aplan/show/v3`).",
+                "type": "string"
+              },
+              "status": {
+                "description": "Current task status.",
+                "type": "string"
+              },
+              "title": {
+                "description": "Task title.",
+                "type": "string"
+              }
+            },
+            "required": [
+              "schema",
+              "id",
+              "title",
+              "status"
+            ],
+            "type": "object"
+          }
+        },
+        "description": "Focused single-task resource returned by `aplan://tasks/{id}`.",
+        "properties": {
+          "complete": {
+            "description": "Whether the task projection is complete within size bounds.",
+            "type": "boolean"
+          },
+          "contract_version": {
+            "description": "Explicit MCP contract version (`aplan/mcp/v2`).",
+            "type": "string"
+          },
+          "input_identity": {
+            "$ref": "#/$defs/InputIdentity",
+            "description": "Cryptographic identity of the plan and configuration snapshot."
+          },
+          "resource": {
+            "description": "Canonical URI (`aplan://tasks/{id}`).",
+            "type": "string"
+          },
+          "task": {
+            "$ref": "#/$defs/ShowPayload",
+            "description": "Complete structured `Show` projection (without prose body)."
+          },
+          "truncated": {
+            "description": "Whether the task projection was truncated to satisfy size bounds.",
+            "type": "boolean"
+          }
+        },
+        "required": [
+          "contract_version",
+          "resource",
+          "input_identity",
+          "complete",
+          "truncated",
+          "task"
+        ],
+        "title": "TaskDetailResource",
+        "type": "object"
+      }
+    }
+  },
+  "supported_protocol_revisions": [
+    "2024-11-05",
+    "2025-03-26",
+    "2025-06-18",
+    "2025-11-25",
+    "2026-07-28"
+  ],
+  "tools": {
+    "aplan_add": {
+      "description": "Create a task with an explicit id and phase, or mint the next id in this plan's own convention (including its configured ULID strategy) and derive the phase from its cut. It accepts live initial states, every creation-time relationship, revisit scheduling and version impact; terminal history uses the CLI's evidence-resolving manifest ledger. With `members`, both identity fields are required: create that milestone and move existing live work from its source cuts in one guarded batch. Refuses before writing what `check` would reject after, by running the rules on the plan this would produce; what it would only warn about is named in `notes` instead.",
+      "inputSchema": {
+        "$defs": {
+          "AddInitialStatus": {
+            "description": "Live initial status admitted by `aplan_add`.",
+            "enum": [
+              "todo",
+              "in_progress",
+              "blocked"
+            ],
+            "type": "string"
+          },
+          "AddVersionImpact": {
+            "description": "Version impact admitted by `aplan_add`.",
+            "enum": [
+              "none",
+              "fix",
+              "feature",
+              "breaking"
+            ],
+            "type": "string"
+          }
+        },
+        "additionalProperties": false,
+        "allOf": [
+          {
+            "if": {
+              "properties": {
+                "members": {
+                  "minItems": 1
+                }
+              },
+              "required": [
+                "members"
+              ]
+            },
+            "then": {
+              "not": {
+                "required": [
+                  "cut"
+                ]
+              },
+              "properties": {
+                "tags": {
+                  "contains": {
+                    "const": "milestone"
+                  }
+                }
+              },
+              "required": [
+                "id",
+                "phase",
+                "tags"
+              ]
+            }
+          }
+        ],
+        "description": "Input for `aplan_add`.",
+        "properties": {
+          "blocked_by": {
+            "default": null,
+            "description": "Hard predecessor ids.",
+            "items": {
+              "type": "string"
+            },
+            "type": [
+              "array",
+              "null"
+            ]
+          },
+          "contains": {
+            "default": null,
+            "description": "Release or container member ids.",
+            "items": {
+              "type": "string"
+            },
+            "type": [
+              "array",
+              "null"
+            ]
+          },
+          "cut": {
+            "default": null,
+            "description": "The cut to place it in: its milestone id (`M-v0.8`) or the label it\nreports itself under (`v0.8`). A plan with `require_cut_membership`\nrejects a task in no cut.",
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "effort_days": {
+            "default": null,
+            "description": "Estimate in days.",
+            "format": "double",
+            "type": [
+              "number",
+              "null"
+            ]
+          },
+          "id": {
+            "default": null,
+            "description": "Explicit id. An ordinary add may omit it to mint from the plan\nconvention; a non-empty members request requires it.",
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "members": {
+            "default": null,
+            "description": "Existing live task ids moved from exactly one source cut each into the\nnew milestone this add creates. A non-empty list requires `id`, `phase`,\nand a `tags` entry equal to `milestone`, forbids `cut`, and reserves\n`blocked_by` for milestone predecessors.",
+            "items": {
+              "type": "string"
+            },
+            "type": [
+              "array",
+              "null"
+            ],
+            "uniqueItems": true
+          },
+          "owner": {
+            "default": null,
+            "description": "Durable owner name.",
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "paths": {
+            "default": null,
+            "description": "Globs this task owns. Without them its future evidence cannot be bound to\nit (`APLAN023`).",
+            "items": {
+              "type": "string"
+            },
+            "type": [
+              "array",
+              "null"
+            ]
+          },
+          "phase": {
+            "default": null,
+            "description": "Reporting phase. An ordinary add may omit it to derive from the selected\ncut or plan; a non-empty members request requires it.",
+            "format": "uint32",
+            "minimum": 0,
+            "type": [
+              "integer",
+              "null"
+            ]
+          },
+          "prefer_after": {
+            "default": null,
+            "description": "Advisory predecessor ids.",
+            "items": {
+              "type": "string"
+            },
+            "type": [
+              "array",
+              "null"
+            ]
+          },
+          "ratified_by": {
+            "default": null,
+            "description": "Decision-record task ids.",
+            "items": {
+              "type": "string"
+            },
+            "type": [
+              "array",
+              "null"
+            ]
+          },
+          "revisit_at": {
+            "default": null,
+            "description": "RFC 3339 instant for an initially blocked task.",
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "root": {
+            "default": null,
+            "description": "Repository root containing `.aplan.yml`, or that repository's configured\nplan directory. Omit to use the server's launch context.",
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "status": {
+            "anyOf": [
+              {
+                "$ref": "#/$defs/AddInitialStatus"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null,
+            "description": "Initial live status. Terminal history uses the CLI evidence-resolving\nmanifest ledger."
+          },
+          "tags": {
+            "default": null,
+            "description": "Subject or reserved tags.",
+            "items": {
+              "type": "string"
+            },
+            "type": [
+              "array",
+              "null"
+            ]
+          },
+          "title": {
+            "description": "What the task is, in a line.",
+            "type": "string"
+          },
+          "traces": {
+            "default": null,
+            "description": "Document sections this task answers to, as `path/to/doc.md#anchor`. An\nanchor that does not resolve is refused (`APLAN008`).",
+            "items": {
+              "type": "string"
+            },
+            "type": [
+              "array",
+              "null"
+            ]
+          },
+          "version_impact": {
+            "anyOf": [
+              {
+                "$ref": "#/$defs/AddVersionImpact"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null,
+            "description": "Declared version impact."
+          },
+          "version_impact_reason": {
+            "default": null,
+            "description": "Why the declared version impact applies.",
+            "type": [
+              "string",
+              "null"
+            ]
+          }
+        },
+        "required": [
+          "title"
+        ],
+        "title": "AddInput",
+        "type": "object"
+      },
+      "name": "aplan_add",
+      "outputSchema": {
+        "$defs": {
+          "AddPayload": {
+            "additionalProperties": true,
+            "description": "Structured payload for `aplan_add`.",
+            "properties": {
+              "file": {
+                "description": "Created file path.",
+                "type": "string"
+              },
+              "id": {
+                "description": "Created task or milestone id.",
+                "type": "string"
+              },
+              "notes": {
+                "default": [],
+                "description": "Non-blocking warning notes.",
+                "items": {
+                  "type": "string"
+                },
+                "type": "array"
+              }
+            },
+            "required": [
+              "id",
+              "file"
+            ],
+            "type": "object"
+          },
+          "ContextProvenance": {
+            "description": "Resolved repository/plan selection provenance when a caller supplies an\nexplicit `root` argument.",
+            "properties": {
+              "configuration": {
+                "description": "Selected configuration file relative to the repository, if present.",
+                "type": [
+                  "string",
+                  "null"
+                ]
+              },
+              "plan_root": {
+                "description": "Plan root relative to the selected repository.",
+                "type": "string"
+              },
+              "repository_root": {
+                "description": "Relative repository root marker (always `\".\"` to avoid leaking host paths).",
+                "type": "string"
+              },
+              "resolved_symlink": {
+                "description": "Whether resolving `root` followed a symbolic link.",
+                "type": "boolean"
+              },
+              "selection": {
+                "description": "How the explicit `root` path resolved (`repository_root` or `plan_root`).",
+                "type": "string"
+              }
+            },
+            "required": [
+              "selection",
+              "repository_root",
+              "plan_root",
+              "resolved_symlink"
+            ],
+            "type": "object"
+          },
+          "ToolEffect": {
+            "description": "Semantic effect produced by one MCP tool invocation.",
+            "oneOf": [
+              {
+                "const": "read_only",
+                "description": "Observed the plan, repository, or server identity without writing files.",
+                "type": "string"
+              },
+              {
+                "const": "mutated",
+                "description": "Wrote or updated repository plan/claim state through the guarded engine.",
+                "type": "string"
+              },
+              {
+                "const": "refused",
+                "description": "Refused before writing because arguments, policy, or evidence failed.",
+                "type": "string"
+              }
+            ]
+          }
+        },
+        "description": "Object-enveloped structured result returned in `structuredContent` by every\nMCP tool.\n\nUsing an explicit object envelope guarantees compatibility with both\nhandshake-era object-only structured-content clients (`2025-06-18` /\n`2025-11-25`) and `2026-07-28` clients, while exposing `denied`, `effect`,\nand `subject` without requiring callers to parse human compatibility text.",
+        "properties": {
+          "context": {
+            "anyOf": [
+              {
+                "$ref": "#/$defs/ContextProvenance"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "description": "Resolved repository context when the caller passed an explicit `root`."
+          },
+          "contract_version": {
+            "description": "Explicit contract version (`aplan/mcp/v2`).",
+            "type": "string"
+          },
+          "data": {
+            "anyOf": [
+              {
+                "$ref": "#/$defs/AddPayload"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "description": "Typed concrete tool payload when the tool completed (even when a check or\nverify verdict is `denied: true`)."
+          },
+          "denied": {
+            "description": "Whether the plan verdict or tool gate denied the request.",
+            "type": "boolean"
+          },
+          "effect": {
+            "$ref": "#/$defs/ToolEffect",
+            "description": "Semantic effect of the call (`read_only`, `mutated`, or `refused`)."
+          },
+          "error": {
+            "description": "Sanitized refusal reason when the tool refused (`effect == refused`).",
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "subject": {
+            "description": "Primary subject of the invocation (task id, `\"plan\"`, or `\"server\"`).",
+            "type": "string"
+          },
+          "tool": {
+            "description": "Name of the invoked MCP tool.",
+            "type": "string"
+          }
+        },
+        "required": [
+          "contract_version",
+          "tool",
+          "subject",
+          "denied",
+          "effect"
+        ],
+        "title": "ToolResultEnvelope",
+        "type": "object"
+      }
+    },
+    "aplan_check": {
+      "description": "Validate the plan and return its diagnostics, and `denied`: whether this plan fails the build under the repository's warning policy. Hermetic: no git, no network.",
+      "inputSchema": {
+        "additionalProperties": false,
+        "description": "Input for tools scoped only by an optional explicit repository/plan `root`\n(`aplan_ready`, `aplan_check`, `aplan_verify`).",
+        "properties": {
+          "root": {
+            "default": null,
+            "description": "Repository root containing `.aplan.yml`, or that repository's configured\nplan directory. The server resolves plan, configuration, traces, evidence\nproviders and Git as one context; an ambiguous partial directory is\nrefused. Omit this field to use the server's launch context. An explicit\nselection returns `{context, result}` in legacy mode and populates\n`context` in structured mode so the resolved frame is auditable.",
+            "type": [
+              "string",
+              "null"
+            ]
+          }
+        },
+        "title": "RootOnlyInput",
+        "type": "object"
+      },
+      "name": "aplan_check",
+      "outputSchema": {
+        "$defs": {
+          "ContextProvenance": {
+            "description": "Resolved repository/plan selection provenance when a caller supplies an\nexplicit `root` argument.",
+            "properties": {
+              "configuration": {
+                "description": "Selected configuration file relative to the repository, if present.",
+                "type": [
+                  "string",
+                  "null"
+                ]
+              },
+              "plan_root": {
+                "description": "Plan root relative to the selected repository.",
+                "type": "string"
+              },
+              "repository_root": {
+                "description": "Relative repository root marker (always `\".\"` to avoid leaking host paths).",
+                "type": "string"
+              },
+              "resolved_symlink": {
+                "description": "Whether resolving `root` followed a symbolic link.",
+                "type": "boolean"
+              },
+              "selection": {
+                "description": "How the explicit `root` path resolved (`repository_root` or `plan_root`).",
+                "type": "string"
+              }
+            },
+            "required": [
+              "selection",
+              "repository_root",
+              "plan_root",
+              "resolved_symlink"
+            ],
+            "type": "object"
+          },
+          "ToolEffect": {
+            "description": "Semantic effect produced by one MCP tool invocation.",
+            "oneOf": [
+              {
+                "const": "read_only",
+                "description": "Observed the plan, repository, or server identity without writing files.",
+                "type": "string"
+              },
+              {
+                "const": "mutated",
+                "description": "Wrote or updated repository plan/claim state through the guarded engine.",
+                "type": "string"
+              },
+              {
+                "const": "refused",
+                "description": "Refused before writing because arguments, policy, or evidence failed.",
+                "type": "string"
+              }
+            ]
+          },
+          "ValidationPayload": {
+            "additionalProperties": true,
+            "description": "Structured payload for `aplan_check` and `aplan_verify`.",
+            "properties": {
+              "denied": {
+                "description": "Whether the plan fails the configured verdict policy.",
+                "type": "boolean"
+              },
+              "diagnostics": {
+                "description": "Complete diagnostic entries.",
+                "items": {
+                  "additionalProperties": true,
+                  "type": "object"
+                },
+                "type": "array"
+              },
+              "errors": {
+                "description": "Number of error diagnostics.",
+                "format": "uint",
+                "minimum": 0,
+                "type": "integer"
+              },
+              "warnings": {
+                "description": "Number of warning diagnostics.",
+                "format": "uint",
+                "minimum": 0,
+                "type": "integer"
+              }
+            },
+            "required": [
+              "denied",
+              "errors",
+              "warnings",
+              "diagnostics"
+            ],
+            "type": "object"
+          }
+        },
+        "description": "Object-enveloped structured result returned in `structuredContent` by every\nMCP tool.\n\nUsing an explicit object envelope guarantees compatibility with both\nhandshake-era object-only structured-content clients (`2025-06-18` /\n`2025-11-25`) and `2026-07-28` clients, while exposing `denied`, `effect`,\nand `subject` without requiring callers to parse human compatibility text.",
+        "properties": {
+          "context": {
+            "anyOf": [
+              {
+                "$ref": "#/$defs/ContextProvenance"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "description": "Resolved repository context when the caller passed an explicit `root`."
+          },
+          "contract_version": {
+            "description": "Explicit contract version (`aplan/mcp/v2`).",
+            "type": "string"
+          },
+          "data": {
+            "anyOf": [
+              {
+                "$ref": "#/$defs/ValidationPayload"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "description": "Typed concrete tool payload when the tool completed (even when a check or\nverify verdict is `denied: true`)."
+          },
+          "denied": {
+            "description": "Whether the plan verdict or tool gate denied the request.",
+            "type": "boolean"
+          },
+          "effect": {
+            "$ref": "#/$defs/ToolEffect",
+            "description": "Semantic effect of the call (`read_only`, `mutated`, or `refused`)."
+          },
+          "error": {
+            "description": "Sanitized refusal reason when the tool refused (`effect == refused`).",
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "subject": {
+            "description": "Primary subject of the invocation (task id, `\"plan\"`, or `\"server\"`).",
+            "type": "string"
+          },
+          "tool": {
+            "description": "Name of the invoked MCP tool.",
+            "type": "string"
+          }
+        },
+        "required": [
+          "contract_version",
+          "tool",
+          "subject",
+          "denied",
+          "effect"
+        ],
+        "title": "ToolResultEnvelope",
+        "type": "object"
+      }
+    },
+    "aplan_claim": {
+      "description": "Record that you are working on a task, so other agents sharing this Git repository and all of its linked worktrees can see the same local ephemeral claim. It never edits the task or its durable `owner`. Two agents cannot both be told they hold one task: the common-directory record is a compare-and-swap. Taking a held task needs `from` naming the displaced holder. Labels are attribution, not authentication; the response includes time, origin, source and coordination scope.",
+      "inputSchema": {
+        "additionalProperties": false,
+        "description": "Input for `aplan_claim`.",
+        "properties": {
+          "as": {
+            "default": null,
+            "description": "The name to record. Otherwise `APLAN_OWNER`, then per-user `me`, this\nrepository's `git config user.name`, then the operating system's user.\nNever read from `.aplan.yml`.",
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "from": {
+            "default": null,
+            "description": "Who the task is being taken from. Required when somebody holds it, and\nchecked rather than taken on trust.",
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "id": {
+            "description": "The task to claim.",
+            "type": "string"
+          },
+          "root": {
+            "default": null,
+            "description": "Repository root containing `.aplan.yml`, or that repository's configured\nplan directory. Omit to use the server's launch context.",
+            "type": [
+              "string",
+              "null"
+            ]
+          }
+        },
+        "required": [
+          "id"
+        ],
+        "title": "ClaimInput",
+        "type": "object"
+      },
+      "name": "aplan_claim",
+      "outputSchema": {
+        "$defs": {
+          "ClaimPayload": {
+            "additionalProperties": true,
+            "description": "Structured payload for `aplan_claim`.",
+            "properties": {
+              "claim": {
+                "additionalProperties": true,
+                "description": "Complete claim record.",
+                "type": "object"
+              },
+              "coordination": {
+                "additionalProperties": true,
+                "description": "Coordination scope.",
+                "type": "object"
+              },
+              "held_by": {
+                "description": "Holder name now holding the claim.",
+                "type": "string"
+              },
+              "id": {
+                "description": "Claimed task id.",
+                "type": "string"
+              }
+            },
+            "required": [
+              "id",
+              "held_by",
+              "claim",
+              "coordination"
+            ],
+            "type": "object"
+          },
+          "ContextProvenance": {
+            "description": "Resolved repository/plan selection provenance when a caller supplies an\nexplicit `root` argument.",
+            "properties": {
+              "configuration": {
+                "description": "Selected configuration file relative to the repository, if present.",
+                "type": [
+                  "string",
+                  "null"
+                ]
+              },
+              "plan_root": {
+                "description": "Plan root relative to the selected repository.",
+                "type": "string"
+              },
+              "repository_root": {
+                "description": "Relative repository root marker (always `\".\"` to avoid leaking host paths).",
+                "type": "string"
+              },
+              "resolved_symlink": {
+                "description": "Whether resolving `root` followed a symbolic link.",
+                "type": "boolean"
+              },
+              "selection": {
+                "description": "How the explicit `root` path resolved (`repository_root` or `plan_root`).",
+                "type": "string"
+              }
+            },
+            "required": [
+              "selection",
+              "repository_root",
+              "plan_root",
+              "resolved_symlink"
+            ],
+            "type": "object"
+          },
+          "ToolEffect": {
+            "description": "Semantic effect produced by one MCP tool invocation.",
+            "oneOf": [
+              {
+                "const": "read_only",
+                "description": "Observed the plan, repository, or server identity without writing files.",
+                "type": "string"
+              },
+              {
+                "const": "mutated",
+                "description": "Wrote or updated repository plan/claim state through the guarded engine.",
+                "type": "string"
+              },
+              {
+                "const": "refused",
+                "description": "Refused before writing because arguments, policy, or evidence failed.",
+                "type": "string"
+              }
+            ]
+          }
+        },
+        "description": "Object-enveloped structured result returned in `structuredContent` by every\nMCP tool.\n\nUsing an explicit object envelope guarantees compatibility with both\nhandshake-era object-only structured-content clients (`2025-06-18` /\n`2025-11-25`) and `2026-07-28` clients, while exposing `denied`, `effect`,\nand `subject` without requiring callers to parse human compatibility text.",
+        "properties": {
+          "context": {
+            "anyOf": [
+              {
+                "$ref": "#/$defs/ContextProvenance"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "description": "Resolved repository context when the caller passed an explicit `root`."
+          },
+          "contract_version": {
+            "description": "Explicit contract version (`aplan/mcp/v2`).",
+            "type": "string"
+          },
+          "data": {
+            "anyOf": [
+              {
+                "$ref": "#/$defs/ClaimPayload"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "description": "Typed concrete tool payload when the tool completed (even when a check or\nverify verdict is `denied: true`)."
+          },
+          "denied": {
+            "description": "Whether the plan verdict or tool gate denied the request.",
+            "type": "boolean"
+          },
+          "effect": {
+            "$ref": "#/$defs/ToolEffect",
+            "description": "Semantic effect of the call (`read_only`, `mutated`, or `refused`)."
+          },
+          "error": {
+            "description": "Sanitized refusal reason when the tool refused (`effect == refused`).",
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "subject": {
+            "description": "Primary subject of the invocation (task id, `\"plan\"`, or `\"server\"`).",
+            "type": "string"
+          },
+          "tool": {
+            "description": "Name of the invoked MCP tool.",
+            "type": "string"
+          }
+        },
+        "required": [
+          "contract_version",
+          "tool",
+          "subject",
+          "denied",
+          "effect"
+        ],
+        "title": "ToolResultEnvelope",
+        "type": "object"
+      }
+    },
+    "aplan_close": {
+      "description": "Close a task with evidence, resolved at L2 before it is written: a cited commit must be reachable from HEAD and touch the task's `paths`, a cited file must exist, and a cited test must be one a configured runner lists. Refuses exactly what the CLI refuses; evidence is a citation to be resolved, never a score the caller asserts. This agent tool never runs a test; it never starts `test.run` or `test.batch`. Focused L3 closure is an explicit trusted CLI or interactive action. It never fetches a url, and whatever nothing here could check is named in `unchecked` rather than left looking like a pass. `aplan_verify` resolves the whole plan.",
+      "inputSchema": {
+        "additionalProperties": false,
+        "description": "Input for `aplan_close`. Deliberately accepts ONLY `id`, `evidence`, and\noptional `root` so no caller can supply a self-assessment score.",
+        "properties": {
+          "evidence": {
+            "description": "Evidence as `kind:ref`, e.g. `commit:d213c9a`, `test:mod::name`,\n`file:path`, `url:https://...`. Required: a status is a claim, and this\nserver will not make it without proof to resolve.",
+            "items": {
+              "type": "string"
+            },
+            "type": "array"
+          },
+          "id": {
+            "description": "Task id to close.",
+            "type": "string"
+          },
+          "root": {
+            "default": null,
+            "description": "Repository root containing `.aplan.yml`, or that repository's configured\nplan directory. Omit to use the server's launch context.",
+            "type": [
+              "string",
+              "null"
+            ]
+          }
+        },
+        "required": [
+          "id",
+          "evidence"
+        ],
+        "title": "CloseInput",
+        "type": "object"
+      },
+      "name": "aplan_close",
+      "outputSchema": {
+        "$defs": {
+          "ClosePayload": {
+            "additionalProperties": true,
+            "description": "Structured payload for `aplan_close`.",
+            "properties": {
+              "aplan_version": {
+                "description": "Version of aplan that performed the close.",
+                "type": "string"
+              },
+              "closed": {
+                "description": "Closed task id.",
+                "type": "string"
+              },
+              "closed_at": {
+                "description": "Canonical RFC 3339 UTC timestamp recorded at close.",
+                "type": "string"
+              },
+              "evidence": {
+                "description": "Resolved evidence citations recorded on the task.",
+                "items": {
+                  "type": "string"
+                },
+                "type": "array"
+              },
+              "file": {
+                "description": "Updated task file path.",
+                "type": "string"
+              }
+            },
+            "required": [
+              "closed",
+              "closed_at",
+              "file",
+              "evidence",
+              "aplan_version"
+            ],
+            "type": "object"
+          },
+          "ContextProvenance": {
+            "description": "Resolved repository/plan selection provenance when a caller supplies an\nexplicit `root` argument.",
+            "properties": {
+              "configuration": {
+                "description": "Selected configuration file relative to the repository, if present.",
+                "type": [
+                  "string",
+                  "null"
+                ]
+              },
+              "plan_root": {
+                "description": "Plan root relative to the selected repository.",
+                "type": "string"
+              },
+              "repository_root": {
+                "description": "Relative repository root marker (always `\".\"` to avoid leaking host paths).",
+                "type": "string"
+              },
+              "resolved_symlink": {
+                "description": "Whether resolving `root` followed a symbolic link.",
+                "type": "boolean"
+              },
+              "selection": {
+                "description": "How the explicit `root` path resolved (`repository_root` or `plan_root`).",
+                "type": "string"
+              }
+            },
+            "required": [
+              "selection",
+              "repository_root",
+              "plan_root",
+              "resolved_symlink"
+            ],
+            "type": "object"
+          },
+          "ToolEffect": {
+            "description": "Semantic effect produced by one MCP tool invocation.",
+            "oneOf": [
+              {
+                "const": "read_only",
+                "description": "Observed the plan, repository, or server identity without writing files.",
+                "type": "string"
+              },
+              {
+                "const": "mutated",
+                "description": "Wrote or updated repository plan/claim state through the guarded engine.",
+                "type": "string"
+              },
+              {
+                "const": "refused",
+                "description": "Refused before writing because arguments, policy, or evidence failed.",
+                "type": "string"
+              }
+            ]
+          }
+        },
+        "description": "Object-enveloped structured result returned in `structuredContent` by every\nMCP tool.\n\nUsing an explicit object envelope guarantees compatibility with both\nhandshake-era object-only structured-content clients (`2025-06-18` /\n`2025-11-25`) and `2026-07-28` clients, while exposing `denied`, `effect`,\nand `subject` without requiring callers to parse human compatibility text.",
+        "properties": {
+          "context": {
+            "anyOf": [
+              {
+                "$ref": "#/$defs/ContextProvenance"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "description": "Resolved repository context when the caller passed an explicit `root`."
+          },
+          "contract_version": {
+            "description": "Explicit contract version (`aplan/mcp/v2`).",
+            "type": "string"
+          },
+          "data": {
+            "anyOf": [
+              {
+                "$ref": "#/$defs/ClosePayload"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "description": "Typed concrete tool payload when the tool completed (even when a check or\nverify verdict is `denied: true`)."
+          },
+          "denied": {
+            "description": "Whether the plan verdict or tool gate denied the request.",
+            "type": "boolean"
+          },
+          "effect": {
+            "$ref": "#/$defs/ToolEffect",
+            "description": "Semantic effect of the call (`read_only`, `mutated`, or `refused`)."
+          },
+          "error": {
+            "description": "Sanitized refusal reason when the tool refused (`effect == refused`).",
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "subject": {
+            "description": "Primary subject of the invocation (task id, `\"plan\"`, or `\"server\"`).",
+            "type": "string"
+          },
+          "tool": {
+            "description": "Name of the invoked MCP tool.",
+            "type": "string"
+          }
+        },
+        "required": [
+          "contract_version",
+          "tool",
+          "subject",
+          "denied",
+          "effect"
+        ],
+        "title": "ToolResultEnvelope",
+        "type": "object"
+      }
+    },
+    "aplan_dep": {
+      "description": "Add or remove one dependency edge: `after` is the task that must finish first. `blocked_by` is the only ordering the model has and it was writable only at creation, so re-sequencing meant editing files by hand. Refuses before writing what `check` would reject after: a cycle, an id that does not exist, a cancelled blocker, or a done task acquiring an unfinished one. A milestone's `blocked_by` is which tasks are in that cut rather than what it comes after, so editing that is refused here and belongs to `aplan mv`.",
+      "inputSchema": {
+        "additionalProperties": false,
+        "description": "Input for `aplan_dep`.",
+        "properties": {
+          "add": {
+            "description": "True to record the edge, false to remove it.",
+            "type": "boolean"
+          },
+          "after": {
+            "description": "The task it comes after, which must finish first.",
+            "type": "string"
+          },
+          "id": {
+            "description": "The task that comes second.",
+            "type": "string"
+          },
+          "root": {
+            "default": null,
+            "description": "Repository root containing `.aplan.yml`, or that repository's configured\nplan directory. Omit to use the server's launch context.",
+            "type": [
+              "string",
+              "null"
+            ]
+          }
+        },
+        "required": [
+          "id",
+          "after",
+          "add"
+        ],
+        "title": "DepInput",
+        "type": "object"
+      },
+      "name": "aplan_dep",
+      "outputSchema": {
+        "$defs": {
+          "ContextProvenance": {
+            "description": "Resolved repository/plan selection provenance when a caller supplies an\nexplicit `root` argument.",
+            "properties": {
+              "configuration": {
+                "description": "Selected configuration file relative to the repository, if present.",
+                "type": [
+                  "string",
+                  "null"
+                ]
+              },
+              "plan_root": {
+                "description": "Plan root relative to the selected repository.",
+                "type": "string"
+              },
+              "repository_root": {
+                "description": "Relative repository root marker (always `\".\"` to avoid leaking host paths).",
+                "type": "string"
+              },
+              "resolved_symlink": {
+                "description": "Whether resolving `root` followed a symbolic link.",
+                "type": "boolean"
+              },
+              "selection": {
+                "description": "How the explicit `root` path resolved (`repository_root` or `plan_root`).",
+                "type": "string"
+              }
+            },
+            "required": [
+              "selection",
+              "repository_root",
+              "plan_root",
+              "resolved_symlink"
+            ],
+            "type": "object"
+          },
+          "DepPayload": {
+            "description": "Structured payload for `aplan_dep`.",
+            "properties": {
+              "after": {
+                "description": "Predecessor task id.",
+                "type": "string"
+              },
+              "changed": {
+                "description": "Whether the dependency edge changed.",
+                "type": "boolean"
+              },
+              "file": {
+                "description": "Modified file path when `changed` is true.",
+                "type": [
+                  "string",
+                  "null"
+                ]
+              },
+              "id": {
+                "description": "Dependent task id.",
+                "type": "string"
+              },
+              "notes": {
+                "description": "Non-blocking notes when `changed` is true.",
+                "items": {
+                  "type": "string"
+                },
+                "type": [
+                  "array",
+                  "null"
+                ]
+              }
+            },
+            "required": [
+              "id",
+              "after",
+              "changed"
+            ],
+            "type": "object"
+          },
+          "ToolEffect": {
+            "description": "Semantic effect produced by one MCP tool invocation.",
+            "oneOf": [
+              {
+                "const": "read_only",
+                "description": "Observed the plan, repository, or server identity without writing files.",
+                "type": "string"
+              },
+              {
+                "const": "mutated",
+                "description": "Wrote or updated repository plan/claim state through the guarded engine.",
+                "type": "string"
+              },
+              {
+                "const": "refused",
+                "description": "Refused before writing because arguments, policy, or evidence failed.",
+                "type": "string"
+              }
+            ]
+          }
+        },
+        "description": "Object-enveloped structured result returned in `structuredContent` by every\nMCP tool.\n\nUsing an explicit object envelope guarantees compatibility with both\nhandshake-era object-only structured-content clients (`2025-06-18` /\n`2025-11-25`) and `2026-07-28` clients, while exposing `denied`, `effect`,\nand `subject` without requiring callers to parse human compatibility text.",
+        "properties": {
+          "context": {
+            "anyOf": [
+              {
+                "$ref": "#/$defs/ContextProvenance"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "description": "Resolved repository context when the caller passed an explicit `root`."
+          },
+          "contract_version": {
+            "description": "Explicit contract version (`aplan/mcp/v2`).",
+            "type": "string"
+          },
+          "data": {
+            "anyOf": [
+              {
+                "$ref": "#/$defs/DepPayload"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "description": "Typed concrete tool payload when the tool completed (even when a check or\nverify verdict is `denied: true`)."
+          },
+          "denied": {
+            "description": "Whether the plan verdict or tool gate denied the request.",
+            "type": "boolean"
+          },
+          "effect": {
+            "$ref": "#/$defs/ToolEffect",
+            "description": "Semantic effect of the call (`read_only`, `mutated`, or `refused`)."
+          },
+          "error": {
+            "description": "Sanitized refusal reason when the tool refused (`effect == refused`).",
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "subject": {
+            "description": "Primary subject of the invocation (task id, `\"plan\"`, or `\"server\"`).",
+            "type": "string"
+          },
+          "tool": {
+            "description": "Name of the invoked MCP tool.",
+            "type": "string"
+          }
+        },
+        "required": [
+          "contract_version",
+          "tool",
+          "subject",
+          "denied",
+          "effect"
+        ],
+        "title": "ToolResultEnvelope",
+        "type": "object"
+      }
+    },
+    "aplan_identity": {
+      "description": "Name the build of this server: its version, the commit it was built from, and the digests of its capability document and its own image. Asking an installed CLI does not answer this -- a configured MCP process may be a different executable, which is how a pilot spent a pass on a defect the checkout had already fixed. Needs no plan and no repository.",
+      "inputSchema": {
+        "additionalProperties": false,
+        "description": "Input for `aplan_identity`: takes no arguments because identity describes\nthis server process rather than any repository.",
+        "title": "IdentityInput",
+        "type": "object"
+      },
+      "name": "aplan_identity",
+      "outputSchema": {
+        "$defs": {
+          "ContextProvenance": {
+            "description": "Resolved repository/plan selection provenance when a caller supplies an\nexplicit `root` argument.",
+            "properties": {
+              "configuration": {
+                "description": "Selected configuration file relative to the repository, if present.",
+                "type": [
+                  "string",
+                  "null"
+                ]
+              },
+              "plan_root": {
+                "description": "Plan root relative to the selected repository.",
+                "type": "string"
+              },
+              "repository_root": {
+                "description": "Relative repository root marker (always `\".\"` to avoid leaking host paths).",
+                "type": "string"
+              },
+              "resolved_symlink": {
+                "description": "Whether resolving `root` followed a symbolic link.",
+                "type": "boolean"
+              },
+              "selection": {
+                "description": "How the explicit `root` path resolved (`repository_root` or `plan_root`).",
+                "type": "string"
+              }
+            },
+            "required": [
+              "selection",
+              "repository_root",
+              "plan_root",
+              "resolved_symlink"
+            ],
+            "type": "object"
+          },
+          "IdentityPayload": {
+            "description": "Structured payload for `aplan_identity`.",
+            "properties": {
+              "binary_sha256": {
+                "description": "SHA-256 digest of the running binary image, if readable.",
+                "type": [
+                  "string",
+                  "null"
+                ]
+              },
+              "facts_sha256": {
+                "description": "SHA-256 digest of the build's `facts` document.",
+                "type": "string"
+              },
+              "mcp_contract_version": {
+                "description": "Explicit MCP contract version advertised by this server.",
+                "type": [
+                  "string",
+                  "null"
+                ]
+              },
+              "schema": {
+                "description": "Identity document schema identifier (`aplan/tool-identity/v1`).",
+                "type": "string"
+              },
+              "source": {
+                "description": "Source commit revision, if embedded at build time.",
+                "type": [
+                  "string",
+                  "null"
+                ]
+              },
+              "version": {
+                "description": "Package version of this server executable.",
+                "type": "string"
+              }
+            },
+            "required": [
+              "schema",
+              "version",
+              "facts_sha256"
+            ],
+            "type": "object"
+          },
+          "ToolEffect": {
+            "description": "Semantic effect produced by one MCP tool invocation.",
+            "oneOf": [
+              {
+                "const": "read_only",
+                "description": "Observed the plan, repository, or server identity without writing files.",
+                "type": "string"
+              },
+              {
+                "const": "mutated",
+                "description": "Wrote or updated repository plan/claim state through the guarded engine.",
+                "type": "string"
+              },
+              {
+                "const": "refused",
+                "description": "Refused before writing because arguments, policy, or evidence failed.",
+                "type": "string"
+              }
+            ]
+          }
+        },
+        "description": "Object-enveloped structured result returned in `structuredContent` by every\nMCP tool.\n\nUsing an explicit object envelope guarantees compatibility with both\nhandshake-era object-only structured-content clients (`2025-06-18` /\n`2025-11-25`) and `2026-07-28` clients, while exposing `denied`, `effect`,\nand `subject` without requiring callers to parse human compatibility text.",
+        "properties": {
+          "context": {
+            "anyOf": [
+              {
+                "$ref": "#/$defs/ContextProvenance"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "description": "Resolved repository context when the caller passed an explicit `root`."
+          },
+          "contract_version": {
+            "description": "Explicit contract version (`aplan/mcp/v2`).",
+            "type": "string"
+          },
+          "data": {
+            "anyOf": [
+              {
+                "$ref": "#/$defs/IdentityPayload"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "description": "Typed concrete tool payload when the tool completed (even when a check or\nverify verdict is `denied: true`)."
+          },
+          "denied": {
+            "description": "Whether the plan verdict or tool gate denied the request.",
+            "type": "boolean"
+          },
+          "effect": {
+            "$ref": "#/$defs/ToolEffect",
+            "description": "Semantic effect of the call (`read_only`, `mutated`, or `refused`)."
+          },
+          "error": {
+            "description": "Sanitized refusal reason when the tool refused (`effect == refused`).",
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "subject": {
+            "description": "Primary subject of the invocation (task id, `\"plan\"`, or `\"server\"`).",
+            "type": "string"
+          },
+          "tool": {
+            "description": "Name of the invoked MCP tool.",
+            "type": "string"
+          }
+        },
+        "required": [
+          "contract_version",
+          "tool",
+          "subject",
+          "denied",
+          "effect"
+        ],
+        "title": "ToolResultEnvelope",
+        "type": "object"
+      }
+    },
+    "aplan_ready": {
+      "description": "List tasks whose blockers are all done, so an agent can pick real work.",
+      "inputSchema": {
+        "additionalProperties": false,
+        "description": "Input for tools scoped only by an optional explicit repository/plan `root`\n(`aplan_ready`, `aplan_check`, `aplan_verify`).",
+        "properties": {
+          "root": {
+            "default": null,
+            "description": "Repository root containing `.aplan.yml`, or that repository's configured\nplan directory. The server resolves plan, configuration, traces, evidence\nproviders and Git as one context; an ambiguous partial directory is\nrefused. Omit this field to use the server's launch context. An explicit\nselection returns `{context, result}` in legacy mode and populates\n`context` in structured mode so the resolved frame is auditable.",
+            "type": [
+              "string",
+              "null"
+            ]
+          }
+        },
+        "title": "RootOnlyInput",
+        "type": "object"
+      },
+      "name": "aplan_ready",
+      "outputSchema": {
+        "$defs": {
+          "ContextProvenance": {
+            "description": "Resolved repository/plan selection provenance when a caller supplies an\nexplicit `root` argument.",
+            "properties": {
+              "configuration": {
+                "description": "Selected configuration file relative to the repository, if present.",
+                "type": [
+                  "string",
+                  "null"
+                ]
+              },
+              "plan_root": {
+                "description": "Plan root relative to the selected repository.",
+                "type": "string"
+              },
+              "repository_root": {
+                "description": "Relative repository root marker (always `\".\"` to avoid leaking host paths).",
+                "type": "string"
+              },
+              "resolved_symlink": {
+                "description": "Whether resolving `root` followed a symbolic link.",
+                "type": "boolean"
+              },
+              "selection": {
+                "description": "How the explicit `root` path resolved (`repository_root` or `plan_root`).",
+                "type": "string"
+              }
+            },
+            "required": [
+              "selection",
+              "repository_root",
+              "plan_root",
+              "resolved_symlink"
+            ],
+            "type": "object"
+          },
+          "ReadyPayload": {
+            "additionalProperties": true,
+            "description": "Structured payload for `aplan_ready`.",
+            "properties": {
+              "claim_observed_at_epoch_seconds": {
+                "description": "Unix epoch seconds when claims were observed.",
+                "format": "int64",
+                "type": "integer"
+              },
+              "coordination": {
+                "additionalProperties": true,
+                "description": "Claim coordination availability and durability summary.",
+                "type": "object"
+              },
+              "count": {
+                "default": 0,
+                "description": "Total number of tasks currently ready.",
+                "format": "uint",
+                "minimum": 0,
+                "type": "integer"
+              },
+              "ready": {
+                "description": "Ready task rows in deterministic rank order.",
+                "items": {
+                  "additionalProperties": true,
+                  "type": "object"
+                },
+                "type": "array"
+              }
+            },
+            "required": [
+              "ready",
+              "coordination",
+              "claim_observed_at_epoch_seconds"
+            ],
+            "type": "object"
+          },
+          "ToolEffect": {
+            "description": "Semantic effect produced by one MCP tool invocation.",
+            "oneOf": [
+              {
+                "const": "read_only",
+                "description": "Observed the plan, repository, or server identity without writing files.",
+                "type": "string"
+              },
+              {
+                "const": "mutated",
+                "description": "Wrote or updated repository plan/claim state through the guarded engine.",
+                "type": "string"
+              },
+              {
+                "const": "refused",
+                "description": "Refused before writing because arguments, policy, or evidence failed.",
+                "type": "string"
+              }
+            ]
+          }
+        },
+        "description": "Object-enveloped structured result returned in `structuredContent` by every\nMCP tool.\n\nUsing an explicit object envelope guarantees compatibility with both\nhandshake-era object-only structured-content clients (`2025-06-18` /\n`2025-11-25`) and `2026-07-28` clients, while exposing `denied`, `effect`,\nand `subject` without requiring callers to parse human compatibility text.",
+        "properties": {
+          "context": {
+            "anyOf": [
+              {
+                "$ref": "#/$defs/ContextProvenance"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "description": "Resolved repository context when the caller passed an explicit `root`."
+          },
+          "contract_version": {
+            "description": "Explicit contract version (`aplan/mcp/v2`).",
+            "type": "string"
+          },
+          "data": {
+            "anyOf": [
+              {
+                "$ref": "#/$defs/ReadyPayload"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "description": "Typed concrete tool payload when the tool completed (even when a check or\nverify verdict is `denied: true`)."
+          },
+          "denied": {
+            "description": "Whether the plan verdict or tool gate denied the request.",
+            "type": "boolean"
+          },
+          "effect": {
+            "$ref": "#/$defs/ToolEffect",
+            "description": "Semantic effect of the call (`read_only`, `mutated`, or `refused`)."
+          },
+          "error": {
+            "description": "Sanitized refusal reason when the tool refused (`effect == refused`).",
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "subject": {
+            "description": "Primary subject of the invocation (task id, `\"plan\"`, or `\"server\"`).",
+            "type": "string"
+          },
+          "tool": {
+            "description": "Name of the invoked MCP tool.",
+            "type": "string"
+          }
+        },
+        "required": [
+          "contract_version",
+          "tool",
+          "subject",
+          "denied",
+          "effect"
+        ],
+        "title": "ToolResultEnvelope",
+        "type": "object"
+      }
+    },
+    "aplan_release": {
+      "description": "Drop a claim, reporting whose it was. Any caller may release, because a claim lasts until it is released or taken over and an abandoned one has to be clearable by somebody else. A missing task's orphaned local claim can still be released explicitly. Releasing a visible task nobody holds changes nothing and says so.",
+      "inputSchema": {
+        "additionalProperties": false,
+        "description": "Input for single-task tools (`aplan_show`, `aplan_release`, `aplan_start`,\n`aplan_stop`, `aplan_review`).",
+        "properties": {
+          "id": {
+            "description": "Task id.",
+            "type": "string"
+          },
+          "root": {
+            "default": null,
+            "description": "Repository root containing `.aplan.yml`, or that repository's configured\nplan directory. Omit to use the server's launch context.",
+            "type": [
+              "string",
+              "null"
+            ]
+          }
+        },
+        "required": [
+          "id"
+        ],
+        "title": "TaskIdInput",
+        "type": "object"
+      },
+      "name": "aplan_release",
+      "outputSchema": {
+        "$defs": {
+          "ContextProvenance": {
+            "description": "Resolved repository/plan selection provenance when a caller supplies an\nexplicit `root` argument.",
+            "properties": {
+              "configuration": {
+                "description": "Selected configuration file relative to the repository, if present.",
+                "type": [
+                  "string",
+                  "null"
+                ]
+              },
+              "plan_root": {
+                "description": "Plan root relative to the selected repository.",
+                "type": "string"
+              },
+              "repository_root": {
+                "description": "Relative repository root marker (always `\".\"` to avoid leaking host paths).",
+                "type": "string"
+              },
+              "resolved_symlink": {
+                "description": "Whether resolving `root` followed a symbolic link.",
+                "type": "boolean"
+              },
+              "selection": {
+                "description": "How the explicit `root` path resolved (`repository_root` or `plan_root`).",
+                "type": "string"
+              }
+            },
+            "required": [
+              "selection",
+              "repository_root",
+              "plan_root",
+              "resolved_symlink"
+            ],
+            "type": "object"
+          },
+          "ReleasePayload": {
+            "additionalProperties": true,
+            "description": "Structured payload for `aplan_release`.",
+            "properties": {
+              "changed": {
+                "description": "Whether an active claim was released.",
+                "type": "boolean"
+              },
+              "coordination": {
+                "additionalProperties": true,
+                "description": "Coordination scope.",
+                "type": "object"
+              },
+              "id": {
+                "description": "Task id.",
+                "type": "string"
+              }
+            },
+            "required": [
+              "id",
+              "changed",
+              "coordination"
+            ],
+            "type": "object"
+          },
+          "ToolEffect": {
+            "description": "Semantic effect produced by one MCP tool invocation.",
+            "oneOf": [
+              {
+                "const": "read_only",
+                "description": "Observed the plan, repository, or server identity without writing files.",
+                "type": "string"
+              },
+              {
+                "const": "mutated",
+                "description": "Wrote or updated repository plan/claim state through the guarded engine.",
+                "type": "string"
+              },
+              {
+                "const": "refused",
+                "description": "Refused before writing because arguments, policy, or evidence failed.",
+                "type": "string"
+              }
+            ]
+          }
+        },
+        "description": "Object-enveloped structured result returned in `structuredContent` by every\nMCP tool.\n\nUsing an explicit object envelope guarantees compatibility with both\nhandshake-era object-only structured-content clients (`2025-06-18` /\n`2025-11-25`) and `2026-07-28` clients, while exposing `denied`, `effect`,\nand `subject` without requiring callers to parse human compatibility text.",
+        "properties": {
+          "context": {
+            "anyOf": [
+              {
+                "$ref": "#/$defs/ContextProvenance"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "description": "Resolved repository context when the caller passed an explicit `root`."
+          },
+          "contract_version": {
+            "description": "Explicit contract version (`aplan/mcp/v2`).",
+            "type": "string"
+          },
+          "data": {
+            "anyOf": [
+              {
+                "$ref": "#/$defs/ReleasePayload"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "description": "Typed concrete tool payload when the tool completed (even when a check or\nverify verdict is `denied: true`)."
+          },
+          "denied": {
+            "description": "Whether the plan verdict or tool gate denied the request.",
+            "type": "boolean"
+          },
+          "effect": {
+            "$ref": "#/$defs/ToolEffect",
+            "description": "Semantic effect of the call (`read_only`, `mutated`, or `refused`)."
+          },
+          "error": {
+            "description": "Sanitized refusal reason when the tool refused (`effect == refused`).",
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "subject": {
+            "description": "Primary subject of the invocation (task id, `\"plan\"`, or `\"server\"`).",
+            "type": "string"
+          },
+          "tool": {
+            "description": "Name of the invoked MCP tool.",
+            "type": "string"
+          }
+        },
+        "required": [
+          "contract_version",
+          "tool",
+          "subject",
+          "denied",
+          "effect"
+        ],
+        "title": "ToolResultEnvelope",
+        "type": "object"
+      }
+    },
+    "aplan_review": {
+      "description": "Record that a live task's traced sections were re-reviewed and still hold as written, stamping kind-tagged `trace_fingerprints` without altering status, evidence, or body and without creating a commit. Clears `APLAN045` only while the stored stamp matches the traced section and re-arms if the section changes again. Refuses terminal tasks and tasks without resolvable anchored traces.",
+      "inputSchema": {
+        "additionalProperties": false,
+        "description": "Input for single-task tools (`aplan_show`, `aplan_release`, `aplan_start`,\n`aplan_stop`, `aplan_review`).",
+        "properties": {
+          "id": {
+            "description": "Task id.",
+            "type": "string"
+          },
+          "root": {
+            "default": null,
+            "description": "Repository root containing `.aplan.yml`, or that repository's configured\nplan directory. Omit to use the server's launch context.",
+            "type": [
+              "string",
+              "null"
+            ]
+          }
+        },
+        "required": [
+          "id"
+        ],
+        "title": "TaskIdInput",
+        "type": "object"
+      },
+      "name": "aplan_review",
+      "outputSchema": {
+        "$defs": {
+          "ContextProvenance": {
+            "description": "Resolved repository/plan selection provenance when a caller supplies an\nexplicit `root` argument.",
+            "properties": {
+              "configuration": {
+                "description": "Selected configuration file relative to the repository, if present.",
+                "type": [
+                  "string",
+                  "null"
+                ]
+              },
+              "plan_root": {
+                "description": "Plan root relative to the selected repository.",
+                "type": "string"
+              },
+              "repository_root": {
+                "description": "Relative repository root marker (always `\".\"` to avoid leaking host paths).",
+                "type": "string"
+              },
+              "resolved_symlink": {
+                "description": "Whether resolving `root` followed a symbolic link.",
+                "type": "boolean"
+              },
+              "selection": {
+                "description": "How the explicit `root` path resolved (`repository_root` or `plan_root`).",
+                "type": "string"
+              }
+            },
+            "required": [
+              "selection",
+              "repository_root",
+              "plan_root",
+              "resolved_symlink"
+            ],
+            "type": "object"
+          },
+          "ReviewPayload": {
+            "description": "Structured payload for `aplan_review`.",
+            "properties": {
+              "changed": {
+                "description": "Whether trace fingerprints changed.",
+                "type": "boolean"
+              },
+              "file": {
+                "description": "Task file path.",
+                "type": "string"
+              },
+              "id": {
+                "description": "Reviewed task id.",
+                "type": "string"
+              },
+              "notes": {
+                "default": [],
+                "description": "Non-blocking notes.",
+                "items": {
+                  "type": "string"
+                },
+                "type": "array"
+              },
+              "stamped": {
+                "description": "Number of stamped traces.",
+                "format": "uint",
+                "minimum": 0,
+                "type": "integer"
+              },
+              "trace_fingerprints": {
+                "additionalProperties": {
+                  "type": "string"
+                },
+                "description": "Map of trace reference to SHA-256 fingerprint.",
+                "type": "object"
+              }
+            },
+            "required": [
+              "id",
+              "changed",
+              "stamped",
+              "trace_fingerprints",
+              "file"
+            ],
+            "type": "object"
+          },
+          "ToolEffect": {
+            "description": "Semantic effect produced by one MCP tool invocation.",
+            "oneOf": [
+              {
+                "const": "read_only",
+                "description": "Observed the plan, repository, or server identity without writing files.",
+                "type": "string"
+              },
+              {
+                "const": "mutated",
+                "description": "Wrote or updated repository plan/claim state through the guarded engine.",
+                "type": "string"
+              },
+              {
+                "const": "refused",
+                "description": "Refused before writing because arguments, policy, or evidence failed.",
+                "type": "string"
+              }
+            ]
+          }
+        },
+        "description": "Object-enveloped structured result returned in `structuredContent` by every\nMCP tool.\n\nUsing an explicit object envelope guarantees compatibility with both\nhandshake-era object-only structured-content clients (`2025-06-18` /\n`2025-11-25`) and `2026-07-28` clients, while exposing `denied`, `effect`,\nand `subject` without requiring callers to parse human compatibility text.",
+        "properties": {
+          "context": {
+            "anyOf": [
+              {
+                "$ref": "#/$defs/ContextProvenance"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "description": "Resolved repository context when the caller passed an explicit `root`."
+          },
+          "contract_version": {
+            "description": "Explicit contract version (`aplan/mcp/v2`).",
+            "type": "string"
+          },
+          "data": {
+            "anyOf": [
+              {
+                "$ref": "#/$defs/ReviewPayload"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "description": "Typed concrete tool payload when the tool completed (even when a check or\nverify verdict is `denied: true`)."
+          },
+          "denied": {
+            "description": "Whether the plan verdict or tool gate denied the request.",
+            "type": "boolean"
+          },
+          "effect": {
+            "$ref": "#/$defs/ToolEffect",
+            "description": "Semantic effect of the call (`read_only`, `mutated`, or `refused`)."
+          },
+          "error": {
+            "description": "Sanitized refusal reason when the tool refused (`effect == refused`).",
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "subject": {
+            "description": "Primary subject of the invocation (task id, `\"plan\"`, or `\"server\"`).",
+            "type": "string"
+          },
+          "tool": {
+            "description": "Name of the invoked MCP tool.",
+            "type": "string"
+          }
+        },
+        "required": [
+          "contract_version",
+          "tool",
+          "subject",
+          "denied",
+          "effect"
+        ],
+        "title": "ToolResultEnvelope",
+        "type": "object"
+      }
+    },
+    "aplan_show": {
+      "description": "One task whole: its `paths`, `traces` and `evidence`, which no other tool returns, plus what the graph resolves (its cut, whether it is ready, what it waits on and what it releases) and every finding attached to it. Reads repository-backed evidence and retained typed provider observations without starting configured processes; `aplan_verify` explicitly refreshes providers.",
+      "inputSchema": {
+        "additionalProperties": false,
+        "description": "Input for single-task tools (`aplan_show`, `aplan_release`, `aplan_start`,\n`aplan_stop`, `aplan_review`).",
+        "properties": {
+          "id": {
+            "description": "Task id.",
+            "type": "string"
+          },
+          "root": {
+            "default": null,
+            "description": "Repository root containing `.aplan.yml`, or that repository's configured\nplan directory. Omit to use the server's launch context.",
+            "type": [
+              "string",
+              "null"
+            ]
+          }
+        },
+        "required": [
+          "id"
+        ],
+        "title": "TaskIdInput",
+        "type": "object"
+      },
+      "name": "aplan_show",
+      "outputSchema": {
+        "$defs": {
+          "ContextProvenance": {
+            "description": "Resolved repository/plan selection provenance when a caller supplies an\nexplicit `root` argument.",
+            "properties": {
+              "configuration": {
+                "description": "Selected configuration file relative to the repository, if present.",
+                "type": [
+                  "string",
+                  "null"
+                ]
+              },
+              "plan_root": {
+                "description": "Plan root relative to the selected repository.",
+                "type": "string"
+              },
+              "repository_root": {
+                "description": "Relative repository root marker (always `\".\"` to avoid leaking host paths).",
+                "type": "string"
+              },
+              "resolved_symlink": {
+                "description": "Whether resolving `root` followed a symbolic link.",
+                "type": "boolean"
+              },
+              "selection": {
+                "description": "How the explicit `root` path resolved (`repository_root` or `plan_root`).",
+                "type": "string"
+              }
+            },
+            "required": [
+              "selection",
+              "repository_root",
+              "plan_root",
+              "resolved_symlink"
+            ],
+            "type": "object"
+          },
+          "ShowPayload": {
+            "additionalProperties": true,
+            "description": "Structured payload for `aplan_show`.",
+            "properties": {
+              "id": {
+                "description": "Task id.",
+                "type": "string"
+              },
+              "schema": {
+                "description": "Show schema identifier (`aplan/show/v3`).",
+                "type": "string"
+              },
+              "status": {
+                "description": "Current task status.",
+                "type": "string"
+              },
+              "title": {
+                "description": "Task title.",
+                "type": "string"
+              }
+            },
+            "required": [
+              "schema",
+              "id",
+              "title",
+              "status"
+            ],
+            "type": "object"
+          },
+          "ToolEffect": {
+            "description": "Semantic effect produced by one MCP tool invocation.",
+            "oneOf": [
+              {
+                "const": "read_only",
+                "description": "Observed the plan, repository, or server identity without writing files.",
+                "type": "string"
+              },
+              {
+                "const": "mutated",
+                "description": "Wrote or updated repository plan/claim state through the guarded engine.",
+                "type": "string"
+              },
+              {
+                "const": "refused",
+                "description": "Refused before writing because arguments, policy, or evidence failed.",
+                "type": "string"
+              }
+            ]
+          }
+        },
+        "description": "Object-enveloped structured result returned in `structuredContent` by every\nMCP tool.\n\nUsing an explicit object envelope guarantees compatibility with both\nhandshake-era object-only structured-content clients (`2025-06-18` /\n`2025-11-25`) and `2026-07-28` clients, while exposing `denied`, `effect`,\nand `subject` without requiring callers to parse human compatibility text.",
+        "properties": {
+          "context": {
+            "anyOf": [
+              {
+                "$ref": "#/$defs/ContextProvenance"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "description": "Resolved repository context when the caller passed an explicit `root`."
+          },
+          "contract_version": {
+            "description": "Explicit contract version (`aplan/mcp/v2`).",
+            "type": "string"
+          },
+          "data": {
+            "anyOf": [
+              {
+                "$ref": "#/$defs/ShowPayload"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "description": "Typed concrete tool payload when the tool completed (even when a check or\nverify verdict is `denied: true`)."
+          },
+          "denied": {
+            "description": "Whether the plan verdict or tool gate denied the request.",
+            "type": "boolean"
+          },
+          "effect": {
+            "$ref": "#/$defs/ToolEffect",
+            "description": "Semantic effect of the call (`read_only`, `mutated`, or `refused`)."
+          },
+          "error": {
+            "description": "Sanitized refusal reason when the tool refused (`effect == refused`).",
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "subject": {
+            "description": "Primary subject of the invocation (task id, `\"plan\"`, or `\"server\"`).",
+            "type": "string"
+          },
+          "tool": {
+            "description": "Name of the invoked MCP tool.",
+            "type": "string"
+          }
+        },
+        "required": [
+          "contract_version",
+          "tool",
+          "subject",
+          "denied",
+          "effect"
+        ],
+        "title": "ToolResultEnvelope",
+        "type": "object"
+      }
+    },
+    "aplan_start": {
+      "description": "Record that work on a task has begun, setting `in_progress`. A claim rather than a proof, and checked like one: `aplan_verify` reports `APLAN053` where the repository holds nothing matching the task's `paths`, so a status nobody acted on does not pass as progress. Refuses a task that is already terminal, because nothing reopens finished work.",
+      "inputSchema": {
+        "additionalProperties": false,
+        "description": "Input for single-task tools (`aplan_show`, `aplan_release`, `aplan_start`,\n`aplan_stop`, `aplan_review`).",
+        "properties": {
+          "id": {
+            "description": "Task id.",
+            "type": "string"
+          },
+          "root": {
+            "default": null,
+            "description": "Repository root containing `.aplan.yml`, or that repository's configured\nplan directory. Omit to use the server's launch context.",
+            "type": [
+              "string",
+              "null"
+            ]
+          }
+        },
+        "required": [
+          "id"
+        ],
+        "title": "TaskIdInput",
+        "type": "object"
+      },
+      "name": "aplan_start",
+      "outputSchema": {
+        "$defs": {
+          "ContextProvenance": {
+            "description": "Resolved repository/plan selection provenance when a caller supplies an\nexplicit `root` argument.",
+            "properties": {
+              "configuration": {
+                "description": "Selected configuration file relative to the repository, if present.",
+                "type": [
+                  "string",
+                  "null"
+                ]
+              },
+              "plan_root": {
+                "description": "Plan root relative to the selected repository.",
+                "type": "string"
+              },
+              "repository_root": {
+                "description": "Relative repository root marker (always `\".\"` to avoid leaking host paths).",
+                "type": "string"
+              },
+              "resolved_symlink": {
+                "description": "Whether resolving `root` followed a symbolic link.",
+                "type": "boolean"
+              },
+              "selection": {
+                "description": "How the explicit `root` path resolved (`repository_root` or `plan_root`).",
+                "type": "string"
+              }
+            },
+            "required": [
+              "selection",
+              "repository_root",
+              "plan_root",
+              "resolved_symlink"
+            ],
+            "type": "object"
+          },
+          "ToolEffect": {
+            "description": "Semantic effect produced by one MCP tool invocation.",
+            "oneOf": [
+              {
+                "const": "read_only",
+                "description": "Observed the plan, repository, or server identity without writing files.",
+                "type": "string"
+              },
+              {
+                "const": "mutated",
+                "description": "Wrote or updated repository plan/claim state through the guarded engine.",
+                "type": "string"
+              },
+              {
+                "const": "refused",
+                "description": "Refused before writing because arguments, policy, or evidence failed.",
+                "type": "string"
+              }
+            ]
+          },
+          "WorkingPayload": {
+            "additionalProperties": true,
+            "description": "Structured payload for `aplan_start` and `aplan_stop`.",
+            "properties": {
+              "changed": {
+                "description": "Whether the task status changed.",
+                "type": "boolean"
+              },
+              "id": {
+                "description": "Task id.",
+                "type": "string"
+              },
+              "status": {
+                "description": "Resulting status (`in_progress` or `todo`).",
+                "type": "string"
+              }
+            },
+            "required": [
+              "id",
+              "status",
+              "changed"
+            ],
+            "type": "object"
+          }
+        },
+        "description": "Object-enveloped structured result returned in `structuredContent` by every\nMCP tool.\n\nUsing an explicit object envelope guarantees compatibility with both\nhandshake-era object-only structured-content clients (`2025-06-18` /\n`2025-11-25`) and `2026-07-28` clients, while exposing `denied`, `effect`,\nand `subject` without requiring callers to parse human compatibility text.",
+        "properties": {
+          "context": {
+            "anyOf": [
+              {
+                "$ref": "#/$defs/ContextProvenance"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "description": "Resolved repository context when the caller passed an explicit `root`."
+          },
+          "contract_version": {
+            "description": "Explicit contract version (`aplan/mcp/v2`).",
+            "type": "string"
+          },
+          "data": {
+            "anyOf": [
+              {
+                "$ref": "#/$defs/WorkingPayload"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "description": "Typed concrete tool payload when the tool completed (even when a check or\nverify verdict is `denied: true`)."
+          },
+          "denied": {
+            "description": "Whether the plan verdict or tool gate denied the request.",
+            "type": "boolean"
+          },
+          "effect": {
+            "$ref": "#/$defs/ToolEffect",
+            "description": "Semantic effect of the call (`read_only`, `mutated`, or `refused`)."
+          },
+          "error": {
+            "description": "Sanitized refusal reason when the tool refused (`effect == refused`).",
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "subject": {
+            "description": "Primary subject of the invocation (task id, `\"plan\"`, or `\"server\"`).",
+            "type": "string"
+          },
+          "tool": {
+            "description": "Name of the invoked MCP tool.",
+            "type": "string"
+          }
+        },
+        "required": [
+          "contract_version",
+          "tool",
+          "subject",
+          "denied",
+          "effect"
+        ],
+        "title": "ToolResultEnvelope",
+        "type": "object"
+      }
+    },
+    "aplan_stop": {
+      "description": "Record that work on a task has stopped, returning it to `todo`. Not a closure: it claims nothing about what was done, which is what `aplan_close` is for. Refuses a task that is not `in_progress`, since there is then nothing to stop.",
+      "inputSchema": {
+        "additionalProperties": false,
+        "description": "Input for single-task tools (`aplan_show`, `aplan_release`, `aplan_start`,\n`aplan_stop`, `aplan_review`).",
+        "properties": {
+          "id": {
+            "description": "Task id.",
+            "type": "string"
+          },
+          "root": {
+            "default": null,
+            "description": "Repository root containing `.aplan.yml`, or that repository's configured\nplan directory. Omit to use the server's launch context.",
+            "type": [
+              "string",
+              "null"
+            ]
+          }
+        },
+        "required": [
+          "id"
+        ],
+        "title": "TaskIdInput",
+        "type": "object"
+      },
+      "name": "aplan_stop",
+      "outputSchema": {
+        "$defs": {
+          "ContextProvenance": {
+            "description": "Resolved repository/plan selection provenance when a caller supplies an\nexplicit `root` argument.",
+            "properties": {
+              "configuration": {
+                "description": "Selected configuration file relative to the repository, if present.",
+                "type": [
+                  "string",
+                  "null"
+                ]
+              },
+              "plan_root": {
+                "description": "Plan root relative to the selected repository.",
+                "type": "string"
+              },
+              "repository_root": {
+                "description": "Relative repository root marker (always `\".\"` to avoid leaking host paths).",
+                "type": "string"
+              },
+              "resolved_symlink": {
+                "description": "Whether resolving `root` followed a symbolic link.",
+                "type": "boolean"
+              },
+              "selection": {
+                "description": "How the explicit `root` path resolved (`repository_root` or `plan_root`).",
+                "type": "string"
+              }
+            },
+            "required": [
+              "selection",
+              "repository_root",
+              "plan_root",
+              "resolved_symlink"
+            ],
+            "type": "object"
+          },
+          "ToolEffect": {
+            "description": "Semantic effect produced by one MCP tool invocation.",
+            "oneOf": [
+              {
+                "const": "read_only",
+                "description": "Observed the plan, repository, or server identity without writing files.",
+                "type": "string"
+              },
+              {
+                "const": "mutated",
+                "description": "Wrote or updated repository plan/claim state through the guarded engine.",
+                "type": "string"
+              },
+              {
+                "const": "refused",
+                "description": "Refused before writing because arguments, policy, or evidence failed.",
+                "type": "string"
+              }
+            ]
+          },
+          "WorkingPayload": {
+            "additionalProperties": true,
+            "description": "Structured payload for `aplan_start` and `aplan_stop`.",
+            "properties": {
+              "changed": {
+                "description": "Whether the task status changed.",
+                "type": "boolean"
+              },
+              "id": {
+                "description": "Task id.",
+                "type": "string"
+              },
+              "status": {
+                "description": "Resulting status (`in_progress` or `todo`).",
+                "type": "string"
+              }
+            },
+            "required": [
+              "id",
+              "status",
+              "changed"
+            ],
+            "type": "object"
+          }
+        },
+        "description": "Object-enveloped structured result returned in `structuredContent` by every\nMCP tool.\n\nUsing an explicit object envelope guarantees compatibility with both\nhandshake-era object-only structured-content clients (`2025-06-18` /\n`2025-11-25`) and `2026-07-28` clients, while exposing `denied`, `effect`,\nand `subject` without requiring callers to parse human compatibility text.",
+        "properties": {
+          "context": {
+            "anyOf": [
+              {
+                "$ref": "#/$defs/ContextProvenance"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "description": "Resolved repository context when the caller passed an explicit `root`."
+          },
+          "contract_version": {
+            "description": "Explicit contract version (`aplan/mcp/v2`).",
+            "type": "string"
+          },
+          "data": {
+            "anyOf": [
+              {
+                "$ref": "#/$defs/WorkingPayload"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "description": "Typed concrete tool payload when the tool completed (even when a check or\nverify verdict is `denied: true`)."
+          },
+          "denied": {
+            "description": "Whether the plan verdict or tool gate denied the request.",
+            "type": "boolean"
+          },
+          "effect": {
+            "$ref": "#/$defs/ToolEffect",
+            "description": "Semantic effect of the call (`read_only`, `mutated`, or `refused`)."
+          },
+          "error": {
+            "description": "Sanitized refusal reason when the tool refused (`effect == refused`).",
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "subject": {
+            "description": "Primary subject of the invocation (task id, `\"plan\"`, or `\"server\"`).",
+            "type": "string"
+          },
+          "tool": {
+            "description": "Name of the invoked MCP tool.",
+            "type": "string"
+          }
+        },
+        "required": [
+          "contract_version",
+          "tool",
+          "subject",
+          "denied",
+          "effect"
+        ],
+        "title": "ToolResultEnvelope",
+        "type": "object"
+      }
+    },
+    "aplan_verify": {
+      "description": "Resolve the plan's evidence against the repository (L1/L2): a cited commit must be reachable from HEAD and touch the task's `paths`, a cited file must exist. Opens git and may run configured discovery/check providers, but never executes a cited test.",
+      "inputSchema": {
+        "additionalProperties": false,
+        "description": "Input for tools scoped only by an optional explicit repository/plan `root`\n(`aplan_ready`, `aplan_check`, `aplan_verify`).",
+        "properties": {
+          "root": {
+            "default": null,
+            "description": "Repository root containing `.aplan.yml`, or that repository's configured\nplan directory. The server resolves plan, configuration, traces, evidence\nproviders and Git as one context; an ambiguous partial directory is\nrefused. Omit this field to use the server's launch context. An explicit\nselection returns `{context, result}` in legacy mode and populates\n`context` in structured mode so the resolved frame is auditable.",
+            "type": [
+              "string",
+              "null"
+            ]
+          }
+        },
+        "title": "RootOnlyInput",
+        "type": "object"
+      },
+      "name": "aplan_verify",
+      "outputSchema": {
+        "$defs": {
+          "ContextProvenance": {
+            "description": "Resolved repository/plan selection provenance when a caller supplies an\nexplicit `root` argument.",
+            "properties": {
+              "configuration": {
+                "description": "Selected configuration file relative to the repository, if present.",
+                "type": [
+                  "string",
+                  "null"
+                ]
+              },
+              "plan_root": {
+                "description": "Plan root relative to the selected repository.",
+                "type": "string"
+              },
+              "repository_root": {
+                "description": "Relative repository root marker (always `\".\"` to avoid leaking host paths).",
+                "type": "string"
+              },
+              "resolved_symlink": {
+                "description": "Whether resolving `root` followed a symbolic link.",
+                "type": "boolean"
+              },
+              "selection": {
+                "description": "How the explicit `root` path resolved (`repository_root` or `plan_root`).",
+                "type": "string"
+              }
+            },
+            "required": [
+              "selection",
+              "repository_root",
+              "plan_root",
+              "resolved_symlink"
+            ],
+            "type": "object"
+          },
+          "ToolEffect": {
+            "description": "Semantic effect produced by one MCP tool invocation.",
+            "oneOf": [
+              {
+                "const": "read_only",
+                "description": "Observed the plan, repository, or server identity without writing files.",
+                "type": "string"
+              },
+              {
+                "const": "mutated",
+                "description": "Wrote or updated repository plan/claim state through the guarded engine.",
+                "type": "string"
+              },
+              {
+                "const": "refused",
+                "description": "Refused before writing because arguments, policy, or evidence failed.",
+                "type": "string"
+              }
+            ]
+          },
+          "ValidationPayload": {
+            "additionalProperties": true,
+            "description": "Structured payload for `aplan_check` and `aplan_verify`.",
+            "properties": {
+              "denied": {
+                "description": "Whether the plan fails the configured verdict policy.",
+                "type": "boolean"
+              },
+              "diagnostics": {
+                "description": "Complete diagnostic entries.",
+                "items": {
+                  "additionalProperties": true,
+                  "type": "object"
+                },
+                "type": "array"
+              },
+              "errors": {
+                "description": "Number of error diagnostics.",
+                "format": "uint",
+                "minimum": 0,
+                "type": "integer"
+              },
+              "warnings": {
+                "description": "Number of warning diagnostics.",
+                "format": "uint",
+                "minimum": 0,
+                "type": "integer"
+              }
+            },
+            "required": [
+              "denied",
+              "errors",
+              "warnings",
+              "diagnostics"
+            ],
+            "type": "object"
+          }
+        },
+        "description": "Object-enveloped structured result returned in `structuredContent` by every\nMCP tool.\n\nUsing an explicit object envelope guarantees compatibility with both\nhandshake-era object-only structured-content clients (`2025-06-18` /\n`2025-11-25`) and `2026-07-28` clients, while exposing `denied`, `effect`,\nand `subject` without requiring callers to parse human compatibility text.",
+        "properties": {
+          "context": {
+            "anyOf": [
+              {
+                "$ref": "#/$defs/ContextProvenance"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "description": "Resolved repository context when the caller passed an explicit `root`."
+          },
+          "contract_version": {
+            "description": "Explicit contract version (`aplan/mcp/v2`).",
+            "type": "string"
+          },
+          "data": {
+            "anyOf": [
+              {
+                "$ref": "#/$defs/ValidationPayload"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "description": "Typed concrete tool payload when the tool completed (even when a check or\nverify verdict is `denied: true`)."
+          },
+          "denied": {
+            "description": "Whether the plan verdict or tool gate denied the request.",
+            "type": "boolean"
+          },
+          "effect": {
+            "$ref": "#/$defs/ToolEffect",
+            "description": "Semantic effect of the call (`read_only`, `mutated`, or `refused`)."
+          },
+          "error": {
+            "description": "Sanitized refusal reason when the tool refused (`effect == refused`).",
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "subject": {
+            "description": "Primary subject of the invocation (task id, `\"plan\"`, or `\"server\"`).",
+            "type": "string"
+          },
+          "tool": {
+            "description": "Name of the invoked MCP tool.",
+            "type": "string"
+          }
+        },
+        "required": [
+          "contract_version",
+          "tool",
+          "subject",
+          "denied",
+          "effect"
+        ],
+        "title": "ToolResultEnvelope",
+        "type": "object"
+      }
+    },
+    "aplan_why": {
+      "description": "Explain what is blocking a task: its own blockers, and any unfinished cut, without expanding that cut's membership. Pass `all` for the complete transitive closure; every answer names its `traversal`.",
+      "inputSchema": {
+        "additionalProperties": false,
+        "description": "Input for `aplan_why`.",
+        "properties": {
+          "all": {
+            "default": null,
+            "description": "Walk through cuts into their membership as well. Off by default: a cut is\nreported as itself, with `behind` counting what was folded, because the\ncomplete closure of a sequenced plan is mostly the roadmap you can query\nseparately. Every answer names its `traversal`.",
+            "type": [
+              "boolean",
+              "null"
+            ]
+          },
+          "id": {
+            "description": "Task id.",
+            "type": "string"
+          },
+          "root": {
+            "default": null,
+            "description": "Repository root containing `.aplan.yml`, or that repository's configured\nplan directory. Omit to use the server's launch context.",
+            "type": [
+              "string",
+              "null"
+            ]
+          }
+        },
+        "required": [
+          "id"
+        ],
+        "title": "WhyInput",
+        "type": "object"
+      },
+      "name": "aplan_why",
+      "outputSchema": {
+        "$defs": {
+          "ContextProvenance": {
+            "description": "Resolved repository/plan selection provenance when a caller supplies an\nexplicit `root` argument.",
+            "properties": {
+              "configuration": {
+                "description": "Selected configuration file relative to the repository, if present.",
+                "type": [
+                  "string",
+                  "null"
+                ]
+              },
+              "plan_root": {
+                "description": "Plan root relative to the selected repository.",
+                "type": "string"
+              },
+              "repository_root": {
+                "description": "Relative repository root marker (always `\".\"` to avoid leaking host paths).",
+                "type": "string"
+              },
+              "resolved_symlink": {
+                "description": "Whether resolving `root` followed a symbolic link.",
+                "type": "boolean"
+              },
+              "selection": {
+                "description": "How the explicit `root` path resolved (`repository_root` or `plan_root`).",
+                "type": "string"
+              }
+            },
+            "required": [
+              "selection",
+              "repository_root",
+              "plan_root",
+              "resolved_symlink"
+            ],
+            "type": "object"
+          },
+          "ToolEffect": {
+            "description": "Semantic effect produced by one MCP tool invocation.",
+            "oneOf": [
+              {
+                "const": "read_only",
+                "description": "Observed the plan, repository, or server identity without writing files.",
+                "type": "string"
+              },
+              {
+                "const": "mutated",
+                "description": "Wrote or updated repository plan/claim state through the guarded engine.",
+                "type": "string"
+              },
+              {
+                "const": "refused",
+                "description": "Refused before writing because arguments, policy, or evidence failed.",
+                "type": "string"
+              }
+            ]
+          },
+          "WhyPayload": {
+            "additionalProperties": true,
+            "description": "Structured payload for `aplan_why`.",
+            "properties": {
+              "blocked_by": {
+                "description": "Direct or transitive blockers.",
+                "items": {
+                  "additionalProperties": true,
+                  "type": "object"
+                },
+                "type": "array"
+              },
+              "traversal": {
+                "description": "Traversal mode (`cut_bounded` or `transitive`).",
+                "type": "string"
+              }
+            },
+            "required": [
+              "blocked_by",
+              "traversal"
+            ],
+            "type": "object"
+          }
+        },
+        "description": "Object-enveloped structured result returned in `structuredContent` by every\nMCP tool.\n\nUsing an explicit object envelope guarantees compatibility with both\nhandshake-era object-only structured-content clients (`2025-06-18` /\n`2025-11-25`) and `2026-07-28` clients, while exposing `denied`, `effect`,\nand `subject` without requiring callers to parse human compatibility text.",
+        "properties": {
+          "context": {
+            "anyOf": [
+              {
+                "$ref": "#/$defs/ContextProvenance"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "description": "Resolved repository context when the caller passed an explicit `root`."
+          },
+          "contract_version": {
+            "description": "Explicit contract version (`aplan/mcp/v2`).",
+            "type": "string"
+          },
+          "data": {
+            "anyOf": [
+              {
+                "$ref": "#/$defs/WhyPayload"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "description": "Typed concrete tool payload when the tool completed (even when a check or\nverify verdict is `denied: true`)."
+          },
+          "denied": {
+            "description": "Whether the plan verdict or tool gate denied the request.",
+            "type": "boolean"
+          },
+          "effect": {
+            "$ref": "#/$defs/ToolEffect",
+            "description": "Semantic effect of the call (`read_only`, `mutated`, or `refused`)."
+          },
+          "error": {
+            "description": "Sanitized refusal reason when the tool refused (`effect == refused`).",
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "subject": {
+            "description": "Primary subject of the invocation (task id, `\"plan\"`, or `\"server\"`).",
+            "type": "string"
+          },
+          "tool": {
+            "description": "Name of the invoked MCP tool.",
+            "type": "string"
+          }
+        },
+        "required": [
+          "contract_version",
+          "tool",
+          "subject",
+          "denied",
+          "effect"
+        ],
+        "title": "ToolResultEnvelope",
+        "type": "object"
+      }
+    }
+  }
+}

@@ -8,6 +8,19 @@ to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Added
 
+- **Versioned structured MCP outputs and bounded URI-addressed resources (`A2-118`,
+  `--require mcp.structured_outputs_and_bounded_resources`)**. Every MCP tool now declares
+  generated `inputSchema` and `outputSchema` (`aplan/mcp/v2`, committed in
+  `schemas/v1/mcp-contract.json` and pinned in `crates/aplan/tests/mcp-surface.json`), returns
+  schema-conforming object-enveloped `structuredContent` (carrying `contract_version`, `tool`,
+  `subject`, `denied`, `effect`, optional `context`, and typed `data`/`error`) plus sanitized
+  concise compatibility text on `2025-06-18` / `2025-11-25` / `2026-07-28` while preserving legacy
+  JSON text for pre-`2025-06-18` (`2024-11-05` / `2025-03-26`) clients, and exposes bounded
+  `aplan://` resources (`aplan://plan/summary`, `aplan://tasks/{id}`,
+  `aplan://collections/ready{?limit,cursor}`) with 64 KiB page caps, snapshot-bound tamper-evident
+  continuation cursors, and private zero-freshness (`ttlMs: 0`, `cacheScope: "private"`) cache
+  semantics on `2026-07-28`. `aplan_identity` and `aplan facts` now advertise
+  `mcp_contract_version: "aplan/mcp/v2"`.
 - **Pretty terminal Markdown rendering for `show --body` with explicit `--raw-body` route
   (`A2-114`, `A2-115`, `ADR-0075`, `--require show.renders_markdown_body`)**. Human
   `aplan show ID --body` now renders task Markdown through `aplan_output::markdown` with bold

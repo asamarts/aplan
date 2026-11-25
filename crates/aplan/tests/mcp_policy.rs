@@ -183,3 +183,95 @@ fn selection_audit_rejects_every_drift_direction() {
             .any(|finding| finding == "projected command `one` does not state its boundary")
     );
 }
+
+#[test]
+fn every_mcp_resource_and_template_is_classified_confined_and_driven() {
+    let cli = aplan::cli_command();
+    let commands: BTreeSet<&str> = cli.get_subcommands().map(clap::Command::get_name).collect();
+    let tool_names: BTreeSet<&str> = TOOLS.iter().map(|tool| tool.name).collect();
+
+    let live_resources = aplan_mcp::resources::wire_resources();
+    assert_eq!(
+        live_resources.len(),
+        aplan_mcp::resources::RESOURCES.len(),
+        "wire resources drifted from RESOURCES registry"
+    );
+    let mut seen_names = BTreeSet::new();
+    for (spec, wire) in aplan_mcp::resources::RESOURCES
+        .iter()
+        .zip(live_resources.iter())
+    {
+        assert!(
+            seen_names.insert(spec.name),
+            "duplicate resource name `{}`",
+            spec.name
+        );
+        assert_eq!(wire.uri, spec.uri);
+        assert_eq!(wire.name, spec.name);
+        assert!(spec.uri.starts_with("aplan://"), "{}", spec.uri);
+        assert_eq!(spec.mime_type, "application/json");
+        assert!(
+            !spec.rationale.trim().is_empty(),
+            "resource `{}` missing rationale",
+            spec.name
+        );
+        assert!(
+            commands.contains(spec.origin_command),
+            "resource `{}` names unknown CLI origin `{}`",
+            spec.name,
+            spec.origin_command
+        );
+        assert!(
+            !tool_names.contains(spec.name),
+            "resource `{}` collided with an action tool name",
+            spec.name
+        );
+        // Drive the parser for each static resource URI.
+        aplan_mcp::resources::parse_resource_uri(spec.uri)
+            .unwrap_or_else(|e| panic!("static resource `{}` failed to parse: {e:?}", spec.uri));
+    }
+
+    let live_templates = aplan_mcp::resources::wire_resource_templates();
+    assert_eq!(
+        live_templates.len(),
+        aplan_mcp::resources::RESOURCE_TEMPLATES.len(),
+        "wire resource templates drifted from RESOURCE_TEMPLATES registry"
+    );
+    for (spec, wire) in aplan_mcp::resources::RESOURCE_TEMPLATES
+        .iter()
+        .zip(live_templates.iter())
+    {
+        assert!(
+            seen_names.insert(spec.name),
+            "duplicate template name `{}`",
+            spec.name
+        );
+        assert_eq!(wire.uri_template, spec.uri_template);
+        assert_eq!(wire.name, spec.name);
+        assert!(
+            spec.uri_template.starts_with("aplan://"),
+            "{}",
+            spec.uri_template
+        );
+        assert_eq!(spec.mime_type, "application/json");
+        assert!(
+            !spec.rationale.trim().is_empty(),
+            "template `{}` missing rationale",
+            spec.name
+        );
+        assert!(
+            commands.contains(spec.origin_command),
+            "template `{}` names unknown CLI origin `{}`",
+            spec.name,
+            spec.origin_command
+        );
+        // Drive a representative instantiated URI for every declared template.
+        let sample = match spec.name {
+            "task_detail" => "aplan://tasks/A-1",
+            "ready_tasks_page" => "aplan://collections/ready?limit=5",
+            other => panic!("unhandled MCP resource template `{other}` in audit"),
+        };
+        aplan_mcp::resources::parse_resource_uri(sample)
+            .unwrap_or_else(|e| panic!("template `{}` sample `{sample}` failed: {e:?}", spec.name));
+    }
+}

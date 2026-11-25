@@ -72,6 +72,22 @@ pub const ALL: &[Behaviour] = &[
                final-newline rule, and JSON plus Markdown artifact commands stay unchanged",
         proof: &["markdown_cli::show_body_renders_markdown_and_raw_body_preserves_exact_bytes"],
     },
+    // `A2-118`. Existing MCP tools hand-authored input schemas, omitted
+    // output schemas, returned only JSON-in-text, and exposed no bounded
+    // URI-addressed resources. Moving to generated input/output schemas,
+    // object-enveloped `structuredContent` + concise text on `2025-06-18+`
+    // (preserving legacy JSON text on `2024-11-05`/`2025-03-26`), and bounded
+    // resources with input-identity-bound continuations changes what the MCP
+    // server exposes and returns.
+    Behaviour {
+        name: "mcp.structured_outputs_and_bounded_resources",
+        what: "every MCP tool declares generated input and output schemas (`aplan/mcp/v2`), \
+               returns schema-conforming object-enveloped `structuredContent` plus concise text \
+               on structured protocol revisions while preserving legacy JSON text for pre-2025-06-18 \
+               clients, and serves bounded URI-addressed resources with snapshot-bound cursors and \
+               private zero-freshness cache semantics",
+        proof: &["mcp::structured_outputs_bounded_resources_and_protocol_matrix"],
+    },
     // `A2-109` (`ADR-0074`). Existing `close` wrote `status: done`, evidence,
     // stamps and any release version without a completion timestamp. Recording
     // canonical UTC `closed_at` atomically on every successful close changes

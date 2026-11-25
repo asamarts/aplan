@@ -1069,3 +1069,408 @@ fn a_bad_per_user_file_leaves_the_protocol_stream_intact() {
     );
     assert_eq!(task_after, task_before, "claim rewrote task Markdown");
 }
+
+fn initialize_version(version: &str) -> Vec<serde_json::Value> {
+    vec![
+        serde_json::json!({
+            "jsonrpc": "2.0", "id": 1, "method": "initialize",
+            "params": {
+                "protocolVersion": version,
+                "capabilities": {},
+                "clientInfo": { "name": "aplan-test", "version": "1" }
+            }
+        }),
+        serde_json::json!({ "jsonrpc": "2.0", "method": "notifications/initialized" }),
+    ]
+}
+
+fn check_structured_text_parity(result: &serde_json::Value) -> Result<(), String> {
+    let structured = result
+        .get("structuredContent")
+        .and_then(serde_json::Value::as_object)
+        .ok_or_else(|| format!("missing object structuredContent: {result}"))?;
+    let text = result["content"][0]["text"]
+        .as_str()
+        .ok_or_else(|| format!("missing compatibility text: {result}"))?;
+    let tool = structured
+        .get("tool")
+        .and_then(serde_json::Value::as_str)
+        .ok_or("missing structured tool")?;
+    let subject = structured
+        .get("subject")
+        .and_then(serde_json::Value::as_str)
+        .ok_or("missing structured subject")?;
+    let denied = structured
+        .get("denied")
+        .and_then(serde_json::Value::as_bool)
+        .ok_or("missing structured denied")?;
+    let effect = structured
+        .get("effect")
+        .and_then(serde_json::Value::as_str)
+        .ok_or("missing structured effect")?;
+    let expected_verdict = if denied { "denied" } else { "allowed" };
+    let expected_prefix =
+        format!("{tool}: subject={subject} verdict={expected_verdict} effect={effect}");
+    if !text.starts_with(&expected_prefix) {
+        return Err(format!(
+            "structured/text parity mismatch: expected text starting with `{expected_prefix}`, \
+             got `{text}`"
+        ));
+    }
+    if text.contains('\x1b') {
+        return Err(format!("raw ESC leaked into compatibility text: {text:?}"));
+    }
+    Ok(())
+}
+
+/// Proof for `mcp.structured_outputs_and_bounded_resources` (`A2-118`):
+/// exercises generated input/output schemas, object-enveloped `structuredContent`
+/// and concise text parity across all 14 tools, bounded URI-addressed resources
+/// and snapshot-bound continuations, malformed/hostile/stale refusals, and the
+/// protocol compatibility matrix across `2024-11-05`, `2025-11-25`, and
+/// `2026-07-28`.
+#[test]
+#[allow(clippy::too_many_lines)]
+fn structured_outputs_bounded_resources_and_protocol_matrix() {
+    // 0. Negative proof: parity check MUST fail if subject, verdict, or effect diverges.
+    let valid_sample = serde_json::json!({
+        "content": [{ "type": "text", "text": "aplan_check: subject=plan verdict=allowed effect=read_only -- 0 error(s), 0 warning(s)" }],
+        "structuredContent": {
+            "contract_version": aplan_mcp::MCP_CONTRACT_VERSION,
+            "tool": "aplan_check",
+            "subject": "plan",
+            "denied": false,
+            "effect": "read_only",
+            "data": {}
+        }
+    });
+    check_structured_text_parity(&valid_sample).expect("valid sample passes");
+    let mut wrong_subject = valid_sample.clone();
+    wrong_subject["structuredContent"]["subject"] = serde_json::json!("A-99");
+    assert!(check_structured_text_parity(&wrong_subject).is_err());
+    let mut wrong_verdict = valid_sample.clone();
+    wrong_verdict["structuredContent"]["denied"] = serde_json::json!(true);
+    assert!(check_structured_text_parity(&wrong_verdict).is_err());
+    let mut wrong_effect = valid_sample;
+    wrong_effect["structuredContent"]["effect"] = serde_json::json!("mutated");
+    assert!(check_structured_text_parity(&wrong_effect).is_err());
+
+    // Build a real Git-backed fixture with 5 ready tasks so collection paging,
+    // claims, dep edits, trace reviews, and close all run end-to-end.
+    let dir = tempfile::Builder::new()
+        .prefix("mcp-v2-matrix-")
+        .tempdir_in(aplan_core::fixture::fixture_root())
+        .expect("tempdir");
+    let tasks_dir = dir.path().join("tasks");
+    std::fs::create_dir_all(&tasks_dir).expect("tasks dir");
+    std::fs::write(dir.path().join("SPEC.md"), "# Spec\n\n## Rule\n\nFact.\n").expect("spec");
+    std::fs::write(dir.path().join("proof.txt"), "ok\n").expect("proof");
+    for i in 1..=5 {
+        std::fs::write(
+            tasks_dir.join(format!("A-{i}.md")),
+            format!(
+                "---\nid: A-{i}\ntitle: Task {i}\nphase: 1\nstatus: todo\neffort_days: 1\n\
+                 paths:\n- proof.txt\ntraces:\n- SPEC.md#rule\n---\n\n## Why\n\nx\n"
+            ),
+        )
+        .expect("write task");
+    }
+    git(dir.path(), &["init", "--quiet"]);
+    git(
+        dir.path(),
+        &["config", "user.email", "test@example.invalid"],
+    );
+    git(dir.path(), &["config", "user.name", "Test"]);
+    git(dir.path(), &["add", "."]);
+    git(dir.path(), &["commit", "--quiet", "-m", "init"]);
+
+    // 1. Handshake-era `2024-11-05` older text-only client: legacy JSON text, no structuredContent, no resultType.
+    let mut legacy_reqs = initialize_version("2024-11-05");
+    legacy_reqs.push(serde_json::json!({
+        "jsonrpc": "2.0", "id": 2, "method": "tools/call",
+        "params": { "name": "aplan_ready", "arguments": {} }
+    }));
+    let legacy_replies = talk(dir.path(), &legacy_reqs);
+    let legacy_result = &reply(&legacy_replies, 2)["result"];
+    assert!(
+        legacy_result.get("structuredContent").is_none(),
+        "2024-11-05 client must not receive structuredContent: {legacy_result:#?}"
+    );
+    assert!(
+        legacy_result.get("resultType").is_none(),
+        "2024-11-05 client must not receive resultType: {legacy_result:#?}"
+    );
+    let legacy_parsed: serde_json::Value =
+        serde_json::from_str(legacy_result["content"][0]["text"].as_str().expect("text"))
+            .expect("legacy JSON text");
+    assert_eq!(legacy_parsed["ready"].as_array().unwrap().len(), 5);
+
+    // 2. Handshake-era `2025-11-25` structured client: drive ALL 14 tools, resources, paging,
+    //    malformed arguments, unknown resource (-32002), and hostile URI (-32602).
+    let mut s_reqs = initialize_version("2025-11-25");
+    s_reqs.push(serde_json::json!({ "jsonrpc": "2.0", "id": 2, "method": "tools/list" }));
+    s_reqs.push(serde_json::json!({ "jsonrpc": "2.0", "id": 3, "method": "resources/list" }));
+    s_reqs.push(
+        serde_json::json!({ "jsonrpc": "2.0", "id": 4, "method": "resources/templates/list" }),
+    );
+    // Read-only tools + malformed refusal + resource reads can share one session safely.
+    s_reqs.push(serde_json::json!({ "jsonrpc": "2.0", "id": 10, "method": "tools/call", "params": { "name": "aplan_identity", "arguments": {} } }));
+    s_reqs.push(serde_json::json!({ "jsonrpc": "2.0", "id": 11, "method": "tools/call", "params": { "name": "aplan_ready", "arguments": {} } }));
+    s_reqs.push(serde_json::json!({ "jsonrpc": "2.0", "id": 12, "method": "tools/call", "params": { "name": "aplan_why", "arguments": { "id": "A-1" } } }));
+    s_reqs.push(serde_json::json!({ "jsonrpc": "2.0", "id": 13, "method": "tools/call", "params": { "name": "aplan_check", "arguments": {} } }));
+    s_reqs.push(serde_json::json!({ "jsonrpc": "2.0", "id": 14, "method": "tools/call", "params": { "name": "aplan_verify", "arguments": {} } }));
+    s_reqs.push(serde_json::json!({ "jsonrpc": "2.0", "id": 15, "method": "tools/call", "params": { "name": "aplan_show", "arguments": { "id": "A-1" } } }));
+    // Malformed arguments (self-assessment `score` field forbidden by schema).
+    s_reqs.push(serde_json::json!({ "jsonrpc": "2.0", "id": 24, "method": "tools/call", "params": { "name": "aplan_close", "arguments": { "id": "A-2", "evidence": [], "score": 100 } } }));
+    // Resources on 2025-11-25.
+    s_reqs.push(serde_json::json!({ "jsonrpc": "2.0", "id": 30, "method": "resources/read", "params": { "uri": "aplan://plan/summary" } }));
+    s_reqs.push(serde_json::json!({ "jsonrpc": "2.0", "id": 31, "method": "resources/read", "params": { "uri": "aplan://tasks/A-2" } }));
+    s_reqs.push(serde_json::json!({ "jsonrpc": "2.0", "id": 32, "method": "resources/read", "params": { "uri": "aplan://tasks/NO-SUCH" } }));
+    s_reqs.push(serde_json::json!({ "jsonrpc": "2.0", "id": 33, "method": "resources/read", "params": { "uri": "file:///etc/passwd" } }));
+
+    let s_replies = talk(dir.path(), &s_reqs);
+    // Capabilities advertise both tools and resources (and no subscriptions).
+    let init_caps = &reply(&s_replies, 1)["result"]["capabilities"];
+    assert!(init_caps.get("tools").is_some(), "{init_caps}");
+    assert!(init_caps.get("resources").is_some(), "{init_caps}");
+
+    // Every tool exposes generated object inputSchema AND object outputSchema, and no protocol nextCursor.
+    let tools_res = &reply(&s_replies, 2)["result"];
+    assert!(tools_res.get("nextCursor").is_none());
+    let tools_list = tools_res["tools"].as_array().expect("tools array");
+    assert_eq!(tools_list.len(), aplan_mcp::TOOLS.len());
+    for tool in tools_list {
+        assert_eq!(tool["inputSchema"]["type"], "object", "{tool}");
+        assert_eq!(tool["outputSchema"]["type"], "object", "{tool}");
+    }
+
+    // Catalogue resources & templates have no protocol nextCursor.
+    let res_list = &reply(&s_replies, 3)["result"];
+    assert!(res_list.get("nextCursor").is_none());
+    assert_eq!(res_list["resources"].as_array().unwrap().len(), 1);
+    let tmpl_list = &reply(&s_replies, 4)["result"];
+    assert!(tmpl_list.get("nextCursor").is_none());
+    assert_eq!(tmpl_list["resourceTemplates"].as_array().unwrap().len(), 2);
+
+    // Check all 6 read tools for structured/text parity and contract_version.
+    for id in 10..=15 {
+        let res = &reply(&s_replies, id)["result"];
+        assert_ne!(res["isError"], true, "tool call id={id} failed: {res:#?}");
+        assert!(
+            res.get("resultType").is_none(),
+            "2025-11-25 omits resultType"
+        );
+        check_structured_text_parity(res)
+            .unwrap_or_else(|e| panic!("parity failed for call id={id}: {e}"));
+        assert_eq!(
+            res["structuredContent"]["contract_version"],
+            aplan_mcp::MCP_CONTRACT_VERSION
+        );
+    }
+    // `aplan_identity` advertises `mcp_contract_version`.
+    assert_eq!(
+        reply(&s_replies, 10)["result"]["structuredContent"]["data"]["mcp_contract_version"],
+        aplan_mcp::MCP_CONTRACT_VERSION
+    );
+
+    // Run all 8 mutating tools sequentially (JSON-RPC requests within one session may execute concurrently).
+    let sequential_mutations = [
+        (
+            "aplan_add",
+            serde_json::json!({ "id": "A-6", "title": "Added task", "phase": 1, "effort_days": 1, "paths": ["proof.txt"] }),
+        ),
+        (
+            "aplan_dep",
+            serde_json::json!({ "id": "A-6", "after": "A-1", "add": true }),
+        ),
+        (
+            "aplan_claim",
+            serde_json::json!({ "id": "A-1", "as": "ada" }),
+        ),
+        ("aplan_start", serde_json::json!({ "id": "A-1" })),
+        ("aplan_stop", serde_json::json!({ "id": "A-1" })),
+        ("aplan_release", serde_json::json!({ "id": "A-1" })),
+        ("aplan_review", serde_json::json!({ "id": "A-1" })),
+        (
+            "aplan_close",
+            serde_json::json!({ "id": "A-1", "evidence": ["file:proof.txt"] }),
+        ),
+    ];
+    for (tool_name, args) in sequential_mutations {
+        let mut reqs = initialize_version("2025-11-25");
+        reqs.push(serde_json::json!({
+            "jsonrpc": "2.0", "id": 2, "method": "tools/call",
+            "params": { "name": tool_name, "arguments": args }
+        }));
+        let replies = talk(dir.path(), &reqs);
+        let tool_result = &reply(&replies, 2)["result"];
+        assert_ne!(
+            tool_result["isError"], true,
+            "{tool_name} failed: {tool_result:#?}"
+        );
+        assert!(
+            tool_result.get("resultType").is_none(),
+            "2025-11-25 omits resultType"
+        );
+        check_structured_text_parity(tool_result)
+            .unwrap_or_else(|e| panic!("parity failed for {tool_name}: {e}"));
+        assert_eq!(
+            tool_result["structuredContent"]["contract_version"],
+            aplan_mcp::MCP_CONTRACT_VERSION
+        );
+    }
+    // Malformed `score` argument is refused cleanly with structured denial & effect=refused.
+    let malformed = &reply(&s_replies, 24)["result"];
+    assert_eq!(malformed["isError"], true, "{malformed:#?}");
+    check_structured_text_parity(malformed).expect("refusal parity");
+    assert_eq!(malformed["structuredContent"]["denied"], true);
+    assert_eq!(malformed["structuredContent"]["effect"], "refused");
+
+    // Static summary & focused task resource carry inputIdentity and completeness.
+    let summary_content = &reply(&s_replies, 30)["result"]["contents"][0];
+    assert_eq!(summary_content["mimeType"], "application/json");
+    assert_eq!(summary_content["_meta"]["complete"], true);
+    assert_eq!(summary_content["_meta"]["cacheScope"], "private");
+    assert_eq!(summary_content["_meta"]["ttlMs"], 0);
+    let summary_json: serde_json::Value =
+        serde_json::from_str(summary_content["text"].as_str().unwrap()).unwrap();
+    assert_eq!(
+        summary_json["contract_version"],
+        aplan_mcp::MCP_CONTRACT_VERSION
+    );
+    assert!(
+        !summary_json["input_identity"]["plan_sha256"]
+            .as_str()
+            .unwrap()
+            .is_empty()
+    );
+
+    let detail_content = &reply(&s_replies, 31)["result"]["contents"][0];
+    let detail_json: serde_json::Value =
+        serde_json::from_str(detail_content["text"].as_str().unwrap()).unwrap();
+    assert_eq!(detail_json["task"]["id"], "A-2");
+    assert_eq!(detail_json["complete"], true);
+
+    // Unknown task resource on 2025-11-25 returns RESOURCE_NOT_FOUND (-32002); hostile URI returns INVALID_PARAMS (-32602).
+    assert_eq!(reply(&s_replies, 32)["error"]["code"], -32002);
+    assert_eq!(reply(&s_replies, 33)["error"]["code"], -32602);
+
+    // 3. Multi-page collection walk + stale continuation refusal when plan changes.
+    let mut page1_reqs = initialize_version("2025-11-25");
+    page1_reqs.push(serde_json::json!({
+        "jsonrpc": "2.0", "id": 2, "method": "resources/read",
+        "params": { "uri": "aplan://collections/ready?limit=2" }
+    }));
+    let page1_replies = talk(dir.path(), &page1_reqs);
+    let page1: serde_json::Value = serde_json::from_str(
+        reply(&page1_replies, 2)["result"]["contents"][0]["text"]
+            .as_str()
+            .unwrap(),
+    )
+    .unwrap();
+    assert_eq!(page1["returned"], 2);
+    assert_eq!(page1["complete"], false);
+    let next_uri = page1["next_uri"].as_str().expect("next_uri").to_string();
+
+    // Page 2 succeeds before mutation.
+    let mut page2_reqs = initialize_version("2025-11-25");
+    page2_reqs.push(serde_json::json!({
+        "jsonrpc": "2.0", "id": 2, "method": "resources/read",
+        "params": { "uri": next_uri }
+    }));
+    let page2_replies = talk(dir.path(), &page2_reqs);
+    let page2: serde_json::Value = serde_json::from_str(
+        reply(&page2_replies, 2)["result"]["contents"][0]["text"]
+            .as_str()
+            .unwrap(),
+    )
+    .unwrap();
+    assert_eq!(page2["returned"], 2);
+
+    // Mutate one task file -> reusing `next_uri` MUST fail as stale!
+    std::fs::write(
+        tasks_dir.join("A-5.md"),
+        "---\nid: A-5\ntitle: Task 5 edited\nphase: 1\nstatus: todo\neffort_days: 1\n\
+         paths:\n- proof.txt\ntraces:\n- SPEC.md#rule\n---\n\n## Why\n\nedited\n",
+    )
+    .expect("edit A-5");
+    let stale_replies = talk(dir.path(), &page2_reqs);
+    assert_eq!(reply(&stale_replies, 2)["error"]["code"], -32602);
+    assert!(
+        reply(&stale_replies, 2)["error"]["message"]
+            .as_str()
+            .unwrap()
+            .contains("stale"),
+        "{:#?}",
+        reply(&stale_replies, 2)
+    );
+
+    // 4. Current protocol revision `2026-07-28` (NO `initialize`, inline `_meta`, `discover`,
+    //    `resultType: "complete"`, `ttlMs: 0`, `cacheScope: "private"`, unknown resource -> `-32602`).
+    let meta_2026 = serde_json::json!({
+        "io.modelcontextprotocol/protocolVersion": "2026-07-28",
+        "io.modelcontextprotocol/clientCapabilities": {},
+    });
+    let reqs_2026 = vec![
+        serde_json::json!({
+            "jsonrpc": "2.0", "id": 1, "method": "server/discover",
+            "params": { "_meta": meta_2026 }
+        }),
+        serde_json::json!({
+            "jsonrpc": "2.0", "id": 2, "method": "tools/list",
+            "params": { "_meta": meta_2026 }
+        }),
+        serde_json::json!({
+            "jsonrpc": "2.0", "id": 3, "method": "tools/call",
+            "params": { "name": "aplan_ready", "arguments": {}, "_meta": meta_2026 }
+        }),
+        serde_json::json!({
+            "jsonrpc": "2.0", "id": 4, "method": "resources/read",
+            "params": { "uri": "aplan://plan/summary", "_meta": meta_2026 }
+        }),
+        serde_json::json!({
+            "jsonrpc": "2.0", "id": 5, "method": "resources/read",
+            "params": { "uri": "aplan://tasks/NO-SUCH", "_meta": meta_2026 }
+        }),
+        // Missing required _meta on 2026-07-28 session MUST be refused with -32602.
+        serde_json::json!({
+            "jsonrpc": "2.0", "id": 6, "method": "tools/list",
+            "params": {}
+        }),
+    ];
+    let replies_2026 = talk(dir.path(), &reqs_2026);
+    let discover_2026 = &reply(&replies_2026, 1)["result"];
+    assert_eq!(
+        discover_2026["resultType"], "complete",
+        "{discover_2026:#?}"
+    );
+    assert_eq!(
+        discover_2026["_meta"]["io.modelcontextprotocol/serverInfo"]["name"], "aplan",
+        "{discover_2026:#?}"
+    );
+    assert!(
+        discover_2026["supportedVersions"]
+            .as_array()
+            .is_some_and(|vs| vs.iter().any(|v| v == "2026-07-28")),
+        "{discover_2026:#?}"
+    );
+    assert!(discover_2026["capabilities"].get("tools").is_some());
+    assert!(discover_2026["capabilities"].get("resources").is_some());
+    assert_eq!(reply(&replies_2026, 2)["result"]["resultType"], "complete");
+    assert_eq!(reply(&replies_2026, 2)["result"]["ttlMs"], 0);
+    assert_eq!(reply(&replies_2026, 2)["result"]["cacheScope"], "private");
+
+    let call_2026 = &reply(&replies_2026, 3)["result"];
+    assert_eq!(call_2026["resultType"], "complete");
+    check_structured_text_parity(call_2026).expect("2026-07-28 tool parity");
+
+    let read_2026 = &reply(&replies_2026, 4)["result"];
+    assert_eq!(read_2026["resultType"], "complete");
+    assert_eq!(read_2026["ttlMs"], 0);
+    assert_eq!(read_2026["cacheScope"], "private");
+
+    // 2026-07-28 maps RESOURCE_NOT_FOUND to INVALID_PARAMS (-32602).
+    assert_eq!(reply(&replies_2026, 5)["error"]["code"], -32602);
+    // Missing per-request _meta refused with INVALID_PARAMS (-32602).
+    assert_eq!(reply(&replies_2026, 6)["error"]["code"], -32602);
+}

@@ -76,6 +76,7 @@ pub struct BuildFacts {
     pub evidence_kinds: Vec<String>,
     pub exit_codes: ExitCodeFacts,
     pub formats: Vec<String>,
+    pub mcp_contract_version: String,
     pub mcp_tools: Vec<McpToolFact>,
     pub rules: Vec<RuleFact>,
     pub schema_version: String,
@@ -306,6 +307,7 @@ mod tests {
         ("exit_codes.internal", "exit-code summary"),
         ("exit_codes.usage", "exit-code summary"),
         ("formats[]", "group item name"),
+        ("mcp_contract_version", "About header"),
         ("mcp_tools[].description", "group item detail"),
         ("mcp_tools[].name", "group item name"),
         ("rules[].code", "group item name"),
@@ -441,6 +443,7 @@ mod tests {
                 internal: 3,
             },
             formats: vec!["human".to_string()],
+            mcp_contract_version: "aplan/mcp/v2".to_string(),
             mcp_tools: vec![McpToolFact {
                 name: "aplan_check".to_string(),
                 description: "check a plan".to_string(),
@@ -491,7 +494,13 @@ mod tests {
                 .filter(|(_, value)| !value.is_array())
                 .map(|(key, _)| key.as_str())
                 .collect::<Vec<_>>(),
-            ["counts", "exit_codes", "schema_version", "version"]
+            [
+                "counts",
+                "exit_codes",
+                "mcp_contract_version",
+                "schema_version",
+                "version"
+            ]
         );
 
         let mut serialized_paths = BTreeSet::new();
