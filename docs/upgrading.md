@@ -56,6 +56,18 @@ binary accepts.
 So: stage the new binary, confirm `aplan check` still passes on your existing config, and only then
 add the new keys.
 
+## Test-runner configuration diagnostics report full paths and expected shapes (`A2-037`, `A2-038`)
+
+`.aplan.yml` `test` runner configuration errors now report every missing required field at once
+with its full key path and expected shape (for example `test.schedule`, `test.runners[0].list`,
+`test.runners[0].run`), name where misplaced keys belong (for example `test.runners[0].schedule`
+belongs at `test.schedule`), describe every type error in configuration terms
+(`test.schedule: expected a mapping such as {capacity: 1}` rather than Rust struct names), and
+name each listed runner's own indexed path (`test.runners[0].run`, `test[1].run`) in runner
+validation errors. Check capability availability with
+`aplan facts --require config.test_runner_reports_all_missing_and_misplaced_fields` and
+`aplan facts --require config.test_runner_errors_name_expected_shape_and_runner_path`.
+
 ## `aplan capture` defaults to a compact two-line human summary (`A2-041`)
 
 Human `aplan capture` now defaults to two lines (`capture I-... applied: <title>` and

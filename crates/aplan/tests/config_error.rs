@@ -505,3 +505,89 @@ fn requires_refuses_prerelease_min_version_and_binary_sha256() {
     assert!(out.contains("docs/upgrading.md"), "{out}");
     assert!(out.contains("external"), "{out}");
 }
+
+/// Proof for `config.test_runner_reports_all_missing_and_misplaced_fields`
+/// (`A2-037`) and `config.test_runner_errors_name_expected_shape_and_runner_path`
+/// (`A2-038`), reproducing every row of issue #34 end to end through `aplan check`.
+#[test]
+fn issue_34_test_runners_sequence_reaches_valid_config_in_one_step() {
+    // Row 1: one error names all three missing fields with their full paths and
+    // shapes so the author can jump straight to a valid config in one edit.
+    let row1 = repo("test:\n  runners:\n    - name: unit\n");
+    let (out1, code1) = aplan(row1.path(), &["check", "--root", "aplan"]);
+    assert_eq!(code1, 2, "{out1}");
+    for required in [
+        "test.schedule",
+        "{capacity: 1}",
+        "test.runners[0].list",
+        "test.runners[0].run",
+        "{test}",
+    ] {
+        assert!(
+            out1.contains(required),
+            "row 1 omitted `{required}`:\n{out1}"
+        );
+    }
+
+    // Applying every requirement from row 1 reaches a valid config in one step.
+    std::fs::write(
+        row1.path().join(".aplan.yml"),
+        "test:\n  schedule:\n    capacity: 1\n  runners:\n    - name: unit\n      list: ['true']\n      run: ['true', '{test}']\n",
+    )
+    .expect("fixed config");
+    let (ok_out, ok_code) = aplan(row1.path(), &["check", "--root", "aplan"]);
+    assert_eq!(ok_code, 0, "one-step fix must succeed:\n{ok_out}");
+
+    // Row 2: scalar `list: "true"` describes the wanted argv list shape in
+    // configuration terms (never Rust's `expected a sequence`) and still reports
+    // the remaining missing fields.
+    let row2 = repo("test:\n  runners:\n    - name: unit\n      list: \"true\"\n");
+    let (out2, code2) = aplan(row2.path(), &["check", "--root", "aplan"]);
+    assert_eq!(code2, 2, "{out2}");
+    assert!(
+        out2.contains("test.runners[0].list: expected a command argv list of strings"),
+        "{out2}"
+    );
+    assert!(
+        out2.contains("test.schedule") && out2.contains("test.runners[0].run"),
+        "{out2}"
+    );
+    assert!(!out2.contains("expected a sequence"), "{out2}");
+
+    // Row 5: misplaced `schedule` inside a runner names `test.schedule` instead
+    // of misreporting an unknown key from a newer binary.
+    let row5 = repo(
+        "test:\n  runners:\n    - name: unit\n      list: ['true']\n      run: ['true']\n      schedule: nightly\n",
+    );
+    let (out5, code5) = aplan(row5.path(), &["check", "--root", "aplan"]);
+    assert_eq!(code5, 2, "{out5}");
+    assert!(
+        out5.contains("test.runners[0].schedule: misplaced key")
+            && out5.contains("`test.schedule`"),
+        "{out5}"
+    );
+    assert!(!out5.contains("unknown key"), "{out5}");
+    assert!(!out5.contains("this is aplan"), "{out5}");
+
+    // Row 6: `test.schedule: nightly` states the mapping shape in config terms,
+    // never `expected struct TestSchedule`.
+    let row6 = repo(
+        "test:\n  schedule: nightly\n  runners:\n    - name: unit\n      list: ['true']\n      run: ['true']\n",
+    );
+    let (out6, code6) = aplan(row6.path(), &["check", "--root", "aplan"]);
+    assert_eq!(code6, 2, "{out6}");
+    assert!(
+        out6.contains("test.schedule: expected a mapping such as {capacity: 1}"),
+        "{out6}"
+    );
+    assert!(!out6.contains("TestSchedule"), "{out6}");
+
+    // Row 7: runner validation names `test.runners[0].run`, never `test.run`.
+    let row7 = repo(
+        "test:\n  schedule:\n    capacity: 1\n  runners:\n    - name: unit\n      list: ['true']\n      run: ['true']\n",
+    );
+    let (out7, code7) = aplan(row7.path(), &["check", "--root", "aplan"]);
+    assert_eq!(code7, 2, "{out7}");
+    assert!(out7.contains("`test.runners[0].run`"), "{out7}");
+    assert!(!out7.contains("`test.run`"), "{out7}");
+}

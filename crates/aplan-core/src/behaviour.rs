@@ -60,6 +60,36 @@ pub struct Behaviour {
 
 /// Every named behaviour this build has.
 pub const ALL: &[Behaviour] = &[
+    // `A2-037`. Previously, serde reported only the first missing field in
+    // `test` / `test.runners` and treated misplaced keys such as
+    // `test.runners[0].schedule` as unknown keys without saying where they
+    // belong. Reporting every missing field at its full path and naming where
+    // misplaced keys belong in one pass changes config-load diagnostics.
+    Behaviour {
+        name: "config.test_runner_reports_all_missing_and_misplaced_fields",
+        what: "test-runner configuration errors report every missing required field with its full \
+               key path (for example `test.schedule`, `test.runners[0].list`, `test.runners[0].run`) \
+               in one refusal and name where misplaced keys belong",
+        proof: &[
+            "every_missing_and_misplaced_test_runner_field_is_reported_at_once",
+            "config_error::issue_34_test_runners_sequence_reaches_valid_config_in_one_step",
+        ],
+    },
+    // `A2-038`. Previously, test-runner type errors leaked Rust internals
+    // (`expected struct TestSchedule`, `expected a sequence`) and runner
+    // validation hardcoded `test.run` even for listed runners under
+    // `test.runners[i]` or `test[i]`.
+    Behaviour {
+        name: "config.test_runner_errors_name_expected_shape_and_runner_path",
+        what: "every test-runner configuration type error describes the expected shape in \
+               configuration terms (such as `test.schedule: expected a mapping such as {capacity: 1}`) \
+               and every runner validation error names the runner's own indexed key path (such as \
+               `test.runners[0].run`)",
+        proof: &[
+            "test_runner_type_and_validation_errors_name_expected_shape_and_runner_path",
+            "config_error::issue_34_test_runners_sequence_reaches_valid_config_in_one_step",
+        ],
+    },
     // `A2-041`. Existing `capture` printed the complete ~17-line capture record
     // and all four snapshot digests in default human output. Moving the default
     // human summary to two lines (id, outcome, title and written path) while

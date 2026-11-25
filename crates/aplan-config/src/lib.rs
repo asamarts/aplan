@@ -46,6 +46,7 @@ pub const TEST_BATCH_PROTOCOL: u32 = 1;
 pub const URL_PLACEHOLDER: &str = "{url}";
 
 /// The config file, at the repository root.
+mod test_runner_parse;
 pub mod user;
 
 pub const CONFIG_FILE: &str = ".aplan.yml";
@@ -1318,39 +1319,34 @@ pub struct TestRunnerGroup {
 }
 
 impl<'de> Deserialize<'de> for TestRunners {
-    /// Dispatch on the shape rather than deriving `untagged`.
+    /// Parse `test` directly from [`yaml_compat::Value`] with full key-path
+    /// diagnostics (`A2-037`, `A2-038`).
     ///
-    /// A derived untagged enum reports only "data did not match any variant of
-    /// untagged enum `TestRunners`" when a runner has a typo in it, which loses
-    /// the one thing the author needs: the name of the offending key. Deciding
-    /// on sequence-versus-mapping first means the inner `deny_unknown_fields`
-    /// error is the one that surfaces.
+    /// A derived untagged enum loses the offending key name, and serde's
+    /// default struct deserialization stops at the first missing field and
+    /// formats type mismatches in Rust terms. Parsing the value tree directly
+    /// reports every missing field, misplaced key, and configuration-terms type
+    /// error at its full path in one refusal.
     fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
     where
         D: serde::Deserializer<'de>,
     {
         use serde::de::Error as _;
         let value = yaml_compat::Value::deserialize(deserializer)?;
-        if value.is_sequence() {
-            Vec::<TestRunner>::deserialize(value)
-                .map(TestRunners::Many)
-                .map_err(D::Error::custom)
-        } else if value.as_mapping().is_some_and(|mapping| {
-            mapping.contains_key(yaml_compat::Value::String("runners".into()))
-                || mapping.contains_key(yaml_compat::Value::String("schedule".into()))
-        }) {
-            TestRunnerGroup::deserialize(value)
-                .map(TestRunners::Scheduled)
-                .map_err(D::Error::custom)
-        } else {
-            TestRunner::deserialize(value)
-                .map(TestRunners::One)
-                .map_err(D::Error::custom)
-        }
+        test_runner_parse::parse_test_runners(&value).map_err(D::Error::custom)
     }
 }
 
 impl TestRunners {
+    /// Key path prefix for runner `index` in diagnostics (`A2-038`).
+    fn runner_prefix(&self, index: usize) -> String {
+        match self {
+            Self::One(_) => "test".into(),
+            Self::Many(_) => format!("test[{index}]"),
+            Self::Scheduled(_) => format!("test.runners[{index}]"),
+        }
+    }
+
     /// Every runner, in the order the file declares them.
     #[must_use]
     pub fn all(&self) -> &[TestRunner] {
@@ -1388,27 +1384,36 @@ impl TestRunners {
     ///
     /// [`Error::BadRunner`] for an empty sequence, or the first invalid runner's.
     pub fn validate(&self) -> Result<(), Error> {
+        if self.has_explicit_schedule() && self.schedule().capacity == 0 {
+            return Err(Error::BadRunner(
+                "`test.schedule.capacity` is 0; expected a positive integer such as 1".into(),
+            ));
+        }
         if self.all().is_empty() {
-            return Err(Error::BadRunner(
-                "`test` is an empty list; remove the key, or give it a runner".into(),
-            ));
+            let key = match self {
+                Self::Scheduled(_) => "test.runners",
+                Self::One(_) | Self::Many(_) => "test",
+            };
+            return Err(Error::BadRunner(format!(
+                "`{key}` is an empty list; remove the key, or give it a runner"
+            )));
         }
-        if !self.has_explicit_schedule()
-            && self
-                .all()
-                .iter()
-                .any(|runner| runner.weight.is_some() || runner.exclusive.is_some())
-        {
-            return Err(Error::BadRunner(
-                "`test.weight` and `test.exclusive` require the explicit `test.schedule` / `test.runners` form"
-                    .into(),
-            ));
+        if !self.has_explicit_schedule() {
+            for (index, runner) in self.all().iter().enumerate() {
+                if runner.weight.is_some() || runner.exclusive.is_some() {
+                    let prefix = self.runner_prefix(index);
+                    return Err(Error::BadRunner(format!(
+                        "`{prefix}.weight` and `{prefix}.exclusive` require the explicit `test.schedule` / `test.runners` form"
+                    )));
+                }
+            }
         }
-        for r in self.all() {
-            r.validate()?;
+        for (index, r) in self.all().iter().enumerate() {
+            let prefix = self.runner_prefix(index);
+            r.validate_at(&prefix)?;
             if r.weight() > self.schedule().capacity {
                 return Err(Error::BadRunner(format!(
-                    "`test` runner weight {} exceeds `test.schedule.capacity` {}",
+                    "`{prefix}.weight`: weight {} exceeds `test.schedule.capacity` {}",
                     r.weight(),
                     self.schedule().capacity
                 )));
@@ -1437,22 +1442,22 @@ pub struct TestBatch {
 }
 
 impl TestBatch {
-    fn validate(&self) -> Result<(), Error> {
+    fn validate_at(&self, prefix: &str) -> Result<(), Error> {
         if self.protocol != TEST_BATCH_PROTOCOL {
             return Err(Error::BadRunner(format!(
-                "`test.batch.protocol` must be {TEST_BATCH_PROTOCOL} (found {})",
+                "`{prefix}.protocol` must be {TEST_BATCH_PROTOCOL} (found {})",
                 self.protocol
             )));
         }
         if self.run.is_empty() {
-            return Err(Error::BadRunner(
-                "`test.batch.run` is an empty command".into(),
-            ));
+            return Err(Error::BadRunner(format!(
+                "`{prefix}.run` is an empty command"
+            )));
         }
         if self.run.iter().any(|argument| argument.trim().is_empty()) {
-            return Err(Error::BadRunner(
-                "`test.batch.run` contains a blank argument".into(),
-            ));
+            return Err(Error::BadRunner(format!(
+                "`{prefix}.run` contains a blank argument"
+            )));
         }
         for placeholder in [BATCH_MANIFEST_PLACEHOLDER, BATCH_RESULT_PLACEHOLDER] {
             let count = self
@@ -1462,12 +1467,12 @@ impl TestBatch {
                 .count();
             if count != 1 {
                 return Err(Error::BadRunner(format!(
-                    "`test.batch.run` must contain `{placeholder}` exactly once, as a whole argument (found {count})"
+                    "`{prefix}.run` must contain `{placeholder}` exactly once, as a whole argument (found {count})"
                 )));
             }
             if self.run.first().map(String::as_str) == Some(placeholder) {
                 return Err(Error::BadRunner(format!(
-                    "`{placeholder}` may not be the command (the first element) of `test.batch.run`"
+                    "`{placeholder}` may not be the command (the first element) of `{prefix}.run`"
                 )));
             }
             if self
@@ -1476,7 +1481,7 @@ impl TestBatch {
                 .any(|argument| argument.as_str() != placeholder && argument.contains(placeholder))
             {
                 return Err(Error::BadRunner(format!(
-                    "`test.batch.run` may use `{placeholder}` only as a whole argument, never spliced inside another one"
+                    "`{prefix}.run` may use `{placeholder}` only as a whole argument, never spliced inside another one"
                 )));
             }
         }
@@ -1486,7 +1491,7 @@ impl TestBatch {
             .any(|argument| argument.contains(PLACEHOLDER))
         {
             return Err(Error::BadRunner(format!(
-                "`test.batch.run` may not contain `{PLACEHOLDER}`; exact names belong only in the manifest"
+                "`{prefix}.run` may not contain `{PLACEHOLDER}`; exact names belong only in the manifest"
             )));
         }
         Ok(())
@@ -2584,17 +2589,17 @@ pub struct TestCoverage {
 
 impl TestCoverage {
     /// Reject a coverage claim the tool cannot act on.
-    fn validate(&self) -> Result<(), Error> {
+    fn validate_at(&self, prefix: &str) -> Result<(), Error> {
         for (field, values) in [("tests", &self.tests), ("paths", &self.paths)] {
             if values.is_empty() {
                 return Err(Error::BadRunner(format!(
-                    "`test.covers_by_test.{field}` is an empty list; remove the entry, or name \
+                    "`{prefix}.{field}` is an empty list; remove the entry, or name \
                      what it covers"
                 )));
             }
             if values.iter().any(|v| v.trim().is_empty()) {
                 return Err(Error::BadRunner(format!(
-                    "`test.covers_by_test.{field}` contains a blank entry"
+                    "`{prefix}.{field}` contains a blank entry"
                 )));
             }
         }
@@ -2617,11 +2622,11 @@ pub struct TestInputDependency {
 }
 
 impl TestInputDependency {
-    fn validate(&self) -> Result<(), Error> {
+    fn validate_at(&self, prefix: &str) -> Result<(), Error> {
         for (field, values) in [("tests", &self.tests), ("paths", &self.paths)] {
             if values.is_empty() {
                 return Err(Error::BadRunner(format!(
-                    "`test.inputs_by_test.{field}` is an empty list; every entry must name both tests and their inputs"
+                    "`{prefix}.{field}` is an empty list; every entry must name both tests and their inputs"
                 )));
             }
             if values
@@ -2629,14 +2634,14 @@ impl TestInputDependency {
                 .any(|value| aplan_core::task::is_vacuous_ref(value))
             {
                 return Err(Error::BadRunner(format!(
-                    "`test.inputs_by_test.{field}` contains a blank entry"
+                    "`{prefix}.{field}` contains a blank entry"
                 )));
             }
         }
         for pattern in &self.tests {
             globset::Glob::new(pattern).map_err(|error| {
                 Error::BadRunner(format!(
-                    "invalid `test.inputs_by_test.tests` pattern `{pattern}`: {error}"
+                    "invalid `{prefix}.tests` pattern `{pattern}`: {error}"
                 ))
             })?;
         }
@@ -2653,12 +2658,12 @@ impl TestInputDependency {
                 })
             {
                 return Err(Error::BadRunner(format!(
-                    "`test.inputs_by_test.paths` entry `{pattern}` must stay below the repository root"
+                    "`{prefix}.paths` entry `{pattern}` must stay below the repository root"
                 )));
             }
             globset::Glob::new(pattern).map_err(|error| {
                 Error::BadRunner(format!(
-                    "invalid `test.inputs_by_test.paths` pattern `{pattern}`: {error}"
+                    "invalid `{prefix}.paths` pattern `{pattern}`: {error}"
                 ))
             })?;
         }
@@ -2758,28 +2763,26 @@ impl TestRunner {
         }
     }
 
-    fn validate_scheduler_reservation(&self) -> Result<(), Error> {
+    fn validate_scheduler_reservation_at(&self, prefix: &str) -> Result<(), Error> {
         if self.weight == Some(0) {
-            return Err(Error::BadRunner(
-                "`test` runner weight is 0, which no provider command can consume".into(),
-            ));
+            return Err(Error::BadRunner(format!(
+                "`{prefix}.weight`: weight is 0, which no provider command can consume"
+            )));
         }
         let Some(resources) = &self.exclusive else {
             return Ok(());
         };
         if resources.is_empty() {
-            return Err(Error::BadRunner(
-                "`test` runner exclusive resource list is empty; remove it, or name a resource"
-                    .into(),
-            ));
+            return Err(Error::BadRunner(format!(
+                "`{prefix}.exclusive`: exclusive resource list is empty; remove it, or name a resource"
+            )));
         }
         let mut unique = BTreeSet::new();
         for resource in resources {
             if resource.trim().is_empty() || resource != resource.trim() {
-                return Err(Error::BadRunner(
-                    "`test` runner exclusive resources must be non-blank and have no surrounding whitespace"
-                        .into(),
-                ));
+                return Err(Error::BadRunner(format!(
+                    "`{prefix}.exclusive`: exclusive resources must be non-blank and have no surrounding whitespace"
+                )));
             }
             if resource.chars().any(|character| {
                 character.is_control()
@@ -2796,14 +2799,13 @@ impl TestRunner {
                             | '\u{061C}'
                     )
             }) {
-                return Err(Error::BadRunner(
-                    "`test` runner exclusive resources may not contain control or invisible formatting characters"
-                        .into(),
-                ));
+                return Err(Error::BadRunner(format!(
+                    "`{prefix}.exclusive`: exclusive resources may not contain control or invisible formatting characters"
+                )));
             }
             if !unique.insert(resource) {
                 return Err(Error::BadRunner(format!(
-                    "`test` runner repeats exclusive resource `{resource}`"
+                    "`{prefix}.exclusive`: repeats exclusive resource `{resource}`"
                 )));
             }
         }
@@ -2812,53 +2814,61 @@ impl TestRunner {
 
     /// Reject a runner that could not receive a test name safely.
     pub fn validate(&self) -> Result<(), Error> {
-        validate_limits("test", self.command_policy()).map_err(Error::BadRunner)?;
-        self.validate_scheduler_reservation()?;
+        self.validate_at("test")
+    }
+
+    /// Reject a runner that could not receive a test name safely, naming every
+    /// diagnostic against `prefix` (for example `test`, `test[0]`, or
+    /// `test.runners[0]`) (`A2-038`).
+    pub(crate) fn validate_at(&self, prefix: &str) -> Result<(), Error> {
+        validate_limits(prefix, self.command_policy()).map_err(Error::BadRunner)?;
+        self.validate_scheduler_reservation_at(prefix)?;
         // Config the tool cannot act on is an error, never a silent no-op: an
         // empty `covers` reads as a locality claim and makes none.
         match &self.covers {
             Some(c) if c.is_empty() => {
-                return Err(Error::BadRunner(
-                    "`test.covers` is an empty list; remove the key, or name the paths this \
+                return Err(Error::BadRunner(format!(
+                    "`{prefix}.covers` is an empty list; remove the key, or name the paths this \
                      runner covers"
-                        .into(),
-                ));
+                )));
             }
             Some(c) if c.iter().any(|p| p.trim().is_empty()) => {
-                return Err(Error::BadRunner(
-                    "`test.covers` contains a blank path glob".into(),
-                ));
+                return Err(Error::BadRunner(format!(
+                    "`{prefix}.covers` contains a blank path glob"
+                )));
             }
             _ => {}
         }
         if let Some(by_test) = &self.covers_by_test {
             if by_test.is_empty() {
-                return Err(Error::BadRunner(
-                    "`test.covers_by_test` is an empty list; remove the key, or name the tests \
+                return Err(Error::BadRunner(format!(
+                    "`{prefix}.covers_by_test` is an empty list; remove the key, or name the tests \
                      that cover something else"
-                        .into(),
-                ));
+                )));
             }
-            for entry in by_test {
-                entry.validate()?;
+            for (index, entry) in by_test.iter().enumerate() {
+                entry.validate_at(&format!("{prefix}.covers_by_test[{index}]"))?;
             }
         }
         if let Some(by_test) = &self.inputs_by_test {
             if by_test.is_empty() {
-                return Err(Error::BadRunner(
-                    "`test.inputs_by_test` is an empty list; remove the key to refresh the complete runner, or declare every test's inputs"
-                        .into(),
-                ));
+                return Err(Error::BadRunner(format!(
+                    "`{prefix}.inputs_by_test` is an empty list; remove the key to refresh the complete runner, or declare every test's inputs"
+                )));
             }
-            for entry in by_test {
-                entry.validate()?;
+            for (index, entry) in by_test.iter().enumerate() {
+                entry.validate_at(&format!("{prefix}.inputs_by_test[{index}]"))?;
             }
         }
         if self.list.is_empty() {
-            return Err(Error::BadRunner("`test.list` is an empty command".into()));
+            return Err(Error::BadRunner(format!(
+                "`{prefix}.list` is an empty command"
+            )));
         }
         if self.run.is_empty() {
-            return Err(Error::BadRunner("`test.run` is an empty command".into()));
+            return Err(Error::BadRunner(format!(
+                "`{prefix}.run` is an empty command"
+            )));
         }
         let holes = self
             .run
@@ -2867,7 +2877,7 @@ impl TestRunner {
             .count();
         if holes != 1 {
             return Err(Error::BadRunner(format!(
-                "`test.run` must contain `{PLACEHOLDER}` exactly once, as a whole argument \
+                "`{prefix}.run` must contain `{PLACEHOLDER}` exactly once, as a whole argument \
                  (found {holes})"
             )));
         }
@@ -2877,7 +2887,7 @@ impl TestRunner {
         // boundary (HLD 5.5), and `validate` is where it is enforced.
         if self.run.first().map(String::as_str) == Some(PLACEHOLDER) {
             return Err(Error::BadRunner(format!(
-                "`{PLACEHOLDER}` may not be the command (the first element) of `test.run`: the \
+                "`{PLACEHOLDER}` may not be the command (the first element) of `{prefix}.run`: the \
                  program to run must be a fixed command, never the test name"
             )));
         }
@@ -2889,12 +2899,12 @@ impl TestRunner {
             .any(|e| e.as_str() != PLACEHOLDER && e.contains(PLACEHOLDER))
         {
             return Err(Error::BadRunner(format!(
-                "`test.run` may use `{PLACEHOLDER}` only as a whole argument, never spliced \
+                "`{prefix}.run` may use `{PLACEHOLDER}` only as a whole argument, never spliced \
                  inside another one"
             )));
         }
         if let Some(batch) = &self.batch {
-            batch.validate()?;
+            batch.validate_at(&format!("{prefix}.batch"))?;
         }
         Ok(())
     }
@@ -3242,7 +3252,9 @@ where
         // key instead of the first one serde happened to reach.
         let (unknown, remaining) = scan_unknown(text);
         if unknown.is_empty() {
-            Error::Parse(format!("{}: {e}", path.display()))
+            let detail = e.to_string();
+            let detail = test_runner_parse::strip_duplicate_test_prefix(&detail);
+            Error::Parse(format!("{}: {detail}", path.display()))
         } else {
             Error::UnknownKeys(UnknownKeys {
                 path: path.display().to_string(),
@@ -4174,7 +4186,11 @@ fn scan_unknown(text: &str) -> (Vec<(String, Option<String>)>, Option<String>) {
     // field the adopter is about to supply by correcting the spelling.
     let remaining = yaml_compat::to_string(&doc).ok().and_then(|cleaned| {
         match aplan_core::yaml::from_str::<Config>(&cleaned) {
-            Err(e) => Some(strip_position(&e.to_string())),
+            Err(e) => {
+                let raw = e.to_string();
+                let stripped = strip_position(&raw);
+                Some(test_runner_parse::strip_duplicate_test_prefix(&stripped).to_string())
+            }
             // Parsing is only half of loading: the semantic checks are where a
             // runner with no `{test}` placeholder or an unknown `advisory` code
             // is caught, and they are as much "what you meet next" as a type
@@ -4219,6 +4235,9 @@ fn walk_unknown(
             format!("{prefix}.{name}")
         };
         if !accepted.iter().any(|a| a == &path) {
+            if test_runner_parse::is_misplaced_test_path(&path) {
+                continue;
+            }
             let near = accepted
                 .iter()
                 .find(|a| aplan_core::is_one_edit_apart(a, &path))
@@ -7156,6 +7175,230 @@ future_top_level_key_from_v09:
                 );
             }
             assert!(!keys.iter().any(|k| k.contains("binary_sha256")));
+        }
+
+        /// Exhaustive census: every `test.*` key in the derived schema must be
+        /// accounted for by [`test_runner_parse`] so a future field cannot fall
+        /// out of the diagnostic parser silently.
+        #[test]
+        fn test_runner_parser_key_tables_match_accepted_keys() {
+            let mut expected = BTreeSet::new();
+            expected.insert("test".to_string());
+            for key in test_runner_parse::GROUP_KEYS {
+                expected.insert(format!("test.{key}"));
+            }
+            for key in test_runner_parse::SCHEDULE_KEYS {
+                expected.insert(format!("test.schedule.{key}"));
+            }
+            for prefix in ["test", "test.runners"] {
+                for key in test_runner_parse::RUNNER_KEYS {
+                    expected.insert(format!("{prefix}.{key}"));
+                }
+                for key in test_runner_parse::BATCH_KEYS {
+                    expected.insert(format!("{prefix}.batch.{key}"));
+                }
+                for key in test_runner_parse::COVERAGE_KEYS {
+                    expected.insert(format!("{prefix}.covers_by_test.{key}"));
+                }
+                for key in test_runner_parse::INPUT_DEP_KEYS {
+                    expected.insert(format!("{prefix}.inputs_by_test.{key}"));
+                }
+            }
+            let actual: BTreeSet<String> = accepted_keys()
+                .into_iter()
+                .filter(|k| k == "test" || k.starts_with("test."))
+                .collect();
+            assert_eq!(
+                actual, expected,
+                "schema `test` keys diverged from `test_runner_parse` key tables"
+            );
+        }
+
+        /// Proof for `config.test_runner_reports_all_missing_and_misplaced_fields`
+        /// (`A2-037`): missing fields across `test`, `test.schedule`, every listed
+        /// runner, and nested `batch`/`covers_by_test`/`inputs_by_test` blocks are
+        /// listed together with full key paths, and misplaced keys name where they
+        /// belong.
+        #[test]
+        fn every_missing_and_misplaced_test_runner_field_is_reported_at_once() {
+            const BEHAVIOUR: &str = "config.test_runner_reports_all_missing_and_misplaced_fields";
+            assert_eq!(
+                BEHAVIOUR,
+                "config.test_runner_reports_all_missing_and_misplaced_fields"
+            );
+
+            // Scheduled form missing schedule + multiple runners' list/run.
+            let err = parse_config(
+                "test:\n  runners:\n    - name: first\n    - name: second\n      list: ['true']\n",
+                Path::new(".aplan.yml"),
+            )
+            .expect_err("missing fields must fail")
+            .to_string();
+            for field in [
+                "test.schedule",
+                "test.runners[0].list",
+                "test.runners[0].run",
+                "test.runners[1].run",
+            ] {
+                assert!(err.contains(field), "missing `{field}` in:\n{err}");
+            }
+
+            // Single-runner empty mapping + nested batch/covers_by_test/inputs_by_test.
+            let nested = parse_config(
+                "test:\n  batch: {}\n  covers_by_test: [{}]\n  inputs_by_test: [{}]\n",
+                Path::new(".aplan.yml"),
+            )
+            .expect_err("nested missing fields must fail")
+            .to_string();
+            for field in [
+                "test.list",
+                "test.run",
+                "test.batch.protocol",
+                "test.batch.run",
+                "test.covers_by_test[0].tests",
+                "test.covers_by_test[0].paths",
+                "test.inputs_by_test[0].tests",
+                "test.inputs_by_test[0].paths",
+            ] {
+                assert!(nested.contains(field), "missing `{field}` in:\n{nested}");
+            }
+
+            // Misplaced keys at every wrong level name their correct home.
+            for (yaml, needle_a, needle_b) in [
+                (
+                    "test:\n  runners:\n    - name: unit\n      list: ['true']\n      run: ['true', '{test}']\n      schedule: nightly\n",
+                    "test.runners[0].schedule: misplaced key",
+                    "`test.schedule`",
+                ),
+                (
+                    "test:\n  - list: ['true']\n    run: ['true', '{test}']\n    schedule: {capacity: 1}\n",
+                    "test[0].schedule: misplaced key",
+                    "`test.schedule`",
+                ),
+                (
+                    "test:\n  schedule: {capacity: 1}\n  runners:\n    - list: ['true']\n      run: ['true', '{test}']\n  list: ['true']\n",
+                    "test.list: misplaced key",
+                    "`test.runners[i].list`",
+                ),
+                (
+                    "test:\n  capacity: 2\n  runners:\n    - list: ['true']\n      run: ['true', '{test}']\n",
+                    "test.capacity: misplaced key",
+                    "`test.schedule`",
+                ),
+                (
+                    "test:\n  schedule:\n    capacity: 2\n    weight: 1\n  runners:\n    - list: ['true']\n      run: ['true', '{test}']\n",
+                    "test.schedule.weight: misplaced key",
+                    "`test.runners[i].weight`",
+                ),
+                (
+                    "test:\n  list: ['true']\n  run: ['true', '{test}']\n  protocol: 1\n",
+                    "test.protocol: misplaced key",
+                    "`test.batch.protocol`",
+                ),
+            ] {
+                let msg = parse_config(yaml, Path::new(".aplan.yml"))
+                    .expect_err("misplaced key must fail")
+                    .to_string();
+                assert!(
+                    msg.contains(needle_a) && msg.contains(needle_b),
+                    "expected `{needle_a}` and `{needle_b}` in:\n{msg}"
+                );
+            }
+        }
+
+        /// Proof for `config.test_runner_errors_name_expected_shape_and_runner_path`
+        /// (`A2-038`): every runner type error speaks in configuration terms rather
+        /// than Rust types, and every validation error names the runner's own path.
+        #[test]
+        fn test_runner_type_and_validation_errors_name_expected_shape_and_runner_path() {
+            const BEHAVIOUR: &str = "config.test_runner_errors_name_expected_shape_and_runner_path";
+            assert_eq!(
+                BEHAVIOUR,
+                "config.test_runner_errors_name_expected_shape_and_runner_path"
+            );
+
+            for (yaml, wanted, forbidden) in [
+                (
+                    "test: cargo test\n",
+                    "test: expected a runner mapping, a list of runner mappings",
+                    "invalid type",
+                ),
+                (
+                    "test:\n  schedule: nightly\n  runners:\n    - list: ['true']\n      run: ['true', '{test}']\n",
+                    "test.schedule: expected a mapping such as {capacity: 1}",
+                    "TestSchedule",
+                ),
+                (
+                    "test:\n  schedule:\n    capacity: many\n  runners:\n    - list: ['true']\n      run: ['true', '{test}']\n",
+                    "test.schedule.capacity: expected a positive integer such as 1",
+                    "u32",
+                ),
+                (
+                    "test:\n  schedule: {capacity: 1}\n  runners:\n    - list: \"true\"\n      run: ['true', '{test}']\n",
+                    "test.runners[0].list: expected a command argv list of strings",
+                    "expected a sequence",
+                ),
+                (
+                    "test:\n  schedule: {capacity: 1}\n  runners:\n    - list: ['true']\n      run: ['true', 42]\n",
+                    "test.runners[0].run[1]: expected a string argument",
+                    "invalid type",
+                ),
+                (
+                    "test:\n  list: ['true']\n  run: ['true', '{test}']\n  expect_tests: yes_please\n",
+                    "test.expect_tests: expected a boolean (true or false)",
+                    "invalid type",
+                ),
+                (
+                    "test:\n  list: ['true']\n  run: ['true', '{test}']\n  batch: nope\n",
+                    "test.batch: expected a mapping such as {protocol: 1",
+                    "TestBatch",
+                ),
+            ] {
+                let err = parse_config(yaml, Path::new(".aplan.yml"))
+                    .expect_err("type error must fail")
+                    .to_string();
+                assert!(err.contains(wanted), "expected `{wanted}` in:\n{err}");
+                assert!(
+                    !err.contains(forbidden),
+                    "leaked Rust wording `{forbidden}` in:\n{err}"
+                );
+            }
+
+            // Validation errors carry the exact indexed runner path.
+            for (yaml, expected_path) in [
+                (
+                    "test:\n  schedule: {capacity: 1}\n  runners:\n    - list: ['true']\n      run: ['true']\n",
+                    "`test.runners[0].run`",
+                ),
+                (
+                    "test:\n  schedule: {capacity: 1}\n  runners:\n    - list: ['true']\n      run: ['true', '{test}']\n    - list: []\n      run: ['true', '{test}']\n",
+                    "`test.runners[1].list`",
+                ),
+                (
+                    "test:\n  - list: ['true']\n    run: ['true', '{test}']\n  - list: ['true']\n    run: ['{test}']\n",
+                    "`test[1].run`",
+                ),
+                (
+                    "test:\n  schedule: {capacity: 1}\n  runners:\n    - list: ['true']\n      run: ['true', '{test}']\n      batch:\n        protocol: 1\n        run: ['adapter']\n",
+                    "`test.runners[0].batch.run`",
+                ),
+                (
+                    "test:\n  schedule: {capacity: 1}\n  runners:\n    - list: ['true']\n      run: ['true', '{test}']\n      max_memory: 4GB\n",
+                    "`test.runners[0].max_memory`",
+                ),
+                (
+                    "test:\n  schedule: {capacity: 1}\n  runners:\n    - list: ['true']\n      run: ['true', '{test}']\n      covers_by_test:\n        - tests: []\n          paths: ['src/**']\n",
+                    "`test.runners[0].covers_by_test[0].tests`",
+                ),
+            ] {
+                let err = parse_config(yaml, Path::new(".aplan.yml"))
+                    .expect_err("runner validation error must fail")
+                    .to_string();
+                assert!(
+                    err.contains(expected_path),
+                    "expected `{expected_path}` in:\n{err}"
+                );
+            }
         }
     }
 }
