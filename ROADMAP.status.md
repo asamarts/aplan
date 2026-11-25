@@ -15,7 +15,7 @@
 | hardening | todo | 0/15 | 15 | 0 | 14.8d | 0.5 (0.5 left) | 3.0d |
 | qualification | todo | 0/1 | 0 | 1 | 8.0d | 0.3 (0.3 left) | 8.0d |
 | tui-quality | todo | 0/2 | 1 | 1 | 4.0d | 0.1 (0.1 left) | 4.0d |
-| workflow | todo | 3/17 | 6 | 8 | 50.0d | 1.9 (1.5 left) | 17.5d |
+| workflow | todo | 4/17 | 6 | 7 | 50.0d | 1.9 (1.4 left) | 17.5d |
 
 ## v0.7 Security, safe parsing and gates that tell the truth
 
@@ -227,7 +227,7 @@
 | A2-110 | Derive labelled legacy completion times in one Git history pass | done | A2-109 | commit:b3f7080, test:history::tests::single_pass_history_walk_resolves_recorded_legacy_renames_rekeys_reverts_and_untracked |
 | A2-111 | Add completed-task history to the engine and CLI | todo | A2-110 | - |
 | A2-112 | Add completion history and recent work to the TUI | todo | A2-111 | - |
-| A2-113 | Measure and select the terminal Markdown dependency boundary | todo | - | - |
+| A2-113 | Measure and select the terminal Markdown dependency boundary | done | - | commit:806ce69 |
 | A2-114 | Build a safe Markdown semantic document and terminal renderer | todo | A2-113 | - |
 | A2-115 | Pretty-render CLI Markdown surfaces without changing artifacts | todo | A2-114 | - |
 | A2-116 | Expose the capture workflow through MCP and agent guidance | todo | A2-118, A2-122 | - |
