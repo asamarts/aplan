@@ -156,6 +156,40 @@ fn configured_catalogue_searches_exact_names_and_exposes_ambiguity_deterministic
 }
 
 #[test]
+fn filtered_test_catalogue_summary_pluralizes_unique_matches() {
+    let dir = tempfile::Builder::new()
+        .prefix("test-catalogue-plural-")
+        .tempdir_in(aplan_core::fixture::fixture_root())
+        .expect("fixture");
+    catalogue_fixture(dir.path());
+
+    let singular = common::run(dir.path(), &["test", "list", "HANDLES_case"]);
+    assert_eq!(singular.code, 0, "{}", singular.text());
+    assert!(
+        singular
+            .stdout
+            .contains("1 unique match for `HANDLES_case` across 2 runners"),
+        "expected singular match summary: {}",
+        singular.stdout
+    );
+
+    let plural = common::run(dir.path(), &["test", "list", "case"]);
+    assert_eq!(plural.code, 0, "{}", plural.text());
+    assert!(
+        plural
+            .stdout
+            .contains("2 unique matches for `case` across 2 runners"),
+        "expected plural match summary: {}",
+        plural.stdout
+    );
+    assert!(
+        !plural.stdout.contains("unique matchs"),
+        "misspelled plural survived: {}",
+        plural.stdout
+    );
+}
+
+#[test]
 fn catalogue_distinguishes_unconfigured_from_an_empty_runner() {
     let unconfigured = tempfile::Builder::new()
         .prefix("test-catalogue-none-")
