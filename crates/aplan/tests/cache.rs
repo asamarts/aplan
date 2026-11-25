@@ -138,6 +138,21 @@ fn cache_bytes(cache: &std::path::Path) -> Vec<(std::path::PathBuf, Vec<u8>)> {
     values
 }
 
+/// Strip only the independent wall-clock observation instant from JSON `show`
+/// output so consecutive invocations across a 1-second boundary stay comparable.
+fn normalize_show_json(stdout: &str) -> serde_json::Value {
+    let mut value: serde_json::Value = serde_json::from_str(stdout).expect("valid show json");
+    if let Some(obj) = value.as_object_mut() {
+        assert!(
+            obj.get("claim_observed_at_epoch_seconds")
+                .is_some_and(serde_json::Value::is_i64),
+            "expected integer claim_observed_at_epoch_seconds in {stdout}"
+        );
+        obj.remove("claim_observed_at_epoch_seconds");
+    }
+    value
+}
+
 /// A persistent hit is an optimization of the same operation, including the
 /// strict source-only escape hatch. This is the end-to-end proof for A1-589.
 #[test]
@@ -149,7 +164,10 @@ fn cache_hit_off_and_refresh_preserve_the_complete_cli_result() {
     let hit = run(directory.path(), &cache, "auto");
     assert_eq!(cold.code, 0, "{}", cold.text());
     assert_eq!(hit.code, cold.code);
-    assert_eq!(hit.stdout, cold.stdout);
+    assert_eq!(
+        normalize_show_json(&hit.stdout),
+        normalize_show_json(&cold.stdout)
+    );
     assert_eq!(diagnostics(&hit), diagnostics(&cold));
     assert!(timing(&cold).contains("cache_hits=0"), "{}", timing(&cold));
     for expected in [
@@ -170,7 +188,10 @@ fn cache_hit_off_and_refresh_preserve_the_complete_cli_result() {
     let before_off = cache_bytes(&cache);
     let off = run(directory.path(), &cache, "off");
     assert_eq!(off.code, cold.code);
-    assert_eq!(off.stdout, cold.stdout);
+    assert_eq!(
+        normalize_show_json(&off.stdout),
+        normalize_show_json(&cold.stdout)
+    );
     assert_eq!(diagnostics(&off), diagnostics(&cold));
     assert_eq!(cache_bytes(&cache), before_off, "--cache=off wrote state");
     for expected in ["cache_hits=0", "cache_reused=0", "cache_parsed=2"] {
@@ -179,7 +200,10 @@ fn cache_hit_off_and_refresh_preserve_the_complete_cli_result() {
 
     let refresh = run(directory.path(), &cache, "refresh");
     assert_eq!(refresh.code, cold.code);
-    assert_eq!(refresh.stdout, cold.stdout);
+    assert_eq!(
+        normalize_show_json(&refresh.stdout),
+        normalize_show_json(&cold.stdout)
+    );
     assert_eq!(diagnostics(&refresh), diagnostics(&cold));
     for expected in ["cache_hits=0", "cache_reused=0", "cache_parsed=2"] {
         assert!(timing(&refresh).contains(expected), "{}", timing(&refresh));

@@ -2932,6 +2932,38 @@ fn drag_hit_test(layout: &ShellLayout, model: &Model, position: Position) -> Opt
     })
 }
 
+fn completed_viewport(area: Rect, model: &Model, compact: bool) -> TaskViewport {
+    let content = area.inner(Margin::new(1, 1));
+    let (header, _) = completed_header_lines(
+        model,
+        palette(model.theme),
+        compact,
+        usize::from(content.width),
+        model.glyphs == Glyphs::Ascii,
+    );
+    let intro_rows = u16::try_from(header.len()).unwrap_or(u16::MAX);
+    let rows_len = model.completed_rows().len();
+    let capacity = usize::from(content.height).saturating_sub(header.len());
+    let selected_idx = model
+        .selected_completed_visible_index()
+        .unwrap_or_default()
+        .min(rows_len.saturating_sub(1));
+    let start = if rows_len <= capacity {
+        0
+    } else {
+        selected_idx
+            .saturating_sub(capacity.saturating_sub(1) / 2)
+            .min(rows_len.saturating_sub(capacity))
+    };
+    let end = (start + capacity).min(rows_len);
+    TaskViewport {
+        content,
+        intro_rows,
+        start,
+        end,
+    }
+}
+
 fn hit_test(layout: &ShellLayout, model: &Model, position: Position) -> Option<Action> {
     if layout.class == LayoutClass::TooSmall {
         return None;
@@ -2992,11 +3024,7 @@ fn hit_test(layout: &ShellLayout, model: &Model, position: Position) -> Option<A
             model.selected_capture_visible_index().unwrap_or_default(),
             model.inbox_rows().len(),
         ),
-        Route::Completed => item_viewport(
-            layout.primary,
-            model.selected_completed_visible_index().unwrap_or_default(),
-            model.completed_rows().len(),
-        ),
+        Route::Completed => completed_viewport(layout.primary, model, compact),
         Route::Tasks => task_viewport(
             layout.primary,
             compact,
