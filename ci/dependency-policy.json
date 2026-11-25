@@ -2,9 +2,9 @@
   "schema": "aplan/dependency-policy/v1",
   "target": "x86_64-unknown-linux-gnu",
   "budgets": {
-    "lock": 291,
-    "default": 200,
-    "headless": 169,
+    "lock": 293,
+    "default": 202,
+    "headless": 171,
     "tui_increment": 32
   },
   "binary_budget": {
@@ -177,6 +177,14 @@
       "target": "all",
       "behavior": "private temporary-file handoff for capture body editing with cleanup on every return path",
       "task": "A2-002"
+    },
+    {
+      "owner": "aplan-output",
+      "kind": "normal",
+      "dependency": "pulldown-cmark",
+      "target": "all",
+      "behavior": "pure-Rust CommonMark/GFM pull parser behind aplan-output's private semantic Markdown document boundary (ADR-0075)",
+      "task": "A2-114"
     },
     {
       "owner": "aplan",
