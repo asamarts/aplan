@@ -7,13 +7,417 @@
   "contract_version": "aplan/mcp/v2",
   "limits": {
     "default_page_limit": 20,
+    "max_completed_cursor_bytes": 512,
     "max_cursor_bytes": 128,
+    "max_filter_value_bytes": 128,
+    "max_filter_values_per_dimension": 16,
     "max_page_limit": 50,
     "max_resource_bytes": 65536,
     "max_tool_result_bytes": 524288,
-    "max_uri_bytes": 512
+    "max_uri_bytes": 1024
   },
   "resources": {
+    "aplan://collections/completed{?cut,phase,owner,tag,since,until,oldest,history,limit,cursor}": {
+      "mimeType": "application/json",
+      "name": "completed_tasks_page",
+      "schema": {
+        "$defs": {
+          "AppliedCompletedRequest": {
+            "description": "Normalized request parameters echoed in [`CompletedResponse`] (`A2-111`).",
+            "properties": {
+              "history": {
+                "$ref": "#/$defs/HistoryPolicy"
+              },
+              "limit": {
+                "format": "uint",
+                "minimum": 0,
+                "type": [
+                  "integer",
+                  "null"
+                ]
+              },
+              "oldest_first": {
+                "type": "boolean"
+              },
+              "selector": {
+                "$ref": "#/$defs/AppliedCompletedSelector"
+              },
+              "since": {
+                "type": [
+                  "string",
+                  "null"
+                ]
+              },
+              "until": {
+                "type": [
+                  "string",
+                  "null"
+                ]
+              }
+            },
+            "required": [
+              "oldest_first",
+              "history",
+              "selector"
+            ],
+            "type": "object"
+          },
+          "AppliedCompletedSelector": {
+            "description": "Selector dimensions applied to a completed-task history query (`A2-111`).",
+            "properties": {
+              "cuts": {
+                "items": {
+                  "type": "string"
+                },
+                "type": "array"
+              },
+              "owners": {
+                "items": {
+                  "type": "string"
+                },
+                "type": "array"
+              },
+              "phases": {
+                "items": {
+                  "format": "uint32",
+                  "minimum": 0,
+                  "type": "integer"
+                },
+                "type": "array"
+              },
+              "tags": {
+                "items": {
+                  "type": "string"
+                },
+                "type": "array"
+              }
+            },
+            "required": [
+              "cuts",
+              "phases",
+              "owners",
+              "tags"
+            ],
+            "type": "object"
+          },
+          "ClosedAtSource": {
+            "description": "Durable provenance of a persisted `closed_at` timestamp on a `done` task.",
+            "oneOf": [
+              {
+                "const": "local",
+                "description": "Recorded locally when `aplan` accepted the transition to `done`.",
+                "type": "string"
+              },
+              {
+                "const": "imported",
+                "description": "Validated and preserved from an external source during explicit import.",
+                "type": "string"
+              }
+            ]
+          },
+          "CompletedResponse": {
+            "description": "Stable typed response shared across CLI, MCP, and TUI completion-history\nviews (`A2-111`, ADR-0074).",
+            "properties": {
+              "applied": {
+                "$ref": "#/$defs/AppliedCompletedRequest"
+              },
+              "basis_revision": {
+                "type": "string"
+              },
+              "commits_walked": {
+                "format": "uint",
+                "minimum": 0,
+                "type": "integer"
+              },
+              "completeness": {
+                "$ref": "#/$defs/HistoryCompleteness"
+              },
+              "input_identity": {
+                "type": "string"
+              },
+              "items": {
+                "items": {
+                  "$ref": "#/$defs/CompletedTaskRow"
+                },
+                "type": "array"
+              },
+              "limitations": {
+                "items": {
+                  "type": "string"
+                },
+                "type": "array"
+              },
+              "next_cursor": {
+                "type": [
+                  "string",
+                  "null"
+                ]
+              },
+              "schema": {
+                "type": "string"
+              },
+              "total_matched": {
+                "format": "uint",
+                "minimum": 0,
+                "type": "integer"
+              },
+              "truncated": {
+                "type": "boolean"
+              }
+            },
+            "required": [
+              "schema",
+              "input_identity",
+              "basis_revision",
+              "completeness",
+              "limitations",
+              "commits_walked",
+              "applied",
+              "total_matched",
+              "truncated",
+              "items"
+            ],
+            "type": "object"
+          },
+          "CompletedTaskRow": {
+            "description": "One completed work task row in [`CompletedResponse`] (`A2-111`, ADR-0074).",
+            "properties": {
+              "commit": {
+                "description": "Full commit OID when `source == history_first_seen`.",
+                "type": [
+                  "string",
+                  "null"
+                ]
+              },
+              "cut": {
+                "type": [
+                  "string",
+                  "null"
+                ]
+              },
+              "id": {
+                "type": "string"
+              },
+              "incomparable_candidates": {
+                "description": "Number of incomparable minimal transition candidates when > 1, else 0.",
+                "format": "uint",
+                "minimum": 0,
+                "type": "integer"
+              },
+              "instant": {
+                "description": "Canonical RFC 3339 UTC whole-second instant, or `None` when `unknown`.",
+                "type": [
+                  "string",
+                  "null"
+                ]
+              },
+              "milestone": {
+                "type": [
+                  "string",
+                  "null"
+                ]
+              },
+              "owner": {
+                "type": [
+                  "string",
+                  "null"
+                ]
+              },
+              "phase": {
+                "format": "uint32",
+                "minimum": 0,
+                "type": "integer"
+              },
+              "recorded_origin": {
+                "anyOf": [
+                  {
+                    "$ref": "#/$defs/ClosedAtSource"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ],
+                "description": "Durable origin (`local` or `imported`) when `source == recorded`."
+              },
+              "source": {
+                "$ref": "#/$defs/CompletionTimeSource",
+                "description": "Non-overlapping provenance discriminator."
+              },
+              "tags": {
+                "items": {
+                  "type": "string"
+                },
+                "type": "array"
+              },
+              "title": {
+                "type": "string"
+              }
+            },
+            "required": [
+              "id",
+              "title",
+              "phase",
+              "tags",
+              "source",
+              "incomparable_candidates"
+            ],
+            "type": "object"
+          },
+          "CompletionTimeSource": {
+            "description": "Non-overlapping provenance discriminator for a task's completion instant\n(`ADR-0074`).",
+            "oneOf": [
+              {
+                "const": "recorded",
+                "description": "Exact persisted `closed_at` claim on the task, with durable\n`local` vs. `imported` origin.",
+                "type": "string"
+              },
+              {
+                "const": "history_first_seen",
+                "description": "Best-effort selected committed observation of a transition to\n`done` in reachable Git history; never persisted as `closed_at`.",
+                "type": "string"
+              },
+              {
+                "const": "unknown",
+                "description": "No defensible completion instant is available.",
+                "type": "string"
+              }
+            ]
+          },
+          "HistoryCompleteness": {
+            "description": "Completeness of a completion-history pass, always scoped to history\nreachable from the named `basis_revision` (`ADR-0074`).",
+            "oneOf": [
+              {
+                "const": "complete",
+                "description": "All in-scope tasks resolved from recorded claims and/or exhaustive\nreachable history from `basis_revision`.",
+                "type": "string"
+              },
+              {
+                "const": "history_skipped",
+                "description": "`HistoryPolicy::Never` skipped Git inference while legacy tasks were\npresent.",
+                "type": "string"
+              },
+              {
+                "const": "incomplete_shallow",
+                "description": "Traversal hit a shallow-clone graft boundary before resolving all\nlegacy tasks.",
+                "type": "string"
+              },
+              {
+                "const": "incomplete_bounded",
+                "description": "Traversal hit an explicit commit, byte, or duration budget before\nresolving all legacy tasks.",
+                "type": "string"
+              },
+              {
+                "const": "incomplete_unobservable",
+                "description": "Unparseable historical task shapes or missing/corrupt repository\nobjects prevented full observation.",
+                "type": "string"
+              },
+              {
+                "const": "unavailable",
+                "description": "No Git repository or no commits exist at `basis_revision`.",
+                "type": "string"
+              }
+            ]
+          },
+          "HistoryPolicy": {
+            "description": "How a completion-history query uses Git history for legacy `done` tasks\nthat lack a persisted `closed_at` (`ADR-0074`).",
+            "oneOf": [
+              {
+                "const": "auto",
+                "description": "Consult Git history only when at least one in-scope `done` task\nlacks `closed_at`; return best-effort results with explicit\ncompleteness status if history is incomplete or unavailable.",
+                "type": "string"
+              },
+              {
+                "const": "never",
+                "description": "Never consult Git history. Legacy `done` tasks without `closed_at`\nremain `unknown`.",
+                "type": "string"
+              },
+              {
+                "const": "required",
+                "description": "Require complete reachable history from `basis_revision` whenever\nany in-scope `done` task lacks `closed_at`; refuse with a typed\nerror rather than returning a partial historical answer.",
+                "type": "string"
+              }
+            ]
+          },
+          "InputIdentity": {
+            "description": "Cryptographic identity of the plan and configuration inputs backing a\nbounded MCP resource response.",
+            "properties": {
+              "config_sha256": {
+                "description": "Content digest of the active configuration, or `\"none\"` when unconfigured.",
+                "type": "string"
+              },
+              "plan_sha256": {
+                "description": "Content digest of the loaded plan snapshot.",
+                "type": "string"
+              },
+              "source": {
+                "description": "Where the inputs were read from (`working_tree`).",
+                "type": "string"
+              },
+              "trust": {
+                "description": "Trust boundary (`hermetic` or `repository`).",
+                "type": "string"
+              }
+            },
+            "required": [
+              "plan_sha256",
+              "config_sha256",
+              "source",
+              "trust"
+            ],
+            "type": "object"
+          }
+        },
+        "description": "Bounded completed-task history resource returned by\n`aplan://collections/completed{?cut,phase,owner,tag,since,until,oldest,history,limit,cursor}`\n(`A2-119`).\n\nEmbeds the shared [`aplan_core::CompletedResponse`] directly without a\ntransport-specific completion model.",
+        "properties": {
+          "complete": {
+            "description": "`true` when this page reaches the end of all matching completed tasks.",
+            "type": "boolean"
+          },
+          "completed": {
+            "$ref": "#/$defs/CompletedResponse",
+            "description": "Exact shared application response from `aplan_app::completed_tasks`."
+          },
+          "contract_version": {
+            "description": "Explicit MCP contract version (`aplan/mcp/v2`).",
+            "type": "string"
+          },
+          "input_identity": {
+            "$ref": "#/$defs/InputIdentity",
+            "description": "Cryptographic identity of the plan and configuration snapshot."
+          },
+          "next_uri": {
+            "description": "Canonical RFC 6570 URI for the next page when `!complete`.",
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "order": {
+            "description": "Deterministic ordering rule (`closed_at_desc` or `closed_at_asc`).",
+            "type": "string"
+          },
+          "resource": {
+            "description": "Canonical URI of this completed-history page resource.",
+            "type": "string"
+          },
+          "truncated_by_size_cap": {
+            "description": "`true` when the page limit was reduced below the requested limit to stay\nwithin [`MAX_RESOURCE_BYTES`].",
+            "type": "boolean"
+          }
+        },
+        "required": [
+          "contract_version",
+          "resource",
+          "input_identity",
+          "order",
+          "complete",
+          "truncated_by_size_cap",
+          "completed"
+        ],
+        "title": "CompletedCollectionResource",
+        "type": "object"
+      }
+    },
     "aplan://collections/ready{?limit,cursor}": {
       "mimeType": "application/json",
       "name": "ready_tasks_page",

@@ -230,7 +230,7 @@ impl std::fmt::Display for CompletionTimeSource {
 }
 
 /// Selector dimensions applied to a completed-task history query (`A2-111`).
-#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 pub struct AppliedCompletedSelector {
     pub cuts: Vec<String>,
     pub phases: Vec<u32>,
@@ -239,7 +239,7 @@ pub struct AppliedCompletedSelector {
 }
 
 /// Normalized request parameters echoed in [`CompletedResponse`] (`A2-111`).
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 pub struct AppliedCompletedRequest {
     pub since: Option<String>,
     pub until: Option<String>,
@@ -250,7 +250,7 @@ pub struct AppliedCompletedRequest {
 }
 
 /// One completed work task row in [`CompletedResponse`] (`A2-111`, ADR-0074).
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 pub struct CompletedTaskRow {
     pub id: String,
     pub title: String,
@@ -273,7 +273,7 @@ pub struct CompletedTaskRow {
 
 /// Stable typed response shared across CLI, MCP, and TUI completion-history
 /// views (`A2-111`, ADR-0074).
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 pub struct CompletedResponse {
     pub schema: String,
     pub input_identity: String,
