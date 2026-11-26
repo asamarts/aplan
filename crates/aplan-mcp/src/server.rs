@@ -864,9 +864,30 @@ fn resolve_repo_and_plan_rel(
     (repo_root, resolved_rel)
 }
 
+fn canonicalize_existing_or_ancestor(path: &std::path::Path) -> Option<PathBuf> {
+    if let Ok(canon) = std::fs::canonicalize(path) {
+        return Some(canon);
+    }
+    let abs = std::path::absolute(path).ok()?;
+    let mut suffix = Vec::new();
+    let mut cursor = abs.as_path();
+    while let Some(std::path::Component::Normal(name)) = cursor.components().next_back() {
+        suffix.push(name.to_os_string());
+        let parent = cursor.parent()?;
+        if let Ok(mut canon) = std::fs::canonicalize(parent) {
+            for component in suffix.into_iter().rev() {
+                canon.push(component);
+            }
+            return Some(canon);
+        }
+        cursor = parent;
+    }
+    None
+}
+
 fn relative_under_root(base: &std::path::Path, target: &std::path::Path) -> PathBuf {
-    if let Ok(base_canon) = std::fs::canonicalize(base)
-        && let Ok(target_canon) = std::fs::canonicalize(target)
+    if let Some(base_canon) = canonicalize_existing_or_ancestor(base)
+        && let Some(target_canon) = canonicalize_existing_or_ancestor(target)
         && let Ok(rel) = target_canon.strip_prefix(&base_canon)
     {
         return rel.to_path_buf();
@@ -874,8 +895,14 @@ fn relative_under_root(base: &std::path::Path, target: &std::path::Path) -> Path
     let base_abs = std::path::absolute(base).unwrap_or_else(|_| base.to_path_buf());
     let target_abs = std::path::absolute(target).unwrap_or_else(|_| target.to_path_buf());
     match target_abs.strip_prefix(&base_abs) {
-        Ok(rel) => rel.to_path_buf(),
-        Err(_) => target.to_path_buf(),
+        Ok(rel)
+            if !rel
+                .components()
+                .any(|c| matches!(c, std::path::Component::ParentDir)) =>
+        {
+            rel.to_path_buf()
+        }
+        _ => target.to_path_buf(),
     }
 }
 
@@ -1742,10 +1769,32 @@ mod tests {
         // External plan root must stay external rather than silently aliasing `aplan`.
         assert_eq!(relative_under_root(&repo_dir, &outside_plan), outside_plan);
 
-        let missing = repo_dir.join("missing-plan");
+        let missing = repo_dir.join("missing").join("nested-plan");
         let (fallback_root, fallback_rel) = resolve_repo_and_plan_rel(&missing, &repo_dir);
         assert_eq!(fallback_root, repo_dir);
-        assert_eq!(fallback_rel, PathBuf::from("missing-plan"));
+        assert_eq!(fallback_rel, PathBuf::from("missing").join("nested-plan"));
+
+        // Escaping `..` segments never alias a missing path inside `base` on any OS.
+        let parent_escape = repo_dir
+            .join("missing")
+            .join("..")
+            .join("..")
+            .join("outside");
+        assert_eq!(
+            relative_under_root(&repo_dir, &parent_escape),
+            parent_escape
+        );
+
+        #[cfg(unix)]
+        {
+            let repo_link = dir.path().join("repo-link");
+            std::os::unix::fs::symlink(&repo_dir, &repo_link).expect("symlink");
+            let linked_missing = repo_link.join("missing/via-link");
+            assert_eq!(
+                relative_under_root(&repo_dir, &linked_missing),
+                PathBuf::from("missing/via-link")
+            );
+        }
     }
 
     #[test]
