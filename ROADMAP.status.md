@@ -10,12 +10,12 @@
 | --- | --- | --- | --- | --- | --- | --- | --- |
 | v0.7 | done | 30/30 | 0 | 0 | 22.8d | 0.8 (0.0 left) | 3.5d |
 | v0.8 | done | 36/36 | 0 | 0 | 49.2d | 1.8 (0.0 left) | 4.5d |
-| adoption | todo | 0/81 | 69 | 12 | 105.8d | 3.9 (3.9 left) | 10.0d |
+| adoption | todo | 5/81 | 67 | 9 | 105.8d | 3.9 (3.8 left) | 10.0d |
 | backlog | todo | 0/1 | 1 | 0 | 1.0d | <0.1 (<0.1 left) | 1.0d |
 | hardening | todo | 0/15 | 15 | 0 | 14.8d | 0.5 (0.5 left) | 3.0d |
 | qualification | todo | 0/1 | 0 | 1 | 8.0d | 0.3 (0.3 left) | 8.0d |
 | tui-quality | todo | 0/2 | 1 | 1 | 4.0d | 0.1 (0.1 left) | 4.0d |
-| workflow | todo | 10/17 | 5 | 2 | 50.0d | 1.9 (0.7 left) | 17.5d |
+| workflow | todo | 12/17 | 3 | 2 | 50.0d | 1.9 (0.6 left) | 17.5d |
 
 ## v0.7 Security, safe parsing and gates that tell the truth
 
@@ -104,11 +104,11 @@
 | A2-033 | Name the path and trace flags the same way on every authoring command | todo | - | - |
 | A2-035 | Explain verify's evidence summary line | todo | - | - |
 | A2-036 | Add a command that edits a release's contains list | todo | A2-025, A2-026, A2-033, A2-034, A2-035 | - |
-| A2-037 | Report every missing test-runner field at once with its full key path | todo | - | - |
-| A2-038 | Describe the expected shape in test-runner type errors and name a listed runner's own key | todo | - | - |
+| A2-037 | Report every missing test-runner field at once with its full key path | done | - | commit:770ac081864f, test:published_schema_tests::build_contract_tests::every_missing_and_misplaced_test_runner_field_is_reported_at_once, test:config_error::issue_34_test_runners_sequence_reaches_valid_config_in_one_step |
+| A2-038 | Describe the expected shape in test-runner type errors and name a listed runner's own key | done | - | commit:770ac081864f, test:published_schema_tests::build_contract_tests::test_runner_type_and_validation_errors_name_expected_shape_and_runner_path, test:config_error::issue_34_test_runners_sequence_reaches_valid_config_in_one_step |
 | A2-039 | Show a minimal valid test runner in the quickstart | todo | A2-037, A2-038 | - |
 | A2-040 | Add a batch form to capture | todo | A2-041 | - |
-| A2-041 | Make capture's default human output short | todo | - | - |
+| A2-041 | Make capture's default human output short | done | - | commit:f769b6187865, test:capture_inbox::capture_default_human_output_is_compact_and_verbose_or_json_retains_full_record |
 | A2-042 | Decide how note evidence is recorded through the CLI | todo | - | - |
 | A2-043 | Record note evidence through close and amend | todo | A2-042 | - |
 | A2-044 | Decide how parked work counts in effort rollups | todo | - | - |
@@ -142,7 +142,7 @@
 | A2-084 | The generated agent contract omits revisit_at, so an authoring agent never parks a task with one | todo | - | - |
 | A2-086 | require_min_strength is a set of accepted kinds, and its name says floor | todo | - | - |
 | A2-090 | A task body can assert another task's status, and nothing resolves it | todo | - | - |
-| A2-092 | Expose the exact paths matcher instead of making adopters reimplement it | todo | - | - |
+| A2-092 | Expose the exact paths matcher instead of making adopters reimplement it | done | - | commit:80100175d0cf, test:paths::paths_match_agrees_with_evidence_verification_across_all_glob_semantics, test:paths::paths_match_enforces_deterministic_order_and_explicit_bounded_contract |
 | A2-093 | Promote an existing task to a cut as one checked mutation | todo | - | - |
 | A2-094 | Explain that nesting a cut sequences every member | todo | - | - |
 | A2-098 | A cut member cannot be moved to cross-cutting through aplan | todo | - | - |
@@ -171,7 +171,7 @@
 | A2-154 | A trace cannot select a heading's own body without all of its subsections | todo | - | - |
 | A2-155 | Edit existing task fields through one guarded single and batch authoring surface | todo | - | - |
 | A2-158 | tasks and show: name the cut a task belongs to, and print a quarter-day effort as written | todo | - | - |
-| A2-159 | test list: the summary says "2 unique matchs" | todo | - | - |
+| A2-159 | test list: the summary says "2 unique matchs" | done | - | commit:99cc43cd75d0, test:test_catalogue::filtered_test_catalogue_summary_pluralizes_unique_matches |
 | A2-163 | Let check-docs accept another plan's ids when a document names that plan | todo | - | - |
 | A2-174 | Cite every listed case of a parametrized test with one citation | todo | - | - |
 | A2-175 | Show a failed test batch's adapter output on the first finding printed | todo | - | - |
@@ -233,10 +233,10 @@
 | A2-116 | Expose the capture workflow through MCP and agent guidance | todo | A2-118, A2-122 | - |
 | A2-117 | Audit and release the workflow ergonomics cut | todo | A2-112, A2-115, A2-116, A2-119, A2-120, M-tui-quality | - |
 | A2-118 | Add versioned structured MCP outputs and bounded resources | done | - | commit:ff94344, test:mcp::structured_outputs_bounded_resources_and_protocol_matrix, test:mcp_policy::every_mcp_resource_and_template_is_classified_confined_and_driven |
-| A2-119 | Expose completed-task history through bounded MCP resources | todo | A2-111, A2-118 | - |
+| A2-119 | Expose completed-task history through bounded MCP resources | done | A2-111, A2-118 | commit:c366ed21467e, test:mcp::completed_history_resource_covers_provenance_paging_shallow_caps_staleness_and_hostile_uris, test:resources::tests::completed_page_shrinks_under_64kib_size_cap_and_continues_cleanly |
 | A2-120 | Render task Markdown in the TUI inspector | done | A2-114 | commit:2dc55e4, test:markdown::tests::every_semantic_member_drives_a_tui_disposition_and_matches_cli_semantic_text, test:markdown::tests::large_body_scrolls_incrementally_without_reparse_or_redundant_redraw, test:tui_portability::portable_tui_markdown_inspector_renders_scrolls_and_reflows_on_resize |
 | A2-134 | Audit every read-only surface against the explicit latency and work budgets | todo | A2-135, A2-136 | - |
-| A2-135 | Derive vacuity from one exhaustive validation pass | todo | - | - |
+| A2-135 | Derive vacuity from one exhaustive validation pass | done | - | commit:f71418c55549, test:vacuity::switched_off_tests::single_pass_vacuity_proves_work_bounds_and_rejects_repeated_validator_mutant, test:vacuity::vacuity_performs_one_graph_build_and_one_parse_per_trace_document, test:coverage::switch_dispositions_and_single_pass_observations_agree_with_corpus, test:tests::vacuity_switch_catalogue_is_exhaustive_against_accepted_config_keys |
 | A2-136 | Stream output-dominated read results with bounded memory and prompt first bytes | todo | - | - |
 | A2-139 | Bound why output through deep ordinary dependency chains | todo | - | - |
 
