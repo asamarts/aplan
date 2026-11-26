@@ -106,7 +106,7 @@
 | A2-036 | Add a command that edits a release's contains list | todo | A2-025, A2-026, A2-033, A2-034, A2-035 | - |
 | A2-037 | Report every missing test-runner field at once with its full key path | done | - | commit:770ac081864f, test:published_schema_tests::build_contract_tests::every_missing_and_misplaced_test_runner_field_is_reported_at_once, test:config_error::issue_34_test_runners_sequence_reaches_valid_config_in_one_step |
 | A2-038 | Describe the expected shape in test-runner type errors and name a listed runner's own key | done | - | commit:770ac081864f, test:published_schema_tests::build_contract_tests::test_runner_type_and_validation_errors_name_expected_shape_and_runner_path, test:config_error::issue_34_test_runners_sequence_reaches_valid_config_in_one_step |
-| A2-039 | Show a minimal valid test runner in the quickstart | done | A2-037, A2-038 | commit:d74229f72a5d, test:greenfield::the_documented_minimal_test_runner_is_accepted_by_check, url:https://github.com/asamarts/aplan/issues/34 |
+| A2-039 | Show a minimal valid test runner in the quickstart | done | A2-037, A2-038 | commit:d74229f72a5d, test:greenfield::the_documented_minimal_test_runner_is_accepted_by_check |
 | A2-040 | Add a batch form to capture | todo | A2-041 | - |
 | A2-041 | Make capture's default human output short | done | - | commit:f769b6187865, test:capture_inbox::capture_default_human_output_is_compact_and_verbose_or_json_retains_full_record |
 | A2-042 | Decide how note evidence is recorded through the CLI | todo | - | - |
