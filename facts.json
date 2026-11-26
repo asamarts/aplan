@@ -1,6 +1,14 @@
 {
   "behaviours": [
     {
+      "name": "config.test_runner_reports_all_missing_and_misplaced_fields",
+      "what": "test-runner configuration errors report every missing required field with its full key path (for example `test.schedule`, `test.runners[0].list`, `test.runners[0].run`) in one refusal and name where misplaced keys belong"
+    },
+    {
+      "name": "config.test_runner_errors_name_expected_shape_and_runner_path",
+      "what": "every test-runner configuration type error describes the expected shape in configuration terms (such as `test.schedule: expected a mapping such as {capacity: 1}`) and every runner validation error names the runner's own indexed key path (such as `test.runners[0].run`)"
+    },
+    {
       "name": "capture.compact_human_output",
       "what": "human `capture` defaults to a compact two-line summary (`capture <id> <outcome>: <title>` plus written path), while `--verbose`, `--format json` and `--format agent` retain the full capture record and snapshot digests"
     },
@@ -1520,7 +1528,7 @@
     "version.require_impact"
   ],
   "counts": {
-    "behaviours": 245,
+    "behaviours": 247,
     "build_capabilities": 1,
     "commands": 51,
     "config_keys": 136,
