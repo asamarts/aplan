@@ -670,11 +670,13 @@ const PROBES: &[Probe] = &[
         Some("capture-body.txt"),
         &["probe-capture", "--source", "fixture:stable"],
     ),
+    // `--dry-run` must probe a fresh capture rather than the already-seeded
+    // idempotent `fixture:stable` retry, where both sides are no-op `unchanged`.
     p(
         "capture",
         "--dry-run",
         None,
-        &["probe-capture", "--source", "fixture:stable"],
+        &["probe-capture", "--source", "fixture:fresh-dry-run"],
     ),
     p(
         "capture",
@@ -740,6 +742,12 @@ const PROBES: &[Probe] = &[
         "capture",
         "--revisit-at",
         Some("2027-01-01T00:00:00Z"),
+        &["probe-capture", "--source", "fixture:stable"],
+    ),
+    p(
+        "capture",
+        "--verbose",
+        None,
         &["probe-capture", "--source", "fixture:stable"],
     ),
     p("inbox", "--kind", Some("question"), &[]),

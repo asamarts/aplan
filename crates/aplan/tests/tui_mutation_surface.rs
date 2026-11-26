@@ -464,6 +464,7 @@ const CLI: &[CliMapping] = &[
             ("edit", ModeDisposition::Unsupported),
             ("revisit_at", ModeDisposition::Native),
             ("dry_run", ModeDisposition::Preview),
+            ("verbose", ModeDisposition::OutputOnly),
             ("format", ModeDisposition::OutputOnly),
             ("phase", ModeDisposition::Unsupported),
             ("cut", ModeDisposition::Unsupported),
