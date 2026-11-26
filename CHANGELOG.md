@@ -50,6 +50,9 @@ to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Fixed
 
+- **Fix plural spelling in `aplan test list` filtered summary (`A2-159`)**. `test_catalogue_count`
+  now takes explicit singular and plural nouns so filtered `aplan test list <query>` summaries read
+  `"2 unique matches"` instead of `"2 unique matchs"`.
 - **Reconcile task closure with ephemeral claim lifecycle (`A2-152`, ADR-0073,
   `--require claims.reconciles_terminal_lifecycle_and_surfaces_coordination`)**. Successful
   `close`, `close --execute`, `aplan_close`, `drop`, and TUI closures now CAS-release a matching
