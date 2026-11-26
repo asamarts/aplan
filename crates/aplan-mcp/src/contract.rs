@@ -35,10 +35,22 @@ pub const MAX_TOOL_RESULT_BYTES: usize = 512 * 1024;
 pub const MAX_RESOURCE_BYTES: usize = 64 * 1024;
 
 /// Maximum accepted length of a resource URI in bytes.
-pub const MAX_URI_BYTES: usize = 512;
+pub const MAX_URI_BYTES: usize = 1024;
 
-/// Maximum accepted length of a domain collection continuation cursor in bytes.
+/// Maximum accepted length of a ready-collection continuation cursor in bytes.
 pub const MAX_CURSOR_BYTES: usize = 128;
+
+/// Maximum accepted length of a completed-history continuation cursor in bytes
+/// (matching `aplan_app::completed`).
+pub const MAX_COMPLETED_CURSOR_BYTES: usize = 512;
+
+/// Maximum accepted decoded byte length of one query filter or bound value on
+/// bounded MCP collection resources.
+pub const MAX_FILTER_VALUE_BYTES: usize = 128;
+
+/// Maximum repeated query values permitted per selector dimension (`cut`,
+/// `phase`, `owner`, `tag`) on bounded MCP collection resources.
+pub const MAX_FILTER_VALUES_PER_DIMENSION: usize = 16;
 
 /// Default item limit for bounded collection resources when omitted.
 pub const DEFAULT_PAGE_LIMIT: usize = 20;
@@ -637,6 +649,34 @@ pub struct TaskDetailResource {
     pub task: ShowPayload,
 }
 
+/// Bounded completed-task history resource returned by
+/// `aplan://collections/completed{?cut,phase,owner,tag,since,until,oldest,history,limit,cursor}`
+/// (`A2-119`).
+///
+/// Embeds the shared [`aplan_core::CompletedResponse`] directly without a
+/// transport-specific completion model.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+pub struct CompletedCollectionResource {
+    /// Explicit MCP contract version (`aplan/mcp/v2`).
+    pub contract_version: String,
+    /// Canonical URI of this completed-history page resource.
+    pub resource: String,
+    /// Cryptographic identity of the plan and configuration snapshot.
+    pub input_identity: InputIdentity,
+    /// Deterministic ordering rule (`closed_at_desc` or `closed_at_asc`).
+    pub order: String,
+    /// `true` when this page reaches the end of all matching completed tasks.
+    pub complete: bool,
+    /// `true` when the page limit was reduced below the requested limit to stay
+    /// within [`MAX_RESOURCE_BYTES`].
+    pub truncated_by_size_cap: bool,
+    /// Canonical RFC 6570 URI for the next page when `!complete`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub next_uri: Option<String>,
+    /// Exact shared application response from `aplan_app::completed_tasks`.
+    pub completed: aplan_core::CompletedResponse,
+}
+
 // ---------------------------------------------------------------------------
 // Schema generation (input schemas, output schemas, and derived contract doc)
 // ---------------------------------------------------------------------------
@@ -827,6 +867,11 @@ pub fn derived_schema() -> Value {
             "mimeType": "application/json",
             "schema": generate_object_schema::<CollectionPage<ReadyCollectionItem>>(),
         },
+        "aplan://collections/completed{?cut,phase,owner,tag,since,until,oldest,history,limit,cursor}": {
+            "name": "completed_tasks_page",
+            "mimeType": "application/json",
+            "schema": generate_object_schema::<CompletedCollectionResource>(),
+        },
     });
     serde_json::json!({
         "$schema": "https://json-schema.org/draft/2020-12/schema",
@@ -837,6 +882,9 @@ pub fn derived_schema() -> Value {
             "max_resource_bytes": MAX_RESOURCE_BYTES,
             "max_uri_bytes": MAX_URI_BYTES,
             "max_cursor_bytes": MAX_CURSOR_BYTES,
+            "max_completed_cursor_bytes": MAX_COMPLETED_CURSOR_BYTES,
+            "max_filter_value_bytes": MAX_FILTER_VALUE_BYTES,
+            "max_filter_values_per_dimension": MAX_FILTER_VALUES_PER_DIMENSION,
             "default_page_limit": DEFAULT_PAGE_LIMIT,
             "max_page_limit": MAX_PAGE_LIMIT,
         },

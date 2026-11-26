@@ -620,8 +620,9 @@ impl AplanServer {
             plan_hash.update(b"\0");
             match &input.content {
                 aplan_core::load::PlanFileContent::Bytes(bytes) => {
-                    plan_hash.update(b"bytes:");
-                    plan_hash.update(bytes);
+                    let sha = hex_encode(&Sha256::digest(bytes));
+                    plan_hash.update(b"sha256:");
+                    plan_hash.update(sha.as_bytes());
                 }
                 aplan_core::load::PlanFileContent::Sha256(hex) => {
                     plan_hash.update(b"sha256:");
@@ -788,7 +789,91 @@ impl AplanServer {
                     .map_err(|e| ResourceError::Internal(e.to_string()))?;
                 Ok((canonical, value, identity, complete))
             }
+            ParsedResourceUri::CompletedCollection(query) => {
+                let plan = self
+                    .plan_snapshot(root, policy)
+                    .map_err(ResourceError::Internal)?;
+                if plan
+                    .plan
+                    .load_diagnostics
+                    .iter()
+                    .any(|d| d.severity == aplan_core::Severity::Error)
+                {
+                    return Err(ResourceError::Internal(
+                        "the plan does not load cleanly; `aplan_check` says what failed"
+                            .to_string(),
+                    ));
+                }
+                let app_input_identity = aplan_app::plan_inputs_identity(&plan.inputs);
+                let trust = if query.history == aplan_core::HistoryPolicy::Never {
+                    "hermetic"
+                } else {
+                    "repository"
+                };
+                let identity = self.input_identity_for(&plan, trust);
+                let (repo_root, plan_root_rel) = resolve_repo_and_plan_rel(root, &policy.repo_root);
+                let page = resources::build_completed_page(
+                    &plan.plan,
+                    &app_input_identity,
+                    &repo_root,
+                    &plan_root_rel,
+                    &query,
+                    &identity,
+                )?;
+                let canonical = page.resource.clone();
+                let complete = page.complete;
+                let value = serde_json::to_value(page)
+                    .map_err(|e| ResourceError::Internal(e.to_string()))?;
+                Ok((canonical, value, identity, complete))
+            }
         }
+    }
+}
+
+fn resolve_repo_and_plan_rel(
+    plan_root: &std::path::Path,
+    fallback_repo_root: &std::path::Path,
+) -> (PathBuf, PathBuf) {
+    let probe = if plan_root.exists() {
+        plan_root
+    } else {
+        fallback_repo_root
+    };
+    let (repo_root, resolved_rel) = match aplan_evidence::Repo::discover(probe)
+        .or_else(|_| aplan_evidence::Repo::discover(fallback_repo_root))
+    {
+        Ok(repo) => {
+            if let Some(workdir) = repo
+                .effective_workdir(probe)
+                .or_else(|| repo.effective_workdir(fallback_repo_root))
+            {
+                let rel = relative_under_root(&workdir, plan_root);
+                (workdir, rel)
+            } else {
+                (
+                    fallback_repo_root.to_path_buf(),
+                    relative_under_root(fallback_repo_root, plan_root),
+                )
+            }
+        }
+        Err(_) => (
+            fallback_repo_root.to_path_buf(),
+            relative_under_root(fallback_repo_root, plan_root),
+        ),
+    };
+    (repo_root, resolved_rel)
+}
+
+fn relative_under_root(base: &std::path::Path, target: &std::path::Path) -> PathBuf {
+    let base_abs = std::fs::canonicalize(base)
+        .or_else(|_| std::path::absolute(base))
+        .unwrap_or_else(|_| base.to_path_buf());
+    let target_abs = std::fs::canonicalize(target)
+        .or_else(|_| std::path::absolute(target))
+        .unwrap_or_else(|_| target.to_path_buf());
+    match target_abs.strip_prefix(&base_abs) {
+        Ok(rel) => rel.to_path_buf(),
+        Err(_) => PathBuf::from("aplan"),
     }
 }
 

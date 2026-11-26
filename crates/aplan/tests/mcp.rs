@@ -1250,7 +1250,7 @@ fn structured_outputs_bounded_resources_and_protocol_matrix() {
     assert_eq!(res_list["resources"].as_array().unwrap().len(), 1);
     let tmpl_list = &reply(&s_replies, 4)["result"];
     assert!(tmpl_list.get("nextCursor").is_none());
-    assert_eq!(tmpl_list["resourceTemplates"].as_array().unwrap().len(), 2);
+    assert_eq!(tmpl_list["resourceTemplates"].as_array().unwrap().len(), 3);
 
     // Check all 6 read tools for structured/text parity and contract_version.
     for id in 10..=15 {
@@ -1473,4 +1473,529 @@ fn structured_outputs_bounded_resources_and_protocol_matrix() {
     assert_eq!(reply(&replies_2026, 5)["error"]["code"], -32602);
     // Missing per-request _meta refused with INVALID_PARAMS (-32602).
     assert_eq!(reply(&replies_2026, 6)["error"]["code"], -32602);
+}
+
+fn git_dated(dir: &std::path::Path, args: &[&str], date: &str) {
+    let status = std::process::Command::new("git")
+        .args(args)
+        .current_dir(dir)
+        .env("GIT_AUTHOR_DATE", date)
+        .env("GIT_COMMITTER_DATE", date)
+        .status()
+        .expect("git runs");
+    assert!(status.success(), "git {args:?} failed");
+}
+
+#[test]
+#[allow(clippy::too_many_lines)]
+fn completed_history_resource_covers_provenance_paging_shallow_caps_staleness_and_hostile_uris() {
+    // 1. Empty case: plan with zero completed tasks.
+    let empty_dir = plan();
+    let mut empty_reqs = initialize_version("2025-11-25");
+    empty_reqs.push(serde_json::json!({
+        "jsonrpc": "2.0", "id": 2, "method": "resources/read",
+        "params": { "uri": "aplan://collections/completed" }
+    }));
+    let empty_replies = talk(empty_dir.path(), &empty_reqs);
+    let empty_content = &reply(&empty_replies, 2)["result"]["contents"][0];
+    assert_eq!(empty_content["mimeType"], "application/json");
+    let empty_doc: serde_json::Value =
+        serde_json::from_str(empty_content["text"].as_str().unwrap()).unwrap();
+    assert_eq!(
+        empty_doc["contract_version"],
+        aplan_mcp::MCP_CONTRACT_VERSION
+    );
+    assert_eq!(empty_doc["complete"], true);
+    assert_eq!(empty_doc["truncated_by_size_cap"], false);
+    assert_eq!(empty_doc["order"], "closed_at_desc");
+    assert_eq!(empty_doc["completed"]["total_matched"], 0);
+    assert_eq!(empty_doc["completed"]["items"].as_array().unwrap().len(), 0);
+    assert_eq!(empty_doc["completed"]["completeness"], "complete");
+    assert!(empty_doc.get("next_uri").is_none());
+
+    // 2. Real Git repository covering recorded, inferred (`history_first_seen`),
+    //    `unknown` (`history=never`), filters, ordering, paging, lost-response
+    //    repeat reads, stale/tampered/broadening cursors, hostile URIs, and
+    //    protocol compatibility (`2024-11-05`, `2025-11-25`, `2026-07-28`).
+    let dir = tempfile::Builder::new()
+        .prefix("mcp-completed-e2e-")
+        .tempdir_in(aplan_core::fixture::fixture_root())
+        .expect("tempdir");
+    let repo = dir.path();
+    let tasks = repo.join("aplan/tasks");
+    std::fs::create_dir_all(&tasks).expect("tasks dir");
+    git(repo, &["init", "--quiet"]);
+    git(repo, &["config", "user.email", "test@example.invalid"]);
+    git(repo, &["config", "user.name", "Test"]);
+
+    // Commit 1: seed legacy task as `todo`, plus a milestone cut `v1.0`.
+    std::fs::write(
+        tasks.join("M-v1.md"),
+        "---\nid: M-v1\ntitle: Cut v1.0\nphase: 1\nstatus: in_progress\ntags:\n- milestone\n- v1.0\n\
+         blocked_by:\n- T-INF\n- T-REC-1\n- T-REC-2\n- T-REC-3\n---\n\nbody\n",
+    )
+    .expect("milestone");
+    std::fs::write(
+        tasks.join("T-INF.md"),
+        "---\nid: T-INF\ntitle: Inferred legacy task\nphase: 1\nstatus: todo\nowner: bob\n\
+         effort_days: 1\ntags:\n- history\n---\n\nbody\n",
+    )
+    .expect("T-INF todo");
+    git(repo, &["add", "."]);
+    git_dated(
+        repo,
+        &["commit", "--quiet", "-m", "seed"],
+        "2026-10-01T10:00:00Z",
+    );
+
+    // Commit 2: legacy task transitions to `done` (inferred from commit 2).
+    std::fs::write(
+        tasks.join("T-INF.md"),
+        "---\nid: T-INF\ntitle: Inferred legacy task\nphase: 1\nstatus: done\nowner: bob\n\
+         effort_days: 1\ntags:\n- history\n---\n\nbody\n",
+    )
+    .expect("T-INF done");
+    git(repo, &["add", "."]);
+    git_dated(
+        repo,
+        &["commit", "--quiet", "-m", "finish T-INF"],
+        "2026-10-08T12:00:00Z",
+    );
+
+    // Commit 3: add 3 recorded done tasks with distinct instants, owners, tags.
+    for (id, owner, tag, ts) in [
+        ("T-REC-1", "alice", "mcp", "2026-10-15T12:00:00Z"),
+        ("T-REC-2", "alice", "history", "2026-10-12T12:00:00Z"),
+        ("T-REC-3", "bob", "mcp", "2026-10-05T12:00:00Z"),
+    ] {
+        std::fs::write(
+            tasks.join(format!("{id}.md")),
+            format!(
+                "---\nid: {id}\ntitle: Recorded {id}\nphase: 1\nstatus: done\nowner: {owner}\n\
+                 effort_days: 1\ntags:\n- {tag}\nclosed_at: \"{ts}\"\n\
+                 closed_at_source: local\n---\n\nbody\n"
+            ),
+        )
+        .expect("write recorded task");
+    }
+    git(repo, &["add", "."]);
+    git_dated(
+        repo,
+        &["commit", "--quiet", "-m", "add recorded tasks"],
+        "2026-10-16T00:00:00Z",
+    );
+
+    let read_in = |version: &str, uri: &str| -> serde_json::Value {
+        if version == "2026-07-28" {
+            let meta = serde_json::json!({
+                "io.modelcontextprotocol/protocolVersion": "2026-07-28",
+                "io.modelcontextprotocol/clientCapabilities": {},
+            });
+            let replies = talk_in(
+                repo,
+                &[serde_json::json!({
+                    "jsonrpc": "2.0", "id": 2, "method": "resources/read",
+                    "params": { "uri": uri, "_meta": meta }
+                })],
+            );
+            reply(&replies, 2).clone()
+        } else {
+            let mut reqs = initialize_version(version);
+            reqs.push(serde_json::json!({
+                "jsonrpc": "2.0", "id": 2, "method": "resources/read",
+                "params": { "uri": uri }
+            }));
+            let replies = talk_in(repo, &reqs);
+            reply(&replies, 2).clone()
+        }
+    };
+
+    // Verify full provenance mix (recorded + history_first_seen) and newest-first order.
+    let all_reply = read_in("2025-11-25", "aplan://collections/completed?limit=10");
+    let all_doc: serde_json::Value =
+        serde_json::from_str(all_reply["result"]["contents"][0]["text"].as_str().unwrap()).unwrap();
+    assert_eq!(all_doc["complete"], true);
+    assert_eq!(all_doc["completed"]["completeness"], "complete");
+    assert!(
+        all_doc["completed"]["basis_revision"]
+            .as_str()
+            .unwrap()
+            .starts_with("working_tree@")
+    );
+    let ids: Vec<&str> = all_doc["completed"]["items"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|row| row["id"].as_str().unwrap())
+        .collect();
+    assert_eq!(ids, vec!["T-REC-1", "T-REC-2", "T-INF", "T-REC-3"]);
+    assert_eq!(all_doc["completed"]["items"][0]["source"], "recorded");
+    assert_eq!(all_doc["completed"]["items"][0]["recorded_origin"], "local");
+    assert_eq!(
+        all_doc["completed"]["items"][2]["source"],
+        "history_first_seen"
+    );
+    assert!(
+        all_doc["completed"]["items"][2]["commit"]
+            .as_str()
+            .is_some_and(|c| c.len() == 40)
+    );
+
+    // `history=never` yields `unknown` for legacy task and `history_skipped` completeness.
+    let never_reply = read_in(
+        "2025-11-25",
+        "aplan://collections/completed?history=never&limit=10",
+    );
+    let never_doc: serde_json::Value = serde_json::from_str(
+        never_reply["result"]["contents"][0]["text"]
+            .as_str()
+            .unwrap(),
+    )
+    .unwrap();
+    assert_eq!(never_doc["completed"]["completeness"], "history_skipped");
+    assert_eq!(never_doc["input_identity"]["trust"], "hermetic");
+    let never_ids: Vec<&str> = never_doc["completed"]["items"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|row| row["id"].as_str().unwrap())
+        .collect();
+    assert_eq!(never_ids, vec!["T-REC-1", "T-REC-2", "T-REC-3", "T-INF"]);
+    assert_eq!(never_doc["completed"]["items"][3]["source"], "unknown");
+    assert!(never_doc["completed"]["items"][3]["instant"].is_null());
+
+    // Filters (`cut`, `phase`, `owner`, multi-valued `tag`, `since`, `until`)
+    // and `oldest=true` ordering work canonically.
+    let filtered_reply = read_in(
+        "2025-11-25",
+        "aplan://collections/completed?cut=v1.0&phase=1&owner=alice&tag=mcp&tag=history&since=2026-10-10&until=2026-10-16&oldest=true&limit=10",
+    );
+    let filtered_doc: serde_json::Value = serde_json::from_str(
+        filtered_reply["result"]["contents"][0]["text"]
+            .as_str()
+            .unwrap(),
+    )
+    .unwrap();
+    assert_eq!(filtered_doc["order"], "closed_at_asc");
+    let filtered_ids: Vec<&str> = filtered_doc["completed"]["items"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|row| row["id"].as_str().unwrap())
+        .collect();
+    assert_eq!(filtered_ids, vec!["T-REC-2", "T-REC-1"]);
+
+    // Verify `resources/templates/list` on `2026-07-28`: catalogue pagination
+    // (`nextCursor`) is absent (distinct from domain collection paging), cache
+    // hints enforce private zero-freshness, and `completed_tasks_page` is listed.
+    let meta_2026 = serde_json::json!({
+        "io.modelcontextprotocol/protocolVersion": "2026-07-28",
+        "io.modelcontextprotocol/clientCapabilities": {},
+    });
+    let tmpl_2026_replies = talk_in(
+        repo,
+        &[serde_json::json!({
+            "jsonrpc": "2.0", "id": 1, "method": "resources/templates/list",
+            "params": { "_meta": meta_2026 }
+        })],
+    );
+    let tmpl_2026 = &reply(&tmpl_2026_replies, 1)["result"];
+    assert_eq!(tmpl_2026["resultType"], "complete");
+    assert_eq!(tmpl_2026["ttlMs"], 0);
+    assert_eq!(tmpl_2026["cacheScope"], "private");
+    assert!(tmpl_2026.get("nextCursor").is_none());
+    let completed_tmpl = tmpl_2026["resourceTemplates"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|t| t["name"] == "completed_tasks_page")
+        .expect("completed_tasks_page template");
+    assert_eq!(
+        completed_tmpl["uriTemplate"],
+        "aplan://collections/completed{?cut,phase,owner,tag,since,until,oldest,history,limit,cursor}"
+    );
+    assert_eq!(completed_tmpl["mimeType"], "application/json");
+
+    // Protocol compatibility across ALL FIVE supported protocol revisions
+    // (`2024-11-05`, `2025-03-26`, `2025-06-18`, `2025-11-25`, `2026-07-28`):
+    // every revision receives bit-for-bit identical machine-readable subject JSON,
+    // while `2026-07-28` carries `resultType: "complete"`, `ttlMs: 0`, `cacheScope: "private"`.
+    let mut baseline_p1: Option<serde_json::Value> = None;
+    for &rev in aplan_mcp::contract::SUPPORTED_PROTOCOL_REVISIONS {
+        let resp = read_in(rev, "aplan://collections/completed?limit=2");
+        if rev == "2026-07-28" {
+            assert_eq!(resp["result"]["resultType"], "complete");
+            assert_eq!(resp["result"]["ttlMs"], 0);
+            assert_eq!(resp["result"]["cacheScope"], "private");
+        } else {
+            assert!(
+                resp["result"].get("resultType").is_none(),
+                "legacy revision {rev} must omit resultType"
+            );
+        }
+        assert_eq!(
+            resp["result"]["contents"][0]["mimeType"],
+            "application/json"
+        );
+        assert_eq!(resp["result"]["contents"][0]["_meta"]["ttlMs"], 0);
+        assert_eq!(
+            resp["result"]["contents"][0]["_meta"]["cacheScope"],
+            "private"
+        );
+        let doc: serde_json::Value =
+            serde_json::from_str(resp["result"]["contents"][0]["text"].as_str().unwrap()).unwrap();
+        if let Some(expected) = &baseline_p1 {
+            assert_eq!(
+                &doc, expected,
+                "protocol revision {rev} diverged on completed resource payload"
+            );
+        } else {
+            baseline_p1 = Some(doc);
+        }
+    }
+    let p1_2025 = baseline_p1.expect("at least one protocol revision");
+    assert_eq!(p1_2025["complete"], false);
+    let page2_uri = p1_2025["next_uri"].as_str().expect("page2_uri").to_string();
+
+    // Lost-response safe repeat read: repeating the exact `next_uri` returns
+    // bit-for-bit identical rows and metadata, and completes the 4-row collection.
+    let p2_first = read_in("2025-11-25", &page2_uri);
+    let p2_repeat = read_in("2025-11-25", &page2_uri);
+    let p2_doc_a: serde_json::Value =
+        serde_json::from_str(p2_first["result"]["contents"][0]["text"].as_str().unwrap()).unwrap();
+    let p2_doc_b: serde_json::Value =
+        serde_json::from_str(p2_repeat["result"]["contents"][0]["text"].as_str().unwrap()).unwrap();
+    assert_eq!(p2_doc_a, p2_doc_b);
+    assert_eq!(p2_doc_a["complete"], true);
+    let p2_ids: Vec<&str> = p2_doc_a["completed"]["items"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|row| row["id"].as_str().unwrap())
+        .collect();
+    assert_eq!(p2_ids, vec!["T-INF", "T-REC-3"]);
+
+    // Tampered and selector-broadening cursors are refused (`-32602`).
+    let alice_p1_reply = read_in(
+        "2025-11-25",
+        "aplan://collections/completed?owner=alice&limit=1",
+    );
+    let alice_p1: serde_json::Value = serde_json::from_str(
+        alice_p1_reply["result"]["contents"][0]["text"]
+            .as_str()
+            .unwrap(),
+    )
+    .unwrap();
+    let alice_next = alice_p1["next_uri"].as_str().expect("alice next_uri");
+    // Drop `owner=alice` filter while keeping its cursor (selection broadening!).
+    let broadened_uri = alice_next.replace("owner=alice&", "");
+    assert_eq!(
+        read_in("2025-11-25", &broadened_uri)["error"]["code"],
+        -32602
+    );
+    // Widen `limit=1` to `limit=10` while keeping its cursor.
+    let widened_uri = alice_next.replace("limit=1&", "limit=10&");
+    assert_eq!(read_in("2025-11-25", &widened_uri)["error"]["code"], -32602);
+    // Tamper with the cursor's embedded task id.
+    let tampered_uri = alice_next.replace("T-REC-1", "T-NO-SUCH");
+    assert_eq!(
+        read_in("2025-11-25", &tampered_uri)["error"]["code"],
+        -32602
+    );
+
+    // Hostile and invalid URIs are refused (`-32602`).
+    for hostile in [
+        "aplan://collections/completed?at=HEAD",
+        "aplan://collections/completed?root=/etc",
+        "aplan://collections/completed?path=../../etc/passwd",
+        "aplan://collections/completed?limit=0",
+        "aplan://collections/completed?limit=51",
+        "aplan://collections/completed?cut=../secret",
+        "aplan://collections/completed?since=2026-10-15&until=2026-10-10",
+    ] {
+        let err_reply = read_in("2025-11-25", hostile);
+        assert_eq!(
+            err_reply["error"]["code"], -32602,
+            "hostile URI {hostile:?} was not refused with -32602: {err_reply:#?}"
+        );
+    }
+
+    // 3. Shallow clone case: clone with `--depth 1` so commit 2 is grafted out
+    //    (legacy `T-INF` already appears as `done` at the shallow root commit).
+    let shallow_parent = tempfile::Builder::new()
+        .prefix("mcp-completed-shallow-")
+        .tempdir_in(aplan_core::fixture::fixture_root())
+        .expect("shallow parent");
+    let shallow_repo = shallow_parent.path().join("clone");
+    let file_url = format!("file://{}", repo.display());
+    git(
+        shallow_parent.path(),
+        &[
+            "clone",
+            "--quiet",
+            "--depth",
+            "1",
+            &file_url,
+            shallow_repo.to_str().unwrap(),
+        ],
+    );
+    let mut shallow_reqs = initialize_version("2025-11-25");
+    shallow_reqs.push(serde_json::json!({
+        "jsonrpc": "2.0", "id": 2, "method": "resources/read",
+        "params": { "uri": "aplan://collections/completed?history=auto&limit=10" }
+    }));
+    shallow_reqs.push(serde_json::json!({
+        "jsonrpc": "2.0", "id": 3, "method": "resources/read",
+        "params": { "uri": "aplan://collections/completed?history=required&limit=10" }
+    }));
+    let shallow_replies = talk_in(&shallow_repo, &shallow_reqs);
+    let shallow_auto: serde_json::Value = serde_json::from_str(
+        reply(&shallow_replies, 2)["result"]["contents"][0]["text"]
+            .as_str()
+            .unwrap(),
+    )
+    .unwrap();
+    assert_eq!(
+        shallow_auto["completed"]["completeness"],
+        "incomplete_shallow"
+    );
+    assert!(
+        !shallow_auto["completed"]["limitations"]
+            .as_array()
+            .unwrap()
+            .is_empty()
+    );
+    let shallow_inf = shallow_auto["completed"]["items"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|row| row["id"] == "T-INF")
+        .expect("T-INF row");
+    assert_eq!(shallow_inf["source"], "unknown");
+    assert!(shallow_inf["instant"].is_null());
+    // `history=required` refuses shallow incomplete history cleanly with `-32602`.
+    assert_eq!(reply(&shallow_replies, 3)["error"]["code"], -32602);
+
+    // 4a. Stale-page refusal via `basis_revision` movement: committing an
+    //     unrelated file advances HEAD while task files remain identical ->
+    //     reusing page 1's `next_uri` is refused with `-32602` mentioning `stale`.
+    std::fs::write(repo.join("NOTE.txt"), "advance head\n").expect("note");
+    git(repo, &["add", "NOTE.txt"]);
+    git_dated(
+        repo,
+        &["commit", "--quiet", "-m", "unrelated head move"],
+        "2026-10-17T00:00:00Z",
+    );
+    let head_moved_reply = read_in("2025-11-25", &page2_uri);
+    assert_eq!(head_moved_reply["error"]["code"], -32602);
+    assert!(
+        head_moved_reply["error"]["message"]
+            .as_str()
+            .unwrap()
+            .contains("stale"),
+        "{head_moved_reply:#?}"
+    );
+
+    // Re-read page 1 after HEAD moved to get a fresh cursor, then mutate a task
+    // file in the working tree -> reusing that fresh cursor fails as stale too.
+    let fresh_p1: serde_json::Value =
+        serde_json::from_str(
+            read_in("2025-11-25", "aplan://collections/completed?limit=2")["result"]["contents"][0]
+                ["text"]
+                .as_str()
+                .unwrap(),
+        )
+        .unwrap();
+    let fresh_page2_uri = fresh_p1["next_uri"].as_str().expect("fresh next_uri");
+
+    // 4b. Stale-page refusal via working-tree plan edit (`input_identity` moved).
+    std::fs::write(
+        tasks.join("T-REC-3.md"),
+        "---\nid: T-REC-3\ntitle: Recorded T-REC-3 edited\nphase: 1\nstatus: done\nowner: bob\n\
+         effort_days: 1\ntags:\n- mcp\nclosed_at: \"2026-10-05T12:00:00Z\"\n\
+         closed_at_source: local\n---\n\nbody edited\n",
+    )
+    .expect("mutate T-REC-3");
+    let stale_reply = read_in("2025-11-25", fresh_page2_uri);
+    assert_eq!(stale_reply["error"]["code"], -32602);
+    assert!(
+        stale_reply["error"]["message"]
+            .as_str()
+            .unwrap()
+            .contains("stale"),
+        "{stale_reply:#?}"
+    );
+
+    // 4c. Unloadable task file refuses fail-closed (parity with CLI `aplan completed`)
+    //     rather than silently returning a partial completed-task list.
+    std::fs::write(
+        tasks.join("T-BROKEN.md"),
+        "---\nid: [unclosed yaml\n---\n\nbroken\n",
+    )
+    .expect("write broken task");
+    let broken_reply = read_in("2025-11-25", "aplan://collections/completed?limit=10");
+    assert_eq!(broken_reply["error"]["code"], -32603, "{broken_reply:#?}");
+    assert!(
+        broken_reply["error"]["message"]
+            .as_str()
+            .unwrap()
+            .contains("does not load cleanly"),
+        "{broken_reply:#?}"
+    );
+    std::fs::remove_file(tasks.join("T-BROKEN.md")).expect("remove broken task");
+
+    // 5. 64 KiB size-capped collection walk over live stdio MCP transport,
+    //    verifying the ACTUAL wire `contents[0].text` bytes fit under 64 KiB.
+    let big_dir = tempfile::Builder::new()
+        .prefix("mcp-completed-cap-e2e-")
+        .tempdir_in(aplan_core::fixture::fixture_root())
+        .expect("big tempdir");
+    let big_tasks = big_dir.path().join("tasks");
+    std::fs::create_dir_all(&big_tasks).expect("big tasks dir");
+    for i in 1..=25 {
+        std::fs::write(
+            big_tasks.join(format!("B-{i:02}.md")),
+            format!(
+                "---\nid: B-{i:02}\ntitle: \"Large task {i:02} {}\"\nphase: 1\nstatus: done\n\
+                 effort_days: 1\nclosed_at: \"2026-10-10T00:{i:02}:00Z\"\n\
+                 closed_at_source: local\n---\n\nbody\n",
+                "x".repeat(3_500)
+            ),
+        )
+        .expect("write big task");
+    }
+    let mut uri = "aplan://collections/completed?history=never&limit=25".to_string();
+    let mut seen = Vec::new();
+    let mut saw_size_cap = false;
+    loop {
+        let mut reqs = initialize_version("2025-11-25");
+        reqs.push(serde_json::json!({
+            "jsonrpc": "2.0", "id": 2, "method": "resources/read",
+            "params": { "uri": uri }
+        }));
+        let replies = talk(big_dir.path(), &reqs);
+        let text = reply(&replies, 2)["result"]["contents"][0]["text"]
+            .as_str()
+            .expect("capped text");
+        assert!(
+            text.len() <= aplan_mcp::contract::MAX_RESOURCE_BYTES,
+            "MCP completed wire payload exceeded 64 KiB cap: {} bytes",
+            text.len()
+        );
+        let doc: serde_json::Value = serde_json::from_str(text).expect("capped json");
+        if doc["truncated_by_size_cap"] == true {
+            saw_size_cap = true;
+        }
+        for row in doc["completed"]["items"].as_array().unwrap() {
+            seen.push(row["id"].as_str().unwrap().to_string());
+        }
+        if doc["complete"] == true {
+            break;
+        }
+        uri = doc["next_uri"].as_str().expect("next_uri").to_string();
+    }
+    assert!(saw_size_cap, "expected 64 KiB size cap to trigger");
+    assert_eq!(seen.len(), 25);
+    assert_eq!(seen.first().map(String::as_str), Some("B-25"));
+    assert_eq!(seen.last().map(String::as_str), Some("B-01"));
 }

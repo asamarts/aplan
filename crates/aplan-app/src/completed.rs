@@ -268,15 +268,25 @@ fn encode_cursor(
 }
 
 fn decode_cursor(raw: &str) -> Result<ParsedCursor, CompletedError> {
-    if raw.len() > MAX_CURSOR_BYTES {
+    if raw.is_empty() || raw.len() > MAX_CURSOR_BYTES {
         return Err(CompletedError::InvalidCursor(format!(
-            "cursor exceeds maximum length of {MAX_CURSOR_BYTES} bytes"
+            "cursor length must be 1..={MAX_CURSOR_BYTES} bytes"
         )));
+    }
+    if raw.chars().any(|c| c.is_control() || c.is_whitespace()) {
+        return Err(CompletedError::InvalidCursor(
+            "cursor contains forbidden control or whitespace characters".to_string(),
+        ));
     }
     let parts: Vec<&str> = raw.split('|').collect();
     if parts.len() != 7 || parts[0] != "v1" {
         return Err(CompletedError::InvalidCursor(
             "expected `v1` cursor format".to_string(),
+        ));
+    }
+    if parts[1].is_empty() || parts[2].is_empty() || parts[3].is_empty() {
+        return Err(CompletedError::InvalidCursor(
+            "cursor snapshot or query binding must not be empty".to_string(),
         ));
     }
     let known = match parts[4] {
@@ -306,6 +316,12 @@ fn decode_cursor(raw: &str) -> Result<ParsedCursor, CompletedError> {
             "cursor task id must not be empty".to_string(),
         ));
     }
+    let canonical = encode_cursor(parts[1], parts[2], parts[3], epoch, parts[6]);
+    if canonical != raw {
+        return Err(CompletedError::InvalidCursor(
+            "non-canonical cursor encoding".to_string(),
+        ));
+    }
     Ok(ParsedCursor {
         input_identity: parts[1].to_string(),
         basis_revision: parts[2].to_string(),
@@ -316,18 +332,64 @@ fn decode_cursor(raw: &str) -> Result<ParsedCursor, CompletedError> {
     })
 }
 
+/// Shorten an already-computed [`CompletedResponse`] to its first `keep` rows
+/// (e.g., to stay within a transport byte cap) while keeping `applied`
+/// unchanged and recomputing a valid `next_cursor` pointing at the new last
+/// returned row (`A2-119`).
+///
+/// Returns `true` if `response.items` was shortened, or `false` if `keep == 0`
+/// or `keep >= response.items.len()`.
+pub fn truncate_completed_response(response: &mut CompletedResponse, keep: usize) -> bool {
+    if keep == 0 || keep >= response.items.len() {
+        return false;
+    }
+    response.items.truncate(keep);
+    response.truncated = true;
+    let query_fp = query_fingerprint(&response.applied);
+    if let Some(last) = response.items.last() {
+        let epoch = last
+            .instant
+            .as_deref()
+            .and_then(aplan_core::parse_canonical_closed_at);
+        response.next_cursor = Some(encode_cursor(
+            &response.input_identity,
+            &response.basis_revision,
+            &query_fp,
+            epoch,
+            &last.id,
+        ));
+    }
+    true
+}
+
 /// Compute a stable hex digest identifying a loaded plan's exact input files
 /// (`A2-111`, ADR-0074).
+///
+/// Treats [`aplan_core::PlanFileContent::Bytes`] and
+/// [`aplan_core::PlanFileContent::Sha256`] equivalently and sorts by absolute
+/// path so CLI (`load_plan_identified`), MCP (`PlanStore`), and TUI snapshots
+/// of the same working tree produce the exact same `input_identity` and
+/// continuation cursors (`A2-119`).
 #[must_use]
 pub fn plan_inputs_identity(inputs: &[aplan_core::PlanFileInput]) -> String {
+    let mut entries: Vec<(std::path::PathBuf, &aplan_core::PlanFileInput)> = inputs
+        .iter()
+        .map(|input| {
+            let abs = std::path::absolute(&input.path).unwrap_or_else(|_| input.path.clone());
+            (abs, input)
+        })
+        .collect();
+    entries.sort_by(|a, b| a.0.cmp(&b.0));
+
     let mut hasher = Sha256::new();
-    for input in inputs {
-        hasher.update(input.path.to_string_lossy().as_bytes());
+    for (abs_path, input) in entries {
+        hasher.update(abs_path.to_string_lossy().as_bytes());
         hasher.update(b"\0");
         match &input.content {
             aplan_core::PlanFileContent::Bytes(bytes) => {
-                hasher.update(b"B");
-                hasher.update(bytes);
+                let sha = hex_digest(&Sha256::digest(bytes));
+                hasher.update(b"S");
+                hasher.update(sha.as_bytes());
             }
             aplan_core::PlanFileContent::Sha256(sha) => {
                 hasher.update(b"S");
@@ -520,9 +582,22 @@ pub fn completed_tasks(
 
     let total_matched = matched.len();
 
-    // Advance strictly past the cursor's last sort key.
+    // Verify cursor points at an actual non-terminal row in this immutable
+    // snapshot and advance strictly past its sort key.
     let after_cursor: Vec<(&aplan_core::Task, CompletionTime)> = if let Some(cursor) = parsed_cursor
     {
+        let anchor = matched
+            .iter()
+            .position(|(task, ct)| task.id == cursor.last_id && ct.epoch_seconds == cursor.epoch);
+        match anchor {
+            Some(pos) if pos + 1 < matched.len() => {}
+            _ => {
+                return Err(CompletedError::InvalidCursor(
+                    "cursor position does not match any truncated page boundary for this snapshot"
+                        .to_string(),
+                ));
+            }
+        }
         matched
             .into_iter()
             .filter(|(task, ct)| {
@@ -800,12 +875,89 @@ mod tests {
                 Path::new("aplan"),
                 &CompletedRequest {
                     limit: Some(2),
-                    cursor: first_page.next_cursor,
+                    cursor: first_page.next_cursor.clone(),
                     history: HistoryPolicy::Never,
                     ..Default::default()
                 },
             ),
             Err(CompletedError::StaleCursor { .. })
         ));
+
+        // Tampered cursor position (forged epoch or unknown id) is refused.
+        let raw_cursor = first_page.next_cursor.as_deref().expect("raw cursor");
+        let forged_epoch = raw_cursor.replacen("|1|", "|1|9999999999|", 1);
+        assert!(matches!(
+            completed_tasks(
+                &plan,
+                "sha-1",
+                dir.path(),
+                Path::new("aplan"),
+                &CompletedRequest {
+                    limit: Some(2),
+                    cursor: Some(forged_epoch),
+                    history: HistoryPolicy::Never,
+                    ..Default::default()
+                },
+            ),
+            Err(CompletedError::InvalidCursor(_))
+        ));
+
+        // Truncating a larger response keeps `applied.limit` unchanged and
+        // yields a valid continuation cursor across both known and unknown rows.
+        let mut big = completed_tasks(
+            &plan,
+            "sha-1",
+            dir.path(),
+            Path::new("aplan"),
+            &CompletedRequest {
+                limit: Some(5),
+                history: HistoryPolicy::Never,
+                ..Default::default()
+            },
+        )
+        .expect("full page");
+        assert_eq!(big.items.len(), 5);
+        assert!(!big.truncated);
+        assert!(truncate_completed_response(&mut big, 2));
+        assert_eq!(big.items.len(), 2);
+        assert!(big.truncated);
+        assert_eq!(big.applied.limit, Some(5));
+        let mut tail = completed_tasks(
+            &plan,
+            "sha-1",
+            dir.path(),
+            Path::new("aplan"),
+            &CompletedRequest {
+                limit: Some(5),
+                cursor: big.next_cursor.clone(),
+                history: HistoryPolicy::Never,
+                ..Default::default()
+            },
+        )
+        .expect("continued page");
+        assert_eq!(
+            tail.items.iter().map(|r| r.id.as_str()).collect::<Vec<_>>(),
+            vec!["A-2", "A-UNK-1", "A-UNK-2"]
+        );
+        // Truncating again at an unknown-instant boundary also continues cleanly.
+        assert!(truncate_completed_response(&mut tail, 2));
+        let last = completed_tasks(
+            &plan,
+            "sha-1",
+            dir.path(),
+            Path::new("aplan"),
+            &CompletedRequest {
+                limit: Some(5),
+                cursor: tail.next_cursor.clone(),
+                history: HistoryPolicy::Never,
+                ..Default::default()
+            },
+        )
+        .expect("final page after unknown boundary");
+        assert_eq!(
+            last.items.iter().map(|r| r.id.as_str()).collect::<Vec<_>>(),
+            vec!["A-UNK-2"]
+        );
+        assert!(!last.truncated);
     }
 }

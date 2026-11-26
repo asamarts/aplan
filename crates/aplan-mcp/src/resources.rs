@@ -10,14 +10,17 @@
 //! rather than broadening a selection.
 
 use std::collections::BTreeMap;
+use std::path::Path;
 
 use rmcp::model::{Resource, ResourceTemplate};
 use sha2::{Digest as _, Sha256};
 
 use crate::contract::{
-    CollectionPage, DEFAULT_PAGE_LIMIT, InputIdentity, MAX_CURSOR_BYTES, MAX_PAGE_LIMIT,
-    MAX_RESOURCE_BYTES, MAX_URI_BYTES, MCP_CONTRACT_VERSION, PlanSummaryResource,
-    ReadyCollectionItem, ShowPayload, TaskDetailResource,
+    CollectionPage, CompletedCollectionResource, DEFAULT_PAGE_LIMIT, InputIdentity,
+    MAX_COMPLETED_CURSOR_BYTES, MAX_CURSOR_BYTES, MAX_FILTER_VALUE_BYTES,
+    MAX_FILTER_VALUES_PER_DIMENSION, MAX_PAGE_LIMIT, MAX_RESOURCE_BYTES, MAX_URI_BYTES,
+    MCP_CONTRACT_VERSION, PlanSummaryResource, ReadyCollectionItem, ShowPayload,
+    TaskDetailResource,
 };
 
 /// One static MCP resource advertised by `resources/list`.
@@ -83,6 +86,20 @@ pub const RESOURCE_TEMPLATES: &[ResourceTemplateSpec] = &[
         rationale: "Bounded paged collection read keeps context predictable without adding \
                     presentation-specific rollup tools.",
     },
+    ResourceTemplateSpec {
+        uri_template: "aplan://collections/completed{?cut,phase,owner,tag,since,until,oldest,history,limit,cursor}",
+        name: "completed_tasks_page",
+        title: "Completed tasks history page",
+        description: "Bounded, deterministically ordered completion-history page projecting \
+                      the shared `completed_tasks` engine with optional `cut`, `phase`, `owner`, \
+                      `tag`, `since`, `until`, `oldest`, `history` (`auto`/`never`/`required`), \
+                      `limit` (default 20, max 50), 64 KiB cap, and snapshot-bound cursors.",
+        mime_type: "application/json",
+        origin_command: "completed",
+        rationale: "Completion history is a bounded collection read rather than an action tool, \
+                    projecting the shared `completed_tasks` response directly without adding an \
+                    `aplan_completed` rollup tool.",
+    },
 ];
 
 /// Build the wire [`Resource`] list for `resources/list`.
@@ -127,6 +144,22 @@ pub enum ResourceError {
     Internal(String),
 }
 
+/// Confined, typed query parameters for
+/// `aplan://collections/completed{?cut,phase,owner,tag,since,until,oldest,history,limit,cursor}`.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct CompletedUriQuery {
+    pub cuts: Vec<String>,
+    pub phases: Vec<u32>,
+    pub owners: Vec<String>,
+    pub tags: Vec<String>,
+    pub since: Option<String>,
+    pub until: Option<String>,
+    pub oldest: bool,
+    pub history: aplan_core::HistoryPolicy,
+    pub limit: usize,
+    pub cursor: Option<String>,
+}
+
 /// Parsed, confined target of an `aplan://` resource URI.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum ParsedResourceUri {
@@ -138,6 +171,7 @@ pub enum ParsedResourceUri {
         limit: usize,
         cursor: Option<String>,
     },
+    CompletedCollection(CompletedUriQuery),
 }
 
 /// Strictly parse and confine an MCP resource URI.
@@ -203,6 +237,11 @@ pub fn parse_resource_uri(uri: &str) -> Result<ParsedResourceUri, ResourceError>
     if path == "collections/ready" {
         let (limit, cursor) = parse_collection_query(query)?;
         return Ok(ParsedResourceUri::ReadyCollection { limit, cursor });
+    }
+
+    if path == "collections/completed" {
+        let parsed = parse_completed_query(query)?;
+        return Ok(ParsedResourceUri::CompletedCollection(parsed));
     }
 
     Err(ResourceError::NotFound(format!(
@@ -289,6 +328,415 @@ fn parse_collection_query(query: Option<&str>) -> Result<(usize, Option<String>)
         }
     }
     Ok((limit.unwrap_or(DEFAULT_PAGE_LIMIT), cursor))
+}
+
+fn percent_encode_query_value(value: &str) -> String {
+    use std::fmt::Write as _;
+    let mut out = String::with_capacity(value.len());
+    for byte in value.bytes() {
+        if byte.is_ascii_alphanumeric() || matches!(byte, b'-' | b'.' | b'_' | b'~') {
+            out.push(char::from(byte));
+        } else {
+            let _ = write!(out, "%{byte:02X}");
+        }
+    }
+    out
+}
+
+fn hex_nibble(b: u8) -> Option<u8> {
+    match b {
+        b'0'..=b'9' => Some(b - b'0'),
+        b'a'..=b'f' => Some(b - b'a' + 10),
+        b'A'..=b'F' => Some(b - b'A' + 10),
+        _ => None,
+    }
+}
+
+fn percent_decode_query_value(raw: &str, key: &str) -> Result<String, ResourceError> {
+    let bytes = raw.as_bytes();
+    let mut decoded = Vec::with_capacity(bytes.len());
+    let mut i = 0;
+    while i < bytes.len() {
+        if bytes[i] == b'%' {
+            if i + 2 >= bytes.len() {
+                return Err(ResourceError::InvalidParams(format!(
+                    "malformed percent-encoding in `{key}` query parameter"
+                )));
+            }
+            let Some(hi) = hex_nibble(bytes[i + 1]) else {
+                return Err(ResourceError::InvalidParams(format!(
+                    "invalid hex digit in `{key}` query parameter"
+                )));
+            };
+            let Some(lo) = hex_nibble(bytes[i + 2]) else {
+                return Err(ResourceError::InvalidParams(format!(
+                    "invalid hex digit in `{key}` query parameter"
+                )));
+            };
+            decoded.push((hi << 4) | lo);
+            i += 3;
+        } else {
+            decoded.push(bytes[i]);
+            i += 1;
+        }
+    }
+    let text = String::from_utf8(decoded).map_err(|_| {
+        ResourceError::InvalidParams(format!("`{key}` query parameter is not valid UTF-8"))
+    })?;
+    if text.chars().any(|c| c.is_control() || c == '\\') {
+        return Err(ResourceError::InvalidParams(format!(
+            "`{key}` query parameter contains forbidden control or backslash characters"
+        )));
+    }
+    Ok(text)
+}
+
+fn check_confined_filter_value(decoded: &str, key: &str) -> Result<(), ResourceError> {
+    if decoded.is_empty() || decoded.len() > MAX_FILTER_VALUE_BYTES {
+        return Err(ResourceError::InvalidParams(format!(
+            "`{key}` must be 1..={MAX_FILTER_VALUE_BYTES} bytes"
+        )));
+    }
+    if decoded.split('/').any(|seg| seg == "." || seg == "..") {
+        return Err(ResourceError::InvalidParams(format!(
+            "`{key}` query parameter may not contain path traversal segments"
+        )));
+    }
+    Ok(())
+}
+
+fn push_filter_value(
+    target: &mut Vec<String>,
+    decoded: String,
+    key: &str,
+) -> Result<(), ResourceError> {
+    check_confined_filter_value(&decoded, key)?;
+    if target.len() >= MAX_FILTER_VALUES_PER_DIMENSION {
+        return Err(ResourceError::InvalidParams(format!(
+            "at most {MAX_FILTER_VALUES_PER_DIMENSION} `{key}` values are allowed"
+        )));
+    }
+    target.push(decoded);
+    Ok(())
+}
+
+#[allow(clippy::too_many_lines)] // Exhaustive strict parser for all 10 RFC 6570 template parameters.
+fn parse_completed_query(query: Option<&str>) -> Result<CompletedUriQuery, ResourceError> {
+    let mut cuts: Vec<String> = Vec::new();
+    let mut phases: Vec<u32> = Vec::new();
+    let mut owners: Vec<String> = Vec::new();
+    let mut tags: Vec<String> = Vec::new();
+    let mut since: Option<String> = None;
+    let mut until: Option<String> = None;
+    let mut oldest: Option<bool> = None;
+    let mut history: Option<aplan_core::HistoryPolicy> = None;
+    let mut limit: Option<usize> = None;
+    let mut cursor: Option<String> = None;
+
+    let Some(q) = query else {
+        return Ok(CompletedUriQuery {
+            cuts,
+            phases,
+            owners,
+            tags,
+            since,
+            until,
+            oldest: false,
+            history: aplan_core::HistoryPolicy::Auto,
+            limit: DEFAULT_PAGE_LIMIT,
+            cursor,
+        });
+    };
+    if q.is_empty() {
+        return Err(ResourceError::InvalidParams(
+            "empty query string is not canonical".to_string(),
+        ));
+    }
+
+    for pair in q.split('&') {
+        let Some((key, raw_value)) = pair.split_once('=') else {
+            return Err(ResourceError::InvalidParams(
+                "query parameter must have `key=value` form".to_string(),
+            ));
+        };
+        if raw_value.is_empty() {
+            return Err(ResourceError::InvalidParams(format!(
+                "`{}` query parameter must not be empty",
+                aplan_output::sanitize::visible(key)
+            )));
+        }
+        match key {
+            "cut" => {
+                let decoded = percent_decode_query_value(raw_value, "cut")?;
+                push_filter_value(&mut cuts, decoded, "cut")?;
+            }
+            "phase" => {
+                let parsed: u32 = raw_value.parse().map_err(|_| {
+                    ResourceError::InvalidParams(
+                        "`phase` must be a canonical non-negative integer".to_string(),
+                    )
+                })?;
+                if parsed.to_string() != raw_value {
+                    return Err(ResourceError::InvalidParams(
+                        "`phase` must use canonical base-10 digits without leading zeros or signs"
+                            .to_string(),
+                    ));
+                }
+                if phases.len() >= MAX_FILTER_VALUES_PER_DIMENSION {
+                    return Err(ResourceError::InvalidParams(format!(
+                        "at most {MAX_FILTER_VALUES_PER_DIMENSION} `phase` values are allowed"
+                    )));
+                }
+                phases.push(parsed);
+            }
+            "owner" => {
+                let decoded = percent_decode_query_value(raw_value, "owner")?;
+                push_filter_value(&mut owners, decoded, "owner")?;
+            }
+            "tag" => {
+                let decoded = percent_decode_query_value(raw_value, "tag")?;
+                push_filter_value(&mut tags, decoded, "tag")?;
+            }
+            "since" => {
+                if since.is_some() {
+                    return Err(ResourceError::InvalidParams(
+                        "duplicate `since` query parameter".to_string(),
+                    ));
+                }
+                let decoded = percent_decode_query_value(raw_value, "since")?;
+                check_confined_filter_value(&decoded, "since")?;
+                since = Some(decoded);
+            }
+            "until" => {
+                if until.is_some() {
+                    return Err(ResourceError::InvalidParams(
+                        "duplicate `until` query parameter".to_string(),
+                    ));
+                }
+                let decoded = percent_decode_query_value(raw_value, "until")?;
+                check_confined_filter_value(&decoded, "until")?;
+                until = Some(decoded);
+            }
+            "oldest" => {
+                if oldest.is_some() {
+                    return Err(ResourceError::InvalidParams(
+                        "duplicate `oldest` query parameter".to_string(),
+                    ));
+                }
+                let val = match raw_value {
+                    "true" => true,
+                    "false" => false,
+                    _ => {
+                        return Err(ResourceError::InvalidParams(
+                            "`oldest` must be `true` or `false`".to_string(),
+                        ));
+                    }
+                };
+                oldest = Some(val);
+            }
+            "history" => {
+                if history.is_some() {
+                    return Err(ResourceError::InvalidParams(
+                        "duplicate `history` query parameter".to_string(),
+                    ));
+                }
+                let parsed = match raw_value {
+                    "auto" => aplan_core::HistoryPolicy::Auto,
+                    "never" => aplan_core::HistoryPolicy::Never,
+                    "required" => aplan_core::HistoryPolicy::Required,
+                    _ => {
+                        return Err(ResourceError::InvalidParams(
+                            "`history` must be `auto`, `never`, or `required`".to_string(),
+                        ));
+                    }
+                };
+                history = Some(parsed);
+            }
+            "limit" => {
+                if limit.is_some() {
+                    return Err(ResourceError::InvalidParams(
+                        "duplicate `limit` query parameter".to_string(),
+                    ));
+                }
+                let parsed: usize = raw_value.parse().map_err(|_| {
+                    ResourceError::InvalidParams(format!(
+                        "`limit` must be a positive integer in 1..={MAX_PAGE_LIMIT}"
+                    ))
+                })?;
+                if parsed == 0 || parsed > MAX_PAGE_LIMIT || parsed.to_string() != raw_value {
+                    return Err(ResourceError::InvalidParams(format!(
+                        "`limit` must be a canonical integer in 1..={MAX_PAGE_LIMIT} (got `{}`)",
+                        aplan_output::sanitize::visible(raw_value)
+                    )));
+                }
+                limit = Some(parsed);
+            }
+            "cursor" => {
+                if cursor.is_some() {
+                    return Err(ResourceError::InvalidParams(
+                        "duplicate `cursor` query parameter".to_string(),
+                    ));
+                }
+                let decoded = percent_decode_query_value(raw_value, "cursor")?;
+                if decoded.is_empty() || decoded.len() > MAX_COMPLETED_CURSOR_BYTES {
+                    return Err(ResourceError::InvalidParams(format!(
+                        "`cursor` must be 1..={MAX_COMPLETED_CURSOR_BYTES} bytes"
+                    )));
+                }
+                cursor = Some(decoded);
+            }
+            other => {
+                return Err(ResourceError::InvalidParams(format!(
+                    "unknown completed query parameter `{}` (allowed: `cut`, `phase`, `owner`, \
+                     `tag`, `since`, `until`, `oldest`, `history`, `limit`, `cursor`)",
+                    aplan_output::sanitize::visible(other)
+                )));
+            }
+        }
+    }
+
+    Ok(CompletedUriQuery {
+        cuts,
+        phases,
+        owners,
+        tags,
+        since,
+        until,
+        oldest: oldest.unwrap_or(false),
+        history: history.unwrap_or(aplan_core::HistoryPolicy::Auto),
+        limit: limit.unwrap_or(DEFAULT_PAGE_LIMIT),
+        cursor,
+    })
+}
+
+/// Format a canonical `aplan://collections/completed` URI in template parameter
+/// order (`cut`, `phase`, `owner`, `tag`, `since`, `until`, `oldest`, `history`,
+/// `limit`, `cursor`) with RFC 3986 percent-encoding on values.
+#[must_use]
+pub fn canonical_completed_uri(
+    applied: &aplan_core::AppliedCompletedRequest,
+    limit: usize,
+    cursor: Option<&str>,
+) -> String {
+    let mut params: Vec<String> = Vec::new();
+    for cut in &applied.selector.cuts {
+        params.push(format!("cut={}", percent_encode_query_value(cut)));
+    }
+    for phase in &applied.selector.phases {
+        params.push(format!("phase={phase}"));
+    }
+    for owner in &applied.selector.owners {
+        params.push(format!("owner={}", percent_encode_query_value(owner)));
+    }
+    for tag in &applied.selector.tags {
+        params.push(format!("tag={}", percent_encode_query_value(tag)));
+    }
+    if let Some(since) = &applied.since {
+        params.push(format!("since={}", percent_encode_query_value(since)));
+    }
+    if let Some(until) = &applied.until {
+        params.push(format!("until={}", percent_encode_query_value(until)));
+    }
+    params.push(format!("oldest={}", applied.oldest_first));
+    params.push(format!("history={}", applied.history.as_str()));
+    params.push(format!("limit={limit}"));
+    if let Some(tok) = cursor {
+        params.push(format!("cursor={}", percent_encode_query_value(tok)));
+    }
+    format!("aplan://collections/completed?{}", params.join("&"))
+}
+
+/// Build one bounded, deterministically ordered page for
+/// `aplan://collections/completed{?cut,phase,owner,tag,since,until,oldest,history,limit,cursor}`
+/// directly over [`aplan_app::completed_tasks`] (`A2-119`).
+///
+/// Enforces BOTH `limit <= MAX_PAGE_LIMIT` and `MAX_RESOURCE_BYTES` (shrinking
+/// `completed.items` via [`aplan_app::truncate_completed_response`] while
+/// preserving the request's `applied.limit` cursor binding so continuation
+/// pages work cleanly even when a later page also hits the 64 KiB cap).
+///
+/// # Errors
+///
+/// Returns [`ResourceError::InvalidParams`] on invalid bounds, reversed bounds,
+/// stale/malformed/tampered/oversized cursors, `history=required` failures,
+/// oversized canonical next-page URIs, or a single row exceeding 64 KiB.
+pub fn build_completed_page(
+    plan: &aplan_core::load::Plan,
+    app_input_identity: &str,
+    repo_root: &Path,
+    plan_root_rel: &Path,
+    query: &CompletedUriQuery,
+    input_identity: &InputIdentity,
+) -> Result<CompletedCollectionResource, ResourceError> {
+    let request = aplan_app::CompletedRequest {
+        selector: aplan_core::select::Selector {
+            cuts: query.cuts.clone(),
+            phases: query.phases.clone(),
+            tags: query.tags.clone(),
+            owners: query.owners.clone(),
+            statuses: Vec::new(),
+            unclaimed: false,
+        },
+        since: query.since.clone(),
+        until: query.until.clone(),
+        oldest_first: query.oldest,
+        history: query.history,
+        limit: Some(query.limit),
+        cursor: query.cursor.clone(),
+        basis_revision: None,
+        limits: aplan_core::HistoryLimits::default(),
+    };
+    let mut response =
+        aplan_app::completed_tasks(plan, app_input_identity, repo_root, plan_root_rel, &request)
+            .map_err(|err| ResourceError::InvalidParams(err.to_string()))?;
+
+    let order = if response.applied.oldest_first {
+        "closed_at_asc"
+    } else {
+        "closed_at_desc"
+    };
+    let canonical_uri =
+        canonical_completed_uri(&response.applied, query.limit, query.cursor.as_deref());
+    let mut truncated_by_size_cap = false;
+
+    loop {
+        let next_uri = response
+            .next_cursor
+            .as_deref()
+            .map(|tok| canonical_completed_uri(&response.applied, query.limit, Some(tok)));
+        if let Some(uri) = &next_uri
+            && uri.len() > MAX_URI_BYTES
+        {
+            return Err(ResourceError::InvalidParams(format!(
+                "canonical continuation URI exceeds the {MAX_URI_BYTES}-byte URI limit"
+            )));
+        }
+        let page = CompletedCollectionResource {
+            contract_version: MCP_CONTRACT_VERSION.to_string(),
+            resource: canonical_uri.clone(),
+            input_identity: input_identity.clone(),
+            order: order.to_string(),
+            complete: !response.truncated,
+            truncated_by_size_cap,
+            next_uri,
+            completed: response.clone(),
+        };
+        let serialized_len = serde_json::to_string_pretty(&page)
+            .map_err(|e| ResourceError::Internal(format!("serializing completed page: {e}")))?
+            .len();
+        if serialized_len <= MAX_RESOURCE_BYTES || response.items.len() <= 1 {
+            if serialized_len > MAX_RESOURCE_BYTES {
+                return Err(ResourceError::InvalidParams(format!(
+                    "single completed-history entry exceeds the {MAX_RESOURCE_BYTES}-byte \
+                     resource limit"
+                )));
+            }
+            return Ok(page);
+        }
+        let keep = (response.items.len() / 2).max(1);
+        aplan_app::truncate_completed_response(&mut response, keep);
+        truncated_by_size_cap = true;
+    }
 }
 
 /// Strictly parsed, tamper-evident, snapshot-bound continuation cursor.
@@ -486,7 +934,7 @@ pub fn build_task_detail(
         truncated: false,
         task,
     };
-    let bytes = serde_json::to_vec(&resource)
+    let bytes = serde_json::to_string_pretty(&resource)
         .map_err(|e| ResourceError::Internal(format!("serializing task detail: {e}")))?;
     if bytes.len() > MAX_RESOURCE_BYTES {
         return Err(ResourceError::InvalidParams(format!(
@@ -573,7 +1021,7 @@ pub fn build_ready_page(
             next_uri,
             items: all_items[offset..end].to_vec(),
         };
-        let serialized_len = serde_json::to_vec(&page)
+        let serialized_len = serde_json::to_string_pretty(&page)
             .map_err(|e| ResourceError::Internal(format!("serializing ready page: {e}")))?
             .len();
         if serialized_len <= MAX_RESOURCE_BYTES || take <= 1 {
@@ -621,7 +1069,27 @@ mod tests {
             "aplan://collections/ready?limit=abc",
             "aplan://collections/ready?limit=5&limit=6",
             "aplan://collections/ready?unknown=1",
-            &format!("aplan://tasks/{}", "a".repeat(600)),
+            "aplan://collections/completed?",
+            "aplan://collections/completed?at=HEAD",
+            "aplan://collections/completed?root=/etc",
+            "aplan://collections/completed?path=../../etc/passwd",
+            "aplan://collections/completed?limit=0",
+            "aplan://collections/completed?limit=51",
+            "aplan://collections/completed?limit=05",
+            "aplan://collections/completed?oldest=yes",
+            "aplan://collections/completed?history=always",
+            "aplan://collections/completed?since=2026-01-01&since=2026-01-02",
+            "aplan://collections/completed?until=2026-01-01&until=2026-01-02",
+            "aplan://collections/completed?phase=abc",
+            "aplan://collections/completed?phase=01",
+            "aplan://collections/completed?cut=%ZZ",
+            "aplan://collections/completed?cut=a%00b",
+            "aplan://collections/completed?cut=../secret",
+            &format!(
+                "aplan://collections/completed?cursor={}",
+                "a".repeat(MAX_COMPLETED_CURSOR_BYTES + 1)
+            ),
+            &format!("aplan://tasks/{}", "a".repeat(MAX_URI_BYTES + 1)),
         ] {
             let err = parse_resource_uri(bad)
                 .expect_err(&format!("expected refusal for hostile URI {bad:?}"));
@@ -722,7 +1190,7 @@ mod tests {
         assert!(page.truncated_by_size_cap);
         assert!(!page.complete);
         assert!(page.returned < 40 && page.returned >= 1);
-        let serialized = serde_json::to_vec(&page).expect("serialize");
+        let serialized = serde_json::to_string_pretty(&page).expect("serialize");
         assert!(
             serialized.len() <= MAX_RESOURCE_BYTES,
             "page exceeded 64 KiB cap: {}",
@@ -731,5 +1199,140 @@ mod tests {
         let next = build_ready_page(&items, 40, page.next_cursor.as_deref(), &id)
             .expect("continuation after cap");
         assert_eq!(next.items[0].rank, page.returned + 1);
+    }
+
+    #[test]
+    fn completed_uri_canonical_round_trip() {
+        let applied = aplan_core::AppliedCompletedRequest {
+            since: Some("2026-10-01T00:00:00Z".to_string()),
+            until: Some("2026-10-31T23:59:59Z".to_string()),
+            oldest_first: true,
+            history: aplan_core::HistoryPolicy::Never,
+            limit: Some(15),
+            selector: aplan_core::AppliedCompletedSelector {
+                cuts: vec!["v0.8".to_string()],
+                phases: vec![2],
+                owners: vec!["alice smith".to_string()],
+                tags: vec!["mcp".to_string(), "history".to_string()],
+            },
+        };
+        let uri = canonical_completed_uri(&applied, 15, Some("v1|abc|unversioned|fp|1|100|A-1"));
+        assert!(uri.len() <= MAX_URI_BYTES);
+        let ParsedResourceUri::CompletedCollection(parsed) =
+            parse_resource_uri(&uri).expect("canonical URI parses cleanly")
+        else {
+            panic!("expected CompletedCollection");
+        };
+        assert_eq!(parsed.cuts, vec!["v0.8"]);
+        assert_eq!(parsed.phases, vec![2]);
+        assert_eq!(parsed.owners, vec!["alice smith"]);
+        assert_eq!(parsed.tags, vec!["mcp", "history"]);
+        assert_eq!(parsed.since.as_deref(), Some("2026-10-01T00:00:00Z"));
+        assert_eq!(parsed.until.as_deref(), Some("2026-10-31T23:59:59Z"));
+        assert!(parsed.oldest);
+        assert_eq!(parsed.history, aplan_core::HistoryPolicy::Never);
+        assert_eq!(parsed.limit, 15);
+        assert_eq!(
+            parsed.cursor.as_deref(),
+            Some("v1|abc|unversioned|fp|1|100|A-1")
+        );
+        // Re-emitting from the parsed query is idempotent.
+        let reparsed_uri =
+            canonical_completed_uri(&applied, parsed.limit, parsed.cursor.as_deref());
+        assert_eq!(reparsed_uri, uri);
+    }
+
+    #[test]
+    fn completed_page_shrinks_under_64kib_size_cap_and_continues_cleanly() {
+        // Build a plan with 35 large done tasks so limit=35 exceeds 64 KiB on
+        // BOTH page 1 and page 2, proving continuous size-cap pagination.
+        let dir = tempfile::Builder::new()
+            .prefix("mcp-completed-cap-")
+            .tempdir_in(aplan_core::fixture::fixture_root())
+            .expect("tempdir");
+        let tasks: Vec<aplan_core::load::LoadedTask> = (1..=35)
+            .map(|i| aplan_core::load::LoadedTask {
+                path: dir.path().join(format!("aplan/tasks/C-{i:02}.md")),
+                task: aplan_core::Task {
+                    id: format!("C-{i:02}"),
+                    title: format!("Task {i:02} {}", "x".repeat(3_500)),
+                    phase: 1,
+                    status: aplan_core::Status::Done,
+                    owner: Some("alice".to_string()),
+                    effort_days: Some(1.0),
+                    blocked_by: Vec::new(),
+                    prefer_after: Vec::new(),
+                    ratified_by: Vec::new(),
+                    contains: Vec::new(),
+                    evidence: Vec::new(),
+                    paths: Vec::new(),
+                    traces: Vec::new(),
+                    trace_fingerprints: BTreeMap::new(),
+                    evidence_fingerprints: BTreeMap::new(),
+                    tags: vec!["mcp".to_string()],
+                    revisit_at: None,
+                    version_impact: None,
+                    version_impact_reason: None,
+                    version: None,
+                    closed_at: Some(format!("2026-10-10T00:{i:02}:00Z")),
+                    closed_at_source: Some(aplan_core::ClosedAtSource::Local),
+                },
+                criteria: aplan_core::load::Criteria::default(),
+                fields: BTreeMap::new(),
+            })
+            .collect();
+        let plan = aplan_core::load::Plan {
+            tasks,
+            load_diagnostics: Vec::new(),
+            unloadable: BTreeMap::new(),
+        };
+        let id = identity("1234567890abcdef", "none");
+        let mut cursor: Option<String> = None;
+        let mut collected = Vec::new();
+        let mut capped_pages = 0usize;
+        loop {
+            let q = CompletedUriQuery {
+                cuts: Vec::new(),
+                phases: Vec::new(),
+                owners: Vec::new(),
+                tags: Vec::new(),
+                since: None,
+                until: None,
+                oldest: false,
+                history: aplan_core::HistoryPolicy::Never,
+                limit: 35,
+                cursor: cursor.clone(),
+            };
+            let page =
+                build_completed_page(&plan, "app-sha-1", dir.path(), Path::new("aplan"), &q, &id)
+                    .expect("capped completed page");
+            let bytes = serde_json::to_string_pretty(&page).expect("serialize");
+            assert!(
+                bytes.len() <= MAX_RESOURCE_BYTES,
+                "completed page exceeded 64 KiB cap: {}",
+                bytes.len()
+            );
+            if page.truncated_by_size_cap {
+                capped_pages += 1;
+            }
+            collected.extend(page.completed.items.iter().map(|r| r.id.clone()));
+            if page.complete {
+                assert!(page.next_uri.is_none());
+                assert!(page.completed.next_cursor.is_none());
+                break;
+            }
+            let next_uri = page.next_uri.as_deref().expect("next_uri");
+            let ParsedResourceUri::CompletedCollection(next_q) =
+                parse_resource_uri(next_uri).expect("next_uri parses")
+            else {
+                panic!("expected CompletedCollection next_uri");
+            };
+            assert_eq!(next_q.limit, 35);
+            cursor = next_q.cursor;
+        }
+        assert!(capped_pages >= 2, "expected multiple size-capped pages");
+        assert_eq!(collected.len(), 35);
+        assert_eq!(collected.first().map(String::as_str), Some("C-35"));
+        assert_eq!(collected.last().map(String::as_str), Some("C-01"));
     }
 }

@@ -1181,11 +1181,15 @@ accommodation, two rules quietly weakened.
   - Clients using `2026-07-28` (stateless inline lifecycle via `server/discover` and per-request `_meta`)
     additionally receive `resultType: "complete"`, `ttlMs: 0`, and `cacheScope: "private"` on
     cacheable catalogue and resource replies, and `-32602` (`INVALID_PARAMS`) for unknown resources.
-- **Bounded resources**: `aplan://plan/summary`, `aplan://tasks/{id}`, and
-  `aplan://collections/ready{?limit,cursor}` enforce a 64 KiB page cap, `limit` in `1..=50`, strict
-  `aplan://` URI confinement, and 128-byte opaque cursors bound to both input identity
-  (`plan_sha256`, `config_sha256`) and canonical query parameters. Editing the plan between pages
-  refuses a stale cursor cleanly rather than returning mixed-snapshot results.
+- **Bounded resources**: `aplan://plan/summary`, `aplan://tasks/{id}`,
+  `aplan://collections/ready{?limit,cursor}`, and
+  `aplan://collections/completed{?cut,phase,owner,tag,since,until,oldest,history,limit,cursor}`
+  (`A2-119`) enforce a 64 KiB page cap, `limit` in `1..=50`, strict `aplan://` URI confinement
+  (1024-byte URI limit, 128-byte filter values, no source-controlled path parameters), and opaque
+  cursors (128-byte for `ready`, 512-byte for `completed`) bound to input identity, basis revision,
+  and canonical query parameters. Editing the plan or committing between pages refuses a stale
+  cursor cleanly rather than returning mixed-snapshot results; `completed` projects the shared
+  `aplan_app::completed_tasks` response directly without adding an `aplan_completed` tool.
 
 ## The full list
 

@@ -15,7 +15,7 @@
 | hardening | todo | 0/15 | 15 | 0 | 14.8d | 0.5 (0.5 left) | 3.0d |
 | qualification | todo | 0/1 | 0 | 1 | 8.0d | 0.3 (0.3 left) | 8.0d |
 | tui-quality | todo | 0/2 | 1 | 1 | 4.0d | 0.1 (0.1 left) | 4.0d |
-| workflow | todo | 8/17 | 5 | 4 | 50.0d | 1.9 (1.0 left) | 17.5d |
+| workflow | todo | 10/17 | 5 | 2 | 50.0d | 1.9 (0.7 left) | 17.5d |
 
 ## v0.7 Security, safe parsing and gates that tell the truth
 
@@ -226,13 +226,13 @@
 | A2-109 | Record an atomic close timestamp on done tasks | done | A2-108 | commit:5384cd4, test:close_gate::close_records_atomic_closed_at_and_preserves_it_across_amend_and_restamp |
 | A2-110 | Derive labelled legacy completion times in one Git history pass | done | A2-109 | commit:b3f7080, test:history::tests::single_pass_history_walk_resolves_recorded_legacy_renames_rekeys_reverts_and_untracked |
 | A2-111 | Add completed-task history to the engine and CLI | done | A2-110 | commit:3fb563a, test:completed::completed_cli_supports_ordering_filters_bounds_history_at_paging_and_json |
-| A2-112 | Add completion history and recent work to the TUI | todo | A2-111 | - |
+| A2-112 | Add completion history and recent work to the TUI | done | A2-111 | commit:b55ca36, test:shell::tests::completed_history_reducer_and_snapshot_journeys_cover_empty_legacy_shallow_narrow_and_large, test:tui_journey::completed_history_pty_journey_covers_overview_completed_inspector_and_narrow |
 | A2-113 | Measure and select the terminal Markdown dependency boundary | done | - | commit:806ce69 |
 | A2-114 | Build a safe Markdown semantic document and terminal renderer | done | A2-113 | commit:2bde58c, test:markdown::tests::every_semantic_member_parses_lays_out_and_renders_with_color_invariance, test:markdown::tests::adversarial_escapes_bidi_html_deep_nesting_and_oversized_inputs_are_safe |
 | A2-115 | Pretty-render CLI Markdown surfaces without changing artifacts | done | A2-114 | commit:3509127, test:markdown_cli::show_body_renders_markdown_and_raw_body_preserves_exact_bytes, test:markdown_cli::cli_markdown_output_site_census_drives_every_assigned_disposition |
 | A2-116 | Expose the capture workflow through MCP and agent guidance | todo | A2-118, A2-122 | - |
 | A2-117 | Audit and release the workflow ergonomics cut | todo | A2-112, A2-115, A2-116, A2-119, A2-120, M-tui-quality | - |
-| A2-118 | Add versioned structured MCP outputs and bounded resources | todo | - | - |
+| A2-118 | Add versioned structured MCP outputs and bounded resources | done | - | commit:ff94344, test:mcp::structured_outputs_bounded_resources_and_protocol_matrix, test:mcp_policy::every_mcp_resource_and_template_is_classified_confined_and_driven |
 | A2-119 | Expose completed-task history through bounded MCP resources | todo | A2-111, A2-118 | - |
 | A2-120 | Render task Markdown in the TUI inspector | done | A2-114 | commit:2dc55e4, test:markdown::tests::every_semantic_member_drives_a_tui_disposition_and_matches_cli_semantic_text, test:markdown::tests::large_body_scrolls_incrementally_without_reparse_or_redundant_redraw, test:tui_portability::portable_tui_markdown_inspector_renders_scrolls_and_reflows_on_resize |
 | A2-134 | Audit every read-only surface against the explicit latency and work budgets | todo | A2-135, A2-136 | - |

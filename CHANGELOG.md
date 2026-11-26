@@ -8,6 +8,15 @@ to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Added
 
+- **Bounded completed-task history MCP resource (`A2-119`, `ADR-0074`)**. `aplan mcp` now exposes
+  completed-task history as a bounded resource template
+  `aplan://collections/completed{?cut,phase,owner,tag,since,until,oldest,history,limit,cursor}`
+  projecting the shared `aplan_app::completed_tasks` request and `CompletedResponse` directly
+  without adding an `aplan_completed` action tool or transport-specific completion model. Enforces
+  documented length bounds (1024-byte URI, 512-byte cursor, 128-byte filter values, `limit` in
+  `1..=50`, 64 KiB page cap), canonical percent-encoded continuation URIs bound to snapshot input
+  identity, basis revision, and query fingerprint, strict refusal of stale/tampered/broadening
+  cursors and hostile URIs, and `ttlMs: 0` / `cacheScope: "private"` cache metadata on `2026-07-28`.
 - **Versioned structured MCP outputs and bounded URI-addressed resources (`A2-118`,
   `--require mcp.structured_outputs_and_bounded_resources`)**. Every MCP tool now declares
   generated `inputSchema` and `outputSchema` (`aplan/mcp/v2`, committed in
