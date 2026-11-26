@@ -425,3 +425,69 @@ fn emptying_a_cut_is_not_told_how_to_create_one() {
         "a move was sent to the bulk add seam: {text}"
     );
 }
+
+/// **The minimal test runner in `docs/quickstart.md` is parsed and accepted by `aplan check` (`A2-039`).**
+///
+/// Extracted verbatim from `docs/quickstart.md` so the documented runner configuration cannot
+/// drift from what `.aplan.yml` and `aplan check` accept.
+#[test]
+fn the_documented_minimal_test_runner_is_accepted_by_check() {
+    let doc = quickstart();
+    let runner_yaml = fenced_under(&doc, "Configuring a test runner", "yaml");
+    assert!(
+        runner_yaml.contains("test:")
+            && runner_yaml.contains("list:")
+            && runner_yaml.contains("run:")
+            && runner_yaml.contains("{test}"),
+        "the quickstart's runner snippet does not show a complete test runner:\n{runner_yaml}"
+    );
+
+    // Confirm the snippet actually configures an active test runner (not commented out).
+    let parsed =
+        aplan_config::parse_config(&runner_yaml, Path::new(".aplan.yml")).unwrap_or_else(|err| {
+            panic!("quickstart runner YAML failed to parse: {err}\n{runner_yaml}")
+        });
+    let runners = parsed
+        .test
+        .expect("quickstart runner YAML must configure `test`");
+    assert_eq!(runners.all().len(), 1);
+
+    // 1. Standalone `.aplan.yml` with an empty plan directory passes `aplan check`.
+    let standalone = tempfile::Builder::new()
+        .tempdir_in(aplan_core::fixture::fixture_root())
+        .expect("standalone tempdir");
+    std::fs::create_dir_all(standalone.path().join("aplan")).expect("mkdir aplan");
+    std::fs::write(standalone.path().join(".aplan.yml"), &runner_yaml).expect("write .aplan.yml");
+    let (out, code) = aplan(standalone.path(), &["check"]);
+    assert_eq!(
+        code, 0,
+        "standalone quickstart runner was refused by `aplan check`: {out}"
+    );
+    assert!(out.contains("ok: 0 tasks, 0 warning(s)"), "{out}");
+
+    // 2. Appended to `aplan init`'s generated `.aplan.yml` alongside the quickstart's `plan.yml`.
+    let full = tempfile::Builder::new()
+        .tempdir_in(aplan_core::fixture::fixture_root())
+        .expect("full tempdir");
+    let (init_out, init_code) = aplan(full.path(), &["init"]);
+    assert_eq!(init_code, 0, "aplan init failed: {init_out}");
+    let mut cfg = std::fs::read_to_string(full.path().join(".aplan.yml")).expect("read .aplan.yml");
+    cfg.push('\n');
+    cfg.push_str(&runner_yaml);
+    std::fs::write(full.path().join(".aplan.yml"), cfg).expect("append runner to .aplan.yml");
+
+    let recipe = fenced_under(&doc, "Starting a plan", "yaml");
+    std::fs::write(full.path().join("plan.yml"), &recipe).expect("write plan.yml");
+    let (add_out, add_code) = aplan(full.path(), &["add", "--from", "plan.yml"]);
+    assert_eq!(add_code, 0, "quickstart add --from failed: {add_out}");
+
+    let (check_out, check_code) = aplan(full.path(), &["check"]);
+    assert_eq!(
+        check_code, 0,
+        "quickstart plan with documented runner failed `aplan check`: {check_out}"
+    );
+    assert!(
+        check_out.contains("ok: 3 tasks, 0 warning(s)"),
+        "{check_out}"
+    );
+}

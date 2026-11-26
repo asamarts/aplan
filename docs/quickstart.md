@@ -45,6 +45,22 @@ ok: 3 tasks, 0 warning(s), DAG acyclic
 The operation writes nothing unless the complete post-state is valid. Entries may refer to other
 entries in the same file regardless of order. Run `aplan add --help` for every supported field.
 
+## Configuring a test runner
+
+To resolve `test:` evidence citations, add a `test` runner to `.aplan.yml`:
+
+```yaml
+# .aplan.yml
+test:
+  list: [cargo, test, -q, '--', --list]
+  run: [cargo, test, -q, '--', --exact, '{test}']
+```
+
+Both `list` and `run` are argument sequences executed directly without a shell: `list` prints one
+test name per line, and `run` must include `{test}` as a whole element. Repositories with multiple
+suites can declare a list of named runners under `test:`, or group them under `test.runners` with
+`test.schedule: {capacity: 2}` to bound concurrent provider work.
+
 ## Daily work
 
 ```sh
