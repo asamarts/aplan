@@ -438,3 +438,159 @@ fn a_url_citation_with_no_checker_is_reported_as_not_run() {
         "{row}"
     );
 }
+
+// --- `A2-135`: single-pass vacuity work counters and multi-rule keys --------
+
+fn shared_trace_vacuity_fixture(dir: &Path, config: Option<&str>) {
+    std::fs::create_dir_all(dir.join("aplan/tasks")).expect("mkdir");
+    std::fs::create_dir_all(dir.join("docs")).expect("docs");
+    if let Some(cfg) = config {
+        std::fs::write(dir.join(".aplan.yml"), cfg).expect("config");
+    }
+    std::fs::write(
+        dir.join("docs/spec.md"),
+        "# Spec\n\n## Alpha\n\nUpdated body.\n\n| Item | Value |\n|---|---|\n| beta | row |\n",
+    )
+    .expect("md");
+    std::fs::write(dir.join("docs/spec.yaml"), "service:\n  mode: strict\n").expect("yaml");
+    std::fs::write(
+        dir.join("aplan/tasks/M-1.md"),
+        "---\nid: M-1\ntitle: cut one\nphase: 1\nstatus: todo\ntags: [milestone]\n\
+         blocked_by: [T-1]\n---\n",
+    )
+    .expect("milestone");
+    std::fs::write(
+        dir.join("aplan/tasks/T-1.md"),
+        "---\nid: T-1\ntitle: live without effort\nphase: 1\nstatus: todo\n\
+         traces:\n- docs/spec.md#alpha\n- docs/spec.yaml#/service\n---\n",
+    )
+    .expect("T-1");
+    std::fs::write(
+        dir.join("aplan/tasks/T-2.md"),
+        "---\nid: T-2\ntitle: drifted and weak\nphase: 1\nstatus: done\neffort_days: 1\n\
+         version_impact: none\npaths:\n- \"docs/**\"\n\
+         traces:\n- docs/spec.md#alpha\n- docs/spec.yaml#/service\n\
+         evidence:\n  - kind: note\n    ref: reviewed\n    captured: \"2026-10-01\"\n\
+         trace_fingerprints:\n  docs/spec.md#alpha: deadbeefdeadbeef\n\
+         \x20 docs/spec.yaml#/service: 0000000000000000\n---\n\n\
+         ## Acceptance criteria\n\n- [x] done\n",
+    )
+    .expect("T-2");
+    std::fs::write(
+        dir.join("aplan/tasks/T-3.md"),
+        "---\nid: T-3\ntitle: unstamped and retargeted\nphase: 1\nstatus: done\neffort_days: 1\n\
+         paths:\n- \"docs/**\"\n\
+         traces:\n- docs/spec.md#alpha\n- docs/spec.md#beta\n- docs/spec.yaml#/service\n\
+         evidence:\n  - kind: file\n    ref: docs/spec.md\n\
+         trace_fingerprints:\n  docs/spec.md#beta: \"heading:deadbeefdeadbeef\"\n---\n\n\
+         ## Acceptance criteria\n\n- [x] done\n",
+    )
+    .expect("T-3");
+}
+
+/// `A2-135` AC 3 & AC 4: `vacuity` performs one graph construction and at most
+/// one parse per trace document, both unscoped and with `--cut`, including when
+/// `.aplan.yml` is absent or explicitly disables switches and when multiple
+/// rules sit behind `detect_drift`.
+#[test]
+fn vacuity_performs_one_graph_build_and_one_parse_per_trace_document() {
+    for (label, config, extra_args) in [
+        ("absent-config", None, &["--root", "aplan"][..]),
+        (
+            "explicitly-disabled",
+            Some(
+                "root: aplan\nrequire_effort: false\ndetect_drift: false\n\
+                 require_cut_membership: false\n",
+            ),
+            &[][..],
+        ),
+        (
+            "scoped-cut",
+            Some(
+                "root: aplan\nrequire_effort: false\ndetect_drift: false\n\
+                 require_cut_membership: false\n",
+            ),
+            &["--cut", "M-1"][..],
+        ),
+    ] {
+        let dir = tempfile::Builder::new()
+            .prefix(&format!("vacuity-work-{label}-"))
+            .tempdir_in(aplan_core::fixture::fixture_root())
+            .expect("tempdir");
+        shared_trace_vacuity_fixture(dir.path(), config);
+
+        let mut argv = vec!["--timings", "--cache", "off", "vacuity", "--format", "json"];
+        argv.extend_from_slice(extra_args);
+        let run = common::run(dir.path(), &argv);
+        assert_eq!(run.code, 0, "{label}: {}", run.text());
+        let timing = run
+            .stderr
+            .lines()
+            .find(|line| line.starts_with("aplan: timings "))
+            .unwrap_or_else(|| panic!("{label}: missing timing diagnostic: {}", run.stderr));
+        for field in [
+            "graph_builds=1",
+            "trace_reads=2",
+            "markdown_parses=1",
+            "structured_parses=1",
+        ] {
+            assert!(
+                timing.contains(field),
+                "{label}: missing `{field}` in {timing}"
+            );
+        }
+
+        let doc: serde_json::Value = serde_json::from_str(&run.stdout).expect("vacuity json");
+        let rules = doc["rules"].as_array().expect("rules");
+        let not_run = |code: &str| -> Option<String> {
+            rules
+                .iter()
+                .find(|r| r["rule"] == code)
+                .and_then(|r| r.get("not_run"))
+                .and_then(serde_json::Value::as_str)
+                .map(str::to_string)
+        };
+        // Multiple rules behind `detect_drift` all appear in one pass.
+        for code in ["APLAN018", "APLAN028", "APLAN060"] {
+            assert_eq!(
+                not_run(code).as_deref(),
+                Some("detect_drift"),
+                "{label}: expected `{code}` under `detect_drift`: {}",
+                run.stdout
+            );
+        }
+        assert_eq!(
+            not_run("APLAN017").as_deref(),
+            Some("evidence.require_min_strength"),
+            "{label}: {}",
+            run.stdout
+        );
+        assert_eq!(
+            not_run("APLAN022").as_deref(),
+            Some("require_cut_membership"),
+            "{label}: {}",
+            run.stdout
+        );
+        assert_eq!(
+            not_run("APLAN044").as_deref(),
+            Some("version.require_impact"),
+            "{label}: {}",
+            run.stdout
+        );
+        if config.is_some() {
+            assert_eq!(
+                not_run("APLAN009").as_deref(),
+                Some("require_effort"),
+                "{label}: {}",
+                run.stdout
+            );
+        } else {
+            assert_eq!(
+                not_run("APLAN009"),
+                None,
+                "{label}: require_effort defaults on when config is absent: {}",
+                run.stdout
+            );
+        }
+    }
+}

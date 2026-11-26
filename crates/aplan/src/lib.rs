@@ -14552,7 +14552,45 @@ fn selected_ids_with_claims(
     }
     let tasks: Vec<_> = plan.tasks.iter().map(|lt| &lt.task).collect();
     let graph = build_graph(tasks.iter().copied());
-    refuse_a_release_as_a_cut(plan, &graph, &selector.cuts)?;
+    selected_ids_with_graph_and_claims(plan, &graph, selector, claims)
+}
+
+fn selected_ids_with_graph(
+    root: &std::path::Path,
+    plan: &aplan_core::load::Plan,
+    graph: &Graph<'_>,
+    selector: &aplan_core::select::Selector,
+) -> Result<std::collections::BTreeSet<String>> {
+    if selector.is_empty() {
+        return Ok(plan.tasks.iter().map(|lt| lt.task.id.clone()).collect());
+    }
+    let claims = if selector.unclaimed {
+        let snapshot = aplan_app::claims::snapshot(root, plan)?;
+        if !snapshot.scope.available {
+            anyhow::bail!(
+                "cannot select `--unclaimed`: {}. Run inside a Git repository or omit that \
+                 selector; unavailable coordination is not evidence that work is free",
+                snapshot
+                    .scope
+                    .reason
+                    .as_deref()
+                    .unwrap_or("the local claim scope is unavailable")
+            );
+        }
+        Some(snapshot)
+    } else {
+        None
+    };
+    selected_ids_with_graph_and_claims(plan, graph, selector, claims.as_ref())
+}
+
+fn selected_ids_with_graph_and_claims(
+    plan: &aplan_core::load::Plan,
+    graph: &Graph<'_>,
+    selector: &aplan_core::select::Selector,
+    claims: Option<&aplan_core::ClaimSnapshot>,
+) -> Result<std::collections::BTreeSet<String>> {
+    refuse_a_release_as_a_cut(plan, graph, &selector.cuts)?;
     Ok(graph
         .task_rows()
         .tasks
@@ -14943,15 +14981,15 @@ fn cmd_vacuity(root: &std::path::Path, format: &str, select: &SelectArgs) -> Res
         return Ok(EXIT_VIOLATIONS);
     }
     let selector = select.selector()?;
-    let keep = selected_ids(root, &plan, &selector)?;
-    let tasks: Vec<&aplan_core::task::Task> = plan
-        .tasks
-        .iter()
-        .map(|lt| &lt.task)
+    let all_tasks: Vec<&aplan_core::task::Task> = plan.tasks.iter().map(|lt| &lt.task).collect();
+    let graph = timed("project", || build_graph(all_tasks.iter().copied()));
+    let keep = selected_ids_with_graph(root, &plan, &graph, &selector)?;
+    let tasks: Vec<&aplan_core::task::Task> = all_tasks
+        .into_iter()
         .filter(|t| keep.contains(&t.id))
         .collect();
     // The configuration too, so a rule it switched off is reported as not run
-    // rather than as having checked its subjects (`A1-269`).
+    // rather than as having checked its subjects (`A1-269`, `A2-135`).
     let (config, config_dir) = config_at(root)?;
     let opts = resolve_check_options(
         &config,
@@ -14961,27 +14999,23 @@ fn cmd_vacuity(root: &std::path::Path, format: &str, select: &SelectArgs) -> Res
         false,
         Some(plan_repository(root)),
     );
-    let mut off = aplan_core::vacuity::switched_off(&plan, &opts);
+    let mut off = timed("validate", || {
+        aplan_core::vacuity::switched_off_with_graph(&plan, &opts, &graph)
+    });
     off.extend(resolver_side_off(&config, &tasks));
-    let report = aplan_core::vacuity::of_with(&tasks, &off);
-    render_tolerant(|| aplan_output::render_vacuity(&report, format))?;
+    let report = timed("project", || aplan_core::vacuity::of_with(&tasks, &off));
+    timed("render", || {
+        render_tolerant(|| aplan_output::render_vacuity(&report, format))
+    })?;
     // Always `0`: a measurement is not a verdict (`A1-151`, `A1-020`).
     Ok(EXIT_OK)
 }
 
-/// Rules a *resolver's* configuration leaves nothing for (`A1-274`).
+/// Rules a *resolver's* configuration leaves nothing for (`A1-274`, `A2-135`).
 ///
-/// `A1-269` measures the switches in `validate::Options` by running the rules
-/// again with each one on. That reaches every hermetic rule and none of the
-/// evidence ones: they are produced by `verify`, which opens the repository, so
-/// the same trick would cost this report its hermeticity.
-///
-/// **So these are stated rather than measured, and what stops the statement
-/// drifting is a test.** Each line below asserts "this rule cannot speak in this
-/// configuration", and `every_resolver_gated_rule_is_really_silent` puts a plan
-/// in that configuration and fails if the rule speaks. A claim about a rule that
-/// stops being true fails there, which is the property the measured half gets
-/// for free and this half has to buy.
+/// Derived directly from [`aplan_core::Rule::switch_disposition`] via
+/// [`aplan_core::vacuity::resolver_switched_off`], audited against `.aplan.yml`'s
+/// accepted keys and `every_resolver_gated_rule_is_really_silent`.
 ///
 /// Reads configuration and cited test *names* only: no subprocess and no
 /// repository, so `vacuity` is still hermetic.
@@ -14989,48 +15023,18 @@ fn resolver_side_off(
     config: &aplan_config::Config,
     tasks: &[&aplan_core::task::Task],
 ) -> std::collections::BTreeMap<&'static str, &'static str> {
-    let mut out = std::collections::BTreeMap::new();
-    // Every `test` citation in the plan, which is what a runner would have to
-    // claim locality over.
     let cited: Vec<String> = tasks
         .iter()
         .flat_map(|t| t.evidence.iter())
         .filter(|e| e.kind == aplan_core::EvidenceKind::Test)
         .map(|e| e.reference.clone())
         .collect();
-
-    let test_key = aplan_core::task::EvidenceConfiguredResolver::Test.config_key();
-    match &config.test {
-        // No runner at all: nothing resolves a `test` citation, so every rule
-        // over one is inert.
-        None => {
-            // One `insert` per code rather than a loop over an array: the audit
-            // that asks which crate *raises* a rule reads `insert(code::X,` as
-            // the read-only idiom it is, and a code buried in an array literal
-            // reads as raising one (`A1-274`).
-            out.insert(aplan_core::diagnostic::code::TEST_UNRESOLVED, test_key);
-            out.insert(aplan_core::diagnostic::code::TEST_FAILED, test_key);
-            out.insert(aplan_core::diagnostic::code::TEST_IRRELEVANT, test_key);
-            out.insert(aplan_core::diagnostic::code::RUNNER_LISTS_NOTHING, test_key);
-            out.insert(aplan_core::diagnostic::code::RUN_PROVES_NOTHING, test_key);
-        }
-        // A runner that claims no locality cannot demonstrate a mismatch, which
-        // is `APLAN025`'s own early return. `p00002` is the case: its single
-        // runner declares nothing, and declaring something would be false --
-        // those tests genuinely read the whole tree.
-        Some(runners) => {
-            if !aplan_evidence::claims_locality(runners, &cited) {
-                out.insert(aplan_core::diagnostic::code::TEST_IRRELEVANT, "test.covers");
-            }
-        }
-    }
-    if config.url.is_none() {
-        out.insert(
-            aplan_core::diagnostic::code::URL_UNREACHABLE,
-            aplan_core::task::EvidenceConfiguredResolver::Url.config_key(),
-        );
-    }
-    out
+    let has_test = config.test.is_some();
+    let test_locality = config
+        .test
+        .as_ref()
+        .is_some_and(|runners| aplan_evidence::claims_locality(runners, &cited));
+    aplan_core::vacuity::resolver_switched_off(has_test, test_locality, config.url.is_some())
 }
 
 /// `aplan deprecations`, the runway a plan declares (`A1-021`).

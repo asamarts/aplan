@@ -921,32 +921,16 @@ fn resolver_side_off(
     config: &aplan_config::Config,
     tasks: &[&Task],
 ) -> BTreeMap<&'static str, &'static str> {
-    let mut out = BTreeMap::new();
     let cited = tasks
         .iter()
         .flat_map(|task| &task.evidence)
         .filter(|evidence| evidence.kind == EvidenceKind::Test)
         .map(|evidence| evidence.reference.clone())
         .collect::<Vec<_>>();
-    let test_key = aplan_core::task::EvidenceConfiguredResolver::Test.config_key();
-    match &config.test {
-        None => {
-            out.insert(aplan_core::code::TEST_UNRESOLVED, test_key);
-            out.insert(aplan_core::code::TEST_FAILED, test_key);
-            out.insert(aplan_core::code::TEST_IRRELEVANT, test_key);
-            out.insert(aplan_core::code::RUNNER_LISTS_NOTHING, test_key);
-            out.insert(aplan_core::code::RUN_PROVES_NOTHING, test_key);
-        }
-        Some(runners) if !aplan_evidence::claims_locality(runners, &cited) => {
-            out.insert(aplan_core::code::TEST_IRRELEVANT, "test.covers");
-        }
-        Some(_) => {}
-    }
-    if config.url.is_none() {
-        out.insert(
-            aplan_core::code::URL_UNREACHABLE,
-            aplan_core::task::EvidenceConfiguredResolver::Url.config_key(),
-        );
-    }
-    out
+    let has_test = config.test.is_some();
+    let test_locality = config
+        .test
+        .as_ref()
+        .is_some_and(|runners| aplan_evidence::claims_locality(runners, &cited));
+    aplan_core::vacuity::resolver_switched_off(has_test, test_locality, config.url.is_some())
 }

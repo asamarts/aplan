@@ -23,7 +23,10 @@
 //! **Not a coverage percentage.** "`APLAN012` ran on 44 tasks" is not the
 //! question; how many of those it could have failed is.
 
-use crate::diagnostic::{Binding, Rule};
+use std::collections::{BTreeMap, BTreeSet};
+
+use crate::diagnostic::{Binding, ResolverSwitch, Rule, SwitchDisposition, ValidationSwitch};
+use crate::graph::Graph;
 use crate::task::Task;
 
 /// One rule's reach over a plan.
@@ -62,93 +65,188 @@ impl RuleReach {
     }
 }
 
-/// A config switch, and the `.aplan.yml` key an adopter would set.
+/// One rule entry audited by [`audit_switch_dispositions`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct SwitchCatalogEntry {
+    pub code: &'static str,
+    pub disposition: SwitchDisposition,
+}
+
+/// Audit rule switch dispositions against the declared switch catalogues and
+/// `.aplan.yml`'s accepted key schema (`A2-135`).
 ///
-/// Each is a field of [`crate::validate::Options`] that can stop a rule from
-/// firing at all. The list is of *switches*, not of rules: which rules each one
-/// stops is measured rather than declared, so a rule that grows a dependency on
-/// one joins without anybody remembering (`A1-269`).
-type Switch = (&'static str, fn(&mut crate::validate::Options));
+/// Returns concrete failure descriptions for every defect found:
+/// - missing rule dispositions (a rule in [`Rule::ALL`] absent from `entries`);
+/// - duplicate rule dispositions (a rule code listed more than once);
+/// - unknown rule codes in `entries`;
+/// - duplicate `config_key` or `options_field` entries across switches;
+/// - stale switch config keys absent from `accepted_config_keys`;
+/// - stale/orphan switches that no rule in `entries` references.
+#[must_use]
+pub fn audit_switch_dispositions(
+    entries: &[SwitchCatalogEntry],
+    validation_switches: &[ValidationSwitch],
+    resolver_switches: &[ResolverSwitch],
+    accepted_config_keys: &[String],
+) -> Vec<String> {
+    let mut failures = Vec::new();
+    let accepted: BTreeSet<&str> = accepted_config_keys.iter().map(String::as_str).collect();
 
-/// The strongest set a repository steers toward, used as "on" when probing
-/// `evidence.require_min_strength` in [`SWITCHES`].
-const MIN_STRENGTH_ON: &[crate::task::EvidenceKind] = &[
-    crate::task::EvidenceKind::Commit,
-    crate::task::EvidenceKind::File,
-    crate::task::EvidenceKind::Test,
-];
-
-const SWITCHES: &[Switch] = &[
-    ("require_effort", |o| o.require_effort = true),
-    ("detect_drift", |o| o.detect_drift = true),
-    ("require_cut_membership", |o| {
-        o.require_cut_membership = true;
-    }),
-    // Any non-empty list turns `APLAN017` on; the strongest set is the one a
-    // repository steers toward, so it is what "on" means here.
-    ("evidence.require_min_strength", |o| {
-        if o.require_min_strength.as_deref() != Some(MIN_STRENGTH_ON) {
-            o.require_min_strength = Some(MIN_STRENGTH_ON.to_vec());
-            // Measuring whether `APLAN017` was switched off must not fabricate
-            // an `APLAN059` finding for the synthetic `Test` kind above.
-            o.configured_resolvers = None;
+    let mut seen_codes = BTreeSet::new();
+    let mut referenced_validation = BTreeSet::new();
+    let mut referenced_resolver = BTreeSet::new();
+    for entry in entries {
+        if !seen_codes.insert(entry.code) {
+            failures.push(format!("duplicate switch disposition for `{}`", entry.code));
         }
-    }),
-    // On means the shipped floors, which is what an adopter who sets
-    // `require_impact` and nothing else gets. Choosing stricter floors here
-    // would report `APLAN044` as switched off for tasks the default would not
-    // have named either.
-    ("version.require_impact", |o| {
-        o.require_impact = Some(crate::task::VersionFloors::default());
-    }),
-];
+        if Rule::from_code(entry.code).is_none() {
+            failures.push(format!(
+                "stale switch disposition names unknown rule `{}`",
+                entry.code
+            ));
+        }
+        match entry.disposition {
+            SwitchDisposition::ValidationSwitch(sw) => {
+                referenced_validation.insert(sw);
+                if !validation_switches.contains(&sw) {
+                    failures.push(format!(
+                        "`{}` references undeclared validation switch `{}`",
+                        entry.code,
+                        sw.config_key()
+                    ));
+                }
+            }
+            SwitchDisposition::ResolverSwitch(sw) => {
+                referenced_resolver.insert(sw);
+                if !resolver_switches.contains(&sw) {
+                    failures.push(format!(
+                        "`{}` references undeclared resolver switch `{sw:?}`",
+                        entry.code
+                    ));
+                }
+            }
+            SwitchDisposition::Unconditional | SwitchDisposition::External => {}
+        }
+    }
 
-/// Which rules the configuration has switched off, and the key that did it.
+    for &rule in Rule::ALL {
+        if !seen_codes.contains(rule.code()) {
+            failures.push(format!(
+                "missing switch disposition for `{}` ({})",
+                rule.code(),
+                rule.title()
+            ));
+        }
+    }
+
+    let mut seen_validation_keys = BTreeSet::new();
+    let mut seen_options_fields = BTreeSet::new();
+    for &sw in validation_switches {
+        let key = sw.config_key();
+        if !seen_validation_keys.insert(key) {
+            failures.push(format!("duplicate validation switch config key `{key}`"));
+        }
+        let field = sw.options_field();
+        if !seen_options_fields.insert(field) {
+            failures.push(format!(
+                "duplicate validation switch options field `{field}`"
+            ));
+        }
+        if !accepted.contains(key) {
+            failures.push(format!(
+                "stale validation switch key `{key}` is not in `.aplan.yml`'s accepted keys"
+            ));
+        }
+        if !referenced_validation.contains(&sw) {
+            failures.push(format!(
+                "stale validation switch `{key}` is referenced by no rule in the catalogue"
+            ));
+        }
+    }
+
+    let mut seen_resolvers = BTreeSet::new();
+    for &sw in resolver_switches {
+        if !seen_resolvers.insert(sw) {
+            failures.push(format!("duplicate resolver switch `{sw:?}`"));
+        }
+        for &key in sw.config_keys() {
+            if !accepted.contains(key) {
+                failures.push(format!(
+                    "stale resolver switch key `{key}` is not in `.aplan.yml`'s accepted keys"
+                ));
+            }
+        }
+        if !referenced_resolver.contains(&sw) {
+            failures.push(format!(
+                "stale resolver switch `{sw:?}` is referenced by no rule in the catalogue"
+            ));
+        }
+    }
+
+    failures
+}
+
+/// Which rules the configuration has switched off, and the key that did it,
+/// derived from one single exhaustive validation pass (`A1-269`, `A2-135`).
 ///
-/// Measured by asking: with this switch on and everything else as configured,
-/// does any rule say something it does not say now? A rule that does was
-/// prevented from speaking by that key. Nothing is hand-listed, so a rule that
-/// starts reading a switch appears here on the commit that makes it do so, and
-/// one that stops reading it disappears the same way.
-///
-/// **What it can and cannot see.** It reports a rule the configuration would
-/// have changed the answer of *on this plan*, which is the actionable set: it is
-/// exactly the case `p003` hit, where a fixture omitted `detect_drift` and the
-/// drift it had deliberately introduced went unreported while `vacuity` called
-/// the task checked. A rule switched off with subjects it would have passed
-/// anyway is not distinguishable from one that ran, and cannot be without
-/// asking the rules to declare their own dependencies -- a second registry that
-/// would drift from the first.
+/// Builds one dependency graph and parses each distinct traced document at most
+/// once, then projects the pass's typed [`crate::validate::ValidationObservations`]
+/// onto the rule catalogue's [`SwitchDisposition`] mapping.
 #[must_use]
 pub fn switched_off(
     plan: &crate::load::Plan,
     opts: &crate::validate::Options,
-) -> std::collections::BTreeMap<&'static str, &'static str> {
-    let codes = |o: &crate::validate::Options| -> std::collections::BTreeSet<String> {
-        crate::validate::validate(plan, o)
-            .diagnostics
-            .into_iter()
-            .map(|d| d.code.to_string())
-            .collect()
-    };
-    let now = codes(opts);
-    let mut out = std::collections::BTreeMap::new();
-    for (key, turn_on) in SWITCHES {
-        let mut with = opts.clone();
-        turn_on(&mut with);
-        // Already on: nothing to reveal, and the run would cost a full pass over
-        // the plan to learn it. On a plan this repository's size that is most of
-        // the command's time (`A1-269`'s audit).
-        if with == *opts {
-            continue;
-        }
-        for code in codes(&with).difference(&now) {
-            // A rule already attributed keeps its first key: two switches that
-            // both unblock it is a fact about the plan, and naming one is what
-            // an adopter can act on.
-            if let Some(rule) = Rule::ALL.iter().find(|r| r.code() == code) {
-                out.entry(rule.code()).or_insert(*key);
+) -> BTreeMap<&'static str, &'static str> {
+    crate::validate::validate_with_observations(plan, opts)
+        .1
+        .switched_off()
+}
+
+/// Same as [`switched_off`], reusing graph state the enclosing operation
+/// already constructed so commands such as `aplan vacuity --cut ...` construct
+/// exactly one graph per snapshot (`A2-135`).
+#[must_use]
+pub fn switched_off_with_graph(
+    plan: &crate::load::Plan,
+    opts: &crate::validate::Options,
+    graph: &Graph<'_>,
+) -> BTreeMap<&'static str, &'static str> {
+    crate::validate::validate_with_graph_and_observations(plan, opts, graph)
+        .1
+        .switched_off()
+}
+
+/// Which `verify`-tier rules a repository's resolver configuration leaves
+/// inactive, derived directly from [`Rule::ALL`] and [`Rule::switch_disposition`]
+/// (`A1-274`, `A2-135`).
+#[must_use]
+pub fn resolver_switched_off(
+    has_test_runner: bool,
+    test_claims_locality: bool,
+    has_url_checker: bool,
+) -> BTreeMap<&'static str, &'static str> {
+    let test_key = crate::task::EvidenceConfiguredResolver::Test.config_key();
+    let url_key = crate::task::EvidenceConfiguredResolver::Url.config_key();
+    let mut out = BTreeMap::new();
+    for &rule in Rule::ALL {
+        match rule.switch_disposition() {
+            SwitchDisposition::ResolverSwitch(ResolverSwitch::Test) if !has_test_runner => {
+                out.insert(rule.code(), test_key);
             }
+            SwitchDisposition::ResolverSwitch(ResolverSwitch::TestLocality) => {
+                if !has_test_runner {
+                    out.insert(rule.code(), test_key);
+                } else if !test_claims_locality {
+                    out.insert(rule.code(), "test.covers");
+                }
+            }
+            SwitchDisposition::ResolverSwitch(ResolverSwitch::UrlCheck) if !has_url_checker => {
+                out.insert(rule.code(), url_key);
+            }
+            SwitchDisposition::ResolverSwitch(_)
+            | SwitchDisposition::ValidationSwitch(_)
+            | SwitchDisposition::Unconditional
+            | SwitchDisposition::External => {}
         }
     }
     out
@@ -506,6 +604,487 @@ mod switched_off_tests {
         assert!(
             !off.contains_key("APLAN059"),
             "APLAN059 is not switched off by evidence.require_min_strength: {off:?}"
+        );
+    }
+
+    type OracleSwitch = (&'static str, fn(&mut crate::validate::Options));
+
+    /// Reference multi-pass implementation (the pre-`A2-135` path) retained in
+    /// tests only as an equivalence oracle and as the mutation target proving
+    /// the work-count check fails if repeated validation is restored.
+    fn repeated_validator_switched_off(
+        plan: &crate::load::Plan,
+        opts: &crate::validate::Options,
+    ) -> BTreeMap<&'static str, &'static str> {
+        let switches: &[OracleSwitch] = &[
+            ("require_effort", |o| o.require_effort = true),
+            ("detect_drift", |o| o.detect_drift = true),
+            ("require_cut_membership", |o| {
+                o.require_cut_membership = true;
+            }),
+            ("evidence.require_min_strength", |o| {
+                if o.require_min_strength.as_deref()
+                    != Some(crate::validate::VACUITY_MIN_STRENGTH_ON)
+                {
+                    o.require_min_strength =
+                        Some(crate::validate::VACUITY_MIN_STRENGTH_ON.to_vec());
+                    o.configured_resolvers = None;
+                }
+            }),
+            ("version.require_impact", |o| {
+                o.require_impact = Some(crate::task::VersionFloors::default());
+            }),
+        ];
+        let codes = |o: &crate::validate::Options| -> BTreeSet<String> {
+            crate::validate::validate(plan, o)
+                .diagnostics
+                .into_iter()
+                .map(|d| d.code.to_string())
+                .collect()
+        };
+        let now = codes(opts);
+        let mut out = BTreeMap::new();
+        for (key, turn_on) in switches {
+            let mut with = opts.clone();
+            turn_on(&mut with);
+            if with == *opts {
+                continue;
+            }
+            for code in codes(&with).difference(&now) {
+                if let Some(rule) = Rule::ALL.iter().find(|r| r.code() == code) {
+                    out.entry(rule.code()).or_insert(*key);
+                }
+            }
+        }
+        out
+    }
+
+    fn verify_single_pass_work(
+        plan: &crate::load::Plan,
+        opts: &crate::validate::Options,
+        max_markdown_parses: usize,
+        max_structured_parses: usize,
+        compute: impl FnOnce(
+            &crate::load::Plan,
+            &crate::validate::Options,
+        ) -> BTreeMap<&'static str, &'static str>,
+    ) -> Result<BTreeMap<&'static str, &'static str>, String> {
+        let graphs_before = crate::graph_constructions();
+        let traces_before = crate::trace_document_work();
+        let off = compute(plan, opts);
+        let graph_builds = crate::graph_constructions() - graphs_before;
+        let traces_after = crate::trace_document_work();
+        let markdown_parses = traces_after.markdown_parses - traces_before.markdown_parses;
+        let structured_parses = traces_after.structured_parses - traces_before.structured_parses;
+        let mut problems = Vec::new();
+        if graph_builds != 1 {
+            problems.push(format!("expected 1 graph build, observed {graph_builds}"));
+        }
+        if markdown_parses > max_markdown_parses {
+            problems.push(format!(
+                "expected at most {max_markdown_parses} Markdown parse(s), observed \
+                 {markdown_parses}"
+            ));
+        }
+        if structured_parses > max_structured_parses {
+            problems.push(format!(
+                "expected at most {max_structured_parses} structured parse(s), observed \
+                 {structured_parses}"
+            ));
+        }
+        if problems.is_empty() {
+            Ok(off)
+        } else {
+            Err(problems.join("; "))
+        }
+    }
+
+    fn shared_trace_corpus() -> (tempfile::TempDir, crate::load::Plan) {
+        let dir = tempfile::Builder::new()
+            .prefix("vacuity-single-pass-")
+            .tempdir_in(crate::fixture::fixture_root())
+            .expect("tempdir");
+        let md_path = dir.path().join("docs/spec.md");
+        let yaml_path = dir.path().join("docs/spec.yaml");
+        std::fs::create_dir_all(dir.path().join("docs")).expect("docs");
+        std::fs::write(
+            &md_path,
+            "# Spec\n\n## Alpha\n\nChanged body.\n\n| Item | Value |\n|---|---|\n| beta | row |\n",
+        )
+        .expect("md");
+        std::fs::write(&yaml_path, "service:\n  mode: strict\n").expect("yaml");
+
+        // Task 1: live, missing effort (APLAN009), in no cut (APLAN022).
+        let t_live = live("A-1");
+
+        // Task 2: done with note evidence only (APLAN017), unexplained `none`
+        // version impact (APLAN044), drifted Markdown stamp (APLAN018).
+        let mut t_drift = live("A-2");
+        t_drift.status = Status::Done;
+        t_drift.effort_days = Some(1.0);
+        t_drift.evidence = vec![crate::task::Evidence {
+            kind: crate::task::EvidenceKind::Note,
+            reference: "reviewed".to_string(),
+            captured: Some("2026-10-01".to_string()),
+        }];
+        t_drift.version_impact = Some(crate::task::VersionImpact::None);
+        t_drift.traces = vec![
+            "docs/spec.md#alpha".to_string(),
+            "docs/spec.yaml#/service".to_string(),
+        ];
+        t_drift.trace_fingerprints.insert(
+            "docs/spec.md#alpha".to_string(),
+            "deadbeefdeadbeef".to_string(),
+        );
+        let yaml_hash = crate::anchor_fingerprint(
+            &std::fs::read_to_string(&yaml_path).expect("read yaml"),
+            "service",
+        );
+        let _ = yaml_hash;
+        t_drift.trace_fingerprints.insert(
+            "docs/spec.yaml#/service".to_string(),
+            "0000000000000000".to_string(),
+        );
+
+        // Task 3: done, shares docs/spec.md with unstamped trace (APLAN028) and
+        // kind-retargeted stamp on `#beta` (`heading:` stamp now resolving to a
+        // table row -> APLAN060).
+        let mut t_multi = live("A-3");
+        t_multi.status = Status::Done;
+        t_multi.effort_days = Some(1.0);
+        t_multi.evidence = vec![crate::task::Evidence {
+            kind: crate::task::EvidenceKind::File,
+            reference: "docs/spec.md".to_string(),
+            captured: None,
+        }];
+        t_multi.traces = vec![
+            "docs/spec.md#alpha".to_string(),
+            "docs/spec.md#beta".to_string(),
+            "docs/spec.yaml#/service".to_string(),
+        ];
+        t_multi.trace_fingerprints.insert(
+            "docs/spec.md#beta".to_string(),
+            "heading:deadbeefdeadbeef".to_string(),
+        );
+
+        (dir, plan_of(vec![t_live, t_drift, t_multi]))
+    }
+
+    /// `A2-135` AC 1: one validation pass distinguishes inapplicable, enabled
+    /// clean, enabled with findings, and disabled (both clean and suppressed).
+    #[test]
+    fn single_pass_observations_distinguish_all_four_activation_states() {
+        use crate::validate::{CheckActivation, validate_with_observations};
+
+        // Empty plan: every switch-gated rule is inapplicable.
+        let empty = plan_of(Vec::new());
+        let (_, empty_obs) =
+            validate_with_observations(&empty, &crate::validate::Options::default());
+        for &switch in ValidationSwitch::ALL {
+            for rule in switch.rules() {
+                assert_eq!(
+                    empty_obs.activation(rule),
+                    Some(CheckActivation::Inapplicable),
+                    "{} should be Inapplicable on an empty plan",
+                    rule.code()
+                );
+            }
+        }
+
+        // Enabled clean vs enabled with findings vs disabled clean vs disabled
+        // with suppressed findings.
+        let mut clean_live = live("C-1");
+        clean_live.effort_days = Some(2.0);
+        let mut cut = live("M-1");
+        cut.tags = vec!["milestone".to_string()];
+        cut.blocked_by = vec!["C-1".to_string()];
+        let clean_plan = plan_of(vec![clean_live, cut]);
+
+        let all_on = crate::validate::Options {
+            require_effort: true,
+            require_cut_membership: true,
+            ..crate::validate::Options::default()
+        };
+        let (_, on_obs) = validate_with_observations(&clean_plan, &all_on);
+        assert_eq!(
+            on_obs.activation(Rule::MissingEffort),
+            Some(CheckActivation::EnabledNoFindings)
+        );
+        assert_eq!(
+            on_obs.activation(Rule::MembershipTotality),
+            Some(CheckActivation::EnabledNoFindings)
+        );
+
+        let all_off = crate::validate::Options {
+            require_effort: false,
+            require_cut_membership: false,
+            ..crate::validate::Options::default()
+        };
+        let (_, off_clean_obs) = validate_with_observations(&clean_plan, &all_off);
+        assert_eq!(
+            off_clean_obs.activation(Rule::MissingEffort),
+            Some(CheckActivation::Disabled {
+                suppressed_findings: 0
+            })
+        );
+        assert_eq!(
+            off_clean_obs.activation(Rule::MembershipTotality),
+            Some(CheckActivation::Disabled {
+                suppressed_findings: 0
+            })
+        );
+        assert!(off_clean_obs.switched_off().is_empty());
+
+        let dirty_plan = plan_of(vec![live("D-1")]);
+        let (on_report, on_dirty_obs) = validate_with_observations(&dirty_plan, &all_on);
+        assert!(on_report.diagnostics.iter().any(|d| d.code == "APLAN009"));
+        assert_eq!(
+            on_dirty_obs.activation(Rule::MissingEffort),
+            Some(CheckActivation::EnabledWithFindings { findings: 1 })
+        );
+        assert_eq!(
+            on_dirty_obs.activation(Rule::MembershipTotality),
+            Some(CheckActivation::EnabledWithFindings { findings: 1 })
+        );
+
+        let (off_report, off_dirty_obs) = validate_with_observations(&dirty_plan, &all_off);
+        assert!(
+            off_report
+                .diagnostics
+                .iter()
+                .all(|d| d.code != "APLAN009" && d.code != "APLAN022"),
+            "disabled checks must not leak diagnostics into the report: {:?}",
+            off_report.diagnostics
+        );
+        assert_eq!(
+            off_dirty_obs.activation(Rule::MissingEffort),
+            Some(CheckActivation::Disabled {
+                suppressed_findings: 1
+            })
+        );
+        assert_eq!(
+            off_dirty_obs.activation(Rule::MembershipTotality),
+            Some(CheckActivation::Disabled {
+                suppressed_findings: 1
+            })
+        );
+        assert_eq!(
+            off_dirty_obs.switched_off().get("APLAN009"),
+            Some(&"require_effort")
+        );
+        assert_eq!(
+            off_dirty_obs.switched_off().get("APLAN022"),
+            Some(&"require_cut_membership")
+        );
+    }
+
+    /// `A2-135` AC 3, AC 4 and AC 5: single-pass `switched_off` matches the
+    /// repeated-validator oracle across all switches (including three rules
+    /// behind `detect_drift`), performs one graph build and one parse per
+    /// shared trace document, and restoring the repeated-validator path fails
+    /// the exact same work-count proof.
+    #[test]
+    fn single_pass_vacuity_proves_work_bounds_and_rejects_repeated_validator_mutant() {
+        let (dir, plan) = shared_trace_corpus();
+        let all_off = crate::validate::Options {
+            require_effort: false,
+            detect_drift: false,
+            require_cut_membership: false,
+            require_min_strength: None,
+            require_impact: None,
+            traces_root: Some(dir.path().to_path_buf()),
+            ..crate::validate::Options::default()
+        };
+
+        let single_pass = verify_single_pass_work(&plan, &all_off, 1, 1, switched_off)
+            .expect("single-pass vacuity must stay within 1 graph build and 1 parse per trace doc");
+        let expected_oracle = repeated_validator_switched_off(&plan, &all_off);
+        assert_eq!(
+            single_pass, expected_oracle,
+            "single-pass vacuity must agree with the reference oracle across all 7 switch-gated \
+             rules (including APLAN018, APLAN028 and APLAN060 under detect_drift)"
+        );
+        for (code, key) in [
+            ("APLAN009", "require_effort"),
+            ("APLAN017", "evidence.require_min_strength"),
+            ("APLAN018", "detect_drift"),
+            ("APLAN022", "require_cut_membership"),
+            ("APLAN028", "detect_drift"),
+            ("APLAN044", "version.require_impact"),
+            ("APLAN060", "detect_drift"),
+        ] {
+            assert_eq!(
+                single_pass.get(code),
+                Some(&key),
+                "missing expected rule `{code}` -> `{key}` in {single_pass:?}"
+            );
+        }
+
+        // Mutation test (AC 5): restoring the repeated-validator path fails
+        // the exact same work-count proof on both graph builds and trace parses.
+        let mutant_err =
+            verify_single_pass_work(&plan, &all_off, 1, 1, repeated_validator_switched_off)
+                .expect_err("restoring the repeated-validator path must fail the work-count proof");
+        assert!(
+            mutant_err.contains("graph build")
+                && mutant_err.contains("Markdown parse")
+                && mutant_err.contains("structured parse"),
+            "mutant should trip graph and trace work counters, got: {mutant_err}"
+        );
+    }
+
+    /// Scoped evidence policies and custom version floors preserve exact
+    /// differential parity with the reference oracle (`A2-135` AC 4).
+    #[test]
+    fn single_pass_matches_oracle_under_scoped_policies_and_custom_floors() {
+        let (dir, plan) = shared_trace_corpus();
+        let scoped = crate::validate::EvidenceScope {
+            selector: crate::select::Selector {
+                tags: vec!["scoped".to_string()],
+                ..crate::select::Selector::default()
+            },
+            named_dimensions: 1,
+            require_min_strength: Some(vec![crate::task::EvidenceKind::Test]),
+            exempt_tags: None,
+        };
+        let configurations = [
+            crate::validate::Options {
+                traces_root: Some(dir.path().to_path_buf()),
+                ..crate::validate::Options::default()
+            },
+            crate::validate::Options {
+                require_effort: false,
+                detect_drift: true,
+                require_cut_membership: true,
+                require_min_strength: Some(vec![crate::task::EvidenceKind::Note]),
+                require_impact: Some(crate::task::VersionFloors {
+                    task: crate::task::VersionImpact::None,
+                    cut: crate::task::VersionImpact::None,
+                    release: crate::task::VersionImpact::None,
+                }),
+                traces_root: Some(dir.path().to_path_buf()),
+                evidence_scopes: vec![scoped.clone()],
+                ..crate::validate::Options::default()
+            },
+            crate::validate::Options {
+                require_effort: true,
+                detect_drift: true,
+                require_cut_membership: true,
+                require_min_strength: Some(vec![crate::task::EvidenceKind::Test]),
+                require_impact: Some(crate::task::VersionFloors::default()),
+                traces_root: Some(dir.path().to_path_buf()),
+                evidence_scopes: vec![scoped],
+                ..crate::validate::Options::default()
+            },
+        ];
+        for opts in &configurations {
+            assert_eq!(
+                switched_off(&plan, opts),
+                repeated_validator_switched_off(&plan, opts),
+                "single-pass disagreed with oracle for {opts:?}"
+            );
+        }
+    }
+
+    /// `A2-135` AC 2 negative tests: missing, duplicate, unknown, stale and
+    /// orphan dispositions all fail `audit_switch_dispositions`.
+    #[test]
+    fn switch_catalogue_audit_rejects_missing_duplicate_stale_and_orphan_entries() {
+        let live: Vec<SwitchCatalogEntry> = Rule::ALL
+            .iter()
+            .map(|&rule| SwitchCatalogEntry {
+                code: rule.code(),
+                disposition: rule.switch_disposition(),
+            })
+            .collect();
+        let accepted: Vec<String> = ValidationSwitch::ALL
+            .iter()
+            .map(|sw| sw.config_key().to_string())
+            .chain(
+                ResolverSwitch::ALL
+                    .iter()
+                    .flat_map(|sw| sw.config_keys().iter().map(|k| (*k).to_string())),
+            )
+            .collect();
+        assert!(
+            audit_switch_dispositions(&live, ValidationSwitch::ALL, ResolverSwitch::ALL, &accepted)
+                .is_empty()
+        );
+
+        let missing = audit_switch_dispositions(
+            &live[1..],
+            ValidationSwitch::ALL,
+            ResolverSwitch::ALL,
+            &accepted,
+        );
+        assert!(missing.iter().any(|m| m.contains("missing")), "{missing:?}");
+
+        let mut dup = live.clone();
+        dup.push(live[0]);
+        let dup_err =
+            audit_switch_dispositions(&dup, ValidationSwitch::ALL, ResolverSwitch::ALL, &accepted);
+        assert!(
+            dup_err.iter().any(|m| m.contains("duplicate")),
+            "{dup_err:?}"
+        );
+
+        let dup_switches = [
+            ValidationSwitch::RequireEffort,
+            ValidationSwitch::RequireEffort,
+            ValidationSwitch::DetectDrift,
+            ValidationSwitch::RequireCutMembership,
+            ValidationSwitch::RequireMinStrength,
+            ValidationSwitch::RequireImpact,
+        ];
+        let dup_sw_err =
+            audit_switch_dispositions(&live, &dup_switches, ResolverSwitch::ALL, &accepted);
+        assert!(
+            dup_sw_err.iter().any(|m| m.contains("duplicate")),
+            "{dup_sw_err:?}"
+        );
+
+        let mut unknown = live.clone();
+        unknown.push(SwitchCatalogEntry {
+            code: "APLAN999",
+            disposition: SwitchDisposition::Unconditional,
+        });
+        let unknown_err = audit_switch_dispositions(
+            &unknown,
+            ValidationSwitch::ALL,
+            ResolverSwitch::ALL,
+            &accepted,
+        );
+        assert!(
+            unknown_err.iter().any(|m| m.contains("stale")),
+            "{unknown_err:?}"
+        );
+
+        let orphan_entries: Vec<SwitchCatalogEntry> = live
+            .iter()
+            .map(|entry| {
+                if entry.disposition
+                    == SwitchDisposition::ValidationSwitch(ValidationSwitch::RequireEffort)
+                {
+                    SwitchCatalogEntry {
+                        code: entry.code,
+                        disposition: SwitchDisposition::Unconditional,
+                    }
+                } else {
+                    *entry
+                }
+            })
+            .collect();
+        let orphan_err = audit_switch_dispositions(
+            &orphan_entries,
+            ValidationSwitch::ALL,
+            ResolverSwitch::ALL,
+            &accepted,
+        );
+        assert!(
+            orphan_err
+                .iter()
+                .any(|m| m.contains("stale") && m.contains("require_effort")),
+            "{orphan_err:?}"
         );
     }
 }

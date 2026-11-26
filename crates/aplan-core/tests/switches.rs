@@ -27,12 +27,10 @@ const NOT_A_SWITCH: &[(&str, &str)] = &[
          whether it speaks",
     ),
     (
-        "evidence_for",
-        "the one accessor `APLAN017` now reads, covering `require_min_strength`, `exempt_tags` \
-         and `evidence_scopes` together. None of them is a switch: they decide which requirement \
-         a subject is held to, not whether the rule runs, and the `subjects` column measures who \
-         it could speak about. `exempt_tags` had its own entry here until scoping generalised it \
-         and no rule read it directly any more (`A1-183`)",
+        "scoped_evidence_for",
+        "the one accessor `APLAN017` reads for scoped evidence policy overrides \
+         (`policy[].evidence.require_min_strength` and `exempt_tags`), paired with \
+         `require_min_strength` as the whole-plan fallback (`A1-183`, `A2-135`)",
     ),
     (
         "evidence_scopes",
@@ -105,26 +103,30 @@ fn every_options_field_a_rule_reads_is_a_switch_or_is_explained() {
         read.len()
     );
 
-    // The switches `vacuity` turns on, by the tail of the `.aplan.yml` key --
-    // `evidence.require_min_strength` is the field `require_min_strength`.
-    let vac = std::fs::read_to_string(
-        std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("src/vacuity.rs"),
-    )
-    .expect("vacuity.rs");
-    let block = vac
-        .split_once("const SWITCHES")
-        .and_then(|(_, rest)| rest.split_once("];"))
-        .map(|(block, _)| block)
-        .expect("the switch table");
-    let switches: std::collections::BTreeSet<String> = block
-        .split('"')
-        .skip(1)
-        .step_by(2)
-        .map(|k| k.rsplit('.').next().unwrap_or_default().to_string())
-        .collect();
+    // The switches declared in the authoritative rule catalogue (`A2-135`),
+    // paired with the exact `Options` field each switch reads.
+    let mut switches = std::collections::BTreeSet::new();
+    let mut keys = std::collections::BTreeSet::new();
+    for &switch in aplan_core::ValidationSwitch::ALL {
+        assert!(
+            switches.insert(switch.options_field().to_string()),
+            "duplicate ValidationSwitch options_field `{}`",
+            switch.options_field()
+        );
+        assert!(
+            keys.insert(switch.config_key()),
+            "duplicate ValidationSwitch config_key `{}`",
+            switch.config_key()
+        );
+        assert!(
+            !switch.rules().is_empty(),
+            "ValidationSwitch `{}` governs no rule in Rule::ALL",
+            switch.config_key()
+        );
+    }
     assert!(
         switches.len() >= 3,
-        "only {} switch(es) parsed, so this audit is not reading the table: {switches:?}",
+        "only {} switch(es) declared in ValidationSwitch::ALL: {switches:?}",
         switches.len()
     );
 

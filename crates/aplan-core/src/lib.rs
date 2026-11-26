@@ -110,8 +110,8 @@ pub use completion::{
     HistoryCompleteness, HistoryLimits, HistoryPolicy,
 };
 pub use diagnostic::{
-    AgentContractProvenance, CandidateProjection, Diagnostic, Repair, Report, Rule, Severity,
-    Verdict, WorkingTreeState, code,
+    AgentContractProvenance, CandidateProjection, Diagnostic, Repair, Report, ResolverSwitch, Rule,
+    Severity, SwitchDisposition, ValidationSwitch, Verdict, WorkingTreeState, code,
 };
 pub use explain::{RuleExplanation, explain_rule};
 pub use export::{TaskExport, TaskRow};
@@ -135,8 +135,10 @@ pub use task::{
     normalize_closed_at, parse_canonical_closed_at, substantive_content,
 };
 pub use validate::{
-    AgentsBlock, Cardinality, MilestoneScope, Options, StatusScope, TagFamily, TraceDocumentWork,
-    is_iso_date, is_one_edit_apart, trace_document_work, validate, validate_with_graph,
+    AgentsBlock, Cardinality, CheckActivation, MilestoneScope, Options, StatusScope, TagFamily,
+    TraceDocumentWork, ValidationObservations, is_iso_date, is_one_edit_apart, trace_document_work,
+    validate, validate_with_graph, validate_with_graph_and_observations,
+    validate_with_observations,
 };
 
 #[cfg(test)]
