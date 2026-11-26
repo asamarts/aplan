@@ -865,12 +865,14 @@ fn resolve_repo_and_plan_rel(
 }
 
 fn relative_under_root(base: &std::path::Path, target: &std::path::Path) -> PathBuf {
-    let base_abs = std::fs::canonicalize(base)
-        .or_else(|_| std::path::absolute(base))
-        .unwrap_or_else(|_| base.to_path_buf());
-    let target_abs = std::fs::canonicalize(target)
-        .or_else(|_| std::path::absolute(target))
-        .unwrap_or_else(|_| target.to_path_buf());
+    if let Ok(base_canon) = std::fs::canonicalize(base)
+        && let Ok(target_canon) = std::fs::canonicalize(target)
+        && let Ok(rel) = target_canon.strip_prefix(&base_canon)
+    {
+        return rel.to_path_buf();
+    }
+    let base_abs = std::path::absolute(base).unwrap_or_else(|_| base.to_path_buf());
+    let target_abs = std::path::absolute(target).unwrap_or_else(|_| target.to_path_buf());
     match target_abs.strip_prefix(&base_abs) {
         Ok(rel) => rel.to_path_buf(),
         Err(_) => target.to_path_buf(),
