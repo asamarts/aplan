@@ -1,8 +1,8 @@
 # Read-path performance and exact incremental snapshots
 
-Status: Accepted for phased implementation; A1-588, A1-322, A1-589 and A2-135 delivered
+Status: Accepted for phased implementation; A1-588, A1-322, A1-589, A2-135 and A2-136 delivered
 
-Owning tasks: `A1-588`, `A1-322`, `A1-589`, `A1-590`-`A1-594`, `A2-135`
+Owning tasks: `A1-588`, `A1-322`, `A1-589`, `A1-590`-`A1-594`, `A2-135`, `A2-136`
 
 Date: 2026-10-18
 
@@ -96,9 +96,10 @@ The initial release budgets should be:
   clean-checkout parse budget;
 - no local bounded read may parse unchanged YAML, parse one trace document more than once, or spawn a
   configured command;
-- `A1-594` establishes the bounded-response threshold from measured terminal, pipe and protocol
-  behavior. Larger responses must start below 100 ms and stream with bounded memory; 256 KiB is an
-  initial measurement point, not a contract chosen without data.
+- `A2-136` (superseding `A1-594`) established the **256 KiB** (`BOUNDED_RESPONSE_THRESHOLD_BYTES`)
+  bounded-response threshold and **16 KiB** (`STREAM_BUFFER_CAPACITY`) streaming buffer from
+  measured human, JSON, Markdown/graph, throttled-pipe and MCP protocol behavior. Larger outputs
+  begin promptly and stream with O(1) output buffering.
 
 The existing HLD sentence, "`check` on 10,000 tasks in under 100 ms, cold", is not currently an
 enforced or achieved contract. The existing scale gate intentionally ratchets complexity ratios,
@@ -405,7 +406,7 @@ explicit about later observation/output rows:
 | trace or relevant config change | structural reads | trace/config invalidation covered; exact report hit performs zero trace parses | complete |
 | unavailable/read-only/corrupt index | same bytes, findings and exit as no index | semantic equivalence and safe miss covered | complete |
 | evidence observation current/stale/absent | default `show` | delivered and measured; provider spawn count is zero | complete |
-| output-dominated | unscoped 10,000-row output | stdout bytes and TTFB measured by harness; streaming absent | `A1-594` |
+| output-dominated | unscoped 10,000-row output | delivered and measured (`A2-136`): 16 KiB bounded streaming, O(1) output buffering, flat RSS vs `check`, and exhaustive CLI+MCP disposition inventory | complete |
 
 This prevents an absent cache row from being reported as a hit and prevents a provider refresh from
 being compared to a local read. `A1-589` extended the same harness rather than creating a second
@@ -559,6 +560,106 @@ read and parse per distinct referenced trace document, cutting release CPU on th
 shared-trace corpus by 2.76x (244.9 ms to 88.7 ms) and bringing its cache-disabled release p95
 under 100 ms. A mutation test restores the pre-`A2-135` repeated-validator path and verifies that it
 produces the same map while failing the deterministic graph-build and trace-parse proof.
+
+### A2-136 measured output-dominated streaming and bounded-response threshold
+
+`A2-136` measures representative human, JSON, Markdown, graph and MCP responses before and after
+streaming, establishes a data-backed bounded-response threshold, streams preflighted output-dominated
+surfaces through a bounded 16 KiB `StreamingWriter` (`crates/aplan-output/src/stream.rs`), extends
+`--timings` and `ci/scripts/read-performance.py --output-matrix` with `output_bytes`,
+`peak_output_buffer_bytes`, `transfer_p50_ms` and per-child `max_rss_p50_kib`, hardens early
+`BrokenPipe` and interrupted MCP consumer shutdown (including terminating active configured providers
+on client disconnect with zero orphaned descendants), and enforces an exhaustive derived CLI+MCP
+read-surface disposition inventory (`aplan::read_surface_inventory()`).
+
+**How the 256 KiB threshold and 16 KiB streaming buffer were established.** Pre-streaming
+measurements on `kbox` (baseline `68f43e1`, release profile, warm index hit, `NO_COLOR=1`) exposed
+two concrete failure modes once output crossed roughly 256 KiB:
+
+1. **Unbuffered per-token writes turned transfer into the dominant latency phase.** Pre-streaming
+   `tasks --format json` wrote unbuffered `serde_json::to_writer_pretty` directly to a locked stdout
+   adapter, causing 37.9 ms transfer on the current 206-task plan (301 KiB), 96.2 ms transfer on
+   1,000 tasks (830 KiB), and 596.2 ms transfer on 10,000 tasks (8.24 MiB, 1,451.7 ms total wall).
+2. **Whole-document JSON `Value` and `String` buffers caused multi-MiB RSS spikes before byte 0.**
+   Pre-streaming `roadmap --format json` (2.31 MiB) and `graph --format json` (2.27 MiB) spiked
+   10,000-task process RSS to 94,240 KiB (+19.3 MiB over `roadmap` human) and 91,716 KiB (+16.5 MiB
+   over `graph` dot) before emitting byte 0.
+
+Meanwhile every response at or below 256 KiB transferred in 1-15 ms (completing well inside the
+100 ms read budget across both current and 1,000-task corpora). Across Linux pipe capacity (64 KiB;
+4x = 256 KiB), terminal PTY buffers (4 KiB), and MCP protocol caps (64 KiB paginated resources,
+512 KiB hard tool ceiling), **256 KiB (`BOUNDED_RESPONSE_THRESHOLD_BYTES`)** is the empirical
+boundary above which output volume becomes its own latency and memory class, and **16 KiB
+(`STREAM_BUFFER_CAPACITY`)** is the streaming buffer size (one quarter of a Linux pipe buffer: large
+enough to coalesce millions of small formatting writes while capping peak resident output buffering
+at O(1) 16 KiB and keeping early `BrokenPipe` stop responsive).
+
+**Reproducible post-streaming measurements (`ci/scripts/read-performance.py --output-matrix`).**
+Recorded on `kbox` (`Linux-7.2.8-arch1-2-x86_64`, one-minute load 7.15-13.50 while other host work
+ran) comparing pre-streaming release baseline (`68f43e1`) against post-streaming release
+(`target/release/aplan`, 31,798,336 bytes, SHA-256 `6ab1b32890fd5bf6`) and development
+(`target/debug/aplan`, 108,011,416 bytes, SHA-256 `6384ad543d9f64e6`) on warm index hits (5 samples
+after 2 warm-ups on current and 1,000-task corpora; 3 samples after 1 warm-up on release 10,000 and
+2 samples after 1 warm-up on dev 10,000):
+
+| corpus / command | bytes | release wall p50 (before -> after) | release TTFB p50 (before -> after) | release xfer p50 (before -> after) | dev wall p50 / p95 (after) | peak output buf (after) | release max RSS (before -> after) |
+|---|---:|---:|---:|---:|---:|---:|---:|
+| current / `ready` human | 7,095 | 41.1 -> 19.8 ms | 37.5 -> 18.5 ms | 3.3 -> 1.3 ms | 26.1 / 30.9 ms | 7,095 B | 26,008 -> 26,404 KiB |
+| current / `ready --format json` | 27,058 | 45.5 -> 22.0 ms | 40.9 -> 19.7 ms | 4.5 -> 1.6 ms | 25.9 / 34.6 ms | 16,384 B | 25,644 -> 26,276 KiB |
+| current / `tasks` human | 25,623 | 53.2 -> 22.6 ms | 46.8 -> 20.9 ms | 7.4 -> 1.6 ms | 28.8 / 34.6 ms | 16,370 B | 26,156 -> 26,728 KiB |
+| current / `tasks --format json` | 300,941 | 71.6 -> 23.0 ms | 35.2 -> 20.5 ms | 37.9 -> 2.4 ms | 32.7 / 35.4 ms | 16,384 B | 25,796 -> 26,420 KiB |
+| current / `roadmap --format json` | 76,797 | 29.2 -> 12.8 ms | 26.4 -> 11.6 ms | 3.4 -> 1.2 ms | 18.7 / 49.9 ms | 16,384 B | 20,216 -> 25,224 KiB |
+| generated-1000 / `tasks` human | 90,522 | 107.5 -> 58.3 ms | 93.1 -> 54.4 ms | 14.7 -> 3.8 ms | 84.8 / 95.4 ms | 16,380 B | 27,660 -> 28,344 KiB |
+| generated-1000 / `tasks --format json` | 847,347 | 199.4 -> 57.7 ms | 94.6 -> 52.4 ms | 96.2 -> 5.3 ms | 80.1 / 82.7 ms | 16,384 B | 27,328 -> 28,444 KiB |
+| generated-1000 / `roadmap --format json` | 221,620 | 78.0 -> 40.5 ms | 73.2 -> 36.8 ms | 5.2 -> 3.1 ms | 53.8 / 56.5 ms | 16,384 B | 23,508 -> 27,636 KiB |
+| generated-1000 / `graph --format json` | 207,452 | 69.2 -> 35.2 ms | 62.5 -> 32.6 ms | 6.8 -> 2.6 ms | 44.7 / 48.3 ms | 16,384 B | 22,472 -> 27,636 KiB |
+| generated-10000 / `ready --format json` | 570,082 | 631.5 -> 391.5 ms | 609.1 -> 377.1 ms | 22.4 -> 14.4 ms | 548.6 / 551.0 ms | 16,384 B | 79,724 -> 83,944 KiB |
+| generated-10000 / `tasks` human | 909,523 | 1,055.2 -> 575.6 ms | 968.5 -> 542.5 ms | 91.6 -> 33.5 ms | 1,011.2 / 1,060.6 ms | 16,382 B | 83,876 -> 87,940 KiB |
+| generated-10000 / `tasks --format json` | 8,413,749 | 1,451.7 -> 596.9 ms | 867.4 -> 535.3 ms | 596.2 -> 58.4 ms | 960.1 / 966.5 ms | 16,384 B | 84,244 -> 87,628 KiB |
+| generated-10000 / `roadmap` human | 679,819 | 605.4 -> 387.7 ms | 567.8 -> 364.2 ms | 37.5 -> 24.5 ms | 635.7 / 688.6 ms | 16,380 B | 74,976 -> 79,484 KiB |
+| generated-10000 / `roadmap --format json` | 2,178,252 | 672.9 -> 374.8 ms | 642.7 -> 355.1 ms | 29.2 -> 19.7 ms | 627.0 / 642.5 ms | 16,384 B | 94,240 -> 79,168 KiB |
+| generated-10000 / `roadmap --format markdown` | 738,740 | 615.7 -> 361.7 ms | 591.3 -> 346.6 ms | 24.4 -> 15.0 ms | 625.8 / 639.5 ms | 16,384 B | 76,384 -> 80,112 KiB |
+| generated-10000 / `graph --format mermaid` | 831,093 | 500.9 -> 306.8 ms | 477.9 -> 289.7 ms | 22.9 -> 16.7 ms | 496.7 / 527.6 ms | 16,384 B | 74,916 -> 78,904 KiB |
+| generated-10000 / `graph --format dot` | 1,073,121 | 434.7 -> 319.6 ms | 417.9 -> 299.4 ms | 16.8 -> 18.4 ms | 477.5 / 512.8 ms | 16,384 B | 75,172 -> 79,412 KiB |
+| generated-10000 / `graph --format json` | 2,083,054 | 391.7 -> 323.4 ms | 367.3 -> 302.9 ms | 25.1 -> 19.0 ms | 438.1 / 449.3 ms | 16,384 B | 91,716 -> 78,868 KiB |
+| generated-10000 / `check --format json` (control) | 136 | 386.5 -> 361.6 ms | 375.1 -> 348.7 ms | 14.1 -> 11.9 ms | 493.9 / 509.5 ms | 136 B | 75,136 -> 79,308 KiB |
+
+Key observations from the matrix and complementary consumer probes:
+
+- **Bounded responses complete inside 100 ms in both profiles.** Every current-plan and 1,000-task
+  surface completes below 100 ms p95 in both release (12.6-79.9 ms) and development (19.5-95.4 ms).
+- **Transfer speedup and flat RSS on 10,000 tasks.** Coalesced 16 KiB streaming cut `tasks --format
+  json` transfer 10.2x on 10,000 tasks (596.2 ms to 58.4 ms) and 18.2x on 1,000 tasks (96.2 ms to
+  5.3 ms). Eliminating intermediate `serde_json::Value` trees dropped 10,000-task RSS on `roadmap
+  json` by 15.1 MiB (94,240 KiB to 79,168 KiB) and `graph json` by 12.8 MiB (91,716 KiB to
+  78,868 KiB), matching the 136-byte `check json` control (79,308 KiB) within 0.5 MiB. Every
+  streamed 10,000-task surface stays pinned at `peak_output_buffer_bytes <= 16,384` (up to 513x
+  lower output buffering on the 8.41 MiB `tasks json` payload). The remaining 10,000-task
+  load/projection latency (~270 ms load, ~75-248 ms projection) belongs to `A2-134` (`A1-591`).
+- **Throttled-pipe separation of TTFB from transfer.** Draining stdout at 16 KiB per 5 ms (simulating
+  a slow pager/terminal consumer), release `current / tasks json` (301 KiB) emits byte 0 at
+  **22.9 ms TTFB** while transferring over 189.7 ms (212.6 ms wall, `peak_buf=16,384`);
+  `generated-1000 / tasks json` (847 KiB) emits byte 0 at **64.8 ms TTFB** while transferring over
+  544.2 ms (609.1 ms wall, `peak_buf=16,384`).
+- **MCP protocol framing bounds.** Single JSON-RPC tool frames cannot stream incrementally, so
+  `aplan_ready`, `aplan_check`, `aplan_verify`, `aplan_show`, `aplan_why` and `aplan_identity`
+  enforce a 512 KiB `MAX_TOOL_RESULT_BYTES` ceiling on both legacy text and structured envelopes and
+  return a bounded refusal directing callers to paginated `aplan://` resources (`<= 64 KiB` per
+  page). Measured cold-session stdio release frames: `current / aplan://plan/summary` 1,029 B,
+  `current / aplan_ready` 20,234 B, `generated-1000 / aplan_ready` 40,917 B, and
+  `generated-1000 / aplan://collections/ready?limit=20` 5,563 B.
+
+**Derived read-surface output dispositions (`aplan::read_surface_inventory()`).** Every CLI read
+command/format and every MCP read tool/resource is derived from the live `clap` command tree,
+`COMMAND_SURFACES`, `TOOLS`, `RESOURCES` and `RESOURCE_TEMPLATES` and assigned one of four explicit
+dispositions, audited executably in `crates/aplan/tests/read_streaming.rs`:
+
+| Disposition | Surfaces | Atomic error / size boundary |
+|---|---|---|
+| `streamed` | CLI `check`, `verify` (`human`, `json`, `sarif`, `github`, `agent`), `ready`, `tasks`, `roadmap` (`human`, `json`, `markdown`), `graph` (`mermaid`, `dot`, `json`), `paths`, `stale`, `due`, `deprecations`, `test list` (`human`, `json`, `agent`) | Validation, projection and finite-float preflights complete before byte 0; 16 KiB `StreamingWriter` strips ANSI before counting and stops promptly with exit 0 on `BrokenPipe` |
+| `paginated` | CLI `completed` (`human`, `json`); MCP `aplan://collections/ready{?limit,cursor}`, `aplan://collections/completed{?cut,phase,owner,tag,since,until,oldest,history,limit,cursor}` | Bounded page limit (`<= 100` CLI, `<= 50` and `<= 64 KiB` MCP) with snapshot-bound continuation cursor |
+| `explicitly_capped` | CLI `graph --format text`, `inbox` (`human`, `json`), `paths match` (`human`, `json`); MCP read tools (`aplan_identity`, `aplan_ready`, `aplan_why`, `aplan_show`, `aplan_check`, `aplan_verify`), `aplan://plan/summary`, `aplan://tasks/{id}` | Hard ceiling enforced before emission (`MAX_CANVAS_CELLS` 8,000,000, `inbox` 100 rows, `paths match` default 200 per entry with `--all` streaming, MCP 512 KiB tool / 64 KiB resource caps) |
+| `buffered` | CLI `show`, `why`, `summary`, `critical-path`, `vacuity`, `version`, `check-docs`, `tree`, `facts`, `schema`, `explain`, `attest`, `export-agents-md`, `export-roadmap-json`, `export`, `inbox show`, `test receipt` | Focused single-task / fixed-cardinality views or atomic `--check`/template/digest contracts that must assemble completely before emitting bytes |
 
 ### A1-588 implementation choices
 
@@ -840,8 +941,10 @@ and regressions stay visible:
 8. **Delivered by A2-135:** rule evaluation emits typed activation observations in one pass so
    `vacuity` performs one graph construction and at most one parse per trace document while keeping
    switch dispositions exhaustive on `Rule` in `define_rules!`.
-9. `A1-594`: stream or paginate large human/JSON/protocol collections only after preserving
-   deterministic bytes and atomic-error semantics.
+9. **Delivered by A2-136:** stream preflighted human, Markdown, graph and machine JSON/SARIF
+   read outputs through a bounded 16 KiB `StreamingWriter` above the measured 256 KiB
+   bounded-response threshold, enforce hard MCP tool/resource ceilings and orphan-free disconnect
+   cleanup, and maintain an exhaustive executable CLI+MCP read-surface disposition inventory.
 
 Also measure a narrowly optimized development profile for parser/validator dependencies. The empty
 development-process baseline is only about 30 ms, while per-task work grows much faster than the
@@ -925,7 +1028,9 @@ validator regression.
   window;
 - `A2-135`: delivered single-pass vacuity activation observations and exhaustive switch-catalogue
   audits;
-- `A1-594`: stream output-dominated responses without weakening machine-output atomicity.
+- `A2-136`: delivered bounded 16 KiB output streaming above the measured 256 KiB threshold,
+  preflighted machine serialization, orphan-free `BrokenPipe`/MCP disconnect cleanup, and the
+  exhaustive derived CLI+MCP read-surface disposition inventory.
 
 Re-run the matrix here. If every required current-plan command already meets the target in both
 profiles, the persistent index can narrow to the 10,000-task and cross-process cases; it should not

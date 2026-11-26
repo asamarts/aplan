@@ -1555,12 +1555,19 @@ response below 100 ms and report transfer separately. A changed trace or configu
 cache and an explicit external-provider refresh are distinct states with distinct budgets. The cache is
 never authority, so deleting or corrupting it may change cost but not bytes, diagnostics or exit status.
 
-`ci/scripts/read-performance.py` records min/p50/p95/max wall time, CPU, time to first byte, output bytes and
-deterministic loader/graph/trace work for development and release binaries. Wall time on a busy host is an
-observation, not a shared-runner gate; portable gates assert work counts and the existing 1,500/3,000/
-6,000-task complexity ratios. `docs/design/read-path-performance.md` owns the complete state matrix,
-invalidation model and latest baseline. This replaces the earlier ambiguous and unmet "10,000 tasks in
-under 100 ms, cold" claim without weakening its intended scale bound.
+`ci/scripts/read-performance.py` records min/p50/p95/max wall time, CPU, time to first byte,
+transfer time, per-child peak RSS, output bytes, peak output buffer bytes and deterministic
+loader/graph/trace work for development and release binaries (`--output-matrix` exercises bounded
+and output-dominated human, JSON, Markdown and graph reads). Output-dominated CLI surfaces stream
+preflighted output through a bounded 16 KiB writer above the measured 256 KiB bounded-response
+threshold with deterministic byte parity and clean `BrokenPipe` shutdown, MCP read surfaces enforce
+hard 512 KiB tool / 64 KiB paginated-resource ceilings and terminate active providers on client
+disconnect, and `aplan::read_surface_inventory()` exhaustively classifies every CLI and MCP read
+surface as `streamed`, `paginated`, `explicitly_capped` or `buffered` (`A2-136`). Wall time on a
+busy host is an observation, not a shared-runner gate; portable gates assert work counts and the
+existing 1,500/3,000/6,000-task complexity ratios. `docs/design/read-path-performance.md` owns the
+complete state matrix, invalidation model and latest baseline. This replaces the earlier ambiguous
+and unmet "10,000 tasks in under 100 ms, cold" claim without weakening its intended scale bound.
 
 ---
 

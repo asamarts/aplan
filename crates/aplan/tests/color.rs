@@ -329,7 +329,7 @@ fn plain(text: &str) -> String {
 /// assertion: only equality of two independently sampled clocks is not.
 fn stable_machine_json(command: &str, output: &str) -> serde_json::Value {
     let mut value: serde_json::Value = serde_json::from_str(output).expect("machine JSON");
-    if matches!(command, "ready" | "stale" | "tasks") {
+    if matches!(command, "ready" | "show" | "stale" | "tasks") {
         let observed = value
             .as_object_mut()
             .expect("machine JSON object")

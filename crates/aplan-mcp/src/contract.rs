@@ -897,6 +897,99 @@ pub fn derived_schema() -> Value {
     })
 }
 
+/// Exhaustive read-surface output-disposition inventory derived directly from
+/// [`TOOLS`], [`crate::resources::RESOURCES`], and
+/// [`crate::resources::RESOURCE_TEMPLATES`] (`A2-136`).
+///
+/// Every MCP tool and resource must be classified here: adding a new tool or
+/// resource without declaring its output-volume disposition fails tests so an
+/// unbounded response cannot silently slip onto the protocol surface.
+#[must_use]
+pub fn mcp_read_surface_inventory() -> Vec<aplan_output::stream::ReadSurfaceEntry> {
+    use aplan_output::stream::{OutputDisposition, ReadChannel, ReadSurfaceEntry};
+
+    let mut entries = Vec::new();
+
+    for spec in TOOLS {
+        let potentially_unbounded = match spec.name {
+            // Mutating tools are excluded from the read-surface inventory.
+            "aplan_add" | "aplan_dep" | "aplan_close" | "aplan_claim" | "aplan_release"
+            | "aplan_start" | "aplan_stop" | "aplan_review" => continue,
+            // Read tools whose underlying plan projections scale with task count.
+            "aplan_ready" | "aplan_check" | "aplan_verify" => true,
+            // Read tools focused on server identity or one task.
+            "aplan_identity" | "aplan_why" | "aplan_show" => false,
+            other => panic!(
+                "MCP tool `{other}` is missing an explicit output disposition classification"
+            ),
+        };
+        entries.push(ReadSurfaceEntry {
+            surface: format!("mcp:tool:{}", spec.name),
+            channel: ReadChannel::McpTool,
+            target: spec.name.to_string(),
+            format: "json-rpc/structured".to_string(),
+            potentially_unbounded,
+            disposition: OutputDisposition::ExplicitlyCapped,
+            atomic_error_boundary: "complete JSON-RPC response checked against MAX_TOOL_RESULT_BYTES (512 KiB) before framing; oversized results become a bounded structured refusal",
+            rationale: "Single JSON-RPC tool frames cannot stream incrementally; hard 512 KiB byte cap keeps memory bounded and directs callers to paginated aplan:// resources.",
+        });
+    }
+
+    for spec in crate::resources::RESOURCES {
+        let disposition = match spec.uri {
+            "aplan://plan/summary" => OutputDisposition::ExplicitlyCapped,
+            other => {
+                panic!("MCP static resource `{other}` is missing an explicit output disposition")
+            }
+        };
+        entries.push(ReadSurfaceEntry {
+            surface: format!("mcp:resource:{}", spec.uri),
+            channel: ReadChannel::McpResource,
+            target: spec.uri.to_string(),
+            format: spec.mime_type.to_string(),
+            potentially_unbounded: false,
+            disposition,
+            atomic_error_boundary: "bounded aggregate JSON validated within MAX_RESOURCE_BYTES (64 KiB) before framing",
+            rationale: "Fixed-size aggregate plan summary bounded well below MAX_RESOURCE_BYTES (64 KiB).",
+        });
+    }
+
+    for spec in crate::resources::RESOURCE_TEMPLATES {
+        let (potentially_unbounded, disposition, boundary, rationale) = match spec.uri_template {
+            "aplan://tasks/{id}" => (
+                false,
+                OutputDisposition::ExplicitlyCapped,
+                "single-task JSON verified <= MAX_RESOURCE_BYTES (64 KiB) before framing; oversized task refuses cleanly",
+                "Focused single-task projection without body, strictly capped at 64 KiB.",
+            ),
+            "aplan://collections/ready{?limit,cursor}"
+            | "aplan://collections/completed{?cut,phase,owner,tag,since,until,oldest,history,limit,cursor}" => {
+                (
+                    true,
+                    OutputDisposition::Paginated,
+                    "page sliced to limit <= 50 and dynamically shrunk to <= MAX_RESOURCE_BYTES (64 KiB) with snapshot-bound cursor before framing",
+                    "Potentially unbounded collection served as bounded deterministic pages with input-identity-bound cursors.",
+                )
+            }
+            other => {
+                panic!("MCP resource template `{other}` is missing an explicit output disposition")
+            }
+        };
+        entries.push(ReadSurfaceEntry {
+            surface: format!("mcp:resource:{}", spec.uri_template),
+            channel: ReadChannel::McpResource,
+            target: spec.uri_template.to_string(),
+            format: spec.mime_type.to_string(),
+            potentially_unbounded,
+            disposition,
+            atomic_error_boundary: boundary,
+            rationale,
+        });
+    }
+
+    entries
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -912,6 +1005,21 @@ mod tests {
         }
         let resources = schema["resources"].as_object().expect("resources object");
         assert_eq!(resources.len(), 4);
+
+        let inventory = mcp_read_surface_inventory();
+        assert_eq!(
+            inventory.len(),
+            10,
+            "6 read tools + 1 static resource + 3 resource templates"
+        );
+        assert!(
+            inventory
+                .iter()
+                .any(|e| e.target == "aplan://collections/ready{?limit,cursor}"
+                    && e.disposition == aplan_output::stream::OutputDisposition::Paginated)
+        );
+        assert!(inventory.iter().any(|e| e.target == "aplan_ready"
+            && e.disposition == aplan_output::stream::OutputDisposition::ExplicitlyCapped));
 
         let err = validate_tool_arguments("aplan_unknown", &serde_json::json!({}))
             .expect_err("unknown tool must fail validation");

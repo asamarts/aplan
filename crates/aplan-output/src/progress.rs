@@ -508,5 +508,46 @@ mod tests {
         assert_eq!(fit_line("abcdef", 3), "...");
         assert_eq!(fit_line("abcdef", 2), "..");
         assert_eq!(fit_line("short", usize::MAX), "short");
+
+        assert_eq!(
+            ProgressStreams::from_terminals(true, true),
+            ProgressStreams::BothTerminals
+        );
+        assert_eq!(
+            ProgressStreams::from_terminals(true, false),
+            ProgressStreams::StdoutTerminal
+        );
+        assert_eq!(
+            ProgressStreams::from_terminals(false, true),
+            ProgressStreams::StderrTerminal
+        );
+        assert_eq!(
+            ProgressStreams::from_terminals(false, false),
+            ProgressStreams::Redirected
+        );
+
+        let timing = ProgressTiming::default();
+        let mut hidden = ProgressGate::new(Duration::ZERO, timing);
+        assert_eq!(
+            hidden.changed(Duration::from_millis(10), true),
+            ProgressDraw::FinishHidden
+        );
+        assert_eq!(
+            hidden.due(Duration::from_millis(500)),
+            ProgressDraw::FinishHidden
+        );
+        let mut visible = ProgressGate::new(Duration::ZERO, timing);
+        assert_eq!(
+            visible.due(Duration::from_millis(200)),
+            ProgressDraw::Reveal
+        );
+        assert_eq!(
+            visible.changed(Duration::from_millis(210), true),
+            ProgressDraw::FinishVisible
+        );
+        assert_eq!(
+            visible.due(Duration::from_millis(500)),
+            ProgressDraw::FinishVisible
+        );
     }
 }
