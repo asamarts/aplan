@@ -1769,14 +1769,21 @@ mod tests {
         // External plan root must stay external rather than silently aliasing `aplan`.
         assert_eq!(relative_under_root(&repo_dir, &outside_plan), outside_plan);
 
-        let missing = repo_dir.join("missing/nested-plan");
+        let missing = repo_dir.join("missing").join("nested-plan");
         let (fallback_root, fallback_rel) = resolve_repo_and_plan_rel(&missing, &repo_dir);
         assert_eq!(fallback_root, repo_dir);
-        assert_eq!(fallback_rel, PathBuf::from("missing/nested-plan"));
+        assert_eq!(fallback_rel, PathBuf::from("missing").join("nested-plan"));
 
-        // Non-normal tail components never alias a missing path inside `base`.
-        let parent_tail = repo_dir.join("missing/..");
-        assert_eq!(relative_under_root(&repo_dir, &parent_tail), parent_tail);
+        // Escaping `..` segments never alias a missing path inside `base` on any OS.
+        let parent_escape = repo_dir
+            .join("missing")
+            .join("..")
+            .join("..")
+            .join("outside");
+        assert_eq!(
+            relative_under_root(&repo_dir, &parent_escape),
+            parent_escape
+        );
 
         #[cfg(unix)]
         {
