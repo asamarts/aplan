@@ -1344,4 +1344,60 @@ mod tests {
             reader.join().expect("capture worker");
         }
     }
+
+    #[test]
+    fn prepare_rejects_missing_selection_and_maps_work_actions_and_cli_guidance() {
+        let dir = tempfile::Builder::new()
+            .prefix("mutation-sel")
+            .tempdir_in(aplan_core::fixture::fixture_root())
+            .expect("fixture");
+        let plan_dir = dir.path().join("aplan");
+        std::fs::create_dir_all(plan_dir.join("tasks")).expect("tasks");
+        std::fs::write(
+            plan_dir.join("tasks/T-1.md"),
+            "---\nid: T-1\ntitle: Demo\nphase: 1\nstatus: todo\neffort_days: 1\n---\n\nbody\n",
+        )
+        .expect("task");
+        let context = PlanContext::new(
+            aplan_core::load_plan_identified(&plan_dir),
+            aplan_app::ContextInputs {
+                repository_root: dir.path().to_path_buf(),
+                configuration_file: None,
+                trust: aplan_app::Trust::Hermetic,
+                options: aplan_core::Options::default(),
+                verdict: aplan_core::Verdict::default(),
+            },
+        );
+
+        for action in MutationAction::ALL {
+            if action.needs_selected_task() {
+                let err = prepare(&context, action, None)
+                    .expect_err("task-scoped action without selected task must refuse");
+                assert!(err.contains("needs a selected task"), "{action:?}: {err}");
+            }
+            if action.needs_selected_capture() {
+                let err = prepare(&context, action, None)
+                    .expect_err("capture-scoped action without selected capture must refuse");
+                assert!(
+                    err.contains("needs a selected capture"),
+                    "{action:?}: {err}"
+                );
+            }
+            let _rows: Vec<String> = cli_review_rows(action).collect();
+        }
+
+        assert_eq!(
+            mutation_action(WorkActionKind::Claim),
+            MutationAction::Claim
+        );
+        assert_eq!(
+            mutation_action(WorkActionKind::Release),
+            MutationAction::Release
+        );
+        assert_eq!(
+            mutation_action(WorkActionKind::Start),
+            MutationAction::Start
+        );
+        assert_eq!(mutation_action(WorkActionKind::Stop), MutationAction::Stop);
+    }
 }

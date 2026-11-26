@@ -272,3 +272,32 @@ impl ClaimSnapshot {
         })
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn coordination_state_labels_and_duration_formatting_cover_all_branches() {
+        assert_eq!(ClaimCoordinationState::Active.as_str(), "active");
+        assert_eq!(
+            ClaimCoordinationState::StaleTerminal.as_str(),
+            "stale_terminal"
+        );
+        assert_eq!(
+            ClaimCoordinationState::InProgressUnclaimed.as_str(),
+            "in_progress_unclaimed"
+        );
+        assert_eq!(ClaimCoordinationState::Unclaimed.as_str(), "unclaimed");
+        assert_eq!(ClaimCoordinationState::Unavailable.as_str(), "unavailable");
+
+        assert_eq!(format_duration_short(-5), "0s");
+        assert_eq!(format_duration_short(17), "17s");
+        assert_eq!(format_duration_short(120), "2m");
+        assert_eq!(format_duration_short(125), "2m 5s");
+        assert_eq!(format_duration_short(7200), "2h");
+        assert_eq!(format_duration_short(7320), "2h 2m");
+        assert_eq!(format_duration_short(172_800), "2d");
+        assert_eq!(format_duration_short(180_000), "2d 2h");
+    }
+}

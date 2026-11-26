@@ -8654,4 +8654,416 @@ mod tests {
             entry.diagnostic
         );
     }
+
+    #[test]
+    fn citation_labels_and_outside_repo_file_guard_cover_all_variants() {
+        use crate::resolve::{CitationOutcome, CitationStrength, outside_this_repository};
+        use aplan_core::task::{Status, Task};
+        use std::collections::BTreeMap;
+
+        assert_eq!(CitationStrength::Recorded.label(), "L0 recorded");
+        assert_eq!(CitationStrength::Resolved.label(), "L1 resolved");
+        assert_eq!(CitationStrength::Relevant.label(), "L2 relevant");
+        assert_eq!(CitationStrength::Executed.label(), "L3 executed");
+
+        assert_eq!(CitationOutcome::Resolved.label(), "resolved");
+        assert_eq!(CitationOutcome::Failed.label(), "failed");
+        assert_eq!(CitationOutcome::Refused.label(), "refused");
+        assert_eq!(CitationOutcome::TimedOut.label(), "timed out");
+        assert_eq!(CitationOutcome::Unavailable.label(), "unavailable");
+        assert_eq!(CitationOutcome::OutputLimited.label(), "output limited");
+
+        let task = Task {
+            id: "T-OUT".into(),
+            title: "Outside file check".into(),
+            phase: 1,
+            status: Status::Done,
+            owner: None,
+            effort_days: None,
+            blocked_by: Vec::new(),
+            contains: Vec::new(),
+            ratified_by: Vec::new(),
+            prefer_after: Vec::new(),
+            paths: Vec::new(),
+            traces: Vec::new(),
+            trace_fingerprints: BTreeMap::new(),
+            evidence: Vec::new(),
+            evidence_fingerprints: BTreeMap::new(),
+            tags: Vec::new(),
+            revisit_at: None,
+            version_impact: None,
+            version_impact_reason: None,
+            version: None,
+            closed_at: None,
+            closed_at_source: None,
+        };
+        let file = Path::new("aplan/tasks/T-OUT.md");
+        assert!(outside_this_repository("src/lib.rs", &task, file).is_none());
+
+        let parent =
+            outside_this_repository("../sibling/proof.md", &task, file).expect("parent escape");
+        assert_eq!(parent.code, code::FILE_UNRESOLVED);
+        assert!(parent.message.contains("outside this repository"));
+
+        #[cfg(unix)]
+        let abs_sample = "/etc/hosts";
+        #[cfg(windows)]
+        let abs_sample = r"C:\Windows\System32\drivers\etc\hosts";
+        let abs = outside_this_repository(abs_sample, &task, file).expect("absolute path");
+        assert_eq!(abs.code, code::FILE_UNRESOLVED);
+        assert!(abs.message.contains("outside this repository"));
+    }
+
+    #[test]
+    fn test_resolver_batch_stopped_timed_out_and_stranded_path_diagnostics_render_cleanly() {
+        use crate::batch::TestBatchOutcome;
+        use crate::resolve::{Breach, Executed, Shown, TestResolver};
+        use aplan_core::task::{Evidence, EvidenceKind, Status, Task};
+        use std::collections::BTreeMap;
+
+        let task = Task {
+            id: "T-DIAG".into(),
+            title: "Diagnostic check".into(),
+            phase: 1,
+            status: Status::Todo,
+            owner: None,
+            effort_days: None,
+            blocked_by: Vec::new(),
+            contains: Vec::new(),
+            ratified_by: Vec::new(),
+            prefer_after: Vec::new(),
+            paths: vec!["src/removed.rs".into()],
+            traces: Vec::new(),
+            trace_fingerprints: BTreeMap::new(),
+            evidence: Vec::new(),
+            evidence_fingerprints: BTreeMap::new(),
+            tags: Vec::new(),
+            revisit_at: None,
+            version_impact: None,
+            version_impact_reason: None,
+            version: None,
+            closed_at: None,
+            closed_at_source: None,
+        };
+        let ev = Evidence {
+            kind: EvidenceKind::Test,
+            reference: "unit::case".into(),
+            captured: None,
+        };
+        let file = Path::new("aplan/tasks/T-DIAG.md");
+
+        let cfg = aplan_config::parse_config(
+            "test:\n  name: unit\n  list: ['true']\n  run: ['true', '{test}']\n",
+            Path::new(".aplan.yml"),
+        )
+        .expect("cfg");
+        let runners = cfg.test.expect("test").all().to_vec();
+        let resolver = TestResolver::new(runners, PathBuf::from("."), true, None);
+
+        let d_excerpt = TestResolver::batch_not_proved(
+            &ev,
+            &task,
+            file,
+            Shown::Excerpt("boom\ndetail".into()),
+            "skipped",
+            "adapter skipped it",
+        );
+        assert_eq!(d_excerpt.detail, vec!["boom", "detail"]);
+        let d_already = TestResolver::execution_finding(
+            Executed::Unavailable(Shown::Already),
+            &ev,
+            &task,
+            file,
+        )
+        .expect("unavailable finding");
+        assert!(d_already.message.contains("another finding in this run"));
+        let d_reported = TestResolver::execution_finding(
+            Executed::Reported(TestBatchOutcome::Skipped, Shown::Nothing),
+            &ev,
+            &task,
+            file,
+        )
+        .expect("reported finding");
+        assert!(d_reported.message.contains("skipped"));
+
+        let d_stopped = resolver.stopped(0, Breach::Memory, &ev, &task, file);
+        assert!(d_stopped.message.contains("was stopped under `--execute`"));
+        let d_timeout = resolver.timed_out(0, 30, &ev, &task, file);
+        assert!(d_timeout.message.contains("after 30s"));
+        let _ = resolver.stopped_while_listing(0, Breach::Processes);
+    }
+
+    #[test]
+    fn stranded_live_path_without_rename_reports_removal_commit() {
+        use crate::resolve::report_stranded_live_paths;
+        use aplan_core::task::{Status, Task};
+        use std::collections::{BTreeMap, BTreeSet};
+
+        let task = Task {
+            id: "T-STRAND".into(),
+            title: "Stranded check".into(),
+            phase: 1,
+            status: Status::Todo,
+            owner: None,
+            effort_days: None,
+            blocked_by: Vec::new(),
+            contains: Vec::new(),
+            ratified_by: Vec::new(),
+            prefer_after: Vec::new(),
+            paths: vec!["src/removed.rs".into()],
+            traces: Vec::new(),
+            trace_fingerprints: BTreeMap::new(),
+            evidence: Vec::new(),
+            evidence_fingerprints: BTreeMap::new(),
+            tags: Vec::new(),
+            revisit_at: None,
+            version_impact: None,
+            version_impact_reason: None,
+            version: None,
+            closed_at: None,
+            closed_at_source: None,
+        };
+        let file = Path::new("aplan/tasks/T-STRAND.md");
+
+        // Live task pointing at a file that was previously tracked and deleted without rename.
+        let dir = tempfile::Builder::new()
+            .prefix("stranded-removed-")
+            .tempdir_in(aplan_core::fixture::fixture_root())
+            .expect("tempdir");
+        let git = |args: &[&str]| {
+            let out = std::process::Command::new("git")
+                .current_dir(dir.path())
+                .args(args)
+                .output()
+                .expect("git");
+            assert!(out.status.success(), "git {args:?}");
+        };
+        git(&["init", "-q"]);
+        git(&["config", "user.email", "t@example.com"]);
+        git(&["config", "user.name", "Test"]);
+        std::fs::create_dir_all(dir.path().join("src")).expect("src");
+        std::fs::write(dir.path().join("src/removed.rs"), "pub fn old() {}\n").expect("write");
+        std::fs::write(dir.path().join("src/keep.rs"), "pub fn keep() {}\n").expect("keep");
+        git(&["add", "-A"]);
+        git(&["commit", "-q", "-m", "add"]);
+        std::fs::remove_file(dir.path().join("src/removed.rs")).expect("rm");
+        git(&["add", "-A"]);
+        git(&["commit", "-q", "-m", "remove"]);
+
+        let repo = crate::repo::Repo::discover(dir.path()).expect("repo");
+        let tracked = vec![PathBuf::from("src/keep.rs")];
+        let tracked_set = BTreeSet::from(["src/keep.rs".to_string()]);
+        let mut history = BTreeMap::new();
+        let mut out = Vec::new();
+        report_stranded_live_paths(
+            &repo,
+            &task,
+            file,
+            &tracked,
+            &tracked_set,
+            &mut history,
+            &mut out,
+        )
+        .expect("stranded check");
+        assert_eq!(out.len(), 1, "{out:#?}");
+        assert!(
+            out[0]
+                .message
+                .contains("was previously tracked and removed in commit"),
+            "{}",
+            out[0].message
+        );
+    }
+
+    #[test]
+    fn batch_breach_unproven_selection_unscheduled_runner_and_skipped_output_limit_are_reported() {
+        use crate::batch::{BatchWorkspace, ReportedOutcome, TestBatchOutcome};
+        use crate::resolve::{Breach, Cost, Executed, Outcome, TestResolver};
+        use aplan_core::task::{Evidence, EvidenceKind, Status, Task};
+        use std::collections::{BTreeMap, BTreeSet};
+
+        let task = Task {
+            id: "T-BAT".into(),
+            title: "Batch edges".into(),
+            phase: 1,
+            status: Status::Done,
+            owner: None,
+            effort_days: None,
+            blocked_by: Vec::new(),
+            contains: Vec::new(),
+            ratified_by: Vec::new(),
+            prefer_after: Vec::new(),
+            paths: Vec::new(),
+            traces: Vec::new(),
+            trace_fingerprints: BTreeMap::new(),
+            evidence: Vec::new(),
+            evidence_fingerprints: BTreeMap::new(),
+            tags: Vec::new(),
+            revisit_at: None,
+            version_impact: None,
+            version_impact_reason: None,
+            version: None,
+            closed_at: None,
+            closed_at_source: None,
+        };
+        let ev = Evidence {
+            kind: EvidenceKind::Test,
+            reference: "unit::case".into(),
+            captured: None,
+        };
+        let file = Path::new("aplan/tasks/T-BAT.md");
+
+        let cfg = aplan_config::parse_config(
+            "test:\n  name: unit\n  list: ['true']\n  run: ['true', '{test}']\n  skipped: ['sh', '-c', 'printf %0400d 0']\n  max_output: '16'\n  batch:\n    protocol: 1\n    run: ['true', '{manifest}', '{result}']\n",
+            Path::new(".aplan.yml"),
+        )
+        .expect("cfg");
+        let runners = cfg.test.expect("test").all().to_vec();
+        let names = BTreeSet::from(["unit::case".to_string()]);
+        let workspace = BatchWorkspace::create(1, &runners[0], &names).expect("workspace");
+
+        let resolver = TestResolver::new(runners.clone(), PathBuf::from("."), true, None);
+        assert!(resolver.record_batch_cost(
+            0,
+            &names,
+            Cost {
+                breach: Some(Breach::Memory),
+                ..Cost::default()
+            },
+        ));
+        let mut out = Vec::new();
+        assert!(matches!(
+            resolver.execute_citation(0, &ev, &task, file, &mut out),
+            Executed::Stopped
+        ));
+        assert_eq!(out.len(), 1);
+
+        let unproven = resolver.reported_batch_outcome(
+            0,
+            &ReportedOutcome {
+                outcome: TestBatchOutcome::UnprovenSelection,
+                attempts: None,
+                diagnostic: None,
+            },
+            &workspace,
+        );
+        assert!(matches!(
+            unproven,
+            Outcome::Passed {
+                proves_nothing: true
+            }
+        ));
+
+        let unsched = TestResolver::new(runners.clone(), PathBuf::from("."), true, None);
+        unsched.reject_unscheduled_runner(0, Some(&names));
+        assert!(unsched.checkers.has_fault(0));
+
+        #[cfg(unix)]
+        {
+            let truncated = TestResolver::new(runners, PathBuf::from("."), true, None);
+            assert!(truncated.skipped_tests(0).is_none());
+            assert_eq!(
+                truncated.checkers.outcome(0),
+                Some(crate::resolve::CitationOutcome::OutputLimited)
+            );
+
+            let missing_skip_cfg = aplan_config::parse_config(
+                "test:\n  name: miss\n  list: ['true']\n  run: ['true', '{test}']\n  skipped: ['no-such-skipped-cmd-4f2a']\n",
+                Path::new(".aplan.yml"),
+            )
+            .expect("missing skip cfg");
+            let missing_skip = TestResolver::new(
+                missing_skip_cfg.test.expect("test").all().to_vec(),
+                PathBuf::from("."),
+                true,
+                None,
+            );
+            assert!(missing_skip.skipped_tests(0).is_none());
+            assert_eq!(
+                missing_skip.checkers.outcome(0),
+                Some(crate::resolve::CitationOutcome::Unavailable)
+            );
+        }
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn skipped_tests_timeout_is_reported_as_unavailable() {
+        use crate::resolve::TestResolver;
+
+        let slow_skip_cfg = aplan_config::parse_config(
+            "test:\n  name: slow\n  list: ['true']\n  run: ['true', '{test}']\n  skipped: ['sh', '-c', 'sleep 3']\n  timeout_seconds: 1\n",
+            Path::new(".aplan.yml"),
+        )
+        .expect("slow skip cfg");
+        let slow_skip = TestResolver::new(
+            slow_skip_cfg.test.expect("test").all().to_vec(),
+            PathBuf::from("."),
+            true,
+            None,
+        );
+        assert!(slow_skip.skipped_tests(0).is_none());
+        assert_eq!(
+            slow_skip.checkers.outcome(0),
+            Some(crate::resolve::CitationOutcome::Unavailable)
+        );
+
+        let nonzero_skip_cfg = aplan_config::parse_config(
+            "test:\n  name: fail_skip\n  list: ['true']\n  run: ['true', '{test}']\n  skipped: ['sh', '-c', 'echo boom >&2; exit 2']\n",
+            Path::new(".aplan.yml"),
+        )
+        .expect("nonzero skip cfg");
+        let nonzero_skip = TestResolver::new(
+            nonzero_skip_cfg.test.expect("test").all().to_vec(),
+            PathBuf::from("."),
+            true,
+            None,
+        );
+        assert!(nonzero_skip.skipped_tests(0).is_none());
+        assert_eq!(
+            nonzero_skip.checkers.outcome(0),
+            Some(crate::resolve::CitationOutcome::Unavailable)
+        );
+
+        let slow_list_cfg = aplan_config::parse_config(
+            "test:\n  name: slow_list\n  list: ['sh', '-c', 'sleep 3']\n  run: ['true', '{test}']\n  timeout_seconds: 1\n",
+            Path::new(".aplan.yml"),
+        )
+        .expect("slow list cfg");
+        let slow_list = TestResolver::new(
+            slow_list_cfg.test.expect("test").all().to_vec(),
+            PathBuf::from("."),
+            true,
+            None,
+        );
+        let list_err = slow_list
+            .list_tests_uncached(0)
+            .expect_err("slow list must time out");
+        assert_eq!(list_err.outcome, crate::resolve::CitationOutcome::TimedOut);
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn cage_reads_memory_and_pids_breaches_and_builds_joiner() {
+        use crate::resolve::Breach;
+
+        let cage_tmp = tempfile::Builder::new()
+            .prefix("cage-unit-")
+            .tempdir_in(aplan_core::fixture::fixture_root())
+            .expect("cage tmp");
+        let cage_dir = cage_tmp.path().join("cg");
+        std::fs::create_dir_all(&cage_dir).expect("cg dir");
+        let cage = crate::resolve::Cage {
+            dir: cage_dir.clone(),
+        };
+        assert_eq!(cage.breach(), None);
+        std::fs::write(cage_dir.join("memory.events"), "low 0\noom_kill 1\n").expect("mem");
+        assert_eq!(cage.breach(), Some(Breach::Memory));
+        std::fs::write(cage_dir.join("memory.events"), "oom_kill 0\n").expect("mem0");
+        std::fs::write(cage_dir.join("pids.events"), "max 3\n").expect("pids");
+        assert_eq!(cage.breach(), Some(Breach::Processes));
+        let joined = cage.joiner(&["echo".into(), "ok".into()]);
+        assert!(joined.iter().any(|arg| arg == "echo"));
+        drop(cage);
+    }
 }

@@ -1171,4 +1171,185 @@ mod tests {
             })
         ));
     }
+
+    #[test]
+    #[allow(clippy::too_many_lines)]
+    fn history_resolver_covers_root_plans_blob_bounds_bad_blobs_and_invalid_revisions() {
+        use aplan_core::{Status, Task};
+        use std::collections::BTreeMap;
+
+        let dir = tempfile::Builder::new()
+            .prefix("history-edges-")
+            .tempdir_in(aplan_core::fixture::fixture_root())
+            .expect("tempdir");
+
+        let done_legacy = Task {
+            id: "T-1".to_string(),
+            title: "Legacy".to_string(),
+            phase: 1,
+            status: Status::Done,
+            owner: None,
+            effort_days: Some(1.0),
+            blocked_by: Vec::new(),
+            prefer_after: Vec::new(),
+            ratified_by: Vec::new(),
+            contains: Vec::new(),
+            evidence: Vec::new(),
+            paths: Vec::new(),
+            traces: Vec::new(),
+            trace_fingerprints: BTreeMap::new(),
+            evidence_fingerprints: BTreeMap::new(),
+            tags: Vec::new(),
+            revisit_at: None,
+            version_impact: None,
+            version_impact_reason: None,
+            version: None,
+            closed_at: None,
+            closed_at_source: None,
+        };
+        let todo_task = Task {
+            id: "T-TODO".to_string(),
+            status: Status::Todo,
+            ..done_legacy.clone()
+        };
+
+        // Explicit revision on a non-existent path outside any repo fails with `InvalidRevision`.
+        let unrooted = Path::new("/");
+        if git2::Repository::discover(unrooted).is_err() {
+            assert!(matches!(
+                resolve_completion_times(
+                    unrooted,
+                    Path::new("."),
+                    &[&done_legacy, &todo_task],
+                    Some("HEAD"),
+                    HistoryPolicy::Auto,
+                    &HistoryLimits::default(),
+                ),
+                Err(CompletionHistoryError::InvalidRevision { .. })
+            ));
+            assert!(matches!(
+                resolve_completion_times(
+                    unrooted,
+                    Path::new("."),
+                    &[&done_legacy],
+                    None,
+                    HistoryPolicy::Required,
+                    &HistoryLimits::default(),
+                ),
+                Err(CompletionHistoryError::Unavailable { .. })
+            ));
+        }
+
+        // Root-level plan (`plan_root_rel == "."`) with non-md, non-task md, invalid UTF-8,
+        // malformed YAML, and oversized blobs exercises every snapshot/blob branch.
+        let repo_dir = dir.path().join("repo");
+        std::fs::create_dir_all(&repo_dir).expect("repo");
+        git(&repo_dir, &["init", "-q"], None);
+        git(&repo_dir, &["config", "user.email", "t@example.com"], None);
+        git(&repo_dir, &["config", "user.name", "Test"], None);
+        std::fs::write(repo_dir.join("notes.txt"), "not markdown\n").expect("txt");
+        std::fs::write(repo_dir.join("README.md"), "# No frontmatter\n").expect("readme");
+        std::fs::write(repo_dir.join("bad_utf8.md"), [0xff, 0xfe, 0x00]).expect("utf8");
+        std::fs::write(repo_dir.join("bad_yaml.md"), "---\nid: [unclosed\n---\n").expect("yaml");
+        std::fs::write(
+            repo_dir.join("T-1.md"),
+            "---\nid: T-1\ntitle: Legacy\nphase: 1\nstatus: done\neffort_days: 1\n---\n\nbody\n",
+        )
+        .expect("task");
+        git(&repo_dir, &["add", "-A"], None);
+        git(&repo_dir, &["commit", "-q", "-m", "seed root plan"], None);
+
+        // Invalid revision and non-commit blob revision fail cleanly.
+        assert!(matches!(
+            resolve_completion_times(
+                &repo_dir,
+                Path::new("."),
+                &[&done_legacy],
+                Some("refs/heads/no-such-branch"),
+                HistoryPolicy::Auto,
+                &HistoryLimits::default(),
+            ),
+            Err(CompletionHistoryError::InvalidRevision { .. })
+        ));
+        let blob_oid = git(&repo_dir, &["rev-parse", "HEAD:notes.txt"], None);
+        assert!(matches!(
+            resolve_completion_times(
+                &repo_dir,
+                Path::new("."),
+                &[&done_legacy],
+                Some(&blob_oid),
+                HistoryPolicy::Auto,
+                &HistoryLimits::default(),
+            ),
+            Err(CompletionHistoryError::InvalidRevision { .. })
+        ));
+
+        // Tiny `max_blob_bytes` triggers `TooLarge` / bounded completeness.
+        let tight_single = HistoryLimits {
+            max_blob_bytes: 8,
+            ..HistoryLimits::default()
+        };
+        let bounded = resolve_completion_times(
+            &repo_dir,
+            Path::new("."),
+            &[&done_legacy],
+            None,
+            HistoryPolicy::Auto,
+            &tight_single,
+        )
+        .expect("bounded report");
+        assert_eq!(bounded.completeness, HistoryCompleteness::IncompleteBounded);
+
+        // Tight total blob budget also triggers `TooLarge` / bounded completeness.
+        let tight_total = HistoryLimits {
+            max_total_blob_bytes: 20,
+            ..HistoryLimits::default()
+        };
+        let bounded_total = resolve_completion_times(
+            &repo_dir,
+            Path::new("."),
+            &[&done_legacy],
+            None,
+            HistoryPolicy::Auto,
+            &tight_total,
+        )
+        .expect("bounded total report");
+        assert_eq!(
+            bounded_total.completeness,
+            HistoryCompleteness::IncompleteBounded
+        );
+
+        // Normal limits parse root plan cleanly and report unparseable files as limitations.
+        let normal = resolve_completion_times(
+            &repo_dir,
+            Path::new("."),
+            &[&done_legacy, &todo_task],
+            None,
+            HistoryPolicy::Auto,
+            &HistoryLimits::default(),
+        )
+        .expect("normal root plan");
+        assert!(normal.resolved.contains_key("T-1"));
+        assert!(!normal.limitations.is_empty());
+
+        // Same-path rekey (`OLD-1` -> `NEW-1` both `done` at the identical file path).
+        let mut parent = super::PlanSnapshot::default();
+        parent
+            .tasks
+            .insert("OLD-1".into(), ("aplan/T.md".into(), Status::Done));
+        parent
+            .by_path
+            .insert("aplan/T.md".into(), ("OLD-1".into(), Status::Done));
+        let mut child = super::PlanSnapshot::default();
+        child
+            .tasks
+            .insert("NEW-1".into(), ("aplan/T.md".into(), Status::Done));
+        child
+            .by_path
+            .insert("aplan/T.md".into(), ("NEW-1".into(), Status::Done));
+        assert_eq!(
+            super::detect_unambiguous_rekey(&child, &parent, "NEW-1").as_deref(),
+            Some("OLD-1")
+        );
+    }
 }

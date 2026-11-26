@@ -896,3 +896,47 @@ pub fn derived_schema() -> Value {
         "resources": resources,
     })
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn derived_schema_enumerates_all_tools_resources_limits_and_concise_text() {
+        let schema = derived_schema();
+        assert_eq!(schema["contract_version"], MCP_CONTRACT_VERSION);
+        let tools = schema["tools"].as_object().expect("tools object");
+        assert_eq!(tools.len(), TOOLS.len());
+        for spec in TOOLS {
+            assert!(tools.contains_key(spec.name), "missing tool {}", spec.name);
+        }
+        let resources = schema["resources"].as_object().expect("resources object");
+        assert_eq!(resources.len(), 4);
+
+        let err = validate_tool_arguments("aplan_unknown", &serde_json::json!({}))
+            .expect_err("unknown tool must fail validation");
+        assert!(err.contains("unknown tool"), "{err}");
+
+        let empty_detail =
+            render_concise_tool_text("aplan_ready", "plan", false, ToolEffect::ReadOnly, "");
+        assert_eq!(
+            empty_detail,
+            "aplan_ready: subject=plan verdict=allowed effect=read_only"
+        );
+        let with_detail =
+            render_concise_tool_text("aplan_close", "T-1", true, ToolEffect::Refused, "blocked");
+        assert!(with_detail.ends_with("-- blocked"), "{with_detail}");
+    }
+
+    #[test]
+    #[should_panic(expected = "unknown MCP tool")]
+    fn input_schema_for_unknown_tool_panics() {
+        let _ = input_schema_for_tool("aplan_does_not_exist");
+    }
+
+    #[test]
+    #[should_panic(expected = "unknown MCP tool")]
+    fn output_schema_for_unknown_tool_panics() {
+        let _ = output_schema_for_tool("aplan_does_not_exist");
+    }
+}

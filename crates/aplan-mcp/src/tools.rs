@@ -4495,4 +4495,101 @@ mod coordination_gate {
             "a refusal rewrote the file"
         );
     }
+
+    #[test]
+    fn describe_stale_mismatch_names_plan_config_repository_and_snapshot_diffs() {
+        let make = |plan_sha: &str, cfg_sha: &str, head: Option<&str>, snap: &str| {
+            aplan_app::InputIdentity {
+                source: "working_tree",
+                plan_root: std::path::PathBuf::from("aplan"),
+                repository_root: std::path::PathBuf::from("."),
+                plan_sha256: plan_sha.to_string(),
+                configuration: aplan_app::ConfigurationIdentity {
+                    path: None,
+                    sha256: cfg_sha.to_string(),
+                    content: aplan_app::ConfigurationContentIdentity::Absent,
+                },
+                repository: aplan_app::RepositoryIdentity::Observed {
+                    head: head.map(str::to_string),
+                    modified: 0,
+                    untracked: 0,
+                    status_sha256: "0".repeat(64),
+                },
+                trust: aplan_app::Trust::RepositoryRead,
+                sha256: snap.to_string(),
+            }
+        };
+        let a = make(
+            "aaaaaaaaaaaa00",
+            "11111111111100",
+            Some("h1"),
+            "ssssssssssss01",
+        );
+        let all_diff = make(
+            "bbbbbbbbbbbb00",
+            "22222222222200",
+            Some("h2"),
+            "ssssssssssss02",
+        );
+        let msg = describe_stale_mismatch(&a, &all_diff);
+        assert!(
+            msg.contains("plan digest aaaaaaaaaaaa -> bbbbbbbbbbbb"),
+            "{msg}"
+        );
+        assert!(
+            msg.contains("configuration digest 111111111111 -> 222222222222"),
+            "{msg}"
+        );
+        assert!(msg.contains("repository state changed"), "{msg}");
+
+        let snap_only = make(
+            "aaaaaaaaaaaa00",
+            "11111111111100",
+            Some("h1"),
+            "tttttttttttt99",
+        );
+        let snap_msg = describe_stale_mismatch(&a, &snap_only);
+        assert!(
+            snap_msg.contains("snapshot digest ssssssssssss -> tttttttttttt"),
+            "{snap_msg}"
+        );
+    }
+
+    #[test]
+    fn show_of_helpers_and_cli_only_explanations_cover_variants() {
+        let dir = tempfile::Builder::new()
+            .prefix("mcp-show-of-")
+            .tempdir_in(aplan_core::fixture::fixture_root())
+            .expect("tempdir");
+        let root = dir.path().join("aplan");
+        std::fs::create_dir_all(root.join("tasks")).expect("tasks");
+        std::fs::write(
+            root.join("tasks/T-1.md"),
+            "---\nid: T-1\ntitle: One\nphase: 1\nstatus: todo\neffort_days: 1\n---\n\nbody\n",
+        )
+        .expect("task");
+        let plan = aplan_core::load_plan(&root);
+        let policy = crate::Policy {
+            repo_root: dir.path().to_path_buf(),
+            ..crate::Policy::default()
+        };
+        let shown = show_of(&plan, "T-1", &policy).expect("show_of");
+        assert_eq!(shown["id"], "T-1");
+        let (cached_val, _) = show_of_cached(&plan, "T-1", &policy, None).expect("show_of_cached");
+        assert_eq!(cached_val["id"], "T-1");
+        assert_eq!(
+            default_unclaimed_state(),
+            aplan_core::ClaimCoordinationState::Unclaimed
+        );
+
+        for reason in [
+            CliOnlyReason::AlternateView,
+            CliOnlyReason::HumanJudgement,
+            CliOnlyReason::HostOperation,
+            CliOnlyReason::ExplicitLocalInput,
+            CliOnlyReason::AdapterBoundary,
+        ] {
+            assert!(!reason.explanation().is_empty());
+        }
+    }
 }

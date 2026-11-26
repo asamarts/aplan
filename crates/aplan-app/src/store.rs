@@ -2731,4 +2731,49 @@ mod tests {
         assert_ne!(key_a, key_b);
         assert!(warm.cached_structural_report(&key_b).is_none());
     }
+
+    #[test]
+    fn refresh_with_progress_emits_cache_publication_events() {
+        let dir = tempfile::Builder::new()
+            .prefix("store-refresh-progress-")
+            .tempdir_in(aplan_core::fixture::fixture_root())
+            .expect("tempdir");
+        let root = dir.path().join("aplan");
+        let cache = dir.path().join("cache");
+        std::fs::create_dir_all(&root).expect("root");
+        std::fs::write(
+            root.join("T-1.md"),
+            "---\nid: T-1\ntitle: One\nphase: 1\nstatus: todo\neffort_days: 1\n---\n\nbody\n",
+        )
+        .expect("task");
+        let mut opts = options(&cache);
+        opts.mode = CacheMode::Refresh;
+        let mut store = PlanStore::open(&root, &opts).expect("open");
+        let mut events = Vec::new();
+        store
+            .refresh_with_progress(crate::OperationId::new(42), &mut |ev| events.push(ev))
+            .expect("refresh with progress");
+        assert!(
+            events.iter().any(|ev| {
+                ev.subject
+                    == crate::ProgressSubject::Phase {
+                        phase: crate::ProgressPhase::CachePublication,
+                        child: None,
+                    }
+                    && ev.lifecycle == crate::ProgressLifecycle::Started
+            }),
+            "{events:#?}"
+        );
+        assert!(
+            events.iter().any(|ev| {
+                ev.subject
+                    == crate::ProgressSubject::Phase {
+                        phase: crate::ProgressPhase::CachePublication,
+                        child: None,
+                    }
+                    && ev.lifecycle == crate::ProgressLifecycle::Completed
+            }),
+            "{events:#?}"
+        );
+    }
 }

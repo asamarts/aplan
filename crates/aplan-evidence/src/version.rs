@@ -1225,4 +1225,58 @@ mod tests {
         );
         assert_eq!(resolve_plan_base(Some(unrelated), &mounted), mounted_canon);
     }
+
+    #[test]
+    fn window_and_next_release_descriptions_cover_tag_ambiguous_and_unmeasurable_cases() {
+        let tag = ReleaseTag {
+            name: "v1.0.0".into(),
+            commit: "1111111111111111111111111111111111111111".into(),
+        };
+        let with_tag = Window {
+            since: Some(tag.clone()),
+            closed: vec!["T-1".into()],
+            unmeasurable: None,
+        };
+        assert!(with_tag.said().contains("since `v1.0.0`"));
+        let without_tag = Window {
+            since: None,
+            closed: vec!["T-1".into()],
+            unmeasurable: None,
+        };
+        assert!(without_tag.said().contains("no release tag reachable"));
+
+        let owed = aplan_core::version::Owed {
+            impact: aplan_core::task::VersionImpact::None,
+            raised_by: None,
+        };
+        let rel_untagged = NextRelease {
+            owed: owed.clone(),
+            since: None,
+            window: Chosen::Release {
+                id: "R-1".into(),
+                unclaimed: 2,
+            },
+        };
+        assert!(
+            rel_untagged
+                .said()
+                .contains("2 task(s) closed that it does not claim")
+        );
+        let ambig = NextRelease {
+            owed: owed.clone(),
+            since: Some(tag),
+            window: Chosen::Ambiguous {
+                ids: vec!["R-1".into(), "R-2".into()],
+            },
+        };
+        assert!(ambig.said().contains("2 open releases"));
+        let unmeas = NextRelease {
+            owed,
+            since: None,
+            window: Chosen::Unmeasurable {
+                why: "shallow clone".into(),
+            },
+        };
+        assert!(unmeas.said().contains("shallow clone"));
+    }
 }

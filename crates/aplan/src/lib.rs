@@ -879,6 +879,7 @@ enum Command {
     /// against currently tracked repository files for one task (`--task <ID>`)
     /// or explicit globs. Inspect exact current matches with `paths match` and
     /// recent commit history with `paths`; neither proves semantic relevance.
+    #[command(args_conflicts_with_subcommands = true)]
     Paths {
         #[command(subcommand)]
         command: Option<PathsCommand>,
@@ -21517,9 +21518,10 @@ mod tests {
             test_catalogue_count(answer.summary.runners, "runner", "runners"),
             "2 runners"
         );
+        let collapse_ws = |s: &str| s.split_whitespace().collect::<Vec<_>>().join(" ");
         let singular_rendered = format_test_catalogue_human(&answer);
         assert!(
-            singular_rendered.contains(
+            collapse_ws(&singular_rendered).contains(
                 "1 unique match for `module::proof` across 2 runners (3 total unique names)"
             ),
             "{singular_rendered}"
@@ -21543,12 +21545,12 @@ mod tests {
         );
         let plural_rendered = format_test_catalogue_human(&plural);
         assert!(
-            plural_rendered
+            collapse_ws(&plural_rendered)
                 .contains("2 unique matches for `corpus` across 2 runners (3 total unique names)"),
             "{plural_rendered}"
         );
         assert!(
-            !plural_rendered.contains("unique matchs"),
+            !collapse_ws(&plural_rendered).contains("unique matchs"),
             "{plural_rendered}"
         );
         render_test_catalogue_human(&plural).expect("filtered complete catalogue");

@@ -11013,3 +11013,550 @@ mod version_behind_tests {
         );
     }
 }
+
+#[cfg(test)]
+mod coverage_audit_tests {
+    use super::*;
+    use aplan_config::TestRunner;
+    use aplan_core::load::{Criteria, FieldLines, LoadedTask};
+    use aplan_core::task::{Evidence, EvidenceKind, Status, Task};
+    use aplan_core::{Plan, code};
+    use git2::{Repository, Signature};
+    use std::collections::{BTreeMap, BTreeSet};
+    use std::path::PathBuf;
+
+    fn bare_task(id: &str, status: Status, paths: Vec<String>, evidence: Vec<Evidence>) -> Task {
+        Task {
+            id: id.into(),
+            title: id.into(),
+            phase: 1,
+            status,
+            owner: None,
+            effort_days: None,
+            blocked_by: Vec::new(),
+            contains: Vec::new(),
+            ratified_by: Vec::new(),
+            prefer_after: Vec::new(),
+            paths,
+            traces: Vec::new(),
+            trace_fingerprints: BTreeMap::new(),
+            evidence,
+            evidence_fingerprints: BTreeMap::new(),
+            tags: Vec::new(),
+            revisit_at: None,
+            version_impact: None,
+            version_impact_reason: None,
+            version: None,
+            closed_at: None,
+            closed_at_source: None,
+        }
+    }
+
+    fn init_repo_with_file(rel: &str, body: &str) -> (tempfile::TempDir, String) {
+        let dir = tempfile::Builder::new()
+            .tempdir_in(aplan_core::fixture::fixture_root())
+            .expect("tempdir");
+        let repo = Repository::init(dir.path()).expect("init");
+        let full = dir.path().join(rel);
+        if let Some(parent) = full.parent() {
+            std::fs::create_dir_all(parent).expect("mkdir");
+        }
+        std::fs::write(&full, body).expect("write");
+        let mut index = repo.index().expect("index");
+        index.add_path(Path::new(rel)).expect("add");
+        let tree_id = index.write_tree().expect("write tree");
+        let tree = repo.find_tree(tree_id).expect("find tree");
+        let sig = Signature::now("Audit", "audit@example.test").expect("sig");
+        let oid = repo
+            .commit(Some("HEAD"), &sig, &sig, "initial", &tree, &[])
+            .expect("commit");
+        (dir, oid.to_string())
+    }
+
+    fn dummy_runner(name: Option<&str>, dir: Option<&str>) -> TestRunner {
+        use std::fmt::Write as _;
+        let mut yaml = String::from("test:\n  list: ['true']\n  run: ['true', '{test}']\n");
+        if let Some(n) = name {
+            let _ = writeln!(yaml, "  name: {n}");
+        }
+        if let Some(d) = dir {
+            let _ = writeln!(yaml, "  dir: {d}");
+        }
+        let cfg =
+            aplan_config::parse_config(&yaml, Path::new(".aplan.yml")).expect("parse dummy runner");
+        cfg.test
+            .expect("test block")
+            .all()
+            .first()
+            .cloned()
+            .expect("one runner")
+    }
+
+    #[test]
+    fn rejection_kinds_and_scheduler_fault_outcomes_build_complete_catalogue() {
+        let cases = [
+            (
+                TestObservationRejectionKind::Absent,
+                "absent",
+                CitationOutcome::Unavailable,
+            ),
+            (
+                TestObservationRejectionKind::Stale,
+                "stale",
+                CitationOutcome::Refused,
+            ),
+            (
+                TestObservationRejectionKind::Partial,
+                "partial",
+                CitationOutcome::Unavailable,
+            ),
+            (
+                TestObservationRejectionKind::Untrusted,
+                "untrusted",
+                CitationOutcome::Refused,
+            ),
+            (
+                TestObservationRejectionKind::Incompatible,
+                "incompatible",
+                CitationOutcome::Unavailable,
+            ),
+            (
+                TestObservationRejectionKind::Fault,
+                "faulted",
+                CitationOutcome::Unavailable,
+            ),
+        ];
+        for (kind, label, outcome) in cases {
+            assert_eq!(kind.label(), label);
+            assert_eq!(kind.citation_outcome(), outcome);
+        }
+
+        let configured = vec![
+            dummy_runner(Some("unit"), None),
+            dummy_runner(None, Some("crates/sub")),
+            dummy_runner(None, None),
+        ];
+        let mut outcomes = BTreeMap::new();
+        outcomes.insert(
+            0,
+            scheduler::Outcome::Completed(CompletedCatalogueRunner {
+                index: 1,
+                runner: TestCatalogueRunner {
+                    index: 1,
+                    label: "unit".into(),
+                    state: TestCatalogueRunnerState::Listed,
+                    names: vec!["ok".into()],
+                },
+                diagnostics: Vec::new(),
+                elapsed_millis: 5,
+                spend: vec![("the `unit` test runner".into(), Cost::default())],
+                failure_outcome: None,
+            }),
+        );
+        outcomes.insert(1, scheduler::Outcome::Cancelled);
+        outcomes.insert(2, scheduler::Outcome::Panicked);
+
+        let catalogue =
+            catalogue_from_outcomes(outcomes, &configured, Some(Path::new(".aplan.yml")));
+        assert_eq!(catalogue.runners.len(), 3);
+        assert_eq!(catalogue.runners[0].state, TestCatalogueRunnerState::Listed);
+        assert_eq!(catalogue.runners[1].label, "crates/sub");
+        assert_eq!(catalogue.runners[1].state, TestCatalogueRunnerState::Failed);
+        assert_eq!(catalogue.runners[2].label, "runner 3");
+        assert_eq!(catalogue.runners[2].state, TestCatalogueRunnerState::Failed);
+        assert_eq!(catalogue.diagnostics.len(), 2);
+        assert!(
+            catalogue
+                .diagnostics
+                .iter()
+                .all(|d| d.code == code::TEST_UNRESOLVED
+                    && d.file.as_deref() == Some(Path::new(".aplan.yml")))
+        );
+        assert_eq!(
+            catalogue.failure_outcomes,
+            vec![
+                None,
+                Some(CitationOutcome::Unavailable),
+                Some(CitationOutcome::Unavailable),
+            ]
+        );
+    }
+
+    #[test]
+    fn broken_closed_file_citations_last_touched_and_commit_breadth_query_repo() {
+        let (dir, sha) = init_repo_with_file("src/live.rs", "pub fn ok() {}\n");
+        let plan = Plan {
+            tasks: vec![
+                LoadedTask {
+                    task: bare_task(
+                        "T-DONE",
+                        Status::Done,
+                        vec!["src/live.rs".into()],
+                        vec![
+                            Evidence {
+                                kind: EvidenceKind::File,
+                                reference: "src/live.rs".into(),
+                                captured: None,
+                            },
+                            Evidence {
+                                kind: EvidenceKind::File,
+                                reference: "src/gone.rs#sec".into(),
+                                captured: None,
+                            },
+                            Evidence {
+                                kind: EvidenceKind::File,
+                                reference: "src/gone.rs#sec".into(),
+                                captured: None,
+                            },
+                            Evidence {
+                                kind: EvidenceKind::File,
+                                reference: format!("src/gone.rs@{sha}"),
+                                captured: None,
+                            },
+                            Evidence {
+                                kind: EvidenceKind::Commit,
+                                reference: sha.clone(),
+                                captured: None,
+                            },
+                        ],
+                    ),
+                    fields: FieldLines::new(),
+                    criteria: Criteria::default(),
+                    path: PathBuf::from("aplan/tasks/T-DONE.md"),
+                },
+                LoadedTask {
+                    task: bare_task(
+                        "T-TODO",
+                        Status::Todo,
+                        vec!["src/gone.rs".into()],
+                        vec![Evidence {
+                            kind: EvidenceKind::File,
+                            reference: "src/gone.rs".into(),
+                            captured: None,
+                        }],
+                    ),
+                    fields: FieldLines::new(),
+                    criteria: Criteria::default(),
+                    path: PathBuf::from("aplan/tasks/T-TODO.md"),
+                },
+            ],
+            ..Plan::default()
+        };
+
+        let broken = broken_closed_file_citations(&plan, dir.path());
+        assert_eq!(broken, vec![("T-DONE".into(), "src/gone.rs#sec".into())]);
+
+        let (touched, now) =
+            last_touched(dir.path(), &[PathBuf::from("src/live.rs")]).expect("last_touched");
+        assert!(now > 0);
+        assert!(touched.contains_key(Path::new("src/live.rs")));
+
+        let breadth = commit_breadth(
+            dir.path(),
+            &[("T-DONE".into(), vec!["src/live.rs".into()])],
+            10,
+        )
+        .expect("commit_breadth");
+        assert_eq!(breadth.sampled, 1);
+        assert_eq!(breadth.counts, vec![("T-DONE".into(), 1)]);
+        assert!(breadth.unmeasurable.is_empty());
+    }
+
+    #[test]
+    fn resolve_proposed_reports_unchecked_kinds_and_empty_repo_fallback() {
+        let (dir, sha) = init_repo_with_file("src/a.rs", "pub fn a() {}\n");
+        let task = bare_task("T-1", Status::Todo, vec!["src/a.rs".into()], Vec::new());
+        let evidence = vec![
+            Evidence {
+                kind: EvidenceKind::Commit,
+                reference: sha,
+                captured: None,
+            },
+            Evidence {
+                kind: EvidenceKind::File,
+                reference: "src/a.rs".into(),
+                captured: None,
+            },
+            Evidence {
+                kind: EvidenceKind::Test,
+                reference: "unit::ok".into(),
+                captured: None,
+            },
+            Evidence {
+                kind: EvidenceKind::Url,
+                reference: "https://example.test/proof".into(),
+                captured: None,
+            },
+            Evidence {
+                kind: EvidenceKind::Note,
+                reference: "manual signoff 2026-11-26".into(),
+                captured: None,
+            },
+        ];
+
+        let res_no_runner = resolve_proposed(
+            &task,
+            Path::new("aplan/tasks/T-1.md"),
+            &evidence,
+            dir.path(),
+            &VerifyOptions::default(),
+        )
+        .expect("resolve without runner");
+        assert!(!res_no_runner.repository_unreadable);
+        assert_eq!(
+            res_no_runner.unchecked,
+            vec![EvidenceKind::Test, EvidenceKind::Url, EvidenceKind::Note]
+        );
+
+        let runner_cfg = aplan_config::parse_config(
+            "test:\n  list: ['echo', 'unit::ok']\n  run: ['true', '{test}']\n",
+            Path::new(".aplan.yml"),
+        )
+        .expect("parse test runner");
+        let opts_with_runner = VerifyOptions {
+            test_runner: runner_cfg.test,
+            ..VerifyOptions::default()
+        };
+        let res_with_runner = resolve_proposed(
+            &task,
+            Path::new("aplan/tasks/T-1.md"),
+            &evidence,
+            dir.path(),
+            &opts_with_runner,
+        )
+        .expect("resolve with runner");
+        assert!(!res_with_runner.repository_unreadable);
+        assert_eq!(
+            res_with_runner.unchecked,
+            vec![EvidenceKind::Url, EvidenceKind::Note]
+        );
+
+        // A path outside any git repository (`NotARepository`) falls back cleanly without
+        // refusing closure, while an unreadable unborn-HEAD `file:` lookup surfaces `Error::Git`.
+        let root_path = Path::new("/");
+        if Repository::discover(root_path).is_err() {
+            assert!(broken_closed_file_citations(&Plan::default(), root_path).is_empty());
+            let res_outside = resolve_proposed(
+                &task,
+                Path::new("aplan/tasks/T-1.md"),
+                &evidence,
+                root_path,
+                &VerifyOptions::default(),
+            )
+            .expect("resolve outside repo");
+            assert!(res_outside.repository_unreadable);
+            assert!(res_outside.report.diagnostics.is_empty());
+            let expected_kinds: BTreeSet<EvidenceKind> = evidence.iter().map(|e| e.kind).collect();
+            let got_kinds: BTreeSet<EvidenceKind> = res_outside.unchecked.iter().copied().collect();
+            assert_eq!(got_kinds, expected_kinds);
+        }
+
+        let empty = tempfile::Builder::new()
+            .tempdir_in(aplan_core::fixture::fixture_root())
+            .expect("empty tempdir");
+        Repository::init(empty.path()).expect("init empty");
+        let err_empty = resolve_proposed(
+            &task,
+            Path::new("aplan/tasks/T-1.md"),
+            &evidence,
+            empty.path(),
+            &VerifyOptions::default(),
+        )
+        .expect_err("unborn HEAD with HEAD-relative file evidence propagates git error");
+        assert!(matches!(err_empty, Error::Git(_)), "{err_empty}");
+    }
+
+    #[test]
+    fn restamp_on_empty_repo_returns_no_commits() {
+        let empty = tempfile::Builder::new()
+            .tempdir_in(aplan_core::fixture::fixture_root())
+            .expect("empty tempdir");
+        Repository::init(empty.path()).expect("init empty");
+        let fp_err = update_evidence_fingerprints(
+            &[],
+            &BTreeMap::new(),
+            &[Evidence {
+                kind: EvidenceKind::File,
+                reference: "src/a.rs".into(),
+                captured: None,
+            }],
+            empty.path(),
+            true,
+        )
+        .expect_err("restamp on empty repo must refuse");
+        assert!(matches!(fp_err, Error::NoCommits(_)), "{fp_err}");
+
+        // Exercise `configured_test_catalogue_bounded` progress callbacks and
+        // `file_evidence_matches_stamp` anchored + invalid-UTF8 + unanchored paths.
+        let cfg = aplan_config::parse_config(
+            "test:\n  name: quick\n  list: ['true']\n  run: ['true', '{test}']\n",
+            Path::new(".aplan.yml"),
+        )
+        .expect("cfg");
+        let runners = cfg.test.expect("runners");
+        let mut events = Vec::new();
+        let cat = configured_test_catalogue_bounded(
+            &runners,
+            empty.path(),
+            Some(Path::new(".aplan.yml")),
+            |ev| events.push(ev),
+        );
+        assert_eq!(cat.runners.len(), 1);
+        assert!(events.len() >= 2, "{events:?}");
+
+        let doc_bytes = b"## Sec\n\nBody.\n";
+        let stamp = aplan_core::stamp_in("doc.md", "## Sec\n\nBody.\n", "sec").expect("stamp");
+        assert!(file_evidence_matches_stamp(
+            "doc.md",
+            Some("sec"),
+            doc_bytes,
+            &stamp
+        ));
+        assert!(!file_evidence_matches_stamp(
+            "doc.md",
+            Some("sec"),
+            &[0xff, 0xfe],
+            &stamp
+        ));
+        let whole_fp = aplan_core::anchor::content_fingerprint(doc_bytes);
+        assert!(file_evidence_matches_stamp(
+            "doc.md", None, doc_bytes, &whole_fp
+        ));
+    }
+
+    #[test]
+    fn retained_fingerprints_and_observe_test_runner_selected_cover_paths() {
+        let empty = tempfile::Builder::new()
+            .tempdir_in(aplan_core::fixture::fixture_root())
+            .expect("empty tempdir");
+        Repository::init(empty.path()).expect("init empty");
+
+        let file_ev = Evidence {
+            kind: EvidenceKind::File,
+            reference: "src/a.rs".into(),
+            captured: None,
+        };
+        let mut existing = BTreeMap::new();
+        existing.insert(evidence_fingerprint_key(&file_ev), "fp1".into());
+        existing.insert("file:src/dropped.rs".into(), "fp2".into());
+        let retained = update_evidence_fingerprints(
+            std::slice::from_ref(&file_ev),
+            &existing,
+            std::slice::from_ref(&file_ev),
+            empty.path(),
+            false,
+        )
+        .expect("non-restamp on empty repo retains existing keys");
+        assert_eq!(retained.len(), 1);
+        assert_eq!(
+            retained
+                .get(&evidence_fingerprint_key(&file_ev))
+                .map(String::as_str),
+            Some("fp1")
+        );
+
+        let bad_cfg = aplan_config::parse_config(
+            "test:\n  name: broken\n  list: ['no-such-program-anywhere-aplan-test']\n  run: ['true', '{test}']\n",
+            Path::new(".aplan.yml"),
+        )
+        .expect("bad cfg");
+        let bad_err = observe_test_runner_selected(
+            bad_cfg.test.as_ref().expect("test"),
+            empty.path(),
+            None,
+            "broken",
+            |names| Ok(names.to_vec()),
+        )
+        .expect_err("failed listing must refuse");
+        assert!(bad_err.contains("could not be listed"), "{bad_err}");
+
+        #[cfg(unix)]
+        {
+            let empty_cfg = aplan_config::parse_config(
+                "test:\n  name: quick\n  list: ['true']\n  run: ['true', '{test}']\n",
+                Path::new(".aplan.yml"),
+            )
+            .expect("empty cfg");
+            let empty_err = observe_test_runner_selected(
+                empty_cfg.test.as_ref().expect("test"),
+                empty.path(),
+                None,
+                "quick",
+                |names| Ok(names.to_vec()),
+            )
+            .expect_err("empty listing must refuse");
+            assert!(empty_err.contains("listed no tests"), "{empty_err}");
+
+            let listed_cfg = aplan_config::parse_config(
+                "test:\n  name: listed\n  list: ['echo', 'unit::ok']\n  run: ['true', '{test}']\n",
+                Path::new(".aplan.yml"),
+            )
+            .expect("listed cfg");
+            let unknown_err = observe_test_runner_selected(
+                listed_cfg.test.as_ref().expect("test"),
+                empty.path(),
+                None,
+                "listed",
+                |_| Ok(vec!["unit::missing".into()]),
+            )
+            .expect_err("unknown selected name must refuse");
+            assert!(unknown_err.contains("did not list"), "{unknown_err}");
+
+            let obs = observe_test_runner_selected(
+                listed_cfg.test.as_ref().expect("test"),
+                empty.path(),
+                None,
+                "listed",
+                |names| Ok(names.to_vec()),
+            )
+            .expect("valid selection observes provider");
+            assert_eq!(obs.requested, vec!["unit::ok"]);
+        }
+    }
+
+    #[test]
+    fn reviewed_working_tree_trace_suppresses_candidate_drift_projection() {
+        // Live task carrying a working-tree review stamp suppresses candidate drift projection.
+        let (proj_dir, _) = init_repo_with_file("docs/spec.md", "## Sec\n\nOriginal.\n");
+        let task_rel = "aplan/tasks/T-REV.md";
+        let task_full = proj_dir.path().join(task_rel);
+        std::fs::create_dir_all(task_full.parent().expect("parent")).expect("mkdir");
+        let new_spec = "## Sec\n\nUpdated in working tree.\n";
+        let wt_stamp = aplan_core::stamp_in("docs/spec.md", new_spec, "sec").expect("wt stamp");
+        let task_text = format!(
+            "---\nid: T-REV\ntitle: Reviewed\nphase: 1\nstatus: todo\neffort_days: 1\ntraces:\n- docs/spec.md#sec\ntrace_fingerprints:\n  docs/spec.md#sec: {wt_stamp}\n---\n\nbody\n"
+        );
+        std::fs::write(&task_full, &task_text).expect("task");
+        let repo = Repository::open(proj_dir.path()).expect("open");
+        let mut index = repo.index().expect("index");
+        index.add_path(Path::new(task_rel)).expect("add task");
+        let tree_id = index.write_tree().expect("tree");
+        let tree = repo.find_tree(tree_id).expect("find tree");
+        let head = repo
+            .head()
+            .expect("head")
+            .peel_to_commit()
+            .expect("head commit");
+        let sig = Signature::now("Audit", "audit@example.test").expect("sig");
+        repo.commit(Some("HEAD"), &sig, &sig, "add task", &tree, &[&head])
+            .expect("commit task");
+        std::fs::write(proj_dir.path().join("docs/spec.md"), new_spec).expect("modify spec");
+
+        let plan = aplan_core::load_plan(&proj_dir.path().join("aplan"));
+        let opts = VerifyOptions {
+            detect_drift: true,
+            traces_root: Some(proj_dir.path().to_path_buf()),
+            ..VerifyOptions::default()
+        };
+        let rep = verify_observed(&plan, proj_dir.path(), &opts).expect("verify");
+        assert!(
+            rep.report.candidate_projections.is_empty(),
+            "already-reviewed working-tree trace must not project drift: {:?}",
+            rep.report.candidate_projections
+        );
+
+        let unmeas = unmeasurable_tag("release-2026-11");
+        assert_eq!(unmeas.code, code::VERSION_BEHIND);
+        assert!(unmeas.message.contains("release-2026-11"));
+    }
+}

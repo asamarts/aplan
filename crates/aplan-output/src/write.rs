@@ -232,4 +232,51 @@ mod tests {
             .expect_err("unrelated I/O fault must propagate");
         assert_eq!(err.kind(), ErrorKind::Other);
     }
+
+    struct ScriptedFlushWriter {
+        steps: std::collections::VecDeque<Step>,
+    }
+
+    impl Write for ScriptedFlushWriter {
+        fn write(&mut self, buf: &[u8]) -> io::Result<usize> {
+            Ok(buf.len())
+        }
+
+        fn flush(&mut self) -> io::Result<()> {
+            match self.steps.pop_front() {
+                None | Some(Step::Partial(_)) => Ok(()),
+                Some(Step::WouldBlock) => Err(io::Error::from(ErrorKind::WouldBlock)),
+                Some(Step::Interrupted) => Err(io::Error::from(ErrorKind::Interrupted)),
+                Some(Step::BrokenPipe) => Err(io::Error::from(ErrorKind::BrokenPipe)),
+                Some(Step::Other) => Err(io::Error::other("flush failed")),
+            }
+        }
+    }
+
+    #[test]
+    fn retrying_writer_flush_retries_transient_errors_bounds_stall_and_preserves_empty_write() {
+        let mut ok = RetryingWriter::with_budget(
+            ScriptedFlushWriter {
+                steps: [Step::Interrupted, Step::WouldBlock].into_iter().collect(),
+            },
+            Duration::from_secs(1),
+        );
+        assert_eq!(ok.write(&[]).expect("empty write"), 0);
+        ok.flush()
+            .expect("flush retries Interrupted and WouldBlock");
+        let _inner = ok.into_inner();
+
+        let mut timeout = RetryingWriter::with_budget(AlwaysWouldBlock, Duration::from_millis(15));
+        let err = timeout.flush().expect_err("stalled flush must time out");
+        assert_eq!(err.kind(), ErrorKind::WouldBlock);
+
+        let mut other = RetryingWriter::with_budget(
+            ScriptedFlushWriter {
+                steps: [Step::Other].into_iter().collect(),
+            },
+            Duration::from_secs(1),
+        );
+        let err = other.flush().expect_err("other flush fault propagates");
+        assert_eq!(err.kind(), ErrorKind::Other);
+    }
 }

@@ -1203,4 +1203,102 @@ mod switched_off_tests {
             "{orphan_err:?}"
         );
     }
+
+    #[test]
+    fn switch_catalogue_audit_rejects_undeclared_duplicate_stale_and_orphan_resolver_switches() {
+        let live: Vec<SwitchCatalogEntry> = Rule::ALL
+            .iter()
+            .map(|&rule| SwitchCatalogEntry {
+                code: rule.code(),
+                disposition: rule.switch_disposition(),
+            })
+            .collect();
+        let accepted: Vec<String> = ValidationSwitch::ALL
+            .iter()
+            .map(|sw| sw.config_key().to_string())
+            .chain(
+                ResolverSwitch::ALL
+                    .iter()
+                    .flat_map(|sw| sw.config_keys().iter().map(|k| (*k).to_string())),
+            )
+            .collect();
+
+        // Undeclared validation switch, undeclared resolver switch, duplicate resolver switch,
+        // stale resolver switch key, and orphan resolver switch must all be reported.
+        let undeclared_val = audit_switch_dispositions(&live, &[], ResolverSwitch::ALL, &accepted);
+        assert!(
+            undeclared_val
+                .iter()
+                .any(|m| m.contains("undeclared validation switch")),
+            "{undeclared_val:?}"
+        );
+        let undeclared_res =
+            audit_switch_dispositions(&live, ValidationSwitch::ALL, &[], &accepted);
+        assert!(
+            undeclared_res
+                .iter()
+                .any(|m| m.contains("undeclared resolver switch")),
+            "{undeclared_res:?}"
+        );
+        let dup_res = audit_switch_dispositions(
+            &live,
+            ValidationSwitch::ALL,
+            &[
+                ResolverSwitch::Test,
+                ResolverSwitch::Test,
+                ResolverSwitch::TestLocality,
+                ResolverSwitch::UrlCheck,
+            ],
+            &accepted,
+        );
+        assert!(
+            dup_res
+                .iter()
+                .any(|m| m.contains("duplicate resolver switch")),
+            "{dup_res:?}"
+        );
+        let no_url_keys: Vec<String> = accepted
+            .iter()
+            .filter(|k| k.as_str() != "url.check")
+            .cloned()
+            .collect();
+        let stale_res_key = audit_switch_dispositions(
+            &live,
+            ValidationSwitch::ALL,
+            ResolverSwitch::ALL,
+            &no_url_keys,
+        );
+        assert!(
+            stale_res_key
+                .iter()
+                .any(|m| m.contains("stale resolver switch key") && m.contains("url.check")),
+            "{stale_res_key:?}"
+        );
+        let no_url_entries: Vec<SwitchCatalogEntry> = live
+            .iter()
+            .map(|entry| {
+                if entry.disposition == SwitchDisposition::ResolverSwitch(ResolverSwitch::UrlCheck)
+                {
+                    SwitchCatalogEntry {
+                        code: entry.code,
+                        disposition: SwitchDisposition::External,
+                    }
+                } else {
+                    *entry
+                }
+            })
+            .collect();
+        let orphan_res = audit_switch_dispositions(
+            &no_url_entries,
+            ValidationSwitch::ALL,
+            ResolverSwitch::ALL,
+            &accepted,
+        );
+        assert!(
+            orphan_res
+                .iter()
+                .any(|m| m.contains("stale resolver switch") && m.contains("UrlCheck")),
+            "{orphan_res:?}"
+        );
+    }
 }

@@ -23,6 +23,12 @@ to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   retry) instead of seventeen lines of record fields and snapshot digests. Pass `--verbose` for
   the full human record, or `--format json` / `--format agent` for the full machine payload
   (`--verbose` is rejected on machine formats). `aplan inbox` subcommands remain unchanged.
+- **Exact tracked-file `paths` matcher (`A2-092`)**. Added `aplan paths match <GLOB>...` and
+  `aplan paths match --task <ID>` (`--format human|json`, `--limit N` defaulting to 200 or `--all`,
+  `--repo`) sharing the exact compiled matcher used by `check` and `verify` (`literal_separator`,
+  lexical `.`/`..` normalisation, POSIX separator normalization on Windows, bare-directory hints,
+  deterministic sorted output, and exit `1` on invalid globs) so custom gates do not reimplement
+  glob semantics.
 - **Bounded completed-task history MCP resource (`A2-119`, `ADR-0074`)**. `aplan mcp` now exposes
   completed-task history as a bounded resource template
   `aplan://collections/completed{?cut,phase,owner,tag,since,until,oldest,history,limit,cursor}`

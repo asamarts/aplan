@@ -960,4 +960,97 @@ mod tests {
         );
         assert!(!last.truncated);
     }
+
+    #[test]
+    fn completed_workspace_bounds_and_cursor_validation_cover_all_error_paths() {
+        let dir = tempfile::Builder::new()
+            .prefix("completed-errors-")
+            .tempdir_in(aplan_core::fixture::fixture_root())
+            .expect("tempdir");
+
+        // Workspace constructors & accessors.
+        let empty = CompletedWorkspace::empty("id-empty".to_string());
+        assert_eq!(empty.input_identity(), "id-empty");
+        let empty_resp = empty
+            .query(&CompletedRequest {
+                history: HistoryPolicy::Never,
+                ..Default::default()
+            })
+            .expect("empty query");
+        assert!(empty_resp.items.is_empty());
+
+        let mut release_milestone = done_task("R-1", Some("2026-10-14T00:00:00Z"), true);
+        release_milestone.task.tags.push("release".to_string());
+        release_milestone.task.blocked_by.push("A-1".to_string());
+        let plan = Plan {
+            tasks: vec![
+                done_task("A-1", Some("2026-10-10T12:00:00Z"), false),
+                done_task("A-2", Some("2026-10-12T12:00:00Z"), false),
+                done_task("A-3", Some("2026-10-14T12:00:00Z"), false),
+                release_milestone,
+            ],
+            load_diagnostics: Vec::new(),
+            unloadable: BTreeMap::new(),
+        };
+        let ws = CompletedWorkspace::from_parts(
+            plan.clone(),
+            "id-parts".to_string(),
+            dir.path().to_path_buf(),
+            PathBuf::from("aplan"),
+        );
+        assert_eq!(ws.input_identity(), "id-parts");
+        assert_eq!(ws, ws.clone());
+
+        // Strict since/until filtering excludes earlier and later rows.
+        let middle = ws
+            .query(&CompletedRequest {
+                since: Some("2026-10-11".to_string()),
+                until: Some("2026-10-13".to_string()),
+                history: HistoryPolicy::Never,
+                ..Default::default()
+            })
+            .expect("middle window");
+        assert_eq!(
+            middle
+                .items
+                .iter()
+                .map(|r| r.id.as_str())
+                .collect::<Vec<_>>(),
+            vec!["A-2"]
+        );
+
+        // `parse_bound` errors: out-of-range ISO date, malformed RFC 3339, out-of-range RFC 3339.
+        for bad in ["1969-12-31", "not-a-timestamp", "1969-01-01T00:00:00Z"] {
+            assert!(
+                matches!(
+                    parse_bound("--since", bad, false),
+                    Err(CompletedError::InvalidBound { .. })
+                ),
+                "expected InvalidBound for `{bad}`"
+            );
+        }
+
+        // `decode_cursor` errors across every validation branch.
+        let long_cursor = "a".repeat(MAX_CURSOR_BYTES + 1);
+        for bad_cursor in [
+            "",
+            long_cursor.as_str(),
+            "v1|a|b|c|1|10|T-1\n",
+            "v2|a|b|c|1|10|T-1",
+            "v1||b|c|1|10|T-1",
+            "v1|a|b|c|2|10|T-1",
+            "v1|a|b|c|1|notnum|T-1",
+            "v1|a|b|c|0|10|T-1",
+            "v1|a|b|c|1|10|",
+            "v1|a|b|c|1|+10|T-1",
+        ] {
+            assert!(
+                matches!(
+                    decode_cursor(bad_cursor),
+                    Err(CompletedError::InvalidCursor(_))
+                ),
+                "expected InvalidCursor for `{bad_cursor:?}`"
+            );
+        }
+    }
 }

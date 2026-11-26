@@ -2505,14 +2505,21 @@ fn completed_history_pty_journey_covers_overview_completed_inspector_and_narrow(
     terminal.send(Key::Char('s'))?;
     terminal.wait_until(|screen| screen.contains("order: oldest-first"))?;
     terminal.send(Key::Enter)?;
-    terminal.wait_until(|screen| screen.contains("Completed: [REC]"))?;
+    // Wait for inspector focus (`Esc back to primary`), not just `Completed: [REC]`, because
+    // the wide split-pane preview already displays `Completed: [REC]` before Enter is handled.
+    terminal.wait_until(|screen| {
+        screen.contains("Esc back to primary") && screen.contains("Completed: [REC]")
+    })?;
     terminal.send(Key::Esc)?;
     terminal.wait_until(|screen| {
-        screen.contains("COMPLETED HISTORY") && screen.contains("order: oldest-first")
+        screen.contains("COMPLETED HISTORY")
+            && screen.contains("order: oldest-first")
+            && !screen.contains("Esc back to primary")
     })?;
 
     // Resize to narrow and return to Overview: RECENT COMPLETIONS must be omitted.
     terminal.resize(52, 15)?;
+    terminal.wait_until(|screen| screen.size() == (52, 15))?;
     terminal.send(Key::Char('1'))?;
     terminal
         .wait_until(|screen| screen.contains("CUTS") && !screen.contains("RECENT COMPLETIONS"))?;

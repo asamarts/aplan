@@ -657,4 +657,40 @@ mod tests {
         assert!(boundary("not-a-boundary").is_none());
         assert_eq!(CommandDisposition::Native.label(), "native");
     }
+
+    #[test]
+    fn runtime_discovery_constructors_preserve_surfaces_mutations_and_boundaries() {
+        let surfaces = &[NativeSurface::Tasks];
+        let mutations = &[MutationAction::Add];
+        let boundaries = &[CommandBoundary {
+            name: "demo boundary",
+            aliases: &["demo"],
+            reason: "reason",
+            example: "aplan demo",
+        }];
+
+        let plain_native = native("a", "A", surfaces);
+        assert_eq!(plain_native.name, "a");
+        assert_eq!(plain_native.surfaces.len(), 1);
+        assert!(plain_native.mutations.is_empty());
+        assert!(plain_native.boundaries.is_empty());
+
+        let with_bounds = native_with_boundaries("b", "B", surfaces, boundaries);
+        assert_eq!(with_bounds.boundaries.len(), 1);
+        assert!(with_bounds.mutations.is_empty());
+
+        let with_muts = native_with_mutations("c", "C", surfaces, mutations);
+        assert_eq!(with_muts.mutations.len(), 1);
+        assert!(with_muts.boundaries.is_empty());
+
+        let with_both =
+            native_with_mutations_and_boundaries("d", "D", surfaces, mutations, boundaries);
+        assert_eq!(with_both.surfaces.len(), 1);
+        assert_eq!(with_both.mutations.len(), 1);
+        assert_eq!(with_both.boundaries.len(), 1);
+
+        let mut_only = mutation("e", "E", mutations);
+        assert!(mut_only.surfaces.is_empty());
+        assert_eq!(mut_only.mutations.len(), 1);
+    }
 }

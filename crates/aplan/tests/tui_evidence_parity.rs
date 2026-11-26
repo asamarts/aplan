@@ -155,8 +155,32 @@ impl Fixture {
                 )
             })
             .collect();
+        // Normalize valid canonical wall-clock `closed_at` stamps so a second boundary between
+        // consecutive CLI and TUI runs cannot flake exact-byte parity while still rejecting
+        // missing or non-canonical timestamps.
+        let bytes = self
+            .bytes()
+            .into_iter()
+            .map(|(name, content)| {
+                let normalized = content
+                    .split_inclusive('\n')
+                    .map(|line| {
+                        let trimmed = line.trim_end_matches(['\r', '\n']);
+                        if let Some(ts) = trimmed.strip_prefix("closed_at: ")
+                            && aplan_core::parse_canonical_closed_at(ts).is_some()
+                        {
+                            let eol = &line[trimmed.len()..];
+                            format!("closed_at: <UTC>{eol}")
+                        } else {
+                            line.to_string()
+                        }
+                    })
+                    .collect();
+                (name, normalized)
+            })
+            .collect();
         (
-            self.bytes(),
+            bytes,
             response.denied,
             response.report.tasks_checked,
             diagnostics,

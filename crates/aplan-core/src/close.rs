@@ -5662,4 +5662,46 @@ body
             );
         }
     }
+
+    #[test]
+    fn set_owner_and_revisit_at_cover_add_replace_clear_and_error_paths() {
+        let base = "---\nid: A1-010\ntitle: demo\nphase: 1\nstatus: blocked\n---\n\nbody\n";
+        let with_owner = set_owner(base, Some("alice")).expect("add owner");
+        assert!(with_owner.contains("owner: alice"), "{with_owner}");
+        let replaced_owner = set_owner(&with_owner, Some("bob")).expect("replace owner");
+        assert!(replaced_owner.contains("owner: bob"), "{replaced_owner}");
+        let cleared_owner = set_owner(&replaced_owner, None).expect("clear owner");
+        assert!(!cleared_owner.contains("owner:"), "{cleared_owner}");
+
+        let with_revisit =
+            set_revisit_at(base, Some("2026-12-01T00:00:00Z")).expect("add revisit_at");
+        assert!(
+            with_revisit.contains("revisit_at: '2026-12-01T00:00:00Z'")
+                || with_revisit.contains("revisit_at: \"2026-12-01T00:00:00Z\"")
+                || with_revisit.contains("revisit_at: 2026-12-01T00:00:00Z"),
+            "{with_revisit}"
+        );
+        let cleared_revisit = set_revisit_at(&with_revisit, None).expect("clear revisit_at");
+        assert!(
+            !cleared_revisit.contains("revisit_at:"),
+            "{cleared_revisit}"
+        );
+
+        assert!(matches!(
+            set_owner("no frontmatter", Some("a")),
+            Err(CloseError::NotATask)
+        ));
+        assert!(matches!(
+            set_revisit_at("no frontmatter", Some("2026-12-01T00:00:00Z")),
+            Err(CloseError::NotATask)
+        ));
+        assert!(matches!(
+            set_owner("---\nid: [bad\n---\n", Some("a")),
+            Err(CloseError::Frontmatter(_))
+        ));
+        assert!(matches!(
+            set_revisit_at("---\nid: [bad\n---\n", Some("2026-12-01T00:00:00Z")),
+            Err(CloseError::Frontmatter(_))
+        ));
+    }
 }

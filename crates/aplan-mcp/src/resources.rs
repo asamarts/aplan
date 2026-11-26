@@ -1335,4 +1335,166 @@ mod tests {
         assert_eq!(collected.first().map(String::as_str), Some("C-35"));
         assert_eq!(collected.last().map(String::as_str), Some("C-01"));
     }
+
+    #[test]
+    #[allow(clippy::too_many_lines)]
+    fn resource_uri_parsing_percent_decoding_and_cursor_verification_cover_all_refusals() {
+        // URI confinement, scheme, length, and ready collection query errors.
+        let long_uri = format!("aplan://tasks/{}", "A".repeat(MAX_URI_BYTES + 10));
+        for bad in [
+            "https://example.com/tasks/T-1",
+            long_uri.as_str(),
+            "aplan://unknown/thing",
+            "aplan://collections/ready?",
+            "aplan://collections/ready?noequals",
+            "aplan://collections/ready?limit=5&limit=6",
+            "aplan://collections/ready?limit=abc",
+            "aplan://collections/ready?limit=0",
+            "aplan://collections/ready?cursor=a&cursor=b",
+            "aplan://collections/ready?bogus=1",
+        ] {
+            assert!(
+                parse_resource_uri(bad).is_err(),
+                "expected URI refusal for `{bad}`"
+            );
+        }
+
+        // Percent-decoding & filter confinement errors on `collections/completed`.
+        let too_many_cuts = (0..=MAX_FILTER_VALUES_PER_DIMENSION)
+            .map(|i| format!("cut=c{i}"))
+            .collect::<Vec<_>>()
+            .join("&");
+        let too_many_phases = (0..=MAX_FILTER_VALUES_PER_DIMENSION)
+            .map(|i| format!("phase={i}"))
+            .collect::<Vec<_>>()
+            .join("&");
+        let huge_cursor = "x".repeat(MAX_COMPLETED_CURSOR_BYTES + 1);
+        for query in [
+            "",
+            "noequals",
+            "cut=",
+            "cut=%",
+            "cut=%2",
+            "cut=%ZZ",
+            "cut=%2Z",
+            "cut=%FF",
+            "cut=%00",
+            "cut=%5C",
+            "cut=..",
+            "cut=a/..",
+            "phase=abc",
+            "phase=01",
+            too_many_cuts.as_str(),
+            too_many_phases.as_str(),
+            "since=2026-01-01&since=2026-01-02",
+            "until=2026-01-01&until=2026-01-02",
+            "oldest=true&oldest=false",
+            "oldest=maybe",
+            "history=auto&history=never",
+            "history=invalid",
+            "limit=5&limit=6",
+            "limit=abc",
+            "limit=0",
+            "limit=05",
+            "cursor=a&cursor=b",
+            &format!("cursor={huge_cursor}"),
+            "unknown_key=1",
+        ] {
+            let uri = format!("aplan://collections/completed?{query}");
+            assert!(
+                parse_resource_uri(&uri).is_err(),
+                "expected completed URI refusal for `{uri}`"
+            );
+        }
+
+        // `PageCursor::decode_and_verify` error branches.
+        let req = PageCursor::request_binding("ready", "canonical", 10);
+        let inp = "0123456789abcdef";
+        let too_long_tok = "a".repeat(MAX_CURSOR_BYTES + 1);
+        for tok in [
+            "",
+            too_long_tok.as_str(),
+            "v1.1.10.0123456789abcdef.0123456789abcde!",
+            "v2.1.10.0123456789abcdef.0123456789abcdef",
+            "v1.bad.10.0123456789abcdef.0123456789abcdef",
+            "v1.1.bad.0123456789abcdef.0123456789abcdef",
+            "v1.0.10.0123456789abcdef.0123456789abcdef",
+            "v1.01.10.0123456789abcdef.0123456789abcdef",
+            &format!("v1.1.10.{req}.ffffffffffffffff"),
+            &format!("v1.1.10.ffffffffffffffff.{inp}"),
+        ] {
+            assert!(
+                PageCursor::decode_and_verify(tok, &req, inp, 10).is_err(),
+                "expected cursor refusal for `{tok}`"
+            );
+        }
+
+        // Single completed item exceeding MAX_RESOURCE_BYTES is refused cleanly.
+        let dir = tempfile::Builder::new()
+            .prefix("mcp-oversized-completed-")
+            .tempdir_in(aplan_core::fixture::fixture_root())
+            .expect("tempdir");
+        let giant_task = aplan_core::load::LoadedTask {
+            path: std::path::PathBuf::from("aplan/tasks/G-1.md"),
+            task: aplan_core::Task {
+                id: "G-1".to_string(),
+                title: "X".repeat(MAX_RESOURCE_BYTES + 1024),
+                phase: 1,
+                status: aplan_core::Status::Done,
+                owner: None,
+                effort_days: Some(1.0),
+                blocked_by: Vec::new(),
+                prefer_after: Vec::new(),
+                ratified_by: Vec::new(),
+                contains: Vec::new(),
+                evidence: Vec::new(),
+                paths: Vec::new(),
+                traces: Vec::new(),
+                trace_fingerprints: BTreeMap::new(),
+                evidence_fingerprints: BTreeMap::new(),
+                tags: Vec::new(),
+                revisit_at: None,
+                version_impact: None,
+                version_impact_reason: None,
+                version: None,
+                closed_at: Some("2026-10-10T00:00:00Z".to_string()),
+                closed_at_source: Some(aplan_core::ClosedAtSource::Local),
+            },
+            criteria: aplan_core::load::Criteria::default(),
+            fields: BTreeMap::new(),
+        };
+        let plan = aplan_core::Plan {
+            tasks: vec![giant_task],
+            load_diagnostics: Vec::new(),
+            unloadable: BTreeMap::new(),
+        };
+        let identity = InputIdentity {
+            plan_sha256: "a".repeat(64),
+            config_sha256: "b".repeat(64),
+            source: "working_tree".to_string(),
+            trust: "hermetic".to_string(),
+        };
+        let q = CompletedUriQuery {
+            cuts: Vec::new(),
+            phases: Vec::new(),
+            owners: Vec::new(),
+            tags: Vec::new(),
+            since: None,
+            until: None,
+            oldest: false,
+            history: aplan_core::HistoryPolicy::Never,
+            limit: 10,
+            cursor: None,
+        };
+        let err = build_completed_page(
+            &plan,
+            "app-id",
+            dir.path(),
+            Path::new("aplan"),
+            &q,
+            &identity,
+        )
+        .expect_err("single entry exceeding 64 KiB cap must be refused");
+        assert!(matches!(err, ResourceError::InvalidParams(_)), "{err:?}");
+    }
 }

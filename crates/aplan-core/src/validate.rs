@@ -10358,4 +10358,71 @@ mod tests {
         assert!(crate::normalize_closed_at("2026-02-30T00:00:00Z").is_err());
         assert!(crate::normalize_closed_at("2026-10-11T19:24:60Z").is_err());
     }
+
+    #[test]
+    fn id_families_cuts_reports_conflicting_rules_and_ambiguous_cut_labels() {
+        let mut policy = crate::IdFamilyPolicy::default();
+        policy.cuts.insert(
+            "M-alpha".to_string(),
+            crate::IdFamilyRule {
+                prefix: Some("AL-".to_string()),
+                strategy: None,
+            },
+        );
+        policy.cuts.insert(
+            "alpha".to_string(),
+            crate::IdFamilyRule {
+                prefix: Some("BE-".to_string()),
+                strategy: None,
+            },
+        );
+        policy.cuts.insert(
+            "shared".to_string(),
+            crate::IdFamilyRule {
+                prefix: Some("SH-".to_string()),
+                strategy: None,
+            },
+        );
+
+        let mut m_alpha = t("M-alpha", Status::Todo);
+        m_alpha.tags = vec!["milestone".to_string(), "alpha".to_string()];
+        m_alpha.blocked_by = vec!["WRONG-1".to_string()];
+
+        let mut m_shared_1 = t("M-shared", Status::Todo);
+        m_shared_1.tags = vec!["milestone".to_string(), "shared".to_string()];
+        m_shared_1.blocked_by = vec!["SH-1".to_string()];
+
+        let mut m_shared_2 = t("M-other", Status::Todo);
+        m_shared_2.tags = vec!["milestone".to_string(), "shared".to_string()];
+        m_shared_2.blocked_by = vec!["SH-2".to_string()];
+
+        let plan = plan_of(vec![
+            m_alpha,
+            t("WRONG-1", Status::Todo),
+            m_shared_1,
+            t("SH-1", Status::Todo),
+            m_shared_2,
+            t("SH-2", Status::Todo),
+        ]);
+        let opts = Options {
+            id_families: Some(policy),
+            ..Options::default()
+        };
+        let report = validate(&plan, &opts);
+        let a62: Vec<&Diagnostic> = report
+            .diagnostics
+            .iter()
+            .filter(|d| d.code == code::CUT_ID_FAMILY_MISMATCH)
+            .collect();
+        assert!(
+            a62.iter()
+                .any(|d| d.message.contains("conflicting families")),
+            "expected conflicting id_families.cuts diagnostic: {a62:#?}"
+        );
+        assert!(
+            a62.iter()
+                .any(|d| d.message.contains("matches 2 milestones")),
+            "expected ambiguous label id_families.cuts diagnostic: {a62:#?}"
+        );
+    }
 }

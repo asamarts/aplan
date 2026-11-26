@@ -920,4 +920,36 @@ mod tests {
                 .contains("no repository-relative root")
         );
     }
+
+    #[test]
+    fn rustup_state_and_external_file_hashing_validate_structure() {
+        let dir = tempfile::Builder::new()
+            .prefix("material-rustup-")
+            .tempdir_in(aplan_core::fixture::fixture_root())
+            .expect("tempdir");
+        let mut digest = Sha256::new();
+        // Directory passed where a file is expected is refused.
+        assert!(
+            hash_external_file(&mut digest, dir.path())
+                .expect_err("dir is not a file")
+                .contains("not a file")
+        );
+
+        // Empty `update-hashes` directory is refused.
+        std::fs::write(dir.path().join("settings.toml"), "version = \"12\"\n").expect("settings");
+        let hashes = dir.path().join("update-hashes");
+        std::fs::create_dir_all(&hashes).expect("update-hashes");
+        assert!(
+            hash_rustup_state_at(&mut digest, dir.path())
+                .expect_err("empty update-hashes")
+                .contains("is empty")
+        );
+
+        // Populated rustup state hashes cleanly.
+        std::fs::write(hashes.join("stable"), "abc123\n").expect("hash entry");
+        hash_rustup_state_at(&mut digest, dir.path()).expect("populated rustup state");
+
+        // Also exercise `hash_rustup_state` against the host environment (either ok or clean err).
+        let _ = hash_rustup_state(&mut digest);
+    }
 }

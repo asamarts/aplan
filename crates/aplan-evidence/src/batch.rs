@@ -1095,4 +1095,30 @@ mod tests {
             "batch result owner differs from the aplan-owned manifest"
         );
     }
+
+    #[test]
+    fn batch_outcome_labels_meanings_and_citation_outcomes_cover_all_variants() {
+        let all = [
+            TestBatchOutcome::Passed,
+            TestBatchOutcome::Failed,
+            TestBatchOutcome::Skipped,
+            TestBatchOutcome::ExpectedFailure,
+            TestBatchOutcome::UnexpectedPass,
+            TestBatchOutcome::RetriedPassed,
+            TestBatchOutcome::Flaky,
+            TestBatchOutcome::Cancelled,
+            TestBatchOutcome::TimedOut,
+            TestBatchOutcome::ResourceBreach,
+            TestBatchOutcome::FrameworkCrash,
+            TestBatchOutcome::Incomplete,
+            TestBatchOutcome::UnprovenSelection,
+            TestBatchOutcome::Stopped,
+            TestBatchOutcome::Unavailable,
+        ];
+        for outcome in all {
+            assert!(!outcome.label().is_empty(), "{outcome:?}");
+            assert!(!outcome.meaning().is_empty(), "{outcome:?}");
+            let _ = outcome.citation_outcome();
+        }
+    }
 }

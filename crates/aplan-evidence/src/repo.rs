@@ -1863,4 +1863,104 @@ mod incremental_change_tests {
             Some(canonical_mounted)
         );
     }
+
+    #[test]
+    fn last_touch_commit_resolves_per_path_and_handles_empty_input() {
+        let dir = tempfile::Builder::new()
+            .prefix("repo-last-touch-")
+            .tempdir_in(aplan_core::fixture::fixture_root())
+            .expect("tempdir");
+        let root = dir.path();
+        let git = |args: &[&str]| {
+            let out = std::process::Command::new("git")
+                .current_dir(root)
+                .args(args)
+                .output()
+                .expect("git");
+            assert!(out.status.success(), "git {args:?}");
+            String::from_utf8_lossy(&out.stdout).trim().to_string()
+        };
+        git(&["init", "-q"]);
+        git(&["config", "user.email", "t@example.com"]);
+        git(&["config", "user.name", "Test"]);
+        std::fs::write(root.join("a.txt"), "one\n").expect("a");
+        git(&["add", "-A"]);
+        git(&["commit", "-q", "-m", "c1"]);
+        let c1 = git(&["rev-parse", "HEAD"]);
+
+        std::fs::write(root.join("b.txt"), "two\n").expect("b");
+        git(&["add", "-A"]);
+        git(&["commit", "-q", "-m", "c2"]);
+        let c2 = git(&["rev-parse", "HEAD"]);
+
+        let repo = Repo::discover(root).expect("discover");
+        assert!(repo.last_touched_commit(&[]).expect("empty").is_empty());
+        let touches = repo
+            .last_touched_commit(&[PathBuf::from("a.txt"), PathBuf::from("b.txt")])
+            .expect("touches");
+        assert_eq!(
+            touches.get(&PathBuf::from("a.txt")).map(String::as_str),
+            Some(c1.as_str())
+        );
+        assert_eq!(
+            touches.get(&PathBuf::from("b.txt")).map(String::as_str),
+            Some(c2.as_str())
+        );
+
+        let head_tree = repo.head_tree().expect("head tree");
+        assert_eq!(head_tree.commit, c2);
+        assert!(repo.resolves_as_commit_id(&c2));
+        assert!(!repo.resolves_as_commit_id("HEAD"));
+        assert!(
+            repo.resolve_from("HEAD", &c1)
+                .expect("resolve_from")
+                .reachable
+        );
+
+        // Stage one change and write a second unstaged change to hit `StagedAndUnstaged`.
+        std::fs::write(root.join("a.txt"), "staged\n").expect("stage write");
+        git(&["add", "a.txt"]);
+        std::fs::write(root.join("a.txt"), "unstaged\n").expect("unstaged write");
+        let (state, _, _) = repo
+            .working_tree_file_state(root, Path::new("a.txt"))
+            .expect("staged+unstaged state");
+        assert_eq!(state, aplan_core::WorkingTreeState::StagedAndUnstaged);
+        let status = repo.worktree_status().expect("worktree status");
+        assert!(status.changes.modified >= 1);
+        assert!(!repo.resolves_as_commit_id("not-a-hex-sha"));
+
+        // Unborn HEAD returns `HeadReachability::Unreachable` for an unattached commit.
+        let unborn_dir = tempfile::Builder::new()
+            .prefix("repo-unborn-")
+            .tempdir_in(aplan_core::fixture::fixture_root())
+            .expect("unborn tempdir");
+        let raw_unborn = git2::Repository::init(unborn_dir.path()).expect("init unborn");
+        let empty_tree_id = raw_unborn.index().expect("idx").write_tree().expect("tree");
+        let empty_tree = raw_unborn.find_tree(empty_tree_id).expect("find tree");
+        let sig = git2::Signature::now("Test", "t@example.com").expect("sig");
+        let detached_oid = raw_unborn
+            .commit(None, &sig, &sig, "detached", &empty_tree, &[])
+            .expect("detached commit");
+        let unborn_repo = Repo::discover(unborn_dir.path()).expect("discover unborn");
+        let detached_commit = unborn_repo
+            .resolve_commit(&detached_oid.to_string())
+            .expect("resolve detached");
+        assert_eq!(
+            unborn_repo.head_reachability(&detached_commit),
+            HeadReachability::Unreachable
+        );
+
+        #[cfg(unix)]
+        {
+            std::fs::create_dir_all(root.join("real/sub")).expect("real/sub");
+            std::fs::write(root.join("real/sub/doc.md"), "linked\n").expect("doc");
+            std::os::unix::fs::symlink("real", root.join("link")).expect("symlink");
+            git(&["add", "real/sub/doc.md", "link"]);
+            git(&["commit", "-q", "-m", "symlink dir"]);
+            let blob = repo
+                .checkout_blob_at("HEAD", Path::new("link/sub/doc.md"))
+                .expect("checkout through symlink dir");
+            assert_eq!(blob.as_deref(), Some(b"linked\n".as_slice()));
+        }
+    }
 }

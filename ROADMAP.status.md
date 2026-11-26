@@ -12,7 +12,7 @@
 | v0.8 | done | 36/36 | 0 | 0 | 49.2d | 1.8 (0.0 left) | 4.5d |
 | adoption | todo | 5/81 | 67 | 9 | 105.8d | 3.9 (3.8 left) | 10.0d |
 | backlog | todo | 0/1 | 1 | 0 | 1.0d | <0.1 (<0.1 left) | 1.0d |
-| hardening | todo | 0/15 | 15 | 0 | 14.8d | 0.5 (0.5 left) | 3.0d |
+| hardening | todo | 0/16 | 16 | 0 | 15.8d | 0.6 (0.6 left) | 3.0d |
 | qualification | todo | 0/1 | 0 | 1 | 8.0d | 0.3 (0.3 left) | 8.0d |
 | tui-quality | todo | 0/2 | 1 | 1 | 4.0d | 0.1 (0.1 left) | 4.0d |
 | workflow | todo | 12/17 | 3 | 2 | 50.0d | 1.9 (0.6 left) | 17.5d |
@@ -204,6 +204,7 @@
 | A2-173 | Prove the YAML limits through product reads, and name a missing bracket as one | todo | - | - |
 | A2-176 | Keep the real-terminal tests passing when the suite shares a busy host | todo | - | - |
 | A2-180 | Make the nine TUI timings the reference host cannot yet budget measurable there | todo | A2-164 | - |
+| A2-198 | Close post-merge audit gaps in paths match, MCP history, changelog, PTY test, and coverage floors | todo | - | - |
 
 ## qualification Product qualification
 

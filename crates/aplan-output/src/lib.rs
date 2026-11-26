@@ -9149,6 +9149,55 @@ mod format_table_tests {
             rendered.contains("Neither proves semantic relevance"),
             "{rendered}"
         );
+
+        let empty_task = PathsMatchReport {
+            mode: PathsMatchMode::Task,
+            task: Some(PathsMatchTask {
+                id: "M-1".to_string(),
+                title: "Cut".to_string(),
+            }),
+            tracked_files: 3,
+            limit: None,
+            unique_matched_files: 0,
+            entries: Vec::new(),
+        };
+        assert!(paths_match_human(&empty_task).contains("declares no `paths` entries"));
+
+        let empty_globs = PathsMatchReport {
+            mode: PathsMatchMode::Globs,
+            task: None,
+            tracked_files: 3,
+            limit: None,
+            unique_matched_files: 0,
+            entries: Vec::new(),
+        };
+        assert!(paths_match_human(&empty_globs).contains("no path globs provided"));
+
+        // Exercise every `Binding` label in `needs()` (vacuity human & JSON rendering).
+        let all_bindings = [
+            aplan_core::diagnostic::Binding::Done,
+            aplan_core::diagnostic::Binding::InProgress,
+            aplan_core::diagnostic::Binding::NotMilestone,
+            aplan_core::diagnostic::Binding::Paths,
+            aplan_core::diagnostic::Binding::Traces,
+            aplan_core::diagnostic::Binding::TraceFingerprints,
+            aplan_core::diagnostic::Binding::EvidenceFingerprints,
+            aplan_core::diagnostic::Binding::Evidence(aplan_core::EvidenceKind::Test),
+        ];
+        let label = needs(&all_bindings);
+        assert!(
+            label.contains("`done`")
+                && label.contains("`in_progress`")
+                && label.contains("evidence")
+        );
+        let reach = [aplan_core::vacuity::RuleReach {
+            rule: aplan_core::diagnostic::Rule::UnknownDep,
+            subjects: 1,
+            unbound: 0,
+            binds: Box::leak(all_bindings.into()),
+            off: None,
+        }];
+        let _ = render_vacuity_json(&reach);
     }
 
     /// A format renders at least one surface, or nothing can ask for it and it
