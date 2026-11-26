@@ -1035,3 +1035,112 @@ fn describe_value(value: &yaml_compat::Value) -> String {
         yaml_compat::Value::Tagged(_) => unreachable!("unwrap_tagged strips Tagged"),
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn parse_yaml(yaml: &str) -> Result<TestRunners, String> {
+        let val: yaml_compat::Value = yaml_compat::from_str(yaml).expect("valid yaml");
+        parse_test_runners(&val)
+    }
+
+    #[test]
+    fn test_runner_parser_covers_remaining_error_and_edge_branches() {
+        // Non-string keys, misplaced `protocol`, and unknown fields at group/schedule/runner/batch/pair levels.
+        let group_err =
+            parse_yaml("schedule:\n  123: bad\n  extra: 1\nprotocol: 1\nweird_top: 2\n42: nope\n")
+                .expect_err("group errors");
+        assert!(
+            group_err.contains("test.protocol: misplaced key"),
+            "{group_err}"
+        );
+        assert!(
+            group_err.contains("test.weird_top: unknown field"),
+            "{group_err}"
+        );
+        assert!(group_err.contains("expected string keys"), "{group_err}");
+        assert!(
+            group_err.contains("test.schedule.extra: unknown field"),
+            "{group_err}"
+        );
+        assert!(group_err.contains("test.schedule.capacity"), "{group_err}");
+        assert!(group_err.contains("test.runners"), "{group_err}");
+
+        // Non-mapping item in runner sequence & non-string key in runner mapping.
+        let seq_err = parse_yaml("- 123\n- 99: bad\n  run: ['true']\n").expect_err("seq errors");
+        assert!(
+            seq_err.contains("test[0]: expected a runner mapping"),
+            "{seq_err}"
+        );
+        assert!(
+            seq_err.contains("test[1]: expected string keys"),
+            "{seq_err}"
+        );
+        assert!(seq_err.contains("test[1].list"), "{seq_err}");
+        assert!(seq_err.contains("{test}"), "{seq_err}");
+
+        // Batch unknown field + non-string key, and covers_by_test null / non-mapping / unknown / non-string key.
+        let nested_err = parse_yaml(
+            "list: ['true']\n\
+             run: ['true', '{test}']\n\
+             batch:\n  1: bad\n  extra: 2\n\
+             covers_by_test:\n  - 123\n  - 7: bad\n    extra: 1\n\
+             inputs_by_test: null\n\
+             name: 123\n\
+             expect_tests: null\n\
+             timeout_seconds: null\n\
+             output_lines: null\n\
+             wrap: null\n",
+        )
+        .expect_err("nested errors");
+        assert!(
+            nested_err.contains("test.batch.extra: unknown field"),
+            "{nested_err}"
+        );
+        assert!(
+            nested_err.contains("test.covers_by_test[0]"),
+            "{nested_err}"
+        );
+        assert!(
+            nested_err.contains("test.covers_by_test[1].extra: unknown field"),
+            "{nested_err}"
+        );
+        assert!(nested_err.contains("test.name:"), "{nested_err}");
+
+        // `describe_value` shapes: null, boolean, >40-char string, sequence, mapping, and tagged values.
+        let long_str = "x".repeat(55);
+        assert_eq!(describe_value(&yaml_compat::Value::Null), "null");
+        assert_eq!(
+            describe_value(&yaml_compat::Value::Bool(true)),
+            "boolean `true`"
+        );
+        assert!(describe_value(&yaml_compat::Value::String(long_str)).ends_with("..."));
+        assert_eq!(
+            describe_value(&yaml_compat::Value::Sequence(vec![])),
+            "a list"
+        );
+        assert_eq!(
+            describe_value(&yaml_compat::Value::Mapping(yaml_compat::Mapping::new())),
+            "a mapping"
+        );
+        let tagged = yaml_compat::Value::Tagged(Box::new(yaml_compat::TaggedValue {
+            tag: yaml_compat::Tag::new("!", "custom"),
+            value: yaml_compat::Value::Null,
+        }));
+        assert_eq!(describe_value(&tagged), "null");
+
+        // Null optional fields in a valid runner parse cleanly.
+        let ok = parse_yaml(
+            "list: ['true']\n\
+             run: ['true', '{test}']\n\
+             covers_by_test: null\n\
+             expect_tests: null\n\
+             timeout_seconds: null\n\
+             output_lines: null\n\
+             wrap: null\n",
+        )
+        .expect("null optional fields");
+        assert_eq!(ok.all().len(), 1);
+    }
+}

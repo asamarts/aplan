@@ -638,3 +638,233 @@ fn compute_inputs_digest(
     }
     out
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::process::Command;
+
+    fn git(dir: &Path, args: &[&str]) -> String {
+        let out = Command::new("git")
+            .current_dir(dir)
+            .args(args)
+            .output()
+            .expect("git");
+        assert!(
+            out.status.success(),
+            "git {args:?} failed: {}",
+            String::from_utf8_lossy(&out.stderr)
+        );
+        String::from_utf8_lossy(&out.stdout).trim().to_string()
+    }
+
+    #[test]
+    fn range_spec_and_path_safety_reject_unsupported_and_escaping_inputs() {
+        let defaults = RangeCheckOptions::new("..HEAD");
+        assert_eq!(defaults.max_commits, MAX_RANGE_COMMITS);
+        assert!(!defaults.fail_fast);
+
+        assert!(parse_range_spec("a...b").is_err());
+        assert!(parse_range_spec("HEAD").is_err());
+        assert!(parse_range_spec("HEAD..").is_err());
+        assert_eq!(parse_range_spec("..HEAD").unwrap(), (None, "HEAD"));
+        assert_eq!(parse_range_spec("a..b").unwrap(), (Some("a"), "b"));
+
+        assert!(!is_safe_repo_rel_path(Path::new("/abs/plan")));
+        assert!(!is_safe_repo_rel_path(Path::new("../escape")));
+        assert!(is_safe_repo_rel_path(Path::new("aplan/tasks")));
+    }
+
+    #[test]
+    fn audit_range_rejects_bad_ranges_invalid_historical_config_and_shallow_clones() {
+        let dir = tempfile::Builder::new()
+            .prefix("range-audit-edges-")
+            .tempdir_in(aplan_core::fixture::fixture_root())
+            .expect("tempdir");
+        let root = dir.path().join("origin");
+        std::fs::create_dir_all(root.join("aplan/tasks")).expect("dirs");
+        git(&root, &["init", "-q"]);
+        git(&root, &["config", "user.email", "t@example.com"]);
+        git(&root, &["config", "user.name", "Test"]);
+
+        std::fs::write(
+            root.join("aplan/tasks/T-1.md"),
+            "---\nid: T-1\ntitle: Seed\nphase: 1\nstatus: todo\neffort_days: 1\n---\n\nbody\n",
+        )
+        .expect("task");
+        git(&root, &["add", "-A"]);
+        git(&root, &["commit", "-q", "-m", "c1"]);
+        let c1 = git(&root, &["rev-parse", "HEAD"]);
+
+        // Commit 2: invalid `.aplan.yml` in historical commit.
+        std::fs::write(root.join(".aplan.yml"), "not_valid: [unclosed\n").expect("bad cfg");
+        git(&root, &["add", "-A"]);
+        git(&root, &["commit", "-q", "-m", "c2 bad cfg"]);
+
+        // Commit 3: escaping `root` in historical `.aplan.yml`.
+        std::fs::write(root.join(".aplan.yml"), "root: ../outside\n").expect("escape cfg");
+        git(&root, &["add", "-A"]);
+        git(&root, &["commit", "-q", "-m", "c3 escape root"]);
+        let c3 = git(&root, &["rev-parse", "HEAD"]);
+
+        // Commit 4: clean valid `.aplan.yml`.
+        std::fs::write(root.join(".aplan.yml"), "root: aplan\n").expect("good cfg");
+        git(&root, &["add", "-A"]);
+        git(&root, &["commit", "-q", "-m", "c4 good"]);
+        let c4 = git(&root, &["rev-parse", "HEAD"]);
+
+        // Reversed range (`c4..c1`) is refused.
+        assert!(check_commit_range(&root, &RangeCheckOptions::new(format!("{c4}..{c1}"))).is_err());
+
+        // `max_commits` bound is enforced.
+        let mut bounded = RangeCheckOptions::new(format!("{c1}..{c4}"));
+        bounded.max_commits = 1;
+        assert!(check_commit_range(&root, &bounded).is_err());
+
+        // Invalid historical `.aplan.yml` and escaping `root` surface CONFIG diagnostics.
+        let report = check_commit_range(&root, &RangeCheckOptions::new(format!("{c1}..{c3}")))
+            .expect("range report");
+        assert!(!report.range_clean);
+        assert_eq!(report.commits.len(), 2);
+        assert_eq!(report.commits[0].diagnostics[0].code, "CONFIG");
+        assert!(
+            report.commits[0].diagnostics[0]
+                .message
+                .contains("invalid `.aplan.yml`")
+        );
+        assert_eq!(report.commits[1].diagnostics[0].code, "CONFIG");
+        assert!(
+            report.commits[1].diagnostics[0]
+                .message
+                .contains("escapes the repository tree")
+        );
+
+        // Shallow clone refuses open-ended `..HEAD`.
+        let shallow = dir.path().join("shallow");
+        let file_url = format!("file://{}", root.display());
+        git(
+            dir.path(),
+            &[
+                "clone",
+                "--depth",
+                "1",
+                &file_url,
+                shallow.to_str().unwrap(),
+            ],
+        );
+        let open_err = check_commit_range(&shallow, &RangeCheckOptions::new("..HEAD"))
+            .expect_err("open-ended range in shallow clone must fail");
+        assert!(open_err.to_string().contains("shallow clone"), "{open_err}");
+
+        let repo_handle = git2::Repository::open(&shallow).expect("open shallow");
+        let head_tree = repo_handle
+            .head()
+            .unwrap()
+            .peel_to_commit()
+            .unwrap()
+            .tree()
+            .unwrap();
+        assert!(read_regular_blob(&repo_handle, &head_tree, Path::new("aplan")).is_none());
+    }
+
+    #[test]
+    fn audit_range_covers_happy_path_diagnostics_traces_overrides_and_shallow_boundary() {
+        let dir = tempfile::Builder::new()
+            .prefix("range-audit-full-")
+            .tempdir_in(aplan_core::fixture::fixture_root())
+            .expect("tempdir");
+        let root = dir.path().join("origin");
+        std::fs::create_dir_all(root.join("aplan/tasks")).expect("dirs");
+        std::fs::create_dir_all(root.join("docs")).expect("docs");
+        git(&root, &["init", "-q"]);
+        git(&root, &["config", "user.email", "t@example.com"]);
+        git(&root, &["config", "user.name", "Test"]);
+
+        // c1: base commit with config exercising traces_root, owners, exempt_tags, deny_warnings.
+        std::fs::write(
+            root.join(".aplan.yml"),
+            "root: aplan\ntraces_root: docs\nowners: [alice]\ndeny_warnings: true\nevidence:\n  require_min_strength: [file]\n  exempt_tags: [spike]\n",
+        )
+        .expect("cfg");
+        std::fs::write(root.join("docs/spec.md"), "# Spec\n\n## Sec\n\nBody.\n").expect("spec");
+        std::fs::write(
+            root.join("aplan/tasks/T-1.md"),
+            "---\nid: T-1\ntitle: Valid\nphase: 1\nstatus: todo\nowner: alice\neffort_days: 1\ntraces:\n- spec.md#sec\n- ../outside.md#bad\n- missing.md#none\n---\n\nbody\n",
+        )
+        .expect("T-1");
+        git(&root, &["add", "-A"]);
+        git(&root, &["commit", "-q", "-m", "c1"]);
+        let c1 = git(&root, &["rev-parse", "HEAD"]);
+
+        // c2: adds task with warning (missing effort_days) to exercise RangeDiagnostic::from.
+        std::fs::write(
+            root.join("aplan/tasks/T-2.md"),
+            "---\nid: T-2\ntitle: Missing effort\nphase: 1\nstatus: todo\nowner: alice\n---\n\nbody\n",
+        )
+        .expect("T-2");
+        git(&root, &["add", "-A"]);
+        git(&root, &["commit", "-q", "-m", "c2 warn"]);
+
+        // c3: touches unrelated README to hit cache reuse.
+        std::fs::write(root.join("README.md"), "hello\n").expect("readme");
+        git(&root, &["add", "-A"]);
+        git(&root, &["commit", "-q", "-m", "c3 readme"]);
+        let c3 = git(&root, &["rev-parse", "HEAD"]);
+
+        // With `deny_warnings_override = Some(false)` and `no_traces = true`, c2/c3 pass and reuse.
+        let mut lenient = RangeCheckOptions::new(format!("{c1}..{c3}"));
+        lenient.deny_warnings_override = Some(false);
+        lenient.no_traces = true;
+        let rep_lenient = check_commit_range(&root, &lenient).expect("lenient range");
+        assert!(rep_lenient.range_clean, "{rep_lenient:?}");
+        assert_eq!(rep_lenient.commits.len(), 2);
+        assert!(!rep_lenient.commits[0].diagnostics.is_empty());
+        assert!(rep_lenient.commits[1].reused_from.is_some());
+
+        // With `deny_warnings_override = Some(true)` and traces enabled, warnings deny and traces stage.
+        let mut strict = RangeCheckOptions::new(format!("{c1}..{c3}"));
+        strict.deny_warnings_override = Some(true);
+        let rep_strict = check_commit_range(&root, &strict).expect("strict range");
+        assert!(!rep_strict.range_clean);
+
+        // Shallow clone with unrelated orphan base reaches the shallow boundary parent check.
+        let shallow = dir.path().join("shallow");
+        let file_url = format!("file://{}", root.display());
+        git(
+            dir.path(),
+            &[
+                "clone",
+                "--depth",
+                "1",
+                &file_url,
+                shallow.to_str().unwrap(),
+            ],
+        );
+        git(&shallow, &["config", "user.email", "t@example.com"]);
+        git(&shallow, &["config", "user.name", "Test"]);
+        let tip = git(&shallow, &["rev-parse", "HEAD"]);
+        git(&shallow, &["checkout", "--orphan", "base-only", "-q"]);
+        git(&shallow, &["rm", "-rf", "-q", "."]);
+        git(&shallow, &["commit", "--allow-empty", "-q", "-m", "orphan"]);
+        let orphan = git(&shallow, &["rev-parse", "HEAD"]);
+        git(
+            &shallow,
+            &[
+                "merge",
+                "--allow-unrelated-histories",
+                "-q",
+                "-m",
+                "merge",
+                &tip,
+            ],
+        );
+        let merged = git(&shallow, &["rev-parse", "HEAD"]);
+        let shallow_rep = check_commit_range(
+            &shallow,
+            &RangeCheckOptions::new(format!("{orphan}..{merged}")),
+        )
+        .expect("bounded merge range inside shallow clone audits reachable commits");
+        assert_eq!(shallow_rep.commits.len(), 2);
+        assert!(!shallow_rep.range_clean);
+    }
+}

@@ -506,6 +506,9 @@ mod tests {
             format!("{WRITTEN_BY_PREFIX}0.7.0, surface NOTHEX123456 -->\n- a rule\n"),
             format!("{WRITTEN_BY_PREFIX}0.7.0, surface aaaaaaaaaaaa --> trailing\n- a rule\n"),
             format!("- a rule\n{WRITTEN_BY_PREFIX}0.7.0, surface aaaaaaaaaaaa -->\n"),
+            format!("{WRITTEN_BY_PREFIX}0.7.0, surface aaaaaaaaaaaa --> extra -->\n- a rule\n"),
+            format!("{WRITTEN_BY_PREFIX}0.7.0 no-comma-surface -->\n- a rule\n"),
+            format!("{WRITTEN_BY_PREFIX}, surface aaaaaaaaaaaa -->\n- a rule\n"),
         ];
         for bad in cases {
             let (state, _) = parse_provenance(&bad);

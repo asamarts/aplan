@@ -2244,4 +2244,24 @@ mod points_at_tests {
         assert_eq!(Rule::from_code("APLAN999"), None);
         assert_eq!(Rule::from_code(""), None);
     }
+
+    #[test]
+    fn resolver_switch_rules_enumerates_every_switch_group() {
+        for switch in [
+            ResolverSwitch::Test,
+            ResolverSwitch::TestLocality,
+            ResolverSwitch::UrlCheck,
+        ] {
+            let rules = switch.rules();
+            assert!(
+                !rules.is_empty(),
+                "{switch:?} must govern at least one rule"
+            );
+            assert!(
+                rules
+                    .iter()
+                    .all(|r| r.switch_disposition() == SwitchDisposition::ResolverSwitch(switch))
+            );
+        }
+    }
 }

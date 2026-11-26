@@ -57,7 +57,7 @@ when a client closes its input (`A2-170`), TUI ranking on keys that change only 
 not yet proven through product reads (`A2-173`), real-terminal tests that fail when the host is busy
 (`A2-176`), and nine TUI timings the reference host cannot yet budget (`A2-180`).
 
-**Tasks:** `A2-069`, `A2-087`, `A2-127`, `A2-131`, `A2-133`, `A2-141`, `A2-145`, `A2-162`, `A2-165`, `A2-170`, `A2-171`, `A2-172`, `A2-173`, `A2-176`, `A2-180`
+**Tasks:** `A2-069`, `A2-087`, `A2-127`, `A2-131`, `A2-133`, `A2-141`, `A2-145`, `A2-162`, `A2-165`, `A2-170`, `A2-171`, `A2-172`, `A2-173`, `A2-176`, `A2-180`, `A2-198`
 
 ### adoption, Adoption and ergonomics
 

@@ -1913,4 +1913,116 @@ mod tests {
         assert!(inc.is_complete());
         assert_eq!(inc.lines(), eager.lines.as_slice());
     }
+
+    #[test]
+    fn markdown_covers_headings_alignments_images_nested_blocks_and_truncated_incremental() {
+        let md = "\
+# H1
+## H2
+### H3
+#### H4
+##### H5
+###### H6
+
+| None | Left | Center | Right |
+| --- | :--- | :---: | ---: |
+| a | b | c | d |
+
+Images: ![*em* **strong** ~~strike~~ `code` [lbl](https://example.test)  \nnext](https://img.test/a.png), ![](https://img.test/b.png), ![](), ![alt only]().
+
+Empty label link: [](https://empty.test) and same-label [https://same.test](https://same.test).
+
+Hard break line1  \nline2.
+
+```
+```
+
+> Quote paragraph
+>
+> ```sh
+> echo hi
+> ```
+
+3. ```rust
+   let a = 1;
+   ```
+
+   Second block inside list item.
+
+- 
+- Item with nested quote
+  > inside list
+";
+        let doc = parse_markdown(md);
+        let inline_caps = RenderCapabilities {
+            width: 80,
+            ascii: false,
+            links: LinkDisplay::InlineDestination,
+            ..RenderCapabilities::default()
+        };
+        let label_only_caps = RenderCapabilities {
+            width: 80,
+            ascii: true,
+            links: LinkDisplay::LabelOnly,
+            ..RenderCapabilities::default()
+        };
+        let out_inline = render_terminal(&doc, &inline_caps);
+        let out_label = render_terminal(&doc, &label_only_caps);
+        assert!(out_inline.contains("H6"), "{out_inline}");
+        assert!(out_inline.contains("[image: "), "{out_inline}");
+        assert!(out_inline.contains("[image]"), "{out_inline}");
+        assert!(out_inline.contains("[code]"), "{out_inline}");
+        assert!(out_inline.contains("3. "), "{out_inline}");
+        assert!(out_label.contains("[image: alt only]"), "{out_label}");
+
+        // Direct checks of helper branches: inline inside image/codeblock/blockquote/document and
+        // nested inline flattening plus incremental layout over a truncated document.
+        let mut flat = String::new();
+        flatten_inline_into_string(
+            &Inline::Image {
+                alt: "pic".into(),
+                destination: "u".into(),
+            },
+            &mut flat,
+        );
+        flatten_inline_into_string(&Inline::SoftBreak, &mut flat);
+        flatten_inline_into_string(&Inline::HardBreak, &mut flat);
+        assert_eq!(flat, "pic \n");
+
+        let mut stack = vec![Container::Document(Vec::new())];
+        push_inline(&mut stack, Inline::Text("a".into()));
+        push_inline(&mut stack, Inline::Text("b".into()));
+        stack.push(Container::CodeBlock {
+            language: None,
+            content: String::new(),
+        });
+        push_inline(&mut stack, Inline::Text("c".into()));
+        stack.pop();
+        stack.push(Container::List {
+            ordered_start: None,
+            items: vec![ListItem {
+                task_checked: None,
+                blocks: Vec::new(),
+            }],
+        });
+        let mut trunc = false;
+        push_block(&mut stack, Block::ThematicBreak, &mut trunc);
+        assert!(!trunc);
+
+        let mut many = String::new();
+        for i in 0..=MAX_BLOCKS {
+            let _ = writeln!(many, "Paragraph {i}.\n");
+        }
+        let trunc_doc = parse_markdown(&many);
+        assert!(trunc_doc.truncated);
+        let mut inc = IncrementalLayout::new(trunc_doc.clone(), inline_caps);
+        assert_eq!(inc.document().blocks.len(), trunc_doc.blocks.len());
+        inc.ensure_complete();
+        assert!(inc.is_complete());
+        assert!(
+            inc.lines()
+                .last()
+                .is_some_and(|l| l.spans.iter().any(|s| s.text.contains("truncated")))
+        );
+    }
 }

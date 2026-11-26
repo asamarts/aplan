@@ -699,6 +699,21 @@ fn paths_match_agrees_with_evidence_verification_across_all_glob_semantics() {
         aplan(root, &["paths", "match", "--limit", "0", "src/**"]).1,
         0
     );
+
+    // Parent-only `aplan paths` flags passed before `match` must be refused
+    // (exit 2) rather than silently dropped (`A2-198`).
+    for bad_args in [
+        &["paths", "--format", "json", "match", "src/**"][..],
+        &["paths", "--sample", "10", "match", "src/**"][..],
+        &["paths", "--repo", ".", "match", "src/**"][..],
+        &["paths", "--cut", "M-1", "match", "src/**"][..],
+    ] {
+        let (out, code) = aplan(root, bad_args);
+        assert_eq!(
+            code, 2,
+            "parent flag before `paths match` must be refused, not ignored ({bad_args:?}): {out}"
+        );
+    }
 }
 
 #[test]

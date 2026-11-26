@@ -417,3 +417,30 @@ fn map_error(error: LayoutError) -> AdapterFailure {
         _ => AdapterFailure::Rejected,
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn map_error_and_cell_coordinate_enforce_adapter_bounds() {
+        assert_eq!(
+            map_error(LayoutError::TooLarge {
+                what: "nodes",
+                got: 12,
+                limit: 10,
+            }),
+            AdapterFailure::TooLarge {
+                resource: "nodes".to_string(),
+                got: 12,
+                limit: 10,
+            }
+        );
+        assert_eq!(cell_coordinate(12.6), Ok(13));
+        assert_eq!(cell_coordinate(f64::NAN), Err(AdapterFailure::Rejected));
+        assert_eq!(
+            cell_coordinate(f64::INFINITY),
+            Err(AdapterFailure::Rejected)
+        );
+    }
+}

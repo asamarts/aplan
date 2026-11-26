@@ -7517,6 +7517,50 @@ future_top_level_key_from_v09:
                     "test:\n  schedule: {capacity: 1}\n  runners:\n    - list: ['true']\n      run: ['true', '{test}']\n      covers_by_test:\n        - tests: []\n          paths: ['src/**']\n",
                     "`test.runners[0].covers_by_test[0].tests`",
                 ),
+                (
+                    "test:\n  schedule: {capacity: 1}\n  runners:\n    - list: ['true']\n      run: ['true', '{test}']\n      batch:\n        protocol: 1\n        run: []\n",
+                    "`test.runners[0].batch.run`",
+                ),
+                (
+                    "test:\n  schedule: {capacity: 1}\n  runners:\n    - list: ['true']\n      run: ['true', '{test}']\n      batch:\n        protocol: 1\n        run: ['adapter', '--m={manifest}', '{manifest}', '{result}']\n",
+                    "`test.runners[0].batch.run`",
+                ),
+                (
+                    "test:\n  schedule: {capacity: 1}\n  runners:\n    - list: ['true']\n      run: ['true', '{test}']\n      inputs_by_test:\n        - tests: ['  ']\n          paths: ['src/**']\n",
+                    "`test.runners[0].inputs_by_test[0].tests`",
+                ),
+                (
+                    "test:\n  schedule: {capacity: 1}\n  runners:\n    - list: ['true']\n      run: ['true', '{test}']\n      inputs_by_test:\n        - tests: ['suite::*']\n          paths: ['src/[']\n",
+                    "`test.runners[0].inputs_by_test[0].paths`",
+                ),
+                (
+                    "test:\n  schedule: {capacity: 1}\n  runners:\n    - list: ['true']\n      run: ['true', '{test}']\n      exclusive: ['']\n",
+                    "`test.runners[0].exclusive`",
+                ),
+                (
+                    "test:\n  schedule: {capacity: 1}\n  runners:\n    - list: ['true']\n      run: ['true', '{test}']\n      max_processes: 0\n",
+                    "`test.runners[0].max_processes`",
+                ),
+                (
+                    "test:\n  schedule: {capacity: 1}\n  runners:\n    - list: ['true']\n      run: ['true', '{test}']\n      max_output: 'not-a-size'\n",
+                    "`test.runners[0].max_output`",
+                ),
+                (
+                    "test:\n  schedule: {capacity: 1}\n  runners:\n    - list: ['true']\n      run: ['true', '--f={test}', '{test}']\n",
+                    "`test.runners[0].run`",
+                ),
+                (
+                    "test:\n  schedule: {capacity: 1}\n  runners:\n    - list: ['true']\n      run: []\n",
+                    "`test.runners[0].run`",
+                ),
+                (
+                    "test:\n  schedule: {capacity: 1}\n  runners:\n    - list: ['true']\n      run: ['true', '{test}']\n      wrap: []\n",
+                    "`test.runners[0].wrap`",
+                ),
+                (
+                    "test:\n  schedule: {capacity: 1}\n  runners:\n    - list: ['true']\n      run: ['true', '{test}']\n      covers: []\n",
+                    "`test.runners[0].covers`",
+                ),
             ] {
                 let err = parse_config(yaml, Path::new(".aplan.yml"))
                     .expect_err("runner validation error must fail")

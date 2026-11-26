@@ -684,4 +684,14 @@ mod tests {
         assert!(parse("not: [valid", Format::Yaml).is_none());
         assert!(parse("{\"unclosed\": 1", Format::Json).is_none());
     }
+
+    #[test]
+    fn jsonpath_malformed_selectors_return_specific_refusals() {
+        assert!(parse_anchor("$.!").is_err());
+        assert!(parse_anchor("$.foo[0").is_err());
+        assert!(parse_anchor("$bar").is_err());
+        assert!(parse_anchor("$[not_an_index]").is_err());
+        assert!(parse_anchor("$['unclosed]").is_err());
+        assert!(parse_anchor("$[\"]").is_err());
+    }
 }

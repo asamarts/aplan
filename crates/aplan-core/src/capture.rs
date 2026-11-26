@@ -2995,6 +2995,13 @@ mod tests {
 
     #[test]
     fn cross_record_ids_and_time_formatting_keep_deterministic_boundaries() {
+        struct FixedClock(i64);
+        impl Clock for FixedClock {
+            fn now_epoch(&self) -> i64 {
+                self.0
+            }
+        }
+
         let mut inbox = Inbox {
             captures: vec![
                 LoadedCapture {
@@ -3034,5 +3041,44 @@ mod tests {
         }
         assert!(validate_key("tracker.github", KeySyntax::Namespace).is_ok());
         assert!(validate_text("body\nwith\ttabs", TextKind::Body).is_ok());
+
+        // Inbox file-level load refusals: oversized file, non-UTF-8 bytes, and non-regular directory.
+        let dir = tempfile::Builder::new()
+            .prefix("capture-load-refusals-")
+            .tempdir_in(crate::fixture::fixture_root())
+            .expect("tempdir");
+        let inbox_dir = dir.path().join(".inbox");
+        std::fs::create_dir_all(&inbox_dir).expect("inbox");
+        std::fs::write(
+            inbox_dir.join("I-01K8Z3A4H0000000000000000A.yml"),
+            vec![b'a'; MAX_CAPTURE_BYTES + 16],
+        )
+        .expect("oversized");
+        std::fs::write(
+            inbox_dir.join("I-01K8Z3A4H0000000000000000B.yml"),
+            [0xffu8, 0xfe, 0x00],
+        )
+        .expect("bad utf8");
+        let loaded = load_inbox(
+            dir.path(),
+            &CapturePolicy::default(),
+            &FixedClock(1_700_000_000),
+        );
+        assert!(
+            loaded
+                .diagnostics
+                .iter()
+                .any(|d| d.message.contains("exceeds") || d.message.contains("large")),
+            "expected oversized capture diagnostic: {:#?}",
+            loaded.diagnostics
+        );
+        assert!(
+            loaded
+                .diagnostics
+                .iter()
+                .any(|d| d.message.contains("UTF-8")),
+            "expected invalid UTF-8 diagnostic: {:#?}",
+            loaded.diagnostics
+        );
     }
 }

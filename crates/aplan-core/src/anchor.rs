@@ -1806,4 +1806,72 @@ note: |
             "nested metadata pipe line minted a phantom table-row anchor: {anchors:?}"
         );
     }
+
+    #[test]
+    fn check_stamp_in_covers_algorithm_mismatch_retargeting_legacy_and_drift() {
+        let md = "# Spec\n\n## Alpha\n\nOriginal body.\n";
+        let resolved = resolve_in("spec.md", md, "alpha").expect("heading");
+        let valid_stamp = format!("{}:{}{}", resolved.kind.as_str(), resolved.hash, "");
+        assert_eq!(
+            check_stamp_in("spec.md", md, "alpha", &valid_stamp),
+            Some(StampCheck::Holds)
+        );
+        assert!(holds_in("spec.md", md, "alpha", &valid_stamp));
+
+        // Different `@algo` suffix reports `BuildMismatch`.
+        let mismatched_algo = format!("heading:{}@blake3-v99", resolved.hash);
+        assert_eq!(
+            check_stamp_in("spec.md", md, "alpha", &mismatched_algo),
+            Some(StampCheck::BuildMismatch {
+                stamped_with: "blake3-v99".to_string(),
+                current: CURRENT_FINGERPRINT_ALGO,
+            })
+        );
+
+        // Retargeted from row to heading reports `Retargeted`.
+        let retargeted = format!("row:{}", resolved.hash);
+        assert_eq!(
+            check_stamp_in("spec.md", md, "alpha", &retargeted),
+            Some(StampCheck::Retargeted {
+                was: AnchorKind::Row,
+                now: AnchorKind::Heading,
+            })
+        );
+
+        // Legacy bare 16-hex stamp still holds.
+        let legacy = legacy_fingerprint(md, "alpha").expect("legacy fp");
+        assert_eq!(
+            check_stamp_in("spec.md", md, "alpha", &legacy),
+            Some(StampCheck::Holds)
+        );
+
+        // Different hash reports `Drifted`.
+        assert_eq!(
+            check_stamp_in("spec.md", md, "alpha", "heading:0000000000000000"),
+            Some(StampCheck::Drifted {
+                kind: AnchorKind::Heading,
+            })
+        );
+        assert!(!holds_in(
+            "spec.md",
+            md,
+            "alpha",
+            "heading:0000000000000000"
+        ));
+
+        // Structured YAML & JSON anchors exercise `AnchorKind::Node` and `DocumentKind` dispatch.
+        let yaml = "service:\n  port: 8080\n";
+        let yaml_res = resolve_in("config.yml", yaml, "/service/port").expect("yaml node");
+        assert_eq!(yaml_res.kind, AnchorKind::Node);
+        assert_eq!(yaml_res.kind.as_str(), "node");
+        let json = "{\"service\": {\"port\": 8080}}\n";
+        let json_res = resolve_in("config.json", json, "/service/port").expect("json node");
+        assert_eq!(json_res.kind, AnchorKind::Node);
+        assert!(holds_in(
+            "config.json",
+            json,
+            "/service/port",
+            &format!("node:{}", json_res.hash)
+        ));
+    }
 }

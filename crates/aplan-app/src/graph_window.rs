@@ -1518,6 +1518,14 @@ mod tests {
         let second = project_window(&source, &request);
         assert_eq!(first, second);
         assert_eq!(first.state, GraphWindowState::Windowed);
+        assert!(first.is_windowed());
+        assert!(
+            !project_window(
+                &projection(Vec::new(), Vec::new(), GraphProjectionState::EmptyScope),
+                &GraphWindowRequest::default()
+            )
+            .is_windowed()
+        );
         assert!(first.view.nodes.len() <= 32);
         assert!(first.view.edges.len() <= 31);
         assert!(first.required_lanes <= 2);

@@ -873,7 +873,7 @@ fn relative_under_root(base: &std::path::Path, target: &std::path::Path) -> Path
         .unwrap_or_else(|_| target.to_path_buf());
     match target_abs.strip_prefix(&base_abs) {
         Ok(rel) => rel.to_path_buf(),
-        Err(_) => PathBuf::from("aplan"),
+        Err(_) => target.to_path_buf(),
     }
 }
 
@@ -1714,6 +1714,155 @@ mod tests {
         assert!(
             !err.contains("future_config_key"),
             "pre-schema requires must fire before unknown keys:\n{err}"
+        );
+    }
+
+    #[test]
+    fn relative_under_root_and_repo_discovery_preserve_external_plan_roots() {
+        use super::{relative_under_root, resolve_repo_and_plan_rel};
+        use std::path::PathBuf;
+
+        let dir = tempfile::Builder::new()
+            .prefix("mcp-rel-root-")
+            .tempdir_in(aplan_core::fixture::fixture_root())
+            .expect("tempdir");
+        let repo_dir = dir.path().join("repo");
+        let inside_plan = repo_dir.join("custom-plan");
+        let outside_plan = dir.path().join("external-plan");
+        std::fs::create_dir_all(&inside_plan).expect("inside");
+        std::fs::create_dir_all(&outside_plan).expect("outside");
+
+        assert_eq!(
+            relative_under_root(&repo_dir, &inside_plan),
+            PathBuf::from("custom-plan")
+        );
+        assert_eq!(relative_under_root(&repo_dir, &repo_dir), PathBuf::new());
+        // External plan root must stay external rather than silently aliasing `aplan`.
+        assert_eq!(relative_under_root(&repo_dir, &outside_plan), outside_plan);
+
+        let missing = repo_dir.join("missing-plan");
+        let (fallback_root, fallback_rel) = resolve_repo_and_plan_rel(&missing, &repo_dir);
+        assert_eq!(fallback_root, repo_dir);
+        assert_eq!(fallback_rel, PathBuf::from("missing-plan"));
+    }
+
+    #[test]
+    fn server_covers_unconfigured_resources_input_identity_variants_and_ready_cuts() {
+        let dir = tempfile::Builder::new()
+            .prefix("mcp-srv-edges-")
+            .tempdir_in(aplan_core::fixture::fixture_root())
+            .expect("tempdir");
+        let root = dir.path().join("aplan");
+        std::fs::create_dir_all(root.join("tasks")).expect("tasks");
+        std::fs::write(
+            root.join("tasks/M-1.md"),
+            "---\nid: M-1\ntitle: First cut\nphase: 1\nstatus: todo\nblocked_by: [T-1]\ntags: [milestone, v1]\n---\n\nbody\n",
+        )
+        .expect("M-1");
+        std::fs::write(
+            root.join("tasks/T-1.md"),
+            "---\nid: T-1\ntitle: Work\nphase: 1\nstatus: todo\neffort_days: 1\n---\n\nbody\n",
+        )
+        .expect("T-1");
+
+        // Unconfigured server refuses resource reads cleanly.
+        let unconf = AplanServer::unconfigured("broken config".to_string(), serde_json::json!({}));
+        let err = unconf
+            .read_resource_payload("aplan://plan/summary")
+            .expect_err("unconfigured server must refuse resource reads");
+        assert!(matches!(
+            err,
+            crate::resources::ResourceError::InvalidParams(_)
+        ));
+
+        // `input_identity_for` covers Bytes, Sha256, ReadError, and readable/unreadable config files.
+        let cfg_path = dir.path().join(".aplan.yml");
+        std::fs::write(&cfg_path, "root: aplan\n").expect("cfg");
+        let mut policy = crate::Policy::default();
+        policy.verify.config_file = Some(cfg_path.clone());
+        let server = AplanServer::new(
+            root.clone(),
+            policy,
+            serde_json::json!({}),
+            aplan_app::CacheMode::Off,
+            "mcp-coverage-test".to_string(),
+            ("0.8.0-dev".to_string(), "0123456789ab".to_string()),
+            None,
+        );
+        let synthetic_plan = aplan_core::IdentifiedPlan {
+            root: root.clone(),
+            plan: aplan_core::load_plan(&root),
+            inputs: vec![
+                aplan_core::load::PlanFileInput {
+                    path: root.join("tasks/T-1.md"),
+                    content: aplan_core::load::PlanFileContent::Bytes(b"hello".to_vec()),
+                },
+                aplan_core::load::PlanFileInput {
+                    path: root.join("tasks/M-1.md"),
+                    content: aplan_core::load::PlanFileContent::Sha256("a".repeat(64)),
+                },
+                aplan_core::load::PlanFileInput {
+                    path: root.join("tasks/UNREADABLE.md"),
+                    content: aplan_core::load::PlanFileContent::ReadError {
+                        kind: std::io::ErrorKind::PermissionDenied,
+                        message: "denied".to_string(),
+                    },
+                },
+            ],
+        };
+        let id_ok = server.input_identity_for(&synthetic_plan, "hermetic");
+        assert_ne!(id_ok.config_sha256, "none");
+        assert_ne!(id_ok.config_sha256, "unreadable");
+
+        std::fs::remove_file(&cfg_path).expect("rm cfg");
+        let id_missing_cfg = server.input_identity_for(&synthetic_plan, "hermetic");
+        assert_eq!(id_missing_cfg.config_sha256, "unreadable");
+
+        // Missing task resource maps to NotFound; ready collection includes milestone cut labels.
+        let not_found = server
+            .read_resource_payload("aplan://tasks/NO-SUCH")
+            .expect_err("unknown task must return NotFound");
+        assert!(matches!(
+            not_found,
+            crate::resources::ResourceError::NotFound(_)
+        ));
+        let (canonical, ready_val, _, _) = server
+            .read_resource_payload("aplan://collections/ready")
+            .expect("ready collection");
+        assert_eq!(canonical, "aplan://collections/ready?limit=20");
+        assert_eq!(ready_val["items"][0]["cut"], "v1");
+    }
+
+    #[test]
+    fn oversized_tool_result_returns_structured_refusal() {
+        let big_dir = tempfile::Builder::new()
+            .prefix("mcp-oversized-tool-")
+            .tempdir_in(aplan_core::fixture::fixture_root())
+            .expect("big dir");
+        let big_root = big_dir.path().join("aplan");
+        std::fs::create_dir_all(big_root.join("tasks")).expect("big tasks");
+        let huge_title = "x".repeat(crate::contract::MAX_TOOL_RESULT_BYTES + 2048);
+        std::fs::write(
+            big_root.join("tasks/T-BIG.md"),
+            format!("---\nid: T-BIG\ntitle: {huge_title}\nphase: 1\nstatus: todo\neffort_days: 1\n---\n\nbody\n"),
+        )
+        .expect("T-BIG");
+        let big_server = AplanServer::new(
+            big_root,
+            crate::Policy::default(),
+            serde_json::json!({}),
+            aplan_app::CacheMode::Off,
+            "mcp-coverage-test".to_string(),
+            ("0.8.0-dev".to_string(), "0123456789ab".to_string()),
+            None,
+        );
+        let outcome =
+            big_server.dispatch_structured("aplan_show", &serde_json::json!({"id": "T-BIG"}));
+        assert!(outcome.is_error, "{outcome:?}");
+        assert!(
+            outcome.concise_text.contains("exceeds the"),
+            "{}",
+            outcome.concise_text
         );
     }
 }
