@@ -4390,6 +4390,98 @@ fn audit_unconditional_scenario(
     }
 }
 
+fn corpus_switched_off_oracle(
+    plan: &Plan,
+    opts: &Options,
+) -> std::collections::BTreeMap<&'static str, &'static str> {
+    type OracleProbe = (&'static str, fn(&mut Options));
+    const MIN_ON: &[EvidenceKind] = &[EvidenceKind::Commit, EvidenceKind::File, EvidenceKind::Test];
+    const PROBES: &[OracleProbe] = &[
+        ("require_effort", |o| o.require_effort = true),
+        ("detect_drift", |o| o.detect_drift = true),
+        ("require_cut_membership", |o| {
+            o.require_cut_membership = true;
+        }),
+        ("evidence.require_min_strength", |o| {
+            if o.require_min_strength.as_deref() != Some(MIN_ON) {
+                o.require_min_strength = Some(MIN_ON.to_vec());
+                o.configured_resolvers = None;
+            }
+        }),
+        ("version.require_impact", |o| {
+            o.require_impact = Some(aplan_core::task::VersionFloors::default());
+        }),
+    ];
+    let codes = |o: &Options| -> std::collections::BTreeSet<&'static str> {
+        validate(plan, o)
+            .diagnostics
+            .into_iter()
+            .map(|d| d.code)
+            .collect()
+    };
+    let now = codes(opts);
+    let mut out = std::collections::BTreeMap::new();
+    for (key, turn_on) in PROBES {
+        let mut with = opts.clone();
+        turn_on(&mut with);
+        if with == *opts {
+            continue;
+        }
+        for code in codes(&with).difference(&now) {
+            out.entry(*code).or_insert(*key);
+        }
+    }
+    out
+}
+
+fn audit_validation_switch_silent_scenario(
+    scenario: &Scenario,
+    plan: &Plan,
+    opts: &Options,
+    failures: &mut Vec<String>,
+) {
+    let graphs_before = aplan_core::graph_constructions();
+    let (report, obs) = aplan_core::validate_with_observations(plan, opts);
+    let graph_builds = aplan_core::graph_constructions() - graphs_before;
+    if graph_builds != 1 {
+        failures.push(format!(
+            "{}: expected 1 graph build on silent scenario, got {graph_builds}",
+            scenario.name
+        ));
+    }
+    if report
+        .diagnostics
+        .iter()
+        .any(|d| d.code == scenario.rule.code())
+    {
+        failures.push(format!(
+            "{}: silent scenario unexpectedly fired {}",
+            scenario.name,
+            scenario.rule.code()
+        ));
+    }
+    if !matches!(
+        obs.activation(scenario.rule),
+        Some(
+            aplan_core::CheckActivation::EnabledNoFindings
+                | aplan_core::CheckActivation::Inapplicable
+        )
+    ) {
+        failures.push(format!(
+            "{}: expected EnabledNoFindings or Inapplicable for silent {}, got {:?}",
+            scenario.name,
+            scenario.rule.code(),
+            obs.activation(scenario.rule)
+        ));
+    }
+    if obs.switched_off() != corpus_switched_off_oracle(plan, opts) {
+        failures.push(format!(
+            "{}: single-pass switched_off disagreed with oracle on silent scenario",
+            scenario.name
+        ));
+    }
+}
+
 /// `A2-135` AC 2: exhaustive executable audit of the rule/configuration switch
 /// catalogue and live activation observations across `Rule::ALL` and `corpus()`.
 #[test]
@@ -4413,23 +4505,45 @@ fn switch_dispositions_and_single_pass_observations_agree_with_corpus() {
         catalog_failures.join("\n  ")
     );
 
-    let mut checked_validation_rules = std::collections::BTreeSet::new();
+    let mut checked_validation_fires = std::collections::BTreeSet::new();
+    let mut checked_validation_silent = std::collections::BTreeSet::new();
     let mut checked_unconditional_rules = std::collections::BTreeSet::new();
     let mut failures = Vec::new();
 
-    for scenario in corpus().into_iter().filter(|s| s.expect == Expect::Fires) {
+    for scenario in corpus() {
         let (_dir, plan, opts) = materialize_scenario(&scenario);
-        match scenario.rule.switch_disposition() {
-            aplan_core::SwitchDisposition::ValidationSwitch(switch) => {
-                checked_validation_rules.insert(scenario.rule);
+        // Differential parity + single graph build across the entire corpus.
+        let graphs_before = aplan_core::graph_constructions();
+        let single_off = aplan_core::vacuity::switched_off(&plan, &opts);
+        let graph_builds = aplan_core::graph_constructions() - graphs_before;
+        if graph_builds != 1 {
+            failures.push(format!(
+                "{}: expected 1 graph build in switched_off, got {graph_builds}",
+                scenario.name
+            ));
+        }
+        let oracle_off = corpus_switched_off_oracle(&plan, &opts);
+        if single_off != oracle_off {
+            failures.push(format!(
+                "{}: single-pass switched_off ({single_off:?}) != oracle ({oracle_off:?})",
+                scenario.name
+            ));
+        }
+
+        match (scenario.expect, scenario.rule.switch_disposition()) {
+            (Expect::Fires, aplan_core::SwitchDisposition::ValidationSwitch(switch)) => {
+                checked_validation_fires.insert(scenario.rule);
                 audit_validation_switch_scenario(&scenario, &plan, &opts, switch, &mut failures);
             }
-            aplan_core::SwitchDisposition::Unconditional => {
+            (Expect::Silent, aplan_core::SwitchDisposition::ValidationSwitch(_)) => {
+                checked_validation_silent.insert(scenario.rule);
+                audit_validation_switch_silent_scenario(&scenario, &plan, &opts, &mut failures);
+            }
+            (Expect::Fires, aplan_core::SwitchDisposition::Unconditional) => {
                 checked_unconditional_rules.insert(scenario.rule);
                 audit_unconditional_scenario(&scenario, &plan, &opts, &mut failures);
             }
-            aplan_core::SwitchDisposition::ResolverSwitch(_)
-            | aplan_core::SwitchDisposition::External => {}
+            _ => {}
         }
     }
 
@@ -4439,8 +4553,12 @@ fn switch_dispositions_and_single_pass_observations_agree_with_corpus() {
             .flat_map(|sw| sw.rules())
             .collect();
     assert_eq!(
-        checked_validation_rules, declared_validation_rules,
+        checked_validation_fires, declared_validation_rules,
         "every ValidationSwitch-gated rule must be exercised by a Fires scenario"
+    );
+    assert_eq!(
+        checked_validation_silent, declared_validation_rules,
+        "every ValidationSwitch-gated rule must be exercised by a Silent scenario"
     );
     assert!(
         checked_unconditional_rules.len() >= 30,

@@ -488,6 +488,76 @@ fn shared_trace_vacuity_fixture(dir: &Path, config: Option<&str>) {
     .expect("T-3");
 }
 
+fn assert_shared_trace_timings(label: &str, stderr: &str) {
+    let timing = stderr
+        .lines()
+        .find(|line| line.starts_with("aplan: timings "))
+        .unwrap_or_else(|| panic!("{label}: missing timing diagnostic: {stderr}"));
+    for field in [
+        "graph_builds=1",
+        "trace_reads=2",
+        "markdown_parses=1",
+        "structured_parses=1",
+    ] {
+        assert!(
+            timing.contains(field),
+            "{label}: missing `{field}` in {timing}"
+        );
+    }
+}
+
+fn assert_human_vacuity_rows(label: &str, stdout: &str, expect_trace_drift_row: bool) {
+    let human_codes: Vec<&str> = stdout
+        .lines()
+        .filter_map(|line| {
+            let first = line.split_whitespace().next()?;
+            first.starts_with("APLAN").then_some(first)
+        })
+        .collect();
+    let mut sorted_human_codes = human_codes.clone();
+    sorted_human_codes.sort_unstable();
+    assert_eq!(
+        human_codes, sorted_human_codes,
+        "{label} human: rows must preserve canonical Rule::ALL order:\n{stdout}"
+    );
+    let expected: &[(&str, &str)] = if expect_trace_drift_row {
+        &[
+            ("APLAN017", "evidence.require_min_strength"),
+            ("APLAN018", "detect_drift"),
+            ("APLAN022", "require_cut_membership"),
+            ("APLAN028", "detect_drift"),
+            ("APLAN044", "version.require_impact"),
+            ("APLAN060", "detect_drift"),
+        ]
+    } else {
+        // Under `--cut M-1`, `M-1` holds only live `T-1` so `APLAN018` has 0
+        // subjects and human rendering omits 0-subject rows while keeping the
+        // remaining disabled rules that have subjects in the cut.
+        &[
+            ("APLAN017", "evidence.require_min_strength"),
+            ("APLAN022", "require_cut_membership"),
+            ("APLAN028", "detect_drift"),
+            ("APLAN044", "version.require_impact"),
+            ("APLAN060", "detect_drift"),
+        ]
+    };
+    for &(code, key) in expected {
+        let row = stdout
+            .lines()
+            .find(|line| line.starts_with(code))
+            .unwrap_or_else(|| panic!("{label} human: missing `{code}`:\n{stdout}"));
+        assert!(
+            row.contains("not run") && row.contains(key),
+            "{label} human: expected `{code}` to cite `{key}`: {row}"
+        );
+        assert_eq!(
+            row.split_whitespace().nth(2),
+            Some("0"),
+            "{label} human: disabled rule must report 0 checked: {row}"
+        );
+    }
+}
+
 /// `A2-135` AC 3 & AC 4: `vacuity` performs one graph construction and at most
 /// one parse per trace document, both unscoped and with `--cut`, including when
 /// `.aplan.yml` is absent or explicitly disables switches and when multiple
@@ -523,25 +593,17 @@ fn vacuity_performs_one_graph_build_and_one_parse_per_trace_document() {
         argv.extend_from_slice(extra_args);
         let run = common::run(dir.path(), &argv);
         assert_eq!(run.code, 0, "{label}: {}", run.text());
-        let timing = run
-            .stderr
-            .lines()
-            .find(|line| line.starts_with("aplan: timings "))
-            .unwrap_or_else(|| panic!("{label}: missing timing diagnostic: {}", run.stderr));
-        for field in [
-            "graph_builds=1",
-            "trace_reads=2",
-            "markdown_parses=1",
-            "structured_parses=1",
-        ] {
-            assert!(
-                timing.contains(field),
-                "{label}: missing `{field}` in {timing}"
-            );
-        }
+        assert_shared_trace_timings(label, &run.stderr);
 
         let doc: serde_json::Value = serde_json::from_str(&run.stdout).expect("vacuity json");
         let rules = doc["rules"].as_array().expect("rules");
+        let codes: Vec<&str> = rules.iter().filter_map(|r| r["rule"].as_str()).collect();
+        let mut sorted_codes = codes.clone();
+        sorted_codes.sort_unstable();
+        assert_eq!(
+            codes, sorted_codes,
+            "{label}: vacuity JSON rows must stay in canonical Rule::ALL ascending order"
+        );
         let not_run = |code: &str| -> Option<String> {
             rules
                 .iter()
@@ -550,47 +612,29 @@ fn vacuity_performs_one_graph_build_and_one_parse_per_trace_document() {
                 .and_then(serde_json::Value::as_str)
                 .map(str::to_string)
         };
-        // Multiple rules behind `detect_drift` all appear in one pass.
-        for code in ["APLAN018", "APLAN028", "APLAN060"] {
+        for (code, key) in [
+            ("APLAN017", "evidence.require_min_strength"),
+            ("APLAN018", "detect_drift"),
+            ("APLAN022", "require_cut_membership"),
+            ("APLAN028", "detect_drift"),
+            ("APLAN044", "version.require_impact"),
+            ("APLAN060", "detect_drift"),
+        ] {
             assert_eq!(
                 not_run(code).as_deref(),
-                Some("detect_drift"),
-                "{label}: expected `{code}` under `detect_drift`: {}",
+                Some(key),
+                "{label}: expected `{code}` under `{key}`: {}",
                 run.stdout
             );
         }
-        assert_eq!(
-            not_run("APLAN017").as_deref(),
-            Some("evidence.require_min_strength"),
-            "{label}: {}",
-            run.stdout
-        );
-        assert_eq!(
-            not_run("APLAN022").as_deref(),
-            Some("require_cut_membership"),
-            "{label}: {}",
-            run.stdout
-        );
-        assert_eq!(
-            not_run("APLAN044").as_deref(),
-            Some("version.require_impact"),
-            "{label}: {}",
-            run.stdout
-        );
-        if config.is_some() {
-            assert_eq!(
-                not_run("APLAN009").as_deref(),
-                Some("require_effort"),
-                "{label}: {}",
-                run.stdout
-            );
-        } else {
-            assert_eq!(
-                not_run("APLAN009"),
-                None,
-                "{label}: require_effort defaults on when config is absent: {}",
-                run.stdout
-            );
-        }
+        let expected_effort = config.map(|_| "require_effort");
+        assert_eq!(not_run("APLAN009").as_deref(), expected_effort, "{label}");
+
+        let mut human_argv = vec!["--timings", "--cache", "off", "vacuity"];
+        human_argv.extend_from_slice(extra_args);
+        let human = common::run(dir.path(), &human_argv);
+        assert_eq!(human.code, 0, "{label} human: {}", human.text());
+        assert_shared_trace_timings(&format!("{label} human"), &human.stderr);
+        assert_human_vacuity_rows(label, &human.stdout, label != "scoped-cut");
     }
 }

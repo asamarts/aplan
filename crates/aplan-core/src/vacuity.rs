@@ -736,11 +736,6 @@ mod switched_off_tests {
             "docs/spec.md#alpha".to_string(),
             "deadbeefdeadbeef".to_string(),
         );
-        let yaml_hash = crate::anchor_fingerprint(
-            &std::fs::read_to_string(&yaml_path).expect("read yaml"),
-            "service",
-        );
-        let _ = yaml_hash;
         t_drift.trace_fingerprints.insert(
             "docs/spec.yaml#/service".to_string(),
             "0000000000000000".to_string(),
@@ -984,6 +979,127 @@ mod switched_off_tests {
                 "single-pass disagreed with oracle for {opts:?}"
             );
         }
+    }
+
+    fn clean_all_switch_plan() -> (tempfile::TempDir, crate::load::Plan) {
+        let dir = tempfile::Builder::new()
+            .prefix("vacuity-clean-states-")
+            .tempdir_in(crate::fixture::fixture_root())
+            .expect("tempdir");
+        std::fs::create_dir_all(dir.path().join("docs")).expect("docs");
+        let md = "# Spec\n\n## Alpha\n\nStable.\n";
+        std::fs::write(dir.path().join("docs/spec.md"), md).expect("md");
+        let stamp = crate::stamp_in("docs/spec.md", md, "alpha").expect("stamp");
+
+        let mut cut = live("M-1");
+        cut.tags = vec!["milestone".to_string()];
+        cut.blocked_by = vec!["C-1".to_string(), "C-2".to_string()];
+
+        let mut c_live = live("C-1");
+        c_live.effort_days = Some(1.0);
+
+        let mut c_done = live("C-2");
+        c_done.status = Status::Done;
+        c_done.effort_days = Some(1.0);
+        c_done.version_impact = Some(crate::task::VersionImpact::Fix);
+        c_done.evidence = vec![crate::task::Evidence {
+            kind: crate::task::EvidenceKind::Test,
+            reference: "unit_ok".to_string(),
+            captured: None,
+        }];
+        c_done.traces = vec!["docs/spec.md#alpha".to_string()];
+        c_done
+            .trace_fingerprints
+            .insert("docs/spec.md#alpha".to_string(), stamp);
+
+        (dir, plan_of(vec![cut, c_live, c_done]))
+    }
+
+    /// A scoped empty-list waiver (`policy[].evidence.require_min_strength: []`)
+    /// makes `APLAN017` inapplicable on that task rather than reporting the
+    /// whole-plan switch as disabled, and clean subjects across all 7
+    /// switch-gated rules cleanly distinguish `EnabledNoFindings` from
+    /// `Disabled { suppressed_findings: 0 }`.
+    #[test]
+    fn clean_subjects_and_scoped_waivers_report_exact_activation_states() {
+        use crate::validate::{CheckActivation, validate_with_observations};
+
+        let (dir, clean_plan) = clean_all_switch_plan();
+        let all_on = crate::validate::Options {
+            require_effort: true,
+            detect_drift: true,
+            require_cut_membership: true,
+            require_min_strength: Some(crate::validate::VACUITY_MIN_STRENGTH_ON.to_vec()),
+            require_impact: Some(crate::task::VersionFloors::default()),
+            traces_root: Some(dir.path().to_path_buf()),
+            ..crate::validate::Options::default()
+        };
+        let (_, obs_on) = validate_with_observations(&clean_plan, &all_on);
+        for &switch in ValidationSwitch::ALL {
+            for rule in switch.rules() {
+                assert_eq!(
+                    obs_on.activation(rule),
+                    Some(CheckActivation::EnabledNoFindings),
+                    "{} should be EnabledNoFindings on clean subjects",
+                    rule.code()
+                );
+            }
+        }
+
+        let all_off = crate::validate::Options {
+            require_effort: false,
+            detect_drift: false,
+            require_cut_membership: false,
+            require_min_strength: None,
+            require_impact: None,
+            traces_root: Some(dir.path().to_path_buf()),
+            ..crate::validate::Options::default()
+        };
+        let (_, obs_off) = validate_with_observations(&clean_plan, &all_off);
+        for &switch in ValidationSwitch::ALL {
+            for rule in switch.rules() {
+                assert_eq!(
+                    obs_off.activation(rule),
+                    Some(CheckActivation::Disabled {
+                        suppressed_findings: 0
+                    }),
+                    "{} should be Disabled(0) on clean subjects with switch off",
+                    rule.code()
+                );
+            }
+        }
+        assert!(obs_off.switched_off().is_empty());
+
+        // Scoped empty-list waiver with whole-plan switch enabled -> Inapplicable.
+        let mut waived = live("W-1");
+        waived.status = Status::Done;
+        waived.effort_days = Some(1.0);
+        waived.tags = vec!["waived".to_string()];
+        waived.evidence = vec![crate::task::Evidence {
+            kind: crate::task::EvidenceKind::Note,
+            reference: "manual signoff".to_string(),
+            captured: Some("2026-10-01".to_string()),
+        }];
+        let waived_plan = plan_of(vec![waived]);
+        let waived_opts = crate::validate::Options {
+            require_min_strength: Some(crate::validate::VACUITY_MIN_STRENGTH_ON.to_vec()),
+            evidence_scopes: vec![crate::validate::EvidenceScope {
+                selector: crate::select::Selector {
+                    tags: vec!["waived".to_string()],
+                    ..crate::select::Selector::default()
+                },
+                named_dimensions: 1,
+                require_min_strength: Some(Vec::new()),
+                exempt_tags: None,
+            }],
+            ..crate::validate::Options::default()
+        };
+        let (_, waived_obs) = validate_with_observations(&waived_plan, &waived_opts);
+        assert_eq!(
+            waived_obs.activation(Rule::WeakEvidence),
+            Some(CheckActivation::Inapplicable),
+            "scoped empty-list waiver must not misreport an enabled switch as Disabled"
+        );
     }
 
     /// `A2-135` AC 2 negative tests: missing, duplicate, unknown, stale and

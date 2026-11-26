@@ -1647,13 +1647,15 @@ fn check_trace_stamp(
         // in the same breath is two errors for one cause whose fixes disagree.
         .filter(|tr| check_external_trace(root, opts, tr).is_none())
         .collect();
-    if candidates.is_empty() {
-        let has_stamped = traces.iter().any(|tr| {
+    let has_stamped = || {
+        traces.iter().any(|tr| {
             tr.contains('#')
                 && t.trace_fingerprints.contains_key(*tr)
                 && check_external_trace(root, opts, tr).is_none()
-        });
-        if has_stamped {
+        })
+    };
+    if candidates.is_empty() {
+        if has_stamped() {
             if opts.detect_drift {
                 context.record_enabled(Rule::UnstampedTrace, false);
             } else {
@@ -1675,12 +1677,7 @@ fn check_trace_stamp(
         .filter(|tr| context.traces.fingerprint(root, tr).is_some())
         .collect();
     if unstamped.is_empty() {
-        let has_stamped = traces.iter().any(|tr| {
-            tr.contains('#')
-                && t.trace_fingerprints.contains_key(*tr)
-                && check_external_trace(root, opts, tr).is_none()
-        });
-        if has_stamped {
+        if has_stamped() {
             if opts.detect_drift {
                 context.record_enabled(Rule::UnstampedTrace, false);
             } else {
@@ -3719,7 +3716,10 @@ fn check_min_evidence_strength(
         .get(t.id.as_str())
         .map_or((None, None), |(m, c)| (Some(*m), Some(*c)));
     let (scoped_required, exempt) = opts.scoped_evidence_for(t, cut, milestone);
-    if t.tags.iter().any(|tag| exempt.contains(tag)) {
+    // An explicit empty scoped list (`policy[].evidence.require_min_strength: []`)
+    // waives this subset the same way `exempt_tags` does (`A1-183`), so it is
+    // inapplicable rather than disabled by the whole-plan switch.
+    if t.tags.iter().any(|tag| exempt.contains(tag)) || scoped_required == Some(&[]) {
         return;
     }
     let satisfies = |required: &[EvidenceKind]| {
