@@ -8,6 +8,15 @@ to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Added
 
+- **Actionable test-runner configuration diagnostics (`A2-037`, `A2-038`, addresses #34,
+  `--require config.test_runner_reports_all_missing_and_misplaced_fields`,
+  `--require config.test_runner_errors_name_expected_shape_and_runner_path`)**. Parsing `test`
+  configuration in `.aplan.yml` now reports every missing required field at once with its full key
+  path and expected shape (for example `test.schedule`, `test.runners[0].list`,
+  `test.runners[0].run`), names where misplaced keys belong (such as `test.runners[0].schedule`
+  belonging at `test.schedule`), describes every type error in configuration terms instead of Rust
+  struct names (`test.schedule: expected a mapping such as {capacity: 1}`), and names each listed
+  runner's own indexed path (`test.runners[0].run`, `test[1].run`) in runner validation errors.
 - **Compact default human output for `aplan capture` with `--verbose` opt-in (`A2-041`,
   `--require capture.compact_human_output`)**. Default human `aplan capture` now prints two lines
   (`capture I-... applied: <title>` and `  -> <path>`, or one line on an idempotent `unchanged`
