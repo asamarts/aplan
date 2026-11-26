@@ -5,8 +5,8 @@ use std::cell::RefCell;
 use std::collections::{BTreeMap, BTreeSet};
 use std::path::{Path, PathBuf};
 use std::process::Command;
-use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::{Mutex, OnceLock};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+use std::sync::{Arc, Mutex, OnceLock};
 
 use aplan_core::task::{
     Evidence, EvidenceDilutionMeasure, EvidenceKind, EvidencePathLocator, Status, Task,
@@ -4983,11 +4983,122 @@ fn output_truncated(what: &str, stream: &str, omitted: u64) -> Error {
 }
 
 static CONFIGURED_COMMANDS_TERMINATING: AtomicBool = AtomicBool::new(false);
-static ACTIVE_CONFIGURED_COMMANDS: OnceLock<Mutex<BTreeMap<u32, Option<PathBuf>>>> =
+static NEXT_COMMAND_SCOPE_ID: AtomicU64 = AtomicU64::new(1);
+
+#[derive(Clone)]
+struct ActiveCommandEntry {
+    scope_id: Option<u64>,
+    cgroup: Option<PathBuf>,
+}
+
+static ACTIVE_CONFIGURED_COMMANDS: OnceLock<Mutex<BTreeMap<u32, ActiveCommandEntry>>> =
     OnceLock::new();
 
-fn active_configured_commands() -> &'static Mutex<BTreeMap<u32, Option<PathBuf>>> {
+thread_local! {
+    static CURRENT_COMMAND_SCOPE: RefCell<Option<(u64, Arc<AtomicBool>)>> = const { RefCell::new(None) };
+}
+
+fn active_configured_commands() -> &'static Mutex<BTreeMap<u32, ActiveCommandEntry>> {
     ACTIVE_CONFIGURED_COMMANDS.get_or_init(|| Mutex::new(BTreeMap::new()))
+}
+
+/// Request-scoped cancellation handle for configured evidence commands.
+///
+/// Unlike [`crate::terminate_active_configured_commands`], which permanently stops
+/// configured commands across the whole process before exit, cancelling a
+/// [`CommandCancellationScope`] terminates only the commands started inside
+/// that scope (including any scheduler worker threads spawned beneath it) and
+/// leaves subsequent or sibling requests healthy.
+#[derive(Debug, Clone)]
+pub struct CommandCancellationScope {
+    id: u64,
+    cancelled: Arc<AtomicBool>,
+}
+
+impl Default for CommandCancellationScope {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+impl CommandCancellationScope {
+    /// Allocate a fresh, uncancelled command scope.
+    #[must_use]
+    pub fn new() -> Self {
+        Self {
+            id: NEXT_COMMAND_SCOPE_ID.fetch_add(1, Ordering::Relaxed),
+            cancelled: Arc::new(AtomicBool::new(false)),
+        }
+    }
+
+    /// Execute `work` with this scope installed on the current thread (and
+    /// automatically inherited by scheduler worker threads).
+    pub fn run<T>(&self, work: impl FnOnce() -> T) -> T {
+        with_command_scope(Some((self.id, Arc::clone(&self.cancelled))), work)
+    }
+
+    /// Whether this scope has been cancelled.
+    #[must_use]
+    pub fn is_cancelled(&self) -> bool {
+        self.cancelled.load(Ordering::Acquire)
+    }
+
+    /// Mark this scope cancelled and kill every currently active configured
+    /// command group owned by it without poisoning process-wide command spawns.
+    pub fn cancel(&self) {
+        self.cancelled.store(true, Ordering::Release);
+        let targets: Vec<(u32, Option<PathBuf>)> = active_configured_commands()
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .iter()
+            .filter(|(_, entry)| entry.scope_id == Some(self.id))
+            .map(|(pgid, entry)| (*pgid, entry.cgroup.clone()))
+            .collect();
+        for (pgid, cgroup) in targets {
+            kill_registered_command(pgid, cgroup.as_deref());
+        }
+    }
+}
+
+pub(crate) fn current_command_scope() -> Option<(u64, Arc<AtomicBool>)> {
+    CURRENT_COMMAND_SCOPE.with(|slot| slot.borrow().clone())
+}
+
+pub(crate) fn with_command_scope<T>(
+    scope: Option<(u64, Arc<AtomicBool>)>,
+    work: impl FnOnce() -> T,
+) -> T {
+    struct Restore(Option<(u64, Arc<AtomicBool>)>);
+    impl Drop for Restore {
+        fn drop(&mut self) {
+            CURRENT_COMMAND_SCOPE.with(|slot| {
+                *slot.borrow_mut() = self.0.take();
+            });
+        }
+    }
+    let previous =
+        CURRENT_COMMAND_SCOPE.with(|slot| std::mem::replace(&mut *slot.borrow_mut(), scope));
+    let _guard = Restore(previous);
+    work()
+}
+
+fn current_scope_id() -> Option<u64> {
+    CURRENT_COMMAND_SCOPE.with(|slot| slot.borrow().as_ref().map(|(id, _)| *id))
+}
+
+fn current_scope_cancelled() -> bool {
+    CURRENT_COMMAND_SCOPE.with(|slot| {
+        slot.borrow()
+            .as_ref()
+            .is_some_and(|(_, flag)| flag.load(Ordering::Acquire))
+    })
+}
+
+fn kill_registered_command(pgid: u32, cgroup: Option<&Path>) {
+    if let Some(cgroup) = cgroup {
+        let _ = write_cgroup_knob(&cgroup.join("cgroup.kill"), "1");
+    }
+    kill_process_group(pgid);
 }
 
 /// One configured command registered for process-wide termination cleanup.
@@ -5001,10 +5112,11 @@ struct ActiveConfiguredCommand(u32);
 
 impl ActiveConfiguredCommand {
     fn register(pgid: u32, cgroup: Option<PathBuf>) -> Self {
+        let scope_id = current_scope_id();
         active_configured_commands()
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner)
-            .insert(pgid, cgroup);
+            .insert(pgid, ActiveCommandEntry { scope_id, cgroup });
         Self(pgid)
     }
 }
@@ -5029,7 +5141,7 @@ fn refuse_terminating_command(what: &str) -> Result<(), Error> {
 }
 
 pub(crate) fn configured_commands_terminating() -> bool {
-    CONFIGURED_COMMANDS_TERMINATING.load(Ordering::Acquire)
+    CONFIGURED_COMMANDS_TERMINATING.load(Ordering::Acquire) || current_scope_cancelled()
 }
 
 fn register_configured_command(
@@ -5055,11 +5167,8 @@ pub(crate) fn terminate_active_configured_commands() {
         .lock()
         .unwrap_or_else(std::sync::PoisonError::into_inner)
         .clone();
-    for (pgid, cgroup) in active {
-        if let Some(cgroup) = cgroup {
-            let _ = write_cgroup_knob(&cgroup.join("cgroup.kill"), "1");
-        }
-        kill_process_group(pgid);
+    for (pgid, entry) in active {
+        kill_registered_command(pgid, entry.cgroup.as_deref());
     }
 }
 
@@ -6529,6 +6638,44 @@ mod tests {
             .status()
             .expect("run isolated termination scenario");
         assert!(status.success(), "isolated scenario failed: {status}");
+    }
+
+    #[test]
+    fn command_cancellation_scope_stops_only_its_own_commands_without_poisoning_others() {
+        let dir = tempfile::Builder::new()
+            .prefix("aplan-scope-cancel-")
+            .tempdir_in(aplan_core::fixture::fixture_root())
+            .expect("tempdir");
+        let scope = super::CommandCancellationScope::default();
+        assert!(!scope.is_cancelled());
+        scope.cancel();
+        assert!(scope.is_cancelled());
+
+        let refused = scope.run(|| {
+            spawn_limited(
+                &["true".to_string()],
+                dir.path(),
+                "test.list",
+                std::time::Duration::from_secs(5),
+            )
+        });
+        assert!(
+            refused.is_err(),
+            "cancelled scope must refuse configured command spawn"
+        );
+
+        let fresh = super::CommandCancellationScope::new();
+        let ran = fresh
+            .run(|| {
+                spawn_limited(
+                    &["true".to_string()],
+                    dir.path(),
+                    "test.list",
+                    std::time::Duration::from_secs(5),
+                )
+            })
+            .expect("sibling uncancelled scope remains healthy");
+        assert!(matches!(ran.0, super::Ran::Exited(out) if out.status.success()));
     }
 
     /// A `url` block with only a timeout to vary.

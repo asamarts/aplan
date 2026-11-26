@@ -627,12 +627,25 @@ def render_markdown(report: dict[str, object]) -> str:
     return "\n".join(lines)
 
 
+def resolve_default_task_id(root: Path) -> str:
+    tasks_dir = root / "tasks"
+    if (tasks_dir / "A2-136.md").is_file():
+        return "A2-136"
+    if tasks_dir.is_dir():
+        candidates = sorted(
+            path.stem for path in tasks_dir.glob("*.md") if not path.stem.startswith("M-")
+        )
+        if candidates:
+            return candidates[0]
+    return "A2-136"
+
+
 def main() -> int:
     parser = argparse.ArgumentParser()
     parser.add_argument("--binary", required=True, type=Path)
     parser.add_argument("--profile", required=True)
     parser.add_argument("--root", type=Path, default=Path.cwd() / "aplan")
-    parser.add_argument("--task-id", default="A1-588")
+    parser.add_argument("--task-id", default=None)
     parser.add_argument("--runs", type=int, default=15)
     parser.add_argument("--warmups", type=int, default=2)
     parser.add_argument("--generated-tasks", type=int, default=1000)
@@ -672,6 +685,7 @@ def main() -> int:
         os.environ["APLAN_CACHE_DIR"] = str(temporary_root / "cache")
         cache_mode = "auto"
         current_root = args.root.resolve()
+        task_id = args.task_id or resolve_default_task_id(current_root)
         current_cwd = cwd
         current_edit: Path | None = None
         config_file: Path | None = None
@@ -698,10 +712,10 @@ def main() -> int:
                 discovered = copied_repo / ".aplan.yml"
                 if discovered.is_file():
                     config_file = discovered
-            matches = list(current_root.rglob(f"{args.task_id}.md"))
+            matches = list(current_root.rglob(f"{task_id}.md"))
             if len(matches) != 1:
                 raise RuntimeError(
-                    f"one-edit state found {len(matches)} files for {args.task_id!r}"
+                    f"one-edit state found {len(matches)} files for {task_id!r}"
                 )
             current_edit = matches[0]
 
@@ -777,7 +791,7 @@ def main() -> int:
                     command(
                         binary,
                         current_root,
-                        ["why", args.task_id, "--format", "json"],
+                        ["why", task_id, "--format", "json"],
                         config_file=config_file,
                         cache_mode=cache_mode,
                     ),
@@ -789,7 +803,7 @@ def main() -> int:
                     command(
                         binary,
                         current_root,
-                        ["show", args.task_id, "--no-resolve", "--format", "json"],
+                        ["show", task_id, "--no-resolve", "--format", "json"],
                         config_file=config_file,
                         cache_mode=cache_mode,
                     ),

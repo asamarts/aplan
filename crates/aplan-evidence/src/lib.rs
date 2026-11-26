@@ -1713,6 +1713,8 @@ pub fn verify_observed_with_test_observations(
     })
 }
 
+pub use resolve::CommandCancellationScope;
+
 /// Stop repository-configured commands before a process lifecycle owner
 /// re-raises a termination signal. New command starts are refused once this is
 /// called.
