@@ -232,6 +232,12 @@ const SHOW_BOUNDARIES: &[CommandBoundary] = &[CommandBoundary {
     reason: "writing verbatim raw Markdown body bytes to stdout is a pipe and script workflow rather than an interactive inspector view",
     example: "aplan show --raw-body T-001",
 }];
+const PATHS_BOUNDARIES: &[CommandBoundary] = &[CommandBoundary {
+    name: "paths match",
+    aliases: &["paths match", "match", "glob matcher"],
+    reason: "exact tracked-file glob matching is a scriptable preflight and custom-gate CLI workflow rather than an interactive history report",
+    example: "aplan paths match src/**",
+}];
 const COMPLETED_BOUNDARIES: &[CommandBoundary] = &[
     CommandBoundary {
         name: "completed --at",
@@ -322,10 +328,11 @@ pub const COMMANDS: &[CommandDiscovery] = &[
         "Explore dependency ancestry",
         &[NativeSurface::Graph],
     ),
-    native(
+    native_with_boundaries(
         "paths",
         "Review path specificity",
         &[NativeSurface::Report(aplan_app::ReportKind::Paths)],
+        PATHS_BOUNDARIES,
     ),
     native(
         "vacuity",

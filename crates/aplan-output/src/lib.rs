@@ -8716,6 +8716,233 @@ fn render_paths_json(report: &PathsReport) -> std::io::Result<()> {
     writeln!(out)
 }
 
+/// How `aplan paths match` selected the patterns it evaluated (`A2-092`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum PathsMatchMode {
+    Globs,
+    Task,
+}
+
+/// Task header echoed when `aplan paths match --task <ID>` runs (`A2-092`).
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
+pub struct PathsMatchTask {
+    pub id: String,
+    pub title: String,
+}
+
+/// Complete typed report for `aplan paths match` (`A2-092`).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PathsMatchReport {
+    pub mode: PathsMatchMode,
+    pub task: Option<PathsMatchTask>,
+    pub tracked_files: usize,
+    pub limit: Option<usize>,
+    pub unique_matched_files: usize,
+    pub entries: Vec<aplan_core::glob::PathMatchEntry>,
+}
+
+const PATHS_MATCH_NOTE: &str = "Exact tracked-file matches show what `paths` currently binds; \
+    inspect recent commit history with `aplan paths`. Neither proves semantic relevance.";
+
+/// Render the `aplan paths match` report (`A2-092`).
+///
+/// # Errors
+/// Propagates any write failure on stdout.
+pub fn render_paths_match(report: &PathsMatchReport, format: Format) -> std::io::Result<()> {
+    if format != Format::Human {
+        return render_paths_match_json(report);
+    }
+    let mut out = crate::write::anstream_stdout();
+    write!(out, "{}", paths_match_human(report))
+}
+
+/// Human text rendering for `aplan paths match`, pure so tests inspect exact output.
+#[must_use]
+pub fn paths_match_human(report: &PathsMatchReport) -> String {
+    use aplan_core::glob::PathMatchStatus;
+
+    let mut s = String::new();
+    let bound = match report.limit {
+        Some(n) => format!("limit {n} per entry"),
+        None => "unlimited (--all)".to_string(),
+    };
+    let subject = match &report.task {
+        Some(task) => format!(
+            "task `{}` ({}) -- {} `paths` entry(ies)",
+            task.id,
+            sanitize::visible(&task.title),
+            report.entries.len()
+        ),
+        None => format!("{} path glob(s)", report.entries.len()),
+    };
+    let _ = writeln!(
+        s,
+        "{}",
+        fold::fold(
+            &format!(
+                "matched {subject} against {} tracked repository file(s) ({bound}).",
+                report.tracked_files
+            ),
+            fold::out_width(),
+            0
+        )
+    );
+    let _ = writeln!(s);
+
+    if report.entries.is_empty() {
+        if let Some(task) = &report.task {
+            let _ = writeln!(s, "task `{}` declares no `paths` entries.", task.id);
+        } else {
+            let _ = writeln!(s, "no path globs provided.");
+        }
+        let _ = writeln!(s);
+        let _ = writeln!(s, "{}", fold::note(PATHS_MATCH_NOTE));
+        return s;
+    }
+
+    for entry in &report.entries {
+        write_path_match_entry(&mut s, entry);
+    }
+
+    let matched = report
+        .entries
+        .iter()
+        .filter(|e| e.status == PathMatchStatus::Matched)
+        .count();
+    let empty = report
+        .entries
+        .iter()
+        .filter(|e| e.status == PathMatchStatus::Empty)
+        .count();
+    let invalid = report
+        .entries
+        .iter()
+        .filter(|e| e.status == PathMatchStatus::Invalid)
+        .count();
+    let _ = writeln!(s);
+    let _ = writeln!(
+        s,
+        "summary: {matched} matched, {empty} empty, {invalid} invalid ({} unique matched file(s)).",
+        report.unique_matched_files
+    );
+    let _ = writeln!(s, "{}", fold::note(PATHS_MATCH_NOTE));
+    s
+}
+
+fn write_path_match_entry(s: &mut String, entry: &aplan_core::glob::PathMatchEntry) {
+    use aplan_core::glob::PathMatchStatus;
+
+    let pat = sanitize::visible(&entry.pattern);
+    let norm_note = if entry.normalised == entry.pattern {
+        String::new()
+    } else {
+        format!(" (normalised `{}`)", sanitize::visible(&entry.normalised))
+    };
+    let ok = crate::style::OK;
+    let warn = crate::style::ATTENTION;
+    let err_style = crate::style::ERROR;
+    let dim = crate::style::DIM;
+    match entry.status {
+        PathMatchStatus::Matched => {
+            if entry.truncated {
+                let _ = writeln!(
+                    s,
+                    "{ok}[matched]{ok:#} `{pat}`{norm_note}: showing {} of {} tracked file(s) (truncated)",
+                    entry.returned, entry.total_matched
+                );
+            } else {
+                let _ = writeln!(
+                    s,
+                    "{ok}[matched]{ok:#} `{pat}`{norm_note}: {} tracked file(s)",
+                    entry.total_matched
+                );
+            }
+            for path in &entry.matches {
+                let _ = writeln!(s, "  {}", sanitize::visible(path));
+            }
+            if entry.truncated {
+                let omitted = entry.total_matched.saturating_sub(entry.returned);
+                let _ = writeln!(
+                    s,
+                    "  {dim}... and {omitted} more matched file(s) (pass --limit or --all to see more){dim:#}"
+                );
+            }
+        }
+        PathMatchStatus::Empty => {
+            let _ = writeln!(
+                s,
+                "{warn}[empty]{warn:#}   `{pat}`{norm_note}: 0 tracked files"
+            );
+            if entry.bare_tracked_directory {
+                let dir = sanitize::visible(entry.normalised.trim_end_matches('/'));
+                let _ = writeln!(
+                    s,
+                    "  {dim}hint: `{dir}` is a tracked directory; bare directories match a literal \
+                     filename, use `{dir}/**` to match files inside it{dim:#}"
+                );
+            }
+        }
+        PathMatchStatus::Invalid => {
+            let err = entry.error.as_deref().unwrap_or("invalid glob");
+            let _ = writeln!(
+                s,
+                "{err_style}[invalid]{err_style:#} `{pat}`{norm_note}: {}",
+                sanitize::visible(err)
+            );
+        }
+    }
+}
+
+fn render_paths_match_json(report: &PathsMatchReport) -> std::io::Result<()> {
+    use aplan_core::glob::PathMatchStatus;
+
+    let matched = report
+        .entries
+        .iter()
+        .filter(|e| e.status == PathMatchStatus::Matched)
+        .count();
+    let empty = report
+        .entries
+        .iter()
+        .filter(|e| e.status == PathMatchStatus::Empty)
+        .count();
+    let invalid = report
+        .entries
+        .iter()
+        .filter(|e| e.status == PathMatchStatus::Invalid)
+        .count();
+    let truncated_entries = report.entries.iter().filter(|e| e.truncated).count();
+
+    let mut doc = serde_json::json!({
+        "schema": "aplan/paths-match/v1",
+        "mode": report.mode,
+        "tracked_files": report.tracked_files,
+        "limit": report.limit,
+        "summary": {
+            "entries": report.entries.len(),
+            "matched": matched,
+            "empty": empty,
+            "invalid": invalid,
+            "unique_matched_files": report.unique_matched_files,
+            "truncated_entries": truncated_entries,
+        },
+        "entries": report.entries,
+        "note": PATHS_MATCH_NOTE,
+    });
+    if let Some(task) = &report.task
+        && let Some(obj) = doc.as_object_mut()
+    {
+        obj.insert(
+            "task".to_string(),
+            serde_json::to_value(task).unwrap_or(serde_json::Value::Null),
+        );
+    }
+    let mut out = crate::write::stdout();
+    serde_json::to_writer_pretty(&mut out, &doc)?;
+    writeln!(out)
+}
+
 #[cfg(test)]
 mod format_table_tests {
     use super::*;
@@ -8742,6 +8969,78 @@ mod format_table_tests {
             missing.is_empty(),
             "the module doc does not mention {missing:?}, so it is a second and wrong \
              answer about what this tool can render"
+        );
+    }
+
+    #[test]
+    fn paths_match_human_distinguishes_matched_empty_bare_dir_invalid_and_truncated() {
+        let report = PathsMatchReport {
+            mode: PathsMatchMode::Globs,
+            task: None,
+            tracked_files: 10,
+            limit: Some(1),
+            unique_matched_files: 2,
+            entries: vec![
+                aplan_core::glob::PathMatchEntry {
+                    pattern: "./src/**".to_string(),
+                    normalised: "src/**".to_string(),
+                    status: aplan_core::glob::PathMatchStatus::Matched,
+                    error: None,
+                    bare_tracked_directory: false,
+                    total_matched: 3,
+                    returned: 1,
+                    truncated: true,
+                    matches: vec!["src/a.rs".to_string()],
+                },
+                aplan_core::glob::PathMatchEntry {
+                    pattern: "src".to_string(),
+                    normalised: "src".to_string(),
+                    status: aplan_core::glob::PathMatchStatus::Empty,
+                    error: None,
+                    bare_tracked_directory: true,
+                    total_matched: 0,
+                    returned: 0,
+                    truncated: false,
+                    matches: Vec::new(),
+                },
+                aplan_core::glob::PathMatchEntry {
+                    pattern: "src/[".to_string(),
+                    normalised: "src/[".to_string(),
+                    status: aplan_core::glob::PathMatchStatus::Invalid,
+                    error: Some("unclosed character class".to_string()),
+                    bare_tracked_directory: false,
+                    total_matched: 0,
+                    returned: 0,
+                    truncated: false,
+                    matches: Vec::new(),
+                },
+            ],
+        };
+        let rendered = paths_match_human(&report);
+        assert!(rendered.contains("[matched]"), "{rendered}");
+        assert!(
+            rendered.contains("`./src/**` (normalised `src/**`): showing 1 of 3"),
+            "{rendered}"
+        );
+        assert!(
+            rendered.contains("... and 2 more matched file(s)"),
+            "{rendered}"
+        );
+        assert!(rendered.contains("[empty]"), "{rendered}");
+        assert!(rendered.contains("`src`: 0 tracked files"), "{rendered}");
+        assert!(rendered.contains("use `src/**`"), "{rendered}");
+        assert!(rendered.contains("[invalid]"), "{rendered}");
+        assert!(
+            rendered.contains("`src/[`: unclosed character class"),
+            "{rendered}"
+        );
+        assert!(
+            rendered.contains("summary: 1 matched, 1 empty, 1 invalid"),
+            "{rendered}"
+        );
+        assert!(
+            rendered.contains("Neither proves semantic relevance"),
+            "{rendered}"
         );
     }
 
