@@ -59,6 +59,13 @@ to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Fixed
 
+- **Derive `aplan vacuity` from one exhaustive validation pass (`A2-135`)**. Every rule in
+  `define_rules!` now declares a mandatory typed `SwitchDisposition`, audited exhaustively against
+  `.aplan.yml`'s accepted schema, `validate::Options` and the end-to-end rule corpus. One
+  validation pass emits typed `CheckActivation` observations while sharing one borrowed `Graph` and
+  run-scoped `TraceDocuments` cache across selection and vacuity analysis, reducing `vacuity` to
+  one graph build and at most one parse per distinct trace document with byte-compatible human and
+  JSON output.
 - **Fix plural spelling in `aplan test list` filtered summary (`A2-159`)**. `test_catalogue_count`
   now takes explicit singular and plural nouns so filtered `aplan test list <query>` summaries read
   `"2 unique matches"` instead of `"2 unique matchs"`.

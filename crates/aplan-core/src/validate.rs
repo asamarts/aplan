@@ -7,7 +7,7 @@
 use std::collections::{BTreeMap, BTreeSet};
 use std::path::{Path, PathBuf};
 
-use crate::diagnostic::{Diagnostic, Report, code};
+use crate::diagnostic::{Diagnostic, Report, Rule, SwitchDisposition, code};
 use crate::graph::Graph;
 use crate::load::{LoadedTask, Plan};
 use crate::task::{
@@ -159,17 +159,182 @@ impl TraceDocuments {
     }
 }
 
+/// The strongest evidence set a repository steers toward when evaluating
+/// whether `evidence.require_min_strength` suppressed `APLAN017` (`A1-269`,
+/// `A2-135`).
+pub(crate) const VACUITY_MIN_STRENGTH_ON: &[EvidenceKind] =
+    &[EvidenceKind::Commit, EvidenceKind::File, EvidenceKind::Test];
+
+/// Observed activation outcome for one switch-gated rule during a single
+/// validation pass (`A2-135`).
+///
+/// Sufficient to distinguish an inapplicable check, an enabled check with no
+/// findings, an enabled check with findings, and a disabled (or narrowed)
+/// check without re-evaluating the plan.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum CheckActivation {
+    /// No subject or prerequisite input in this plan could trigger the rule.
+    Inapplicable,
+    /// The rule ran over at least one applicable subject and emitted no findings.
+    EnabledNoFindings,
+    /// The rule ran and emitted at least one finding.
+    EnabledWithFindings {
+        /// Number of diagnostics emitted for this rule in the pass.
+        findings: usize,
+    },
+    /// A configuration switch disabled (or narrowed) the rule on this plan.
+    Disabled {
+        /// Findings the rule would have emitted if the switch were enabled
+        /// (when none already fired under the active options).
+        suppressed_findings: usize,
+    },
+}
+
+impl CheckActivation {
+    /// Whether enabling the rule's switch would change enforcement on this plan.
+    #[must_use]
+    pub const fn suppressed_by_switch(self) -> bool {
+        matches!(
+            self,
+            Self::Disabled {
+                suppressed_findings: 1..,
+            }
+        )
+    }
+}
+
+/// Typed per-rule activation observations emitted by one validation pass
+/// (`A2-135`).
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct ValidationObservations {
+    activations: BTreeMap<Rule, CheckActivation>,
+}
+
+impl ValidationObservations {
+    /// Activation observed for `rule`, if `rule` is gated by a validation switch.
+    #[must_use]
+    pub fn activation(&self, rule: Rule) -> Option<CheckActivation> {
+        self.activations.get(&rule).copied()
+    }
+
+    /// Every observed switch-gated rule activation in canonical [`Rule`] order.
+    pub fn iter(&self) -> impl Iterator<Item = (Rule, CheckActivation)> + '_ {
+        self.activations.iter().map(|(&rule, &state)| (rule, state))
+    }
+
+    /// Project observed activations to the rules whose configuration switch
+    /// suppressed findings on this plan (`rule code -> .aplan.yml key`).
+    #[must_use]
+    pub fn switched_off(&self) -> BTreeMap<&'static str, &'static str> {
+        let mut out = BTreeMap::new();
+        for (&rule, &state) in &self.activations {
+            if state.suppressed_by_switch()
+                && let SwitchDisposition::ValidationSwitch(switch) = rule.switch_disposition()
+            {
+                out.insert(rule.code(), switch.config_key());
+            }
+        }
+        out
+    }
+}
+
+#[derive(Debug, Clone, Copy, Default)]
+struct RuleAccumulator {
+    enabled_subjects: usize,
+    enabled_findings: usize,
+    disabled_subjects: usize,
+    suppressed_findings: usize,
+}
+
+impl RuleAccumulator {
+    fn finalize(self) -> CheckActivation {
+        if self.enabled_findings > 0 {
+            CheckActivation::EnabledWithFindings {
+                findings: self.enabled_findings,
+            }
+        } else if self.suppressed_findings > 0 {
+            CheckActivation::Disabled {
+                suppressed_findings: self.suppressed_findings,
+            }
+        } else if self.disabled_subjects > 0 && self.enabled_subjects == 0 {
+            CheckActivation::Disabled {
+                suppressed_findings: 0,
+            }
+        } else if self.enabled_subjects > 0 {
+            CheckActivation::EnabledNoFindings
+        } else {
+            CheckActivation::Inapplicable
+        }
+    }
+}
+
 struct ValidationContext<'a> {
     opts: &'a Options,
     traces: TraceDocuments,
+    observe_vacuity: bool,
+    observations: BTreeMap<Rule, RuleAccumulator>,
 }
 
 impl<'a> ValidationContext<'a> {
-    fn new(opts: &'a Options) -> Self {
+    fn new(opts: &'a Options, observe_vacuity: bool) -> Self {
         Self {
             opts,
             traces: TraceDocuments::default(),
+            observe_vacuity,
+            observations: BTreeMap::new(),
         }
+    }
+
+    fn record_enabled(&mut self, rule: Rule, fired: bool) {
+        if !self.observe_vacuity {
+            return;
+        }
+        let acc = self.observations.entry(rule).or_default();
+        acc.enabled_subjects = acc.enabled_subjects.saturating_add(1);
+        if fired {
+            acc.enabled_findings = acc.enabled_findings.saturating_add(1);
+        }
+    }
+
+    fn record_disabled(&mut self, rule: Rule, would_fire: bool) {
+        if !self.observe_vacuity {
+            return;
+        }
+        let acc = self.observations.entry(rule).or_default();
+        acc.disabled_subjects = acc.disabled_subjects.saturating_add(1);
+        if would_fire {
+            acc.suppressed_findings = acc.suppressed_findings.saturating_add(1);
+        }
+    }
+
+    fn record_suppressed_probe(&mut self, rule: Rule) {
+        if !self.observe_vacuity {
+            return;
+        }
+        let acc = self.observations.entry(rule).or_default();
+        acc.suppressed_findings = acc.suppressed_findings.saturating_add(1);
+    }
+
+    fn into_observations(self) -> ValidationObservations {
+        if !self.observe_vacuity {
+            return ValidationObservations::default();
+        }
+        let mut activations = BTreeMap::new();
+        for &rule in Rule::ALL {
+            if matches!(
+                rule.switch_disposition(),
+                SwitchDisposition::ValidationSwitch(_)
+            ) {
+                let state = self
+                    .observations
+                    .get(&rule)
+                    .copied()
+                    .unwrap_or_default()
+                    .finalize();
+                activations.insert(rule, state);
+            }
+        }
+        ValidationObservations { activations }
     }
 }
 
@@ -548,8 +713,9 @@ impl Options {
     /// the earlier entry when two are equally specific is the rule that needs no
     /// merge: a reader resolves it by reading down the list, and nothing depends
     /// on the order a map happened to iterate in.
-    #[must_use]
-    pub fn evidence_for(
+    /// The scoped evidence policy override that matches `task`, without
+    /// falling back to the whole-plan `require_min_strength` setting.
+    fn scoped_evidence_for(
         &self,
         task: &crate::task::Task,
         cut: Option<&str>,
@@ -585,16 +751,29 @@ impl Options {
             best.map(|(_, v)| v)
         }
 
-        let strength = narrowest(&self.evidence_scopes, task, cut, milestone, |s| {
+        let scoped_strength = narrowest(&self.evidence_scopes, task, cut, milestone, |s| {
             s.require_min_strength.as_ref()
         })
-        .map(Vec::as_slice)
-        .or(self.require_min_strength.as_deref());
+        .map(Vec::as_slice);
         let exempt = narrowest(&self.evidence_scopes, task, cut, milestone, |s| {
             s.exempt_tags.as_ref()
         })
         .map_or(self.exempt_tags.as_slice(), Vec::as_slice);
-        (strength, exempt)
+        (scoped_strength, exempt)
+    }
+
+    #[must_use]
+    pub fn evidence_for(
+        &self,
+        task: &crate::task::Task,
+        cut: Option<&str>,
+        milestone: Option<&str>,
+    ) -> (Option<&[EvidenceKind]>, &[String]) {
+        let (scoped_strength, exempt) = self.scoped_evidence_for(task, cut, milestone);
+        (
+            scoped_strength.or(self.require_min_strength.as_deref()),
+            exempt,
+        )
     }
 }
 
@@ -626,6 +805,15 @@ pub fn validate(plan: &Plan, opts: &Options) -> Report {
     validate_with_graph(plan, opts, &graph)
 }
 
+/// Validate a plan in one pass and return both the diagnostic report and typed
+/// per-rule activation observations (`A2-135`).
+#[must_use]
+pub fn validate_with_observations(plan: &Plan, opts: &Options) -> (Report, ValidationObservations) {
+    let tasks: Vec<_> = plan.tasks.iter().map(|loaded| &loaded.task).collect();
+    let graph = Graph::new(tasks.iter().copied());
+    validate_with_graph_and_observations(plan, opts, &graph)
+}
+
 /// Validate a plan with graph state the enclosing operation already built.
 ///
 /// The graph must describe `plan`. Keeping the borrowing graph at the call site
@@ -634,6 +822,26 @@ pub fn validate(plan: &Plan, opts: &Options) -> Report {
 /// and projection.
 #[must_use]
 pub fn validate_with_graph(plan: &Plan, opts: &Options, graph: &Graph<'_>) -> Report {
+    run_validate(plan, opts, graph, false).0
+}
+
+/// Validate a plan with an existing graph while also emitting typed per-rule
+/// activation observations for `vacuity` in the same pass (`A2-135`).
+#[must_use]
+pub fn validate_with_graph_and_observations(
+    plan: &Plan,
+    opts: &Options,
+    graph: &Graph<'_>,
+) -> (Report, ValidationObservations) {
+    run_validate(plan, opts, graph, true)
+}
+
+fn run_validate(
+    plan: &Plan,
+    opts: &Options,
+    graph: &Graph<'_>,
+    observe_vacuity: bool,
+) -> (Report, ValidationObservations) {
     let mut report = Report {
         diagnostics: plan.load_diagnostics.clone(),
         tasks_checked: plan.tasks.len(),
@@ -665,7 +873,7 @@ pub fn validate_with_graph(plan: &Plan, opts: &Options, graph: &Graph<'_>) -> Re
         .collect();
 
     let cut_of = cut_index(plan);
-    let mut context = ValidationContext::new(opts);
+    let mut context = ValidationContext::new(opts, observe_vacuity);
 
     for lt in &plan.tasks {
         check_task(
@@ -704,7 +912,7 @@ pub fn validate_with_graph(plan: &Plan, opts: &Options, graph: &Graph<'_>) -> Re
         report.diagnostics.push(d);
     }
 
-    check_membership_totality(plan, opts, &tasks, &mut report.diagnostics);
+    check_membership_totality(plan, &mut context, &tasks, &mut report.diagnostics);
 
     for lt in &plan.tasks {
         check_revisit(lt, &mut report.diagnostics);
@@ -734,7 +942,7 @@ pub fn validate_with_graph(plan: &Plan, opts: &Options, graph: &Graph<'_>) -> Re
             .then(a.file.cmp(&b.file))
             .then(a.message.cmp(&b.message))
     });
-    report
+    (report, context.into_observations())
 }
 
 /// APLAN064: when `.aplan.yml` declares `id_families`, verify that cut
@@ -858,11 +1066,12 @@ fn id_family_diag(
 /// `cross-cutting` tag says that it deliberately belongs to none.
 fn check_membership_totality(
     plan: &Plan,
-    opts: &Options,
+    context: &mut ValidationContext<'_>,
     tasks: &[&crate::task::Task],
     out: &mut Vec<Diagnostic>,
 ) {
-    if !opts.require_cut_membership {
+    let opts = context.opts;
+    if !opts.require_cut_membership && !context.observe_vacuity {
         return;
     }
     let mut cut_count: BTreeMap<&str, usize> = BTreeMap::new();
@@ -880,24 +1089,28 @@ fn check_membership_totality(
         // The waiver applies only where its claim is true (`A1-212`):
         // `cross-cutting` means that this task belongs to no cut, not that
         // duplicate membership is acceptable.
-        if count == 0 && task.tags.iter().any(|tag| tag == "cross-cutting") {
-            continue;
-        }
-        if count != 1 {
-            let message = if count == 0 {
-                "belongs to no cut".to_string()
-            } else {
-                format!("belongs to {count} cuts (a task belongs to exactly one)")
-            };
-            out.push(
-                Diagnostic::error(code::MEMBERSHIP_TOTALITY, message)
-                    .with_task(&task.id)
-                    .with_file(&loaded.path)
-                    .with_agent_instruction(
-                        "Add the task to exactly one milestone's `blocked_by` (its cut), or \
-                         tag it `cross-cutting` if it deliberately belongs to none.",
-                    ),
-            );
+        let waived = count == 0 && task.tags.iter().any(|tag| tag == "cross-cutting");
+        let violates = !waived && count != 1;
+        if opts.require_cut_membership {
+            context.record_enabled(Rule::MembershipTotality, violates);
+            if violates {
+                let message = if count == 0 {
+                    "belongs to no cut".to_string()
+                } else {
+                    format!("belongs to {count} cuts (a task belongs to exactly one)")
+                };
+                out.push(
+                    Diagnostic::error(code::MEMBERSHIP_TOTALITY, message)
+                        .with_task(&task.id)
+                        .with_file(&loaded.path)
+                        .with_agent_instruction(
+                            "Add the task to exactly one milestone's `blocked_by` (its cut), or \
+                             tag it `cross-cutting` if it deliberately belongs to none.",
+                        ),
+                );
+            }
+        } else {
+            context.record_disabled(Rule::MembershipTotality, violates);
         }
     }
 }
@@ -924,75 +1137,93 @@ fn check_task(
     cut_of: &BTreeMap<&str, (&str, &str)>,
     out: &mut Vec<Diagnostic>,
 ) {
-    let t = &lt.task;
-    let opts = context.opts;
-
     check_edges(lt, graph, &plan.unloadable, out);
-    check_evidence(lt, opts, cut_of, out);
+    check_evidence(lt, context, cut_of, out);
     check_path_globs(lt, out);
     check_duplicate_paths(lt, out);
     check_preferences(lt, graph, out);
     check_criteria(lt, out);
     check_scaffold(lt, out);
     check_scaffold_leftover(lt, out);
-    check_version_impact(lt, opts, out);
+    check_version_impact(lt, context, out);
     check_version_record(lt, out);
+    check_effort(lt, context, out);
+    check_milestone_shape(lt, graph, out);
+    check_task_traces(lt, context, out);
+}
 
-    // Effort, for phase rollups. Milestones are checkpoints, not work: they
-    // carry no effort by design (and are excluded from every rollup), so asking
-    // one for an estimate would be noise.
-    if opts.require_effort
-        && !t.status.is_terminal()
-        && !t.is_milestone()
-        && t.effort_days.is_none()
-    {
-        out.push(
-            Diagnostic::warning(code::MISSING_EFFORT, "no `effort_days` estimate")
-                .with_task(&t.id)
-                .with_file(&lt.path)
-                .with_agent_instruction("Add an `effort_days` estimate, or drop the task."),
-        );
+/// APLAN009: effort estimates on active non-milestone tasks.
+///
+/// Milestones are checkpoints, not work: they carry no effort by design (and
+/// are excluded from every rollup), so asking one for an estimate would be
+/// noise.
+fn check_effort(lt: &LoadedTask, context: &mut ValidationContext<'_>, out: &mut Vec<Diagnostic>) {
+    let t = &lt.task;
+    if t.status.is_terminal() || t.is_milestone() {
+        return;
+    }
+    let opts = context.opts;
+    let missing = t.effort_days.is_none();
+    if opts.require_effort {
+        context.record_enabled(Rule::MissingEffort, missing);
+        if missing {
+            out.push(
+                Diagnostic::warning(code::MISSING_EFFORT, "no `effort_days` estimate")
+                    .with_task(&t.id)
+                    .with_file(&lt.path)
+                    .with_agent_instruction("Add an `effort_days` estimate, or drop the task."),
+            );
+        }
+    } else {
+        context.record_disabled(Rule::MissingEffort, missing);
+    }
+}
+
+/// Traces must resolve, and under `detect_drift` (or single-pass vacuity
+/// observation) closed tasks must stamp and stay current with their traced
+/// sections.
+fn check_task_traces(
+    lt: &LoadedTask,
+    context: &mut ValidationContext<'_>,
+    out: &mut Vec<Diagnostic>,
+) {
+    let t = &lt.task;
+    let opts = context.opts;
+    let Some(root) = &opts.traces_root else {
+        return;
+    };
+    // Deduplicate, exactly as `check_edges` does for `blocked_by`: a trace
+    // listed twice is one relationship, and two identical diagnostics is just
+    // noise (two identical annotations under `--format github`).
+    let traces: BTreeSet<&str> = t.traces.iter().map(String::as_str).collect();
+
+    // APLAN028: a closed task that failed to stamp a stampable trace. Checked
+    // before the drift loop, because the loop is precisely what goes quiet.
+    if let Some(d) = check_trace_stamp(root, t, &traces, context) {
+        out.push(d.with_task(&t.id).with_file(&lt.path));
     }
 
-    check_milestone_shape(lt, graph, out);
-
-    // Traces must resolve. This is the link that stops a research document
-    // and a plan from silently diverging.
-    if let Some(root) = &opts.traces_root {
-        // Deduplicate, exactly as `check_edges` does for `blocked_by`: a trace
-        // listed twice is one relationship, and two identical diagnostics is just
-        // noise (two identical annotations under `--format github`).
-        let traces: BTreeSet<&str> = t.traces.iter().map(String::as_str).collect();
-
-        // APLAN028: a closed task that stamped *some* of its traces. Checked
-        // before the drift loop, because the loop is precisely what goes quiet.
-        if let Some(d) = check_trace_stamp(root, t, &traces, opts, &mut context.traces) {
-            out.push(d.with_task(&t.id).with_file(&lt.path));
+    for tr in traces {
+        // Leaving the repository is asked first: a target outside it resolves
+        // perfectly whenever the sibling is checked out, so `check_trace`
+        // would say nothing at all (`A1-143`).
+        if let Some(diag) = check_external_trace(root, opts, tr) {
+            out.push(diag.with_task(&t.id).with_file(&lt.path));
+            continue;
         }
-
-        for tr in traces {
-            // Leaving the repository is asked first: a target outside it
-            // resolves perfectly whenever the sibling is checked out, so
-            // `check_trace` would say nothing at all (`A1-143`).
-            if let Some(diag) = check_external_trace(root, opts, tr) {
-                out.push(diag.with_task(&t.id).with_file(&lt.path));
-                continue;
-            }
-            if let Some(diag) = check_trace(root, tr, &mut context.traces) {
-                out.push(diag.with_task(&t.id).with_file(&lt.path));
-            }
-            // APLAN060 / APLAN018: a closed task whose traced section has
-            // retargeted to a different element kind (blocking error, ADR-0069)
-            // or drifted in content (APLAN018 warning). Only where a stamp
-            // exists (no stamp is unverifiable, not a violation).
-            if opts.detect_drift
-                && t.status == Status::Done
-                && let Some(stamp) = t.trace_fingerprints.get(tr)
-                && let Some(diag) =
-                    check_drift(root, &t.id, tr, stamp, sole_commit(t), &mut context.traces)
-            {
-                out.push(diag.with_task(&t.id).with_file(&lt.path));
-            }
+        if let Some(diag) = check_trace(root, tr, &mut context.traces) {
+            out.push(diag.with_task(&t.id).with_file(&lt.path));
+        }
+        // APLAN060 / APLAN018: a closed task whose traced section has
+        // retargeted to a different element kind (blocking error, ADR-0069)
+        // or drifted in content (APLAN018 warning). Only where a stamp exists
+        // (no stamp is unverifiable, not a violation).
+        if (opts.detect_drift || context.observe_vacuity)
+            && t.status == Status::Done
+            && let Some(stamp) = t.trace_fingerprints.get(tr)
+            && let Some(diag) = check_drift(root, &t.id, tr, stamp, sole_commit(t), context)
+        {
+            out.push(diag.with_task(&t.id).with_file(&lt.path));
         }
     }
 }
@@ -1395,10 +1626,10 @@ fn check_trace_stamp(
     root: &Path,
     t: &crate::task::Task,
     traces: &BTreeSet<&str>,
-    opts: &Options,
-    documents: &mut TraceDocuments,
+    context: &mut ValidationContext<'_>,
 ) -> Option<Diagnostic> {
-    if !opts.detect_drift || t.status != Status::Done {
+    let opts = context.opts;
+    if (!opts.detect_drift && !context.observe_vacuity) || t.status != Status::Done {
         return None;
     }
     // Which traces carry no stamp. Asked first because it needs no file at all,
@@ -1416,7 +1647,21 @@ fn check_trace_stamp(
         // in the same breath is two errors for one cause whose fixes disagree.
         .filter(|tr| check_external_trace(root, opts, tr).is_none())
         .collect();
+    let has_stamped = || {
+        traces.iter().any(|tr| {
+            tr.contains('#')
+                && t.trace_fingerprints.contains_key(*tr)
+                && check_external_trace(root, opts, tr).is_none()
+        })
+    };
     if candidates.is_empty() {
+        if has_stamped() {
+            if opts.detect_drift {
+                context.record_enabled(Rule::UnstampedTrace, false);
+            } else {
+                context.record_disabled(Rule::UnstampedTrace, false);
+            }
+        }
         return None;
     }
     // Of those, only what `close --restamp` can actually stamp -- asked of the
@@ -1429,11 +1674,23 @@ fn check_trace_stamp(
     // here instead got the first and missed the others.
     let unstamped: Vec<&str> = candidates
         .into_iter()
-        .filter(|tr| documents.fingerprint(root, tr).is_some())
+        .filter(|tr| context.traces.fingerprint(root, tr).is_some())
         .collect();
     if unstamped.is_empty() {
+        if has_stamped() {
+            if opts.detect_drift {
+                context.record_enabled(Rule::UnstampedTrace, false);
+            } else {
+                context.record_disabled(Rule::UnstampedTrace, false);
+            }
+        }
         return None;
     }
+    if !opts.detect_drift {
+        context.record_disabled(Rule::UnstampedTrace, true);
+        return None;
+    }
+    context.record_enabled(Rule::UnstampedTrace, true);
     let orphans: Vec<&str> = t
         .trace_fingerprints
         .keys()
@@ -1489,16 +1746,34 @@ fn check_drift(
     trace: &str,
     stamp: &str,
     closed_at: Option<&str>,
-    documents: &mut TraceDocuments,
+    context: &mut ValidationContext<'_>,
 ) -> Option<Diagnostic> {
     let (rel, _) = trace.split_once('#')?;
     // Kind-tagged stamps (`ADR-0069`, `A2-051`) detect silent element-kind
     // retargeting (`heading` <-> `row`) as blocking `APLAN060` error; legacy
     // bare 16-hex stamps keep zero-churn content comparison including the
     // pre-`A1-122` trailing-blank compatibility form.
-    match documents.check_stamp(root, trace, stamp)? {
-        crate::anchor::StampCheck::Holds => return None,
+    let check = context.traces.check_stamp(root, trace, stamp)?;
+    let detect_drift = context.opts.detect_drift;
+    match check {
+        crate::anchor::StampCheck::Holds => {
+            if detect_drift {
+                context.record_enabled(Rule::TraceDrift, false);
+                context.record_enabled(Rule::TraceRetargeted, false);
+            } else {
+                context.record_disabled(Rule::TraceDrift, false);
+                context.record_disabled(Rule::TraceRetargeted, false);
+            }
+            return None;
+        }
         crate::anchor::StampCheck::Retargeted { was, now } => {
+            if !detect_drift {
+                context.record_disabled(Rule::TraceRetargeted, true);
+                context.record_disabled(Rule::TraceDrift, false);
+                return None;
+            }
+            context.record_enabled(Rule::TraceRetargeted, true);
+            context.record_enabled(Rule::TraceDrift, false);
             return Some(
                 Diagnostic::error(
                     code::TRACE_RETARGETED,
@@ -1520,6 +1795,13 @@ fn check_drift(
             stamped_with,
             current,
         } => {
+            if !detect_drift {
+                context.record_disabled(Rule::TraceDrift, true);
+                context.record_disabled(Rule::TraceRetargeted, false);
+                return None;
+            }
+            context.record_enabled(Rule::TraceDrift, true);
+            context.record_enabled(Rule::TraceRetargeted, false);
             return Some(
                 Diagnostic::warning(
                     code::TRACE_DRIFT,
@@ -1536,7 +1818,15 @@ fn check_drift(
                 )),
             );
         }
-        crate::anchor::StampCheck::Drifted { .. } => {}
+        crate::anchor::StampCheck::Drifted { .. } => {
+            if !detect_drift {
+                context.record_disabled(Rule::TraceDrift, true);
+                context.record_disabled(Rule::TraceRetargeted, false);
+                return None;
+            }
+            context.record_enabled(Rule::TraceDrift, true);
+            context.record_enabled(Rule::TraceRetargeted, false);
+        }
     }
     // Where to look, when the task cites a commit to look *from*. The reader is
     // otherwise told a section moved and left to work out which of its lines did,
@@ -3313,10 +3603,10 @@ fn check_duplicate_evidence(lt: &LoadedTask, out: &mut Vec<Diagnostic>) {
     }
 }
 
-/// The invariants that read `evidence`: `APLAN005`, `APLAN010`, `APLAN055`, `APLAN062`.
+/// The invariants that read `evidence`: `APLAN005`, `APLAN010`, `APLAN017`, `APLAN055`, `APLAN062`.
 fn check_evidence(
     lt: &LoadedTask,
-    opts: &Options,
+    context: &mut ValidationContext<'_>,
     cut_of: &BTreeMap<&str, (&str, &str)>,
     out: &mut Vec<Diagnostic>,
 ) {
@@ -3405,47 +3695,81 @@ fn check_evidence(
 
     check_uncheckable_evidence(lt, out);
     check_duplicate_evidence(lt, out);
+    check_min_evidence_strength(lt, has_substantive_evidence, context, cut_of, out);
+}
 
-    // Configured minimum evidence strength. A `done` task must carry at least one
-    // piece of an accepted kind *with a real reference*, unless a tag exempts it.
-    // Vacuous evidence is `APLAN005`'s business, so this only speaks when there is
-    // substantive evidence but none of it is strong enough, which is the
-    // shallow-`done` this rule exists to catch.
-    // The policy that applies *here*, which is the whole-plan one unless a scope
-    // names a narrower subset this task is in (`A1-183`).
+/// `APLAN017`: configured minimum evidence strength, with single-pass
+/// activation observation (`A1-183`, `A2-135`).
+fn check_min_evidence_strength(
+    lt: &LoadedTask,
+    has_substantive_evidence: bool,
+    context: &mut ValidationContext<'_>,
+    cut_of: &BTreeMap<&str, (&str, &str)>,
+    out: &mut Vec<Diagnostic>,
+) {
+    let t = &lt.task;
+    if t.status != Status::Done || !has_substantive_evidence {
+        return;
+    }
+    let opts = context.opts;
     let (milestone, cut) = cut_of
         .get(t.id.as_str())
         .map_or((None, None), |(m, c)| (Some(*m), Some(*c)));
-    let (required, exempt) = opts.evidence_for(t, cut, milestone);
+    let (scoped_required, exempt) = opts.scoped_evidence_for(t, cut, milestone);
+    // An explicit empty scoped list (`policy[].evidence.require_min_strength: []`)
+    // waives this subset the same way `exempt_tags` does (`A1-183`), so it is
+    // inapplicable rather than disabled by the whole-plan switch.
+    if t.tags.iter().any(|tag| exempt.contains(tag)) || scoped_required == Some(&[]) {
+        return;
+    }
+    let satisfies = |required: &[EvidenceKind]| {
+        t.evidence
+            .iter()
+            .any(|e| required.contains(&e.kind) && !is_vacuous_ref(&e.reference))
+    };
+    let required = scoped_required.or(opts.require_min_strength.as_deref());
     // An empty list is a real answer: "nothing is required in this subset". It is
     // how `evidence.exempt_tags` is expressible as a scope (`A1-183`), and
     // without this the rule fired asking for one of nothing.
-    if let Some(required) = required.filter(|r| !r.is_empty())
-        && t.status == Status::Done
-        && has_substantive_evidence
-        && !t.tags.iter().any(|tag| exempt.contains(tag))
-        && !t
-            .evidence
-            .iter()
-            .any(|e| required.contains(&e.kind) && !is_vacuous_ref(&e.reference))
-    {
-        let kinds = required
-            .iter()
-            .map(|k| k.as_str())
-            .collect::<Vec<_>>()
-            .join(", ");
-        out.push(
-            Diagnostic::error(
-                code::WEAK_EVIDENCE,
-                format!("`done` but no evidence of a required kind (need one of: {kinds})"),
-            )
-            .with_task(&t.id)
-            .with_file(&lt.path)
-            .with_agent_instruction(format!(
-                "Add evidence of a stronger kind ({kinds}), or exempt the task with a configured \
-                 tag if nothing stronger exists."
-            )),
-        );
+    let active_required = required.filter(|r| !r.is_empty());
+    if let Some(active) = active_required {
+        let fails = !satisfies(active);
+        context.record_enabled(Rule::WeakEvidence, fails);
+        if fails {
+            let kinds = active
+                .iter()
+                .map(|k| k.as_str())
+                .collect::<Vec<_>>()
+                .join(", ");
+            out.push(
+                Diagnostic::error(
+                    code::WEAK_EVIDENCE,
+                    format!("`done` but no evidence of a required kind (need one of: {kinds})"),
+                )
+                .with_task(&t.id)
+                .with_file(&lt.path)
+                .with_agent_instruction(format!(
+                    "Add evidence of a stronger kind ({kinds}), or exempt the task with a configured \
+                     tag if nothing stronger exists."
+                )),
+            );
+        }
+    }
+    if !context.observe_vacuity {
+        return;
+    }
+    let probe_required = if opts.require_min_strength.as_deref() == Some(VACUITY_MIN_STRENGTH_ON) {
+        required
+    } else {
+        scoped_required.or(Some(VACUITY_MIN_STRENGTH_ON))
+    };
+    let probe_fails = probe_required
+        .filter(|r| !r.is_empty())
+        .is_some_and(|kinds| !satisfies(kinds));
+    if active_required.is_none() {
+        context.record_disabled(Rule::WeakEvidence, probe_fails);
+    } else if probe_fails && opts.require_min_strength.as_deref() != Some(VACUITY_MIN_STRENGTH_ON) {
+        context.record_suppressed_probe(Rule::WeakEvidence);
     }
 }
 
@@ -3628,10 +3952,15 @@ fn check_version_record(lt: &crate::load::LoadedTask, out: &mut Vec<Diagnostic>)
     }
 }
 
-fn check_version_impact(lt: &crate::load::LoadedTask, opts: &Options, out: &mut Vec<Diagnostic>) {
-    let Some(floors) = opts.require_impact else {
+fn check_version_impact(
+    lt: &crate::load::LoadedTask,
+    context: &mut ValidationContext<'_>,
+    out: &mut Vec<Diagnostic>,
+) {
+    let opts = context.opts;
+    if opts.require_impact.is_none() && !context.observe_vacuity {
         return;
-    };
+    }
     let t = &lt.task;
     if t.status != Status::Done {
         return;
@@ -3639,28 +3968,42 @@ fn check_version_impact(lt: &crate::load::LoadedTask, opts: &Options, out: &mut 
     let Some(claimed) = t.version_impact else {
         return;
     };
-    let floor = floors.of(t);
-    if claimed >= floor || t.version_impact_reason.is_some() {
-        return;
+    let default_floors = crate::task::VersionFloors::default();
+    let default_fails = claimed < default_floors.of(t) && t.version_impact_reason.is_none();
+    match opts.require_impact {
+        Some(floors) => {
+            let floor = floors.of(t);
+            let fails = claimed < floor && t.version_impact_reason.is_none();
+            context.record_enabled(Rule::VersionImpactUnexplained, fails);
+            if context.observe_vacuity && floors != default_floors && default_fails {
+                context.record_suppressed_probe(Rule::VersionImpactUnexplained);
+            }
+            if !fails {
+                return;
+            }
+            let mut d = Diagnostic::warning(
+                code::VERSION_IMPACT_UNEXPLAINED,
+                format!(
+                    "claims `{claimed}` of the released version where its level implies \
+                     `{floor}`, and says nowhere why"
+                ),
+            )
+            .with_task(&t.id)
+            .with_file(&lt.path)
+            .with_agent_instruction(
+                "Add `version_impact_reason` saying what this task changed that the level's floor \
+                 gets wrong -- a plan edit or an operational record really can change nothing that \
+                 ships. If it did change the artifact after all, raise `version_impact` instead.",
+            );
+            if let Some(at) = lt.fields.get("version_impact") {
+                d = d.at(*at);
+            }
+            out.push(d);
+        }
+        None => {
+            context.record_disabled(Rule::VersionImpactUnexplained, default_fails);
+        }
     }
-    let mut d = Diagnostic::warning(
-        code::VERSION_IMPACT_UNEXPLAINED,
-        format!(
-            "claims `{claimed}` of the released version where its level implies `{floor}`, and \
-             says nowhere why"
-        ),
-    )
-    .with_task(&t.id)
-    .with_file(&lt.path)
-    .with_agent_instruction(
-        "Add `version_impact_reason` saying what this task changed that the level's floor gets \
-         wrong -- a plan edit or an operational record really can change nothing that ships. If \
-         it did change the artifact after all, raise `version_impact` instead.",
-    );
-    if let Some(at) = lt.fields.get("version_impact") {
-        d = d.at(*at);
-    }
-    out.push(d);
 }
 
 fn check_criteria(lt: &crate::load::LoadedTask, out: &mut Vec<Diagnostic>) {

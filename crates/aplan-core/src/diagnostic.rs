@@ -95,6 +95,132 @@ impl Binding {
     }
 }
 
+/// A `.aplan.yml` on/off switch that gates one or more hermetic validation
+/// rules (`A1-269`, `A2-135`).
+///
+/// Declared beside [`Rule`] so switch dispositions live in the same catalogue
+/// as rule codes, severities and bindings rather than in a second hand-edited
+/// list. Every variant's [`config_key`](Self::config_key) is audited against
+/// `.aplan.yml`'s schema and its [`options_field`](Self::options_field) against
+/// [`crate::validate::Options`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub enum ValidationSwitch {
+    /// `require_effort` (`Options::require_effort`).
+    RequireEffort,
+    /// `detect_drift` (`Options::detect_drift`).
+    DetectDrift,
+    /// `require_cut_membership` (`Options::require_cut_membership`).
+    RequireCutMembership,
+    /// `evidence.require_min_strength` (`Options::require_min_strength`).
+    RequireMinStrength,
+    /// `version.require_impact` (`Options::require_impact`).
+    RequireImpact,
+}
+
+impl ValidationSwitch {
+    /// Every hermetic validation switch, in canonical declaration order.
+    pub const ALL: &'static [Self] = &[
+        Self::RequireEffort,
+        Self::DetectDrift,
+        Self::RequireCutMembership,
+        Self::RequireMinStrength,
+        Self::RequireImpact,
+    ];
+
+    /// The `.aplan.yml` key an adopter sets to enable this switch.
+    #[must_use]
+    pub const fn config_key(self) -> &'static str {
+        match self {
+            Self::RequireEffort => "require_effort",
+            Self::DetectDrift => "detect_drift",
+            Self::RequireCutMembership => "require_cut_membership",
+            Self::RequireMinStrength => "evidence.require_min_strength",
+            Self::RequireImpact => "version.require_impact",
+        }
+    }
+
+    /// The [`crate::validate::Options`] field that carries this switch.
+    #[must_use]
+    pub const fn options_field(self) -> &'static str {
+        match self {
+            Self::RequireEffort => "require_effort",
+            Self::DetectDrift => "detect_drift",
+            Self::RequireCutMembership => "require_cut_membership",
+            Self::RequireMinStrength => "require_min_strength",
+            Self::RequireImpact => "require_impact",
+        }
+    }
+
+    /// Every rule in [`Rule::ALL`] governed by this switch.
+    #[must_use]
+    pub fn rules(self) -> Vec<Rule> {
+        Rule::ALL
+            .iter()
+            .copied()
+            .filter(|rule| rule.switch_disposition() == SwitchDisposition::ValidationSwitch(self))
+            .collect()
+    }
+}
+
+/// A `.aplan.yml` resolver configuration switch that gates one or more
+/// `verify`-tier rules without requiring `vacuity` to spawn providers
+/// (`A1-274`, `A2-135`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub enum ResolverSwitch {
+    /// Requires a configured `test` runner (`test`).
+    Test,
+    /// Requires a configured `test` runner (`test`) that declares locality
+    /// (`test.covers`).
+    TestLocality,
+    /// Requires a configured URL checker (`url.check`).
+    UrlCheck,
+}
+
+impl ResolverSwitch {
+    /// Every resolver switch, in canonical declaration order.
+    pub const ALL: &'static [Self] = &[Self::Test, Self::TestLocality, Self::UrlCheck];
+
+    /// The `.aplan.yml` keys this resolver switch can report in `vacuity`.
+    #[must_use]
+    pub const fn config_keys(self) -> &'static [&'static str] {
+        match self {
+            Self::Test => &["test"],
+            Self::TestLocality => &["test", "test.covers"],
+            Self::UrlCheck => &["url.check"],
+        }
+    }
+
+    /// Every rule in [`Rule::ALL`] governed by this resolver switch.
+    #[must_use]
+    pub fn rules(self) -> Vec<Rule> {
+        Rule::ALL
+            .iter()
+            .copied()
+            .filter(|rule| rule.switch_disposition() == SwitchDisposition::ResolverSwitch(self))
+            .collect()
+    }
+}
+
+/// How a rule's activation relates to `.aplan.yml` switches (`A2-135`).
+///
+/// Mandatory on every row of `define_rules!` so adding a rule requires an
+/// explicit vacuity disposition rather than a silent default.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum SwitchDisposition {
+    /// Hermetic validation rule gated by a `.aplan.yml` on/off switch and
+    /// observed in one validation pass.
+    ValidationSwitch(ValidationSwitch),
+    /// Hermetic validation rule that has no on/off switch (always runs, or is
+    /// shaped only by declared vocabularies or external inputs).
+    Unconditional,
+    /// `verify`-tier rule gated by a configured evidence resolver that
+    /// `vacuity` reports hermetically from configuration.
+    ResolverSwitch(ResolverSwitch),
+    /// Non-hermetic (`verify`), loader or inbox rule outside the hermetic
+    /// validation and resolver switch tables.
+    External,
+}
+
 /// **Changing what an existing rule *does* earns a `Behaviour`** (`A1-142`).
 ///
 /// Adding a row here is already assertable: `--require APLAN031` answers it.
@@ -124,6 +250,7 @@ macro_rules! define_rules {
         $variant:ident => $const_name:ident = $code:literal, $severity:ident, $title:literal
         $(, applies: $applies:expr, binds: $binds:expr)?
         , points_at: $points:expr
+        , switch: $switch:expr
     );+ $(;)?) => {
         /// Every invariant `aplan` can report, as one enumerable registry.
         ///
@@ -133,7 +260,7 @@ macro_rules! define_rules {
         /// string each rule maps to is the stable contract with consumers,
         /// exposed both as [`Rule::code`] and as a matching [`code`] constant
         /// generated from the same row.
-        #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+        #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
         pub enum Rule {
             $( $(#[$meta])* $variant ),+
         }
@@ -203,6 +330,15 @@ macro_rules! define_rules {
                 match self { $( Rule::$variant => $points ),+ }
             }
 
+            /// How this rule's activation relates to `.aplan.yml` switches
+            /// (`A2-135`).
+            ///
+            /// Declared on the row and *not* optional, so a new rule cannot
+            /// enter [`Rule::ALL`] without an explicit vacuity disposition.
+            pub const fn switch_disposition(self) -> SwitchDisposition {
+                match self { $( Rule::$variant => $switch ),+ }
+            }
+
             /// What a task must carry for this rule to have a subject at all.
             ///
             /// Empty means every task is a subject. Declared on the row rather
@@ -237,27 +373,34 @@ define_rules! {
     /// violation, or a deserialisation failure. (An umbrella "the loader
     /// rejected this file", of which the schema case is the common one.)
     Schema => SCHEMA = "APLAN001", Error, "frontmatter parses and satisfies the schema",
-        points_at: None;
+        points_at: None,
+        switch: SwitchDisposition::External;
     /// Two tasks share an `id`.
     DuplicateId => DUPLICATE_ID = "APLAN002", Error, "task ids are unique",
-        points_at: Some("id");
+        points_at: Some("id"),
+        switch: SwitchDisposition::Unconditional;
     /// `blocked_by` names a task that does not exist.
     UnknownDep => UNKNOWN_DEP = "APLAN003", Error, "blocked_by references a task that exists",
-        points_at: Some("blocked_by");
+        points_at: Some("blocked_by"),
+        switch: SwitchDisposition::Unconditional;
     /// The dependency graph contains a cycle.
     Cycle => CYCLE = "APLAN004", Error, "the dependency graph is acyclic",
-        points_at: Some("blocked_by");
+        points_at: Some("blocked_by"),
+        switch: SwitchDisposition::Unconditional;
     /// `status: done` with an empty `evidence` list.
     DoneWithoutEvidence => DONE_WITHOUT_EVIDENCE = "APLAN005", Error,
         "done carries at least one piece of evidence",
-        points_at: Some("evidence");
+        points_at: Some("evidence"),
+        switch: SwitchDisposition::Unconditional;
     /// A task lists itself in `blocked_by`.
     SelfDep => SELF_DEP = "APLAN006", Error, "no task blocks itself",
-        points_at: Some("blocked_by");
+        points_at: Some("blocked_by"),
+        switch: SwitchDisposition::Unconditional;
     /// A `done` task depends on a task that is not `done`.
     DoneBeforeBlocker => DONE_BEFORE_BLOCKER = "APLAN007", Error,
         "a done task does not depend on an unfinished one",
-        points_at: Some("blocked_by");
+        points_at: Some("blocked_by"),
+        switch: SwitchDisposition::Unconditional;
     /// A `traces` anchor does not resolve to a real file, and to a real heading
     /// in it, or -- since ADR-0035 -- a real node of it.
     ///
@@ -269,34 +412,40 @@ define_rules! {
     /// (`A1-191`).
     DanglingTrace => DANGLING_TRACE = "APLAN008", Error,
         "traces anchors resolve to a real heading, table row or node (YAML frontmatter delimiters are metadata, not headings)",
-        points_at: Some("traces");
+        points_at: Some("traces"),
+        switch: SwitchDisposition::Unconditional;
     /// An active task carries no effort estimate.
     MissingEffort => MISSING_EFFORT = "APLAN009", Warning,
         "active tasks carry an effort estimate",
         applies: &[Binding::NotMilestone], binds: &[],
-        points_at: Some("effort_days");
+        points_at: Some("effort_days"),
+        switch: SwitchDisposition::ValidationSwitch(ValidationSwitch::RequireEffort);
     /// Evidence of kind `note` without a `captured` date.
     UndatedNote => UNDATED_NOTE = "APLAN010", Error, "a note used as evidence carries a date",
-        points_at: Some("evidence");
+        points_at: Some("evidence"),
+        switch: SwitchDisposition::Unconditional;
     /// `commit` evidence names an immutable SHA that does not resolve to a
     /// commit reachable from this repository's `HEAD` (L1 "Resolved"). Raised
     /// by `aplan verify`, never by `check`.
     CommitUnresolved => COMMIT_UNRESOLVED = "APLAN011", Error,
         "commit evidence resolves to an immutable commit reachable from HEAD",
-        points_at: Some("evidence");
+        points_at: Some("evidence"),
+        switch: SwitchDisposition::External;
     /// `commit` evidence resolves, but its diff touches nothing in the task's
     /// `paths` (L2 "Relevant"), the citation is real but not bound to the task.
     CommitIrrelevant => COMMIT_IRRELEVANT = "APLAN012", Error,
         "commit evidence touches at least one of the task's paths",
         applies: &[Binding::Done, Binding::Evidence(crate::task::EvidenceKind::Commit)],
         binds: &[Binding::Paths],
-        points_at: Some("evidence");
+        points_at: Some("evidence"),
+        switch: SwitchDisposition::External;
     /// `test` evidence names a test that the configured runner does not list
     /// (L1 "Resolved"). Needs a `test` runner in `.aplan.yml`; without one,
     /// `test` evidence stays at L0, like `url` reachability.
     TestUnresolved => TEST_UNRESOLVED = "APLAN013", Error,
         "test evidence names a test the runner can find",
-        points_at: Some("evidence");
+        points_at: Some("evidence"),
+        switch: SwitchDisposition::ResolverSwitch(ResolverSwitch::Test);
     /// `test` evidence names a test that the runner ran and it failed (L3
     /// "Executed"). Only under `aplan verify --execute`, which is off by default.
     ///
@@ -308,11 +457,13 @@ define_rules! {
     /// is *indistinguishable* from a miss: a skip is plainly distinguishable,
     /// the runner having said so out loud (`A1-300`).
     TestFailed => TEST_FAILED = "APLAN014", Error, "test evidence names a test that passes",
-        points_at: Some("evidence");
+        points_at: Some("evidence"),
+        switch: SwitchDisposition::ResolverSwitch(ResolverSwitch::Test);
     /// `file` evidence names a path that does not exist at the cited rev (or at
     /// `HEAD` when none is cited) (L1 "Resolved").
     FileUnresolved => FILE_UNRESOLVED = "APLAN015", Error, "file evidence resolves at the cited rev",
-        points_at: Some("evidence");
+        points_at: Some("evidence"),
+        switch: SwitchDisposition::External;
     /// A `url` citation did not answer when it was checked.
     ///
     /// `url` was the one evidence kind `verify` never resolved: checked for
@@ -334,13 +485,15 @@ define_rules! {
     /// to set (`A1-041`).
     UrlUnreachable => URL_UNREACHABLE = "APLAN016", Warning,
         "url evidence answers when it is checked",
-        points_at: Some("evidence");
+        points_at: Some("evidence"),
+        switch: SwitchDisposition::ResolverSwitch(ResolverSwitch::UrlCheck);
     /// A `done` task's evidence is weaker than the configured minimum: it has
     /// evidence, but none of an accepted kind, and no exempting tag. Off unless
     /// `.aplan.yml` sets `evidence.require_min_strength`. (`APLAN016`, url
     /// reachability, is reserved; it needs the network path, still off.)
     WeakEvidence => WEAK_EVIDENCE = "APLAN017", Error, "done evidence meets the configured minimum strength",
-        points_at: Some("evidence");
+        points_at: Some("evidence"),
+        switch: SwitchDisposition::ValidationSwitch(ValidationSwitch::RequireMinStrength);
     /// A `done` task's traced document section has changed since the task was
     /// closed: its `trace_fingerprints` no longer match the live content. A
     /// *warning* (advisory), and off unless `.aplan.yml` sets `detect_drift`; a
@@ -350,7 +503,8 @@ define_rules! {
         "a closed task's traced section is unchanged since closure",
         applies: &[Binding::Done, Binding::Traces],
         binds: &[Binding::TraceFingerprints],
-        points_at: Some("traces");
+        points_at: Some("traces"),
+        switch: SwitchDisposition::ValidationSwitch(ValidationSwitch::DetectDrift);
     /// A task declares a `paths` glob that matches no file the repository tracks.
     ///
     /// `paths` is the fixed point three shipped rules judge evidence against:
@@ -398,7 +552,8 @@ define_rules! {
     /// reported on a closed task, which is the pilot's own case (`A1-022`).
     PathsUnmatched => PATHS_UNMATCHED = "APLAN019", Warning,
         "a task's paths globs each match at least one tracked file, once it cites evidence",
-        points_at: Some("paths");
+        points_at: Some("paths"),
+        switch: SwitchDisposition::External;
     /// A live task is blocked by a `dropped` one, so it can never legitimately
     /// start: the plan is deadlocked.
     ///
@@ -406,7 +561,8 @@ define_rules! {
     /// (ROADMAP §10), which is why this rule, shipped earlier, takes `020`. A
     /// code is a contract with consumers; it is not renumbered for tidiness.
     DroppedBlocker => DROPPED_BLOCKER = "APLAN020", Error, "a live task is not blocked by a dropped one",
-        points_at: Some("blocked_by");
+        points_at: Some("blocked_by"),
+        switch: SwitchDisposition::Unconditional;
     /// A task tagged `milestone` does not look like one: it has no members
     /// (`blocked_by` empty, or holding no live work), or it carries `effort_days`
     /// or `paths`, which a checkpoint does not.
@@ -431,7 +587,8 @@ define_rules! {
     /// `A1-146` owns the decision.
     MilestoneHygiene => MILESTONE_HYGIENE = "APLAN021", Warning,
         "a milestone has members and carries no effort or paths",
-        points_at: None;
+        points_at: None,
+        switch: SwitchDisposition::Unconditional;
     /// A non-milestone task belongs to no cut, or to more than one: it is in the
     /// `blocked_by` of zero, or of several, milestone meta-tasks (ADR-0008), and is
     /// not tagged `cross-cutting`. Off unless `.aplan.yml` sets
@@ -443,7 +600,8 @@ define_rules! {
     MembershipTotality => MEMBERSHIP_TOTALITY = "APLAN022", Error,
         "every task is a member of exactly one cut, or is tagged cross-cutting",
         applies: &[Binding::NotMilestone], binds: &[],
-        points_at: None;
+        points_at: None,
+        switch: SwitchDisposition::ValidationSwitch(ValidationSwitch::RequireCutMembership);
     /// A `done` task cites evidence whose relevance cannot be checked, because it
     /// declares no `paths`. `APLAN012` binds a cited `commit` to the task by
     /// requiring its diff to touch one of those globs; with none declared there is
@@ -462,7 +620,8 @@ define_rules! {
     UncheckableEvidence => UNCHECKABLE_EVIDENCE = "APLAN023", Warning,
         "a done task's path-checkable evidence can actually be path-checked",
         applies: &[Binding::Done, Binding::NotMilestone], binds: &[],
-        points_at: Some("evidence");
+        points_at: Some("evidence"),
+        switch: SwitchDisposition::Unconditional;
     /// A `done` task whose whole machine-checkable proof is a commit that is
     /// mostly about something else. `APLAN012` asks whether the diff touches the
     /// task's `paths` at all, which a large enough commit satisfies by accident:
@@ -481,7 +640,8 @@ define_rules! {
         "a done task's commit evidence is about that task, not mostly about other work",
         applies: &[Binding::Done, Binding::Evidence(crate::task::EvidenceKind::Commit)],
         binds: &[Binding::Paths],
-        points_at: Some("evidence");
+        points_at: Some("evidence"),
+        switch: SwitchDisposition::External;
 
     /// A `test` is the strongest evidence kind this tool recognises, the one
     /// `require_min_strength` steers repositories toward, and it was the only one
@@ -510,7 +670,8 @@ define_rules! {
         "a cited test belongs to the part of the repository this task's `paths` cover",
         applies: &[Binding::Done, Binding::Evidence(crate::task::EvidenceKind::Test)],
         binds: &[Binding::Paths],
-        points_at: Some("evidence");
+        points_at: Some("evidence"),
+        switch: SwitchDisposition::ResolverSwitch(ResolverSwitch::TestLocality);
 
     /// A second task-membership dimension ends up in tags, because tags are
     /// what exists. `ADR-0008` rejected them for cut membership precisely
@@ -529,7 +690,8 @@ define_rules! {
     /// (`A1-076`).
     UnknownTag => UNKNOWN_TAG = "APLAN026", Warning,
         "a tag that looks like a member of a declared family is one",
-        points_at: Some("tags");
+        points_at: Some("tags"),
+        switch: SwitchDisposition::Unconditional;
 
     /// A cut is `dropped` while work it lists is still live. The plan then says
     /// two things at once: this cut is cancelled, and these tasks in it are
@@ -543,7 +705,8 @@ define_rules! {
     /// for a repository that wants it to be.
     CancelledCutLiveWork => CANCELLED_CUT_LIVE_WORK = "APLAN027", Warning,
         "a cancelled cut's members are cancelled too",
-        points_at: Some("status");
+        points_at: Some("status"),
+        switch: SwitchDisposition::Unconditional;
     /// A `done` task does not stamp a trace it could stamp, so `APLAN018` is
     /// silently off for the section it cannot compare.
     ///
@@ -595,7 +758,8 @@ define_rules! {
     /// before the loop and had to be told (`A1-297`, audit).
     UnstampedTrace => UNSTAMPED_TRACE = "APLAN028", Error,
         "a done task stamps every trace that can be stamped",
-        points_at: Some("traces");
+        points_at: Some("traces"),
+        switch: SwitchDisposition::ValidationSwitch(ValidationSwitch::DetectDrift);
 
     /// A declared tag family that nothing in the plan uses.
     ///
@@ -623,7 +787,8 @@ define_rules! {
     /// repository, which can set `deny_warnings`, is the judge (`A1-085`).
     UnusedTagFamily => UNUSED_TAG_FAMILY = "APLAN029", Warning,
         "a declared tag family is carried by at least one task",
-        points_at: None;
+        points_at: None,
+        switch: SwitchDisposition::Unconditional;
 
     /// A task carries the number of members a declared family requires.
     ///
@@ -645,7 +810,8 @@ define_rules! {
     /// (`A1-112`, `A1-133`).
     TagCardinality => TAG_CARDINALITY = "APLAN030", Error,
         "a task carries the number of members a declared family requires",
-        points_at: Some("tags");
+        points_at: Some("tags"),
+        switch: SwitchDisposition::Unconditional;
     /// A `done` task cites a `file` that exists and lies outside its `paths`, so
     /// the citation proves the file is there and nothing about this task.
     ///
@@ -676,7 +842,8 @@ define_rules! {
         "file evidence names a file inside the task's paths",
         applies: &[Binding::Done, Binding::Evidence(crate::task::EvidenceKind::File)],
         binds: &[Binding::Paths],
-        points_at: Some("evidence");
+        points_at: Some("evidence"),
+        switch: SwitchDisposition::External;
     /// A `paths` entry the glob compiler cannot use, so every path-based rule is
     /// silently inapplicable to that task.
     ///
@@ -701,7 +868,8 @@ define_rules! {
     /// every rule goes quiet.
     BadPathGlob => BAD_PATH_GLOB = "APLAN032", Error,
         "a task's paths entries are globs this tool can compile",
-        points_at: Some("paths");
+        points_at: Some("paths"),
+        switch: SwitchDisposition::Unconditional;
     /// A `prefer_after` entry that cannot be honoured: an unknown id, the task
     /// itself, a pair that is already a `blocked_by` edge, or a cycle of
     /// preferences with no order at all (`A1-150`, ADR-0025).
@@ -719,7 +887,8 @@ define_rules! {
     /// silence this project exists to remove.
     UnusablePreference => UNUSABLE_PREFERENCE = "APLAN033", Error,
         "a prefer_after entry names a task that can actually be preferred",
-        points_at: Some("prefer_after");
+        points_at: Some("prefer_after"),
+        switch: SwitchDisposition::Unconditional;
     /// A `traces` target that leaves this repository without the repository
     /// saying so (`A1-143`, ADR-0021).
     ///
@@ -747,7 +916,8 @@ define_rules! {
     /// argument for `url` evidence when it refused every scheme but `https`.
     ExternalTrace => EXTERNAL_TRACE = "APLAN034", Error,
         "a traces target outside this repository is declared as external",
-        points_at: Some("traces");
+        points_at: Some("traces"),
+        switch: SwitchDisposition::Unconditional;
     /// `commit` evidence naming a merge commit, which is almost never the commit
     /// that did the work (`A1-145`).
     ///
@@ -774,7 +944,8 @@ define_rules! {
     /// checked against the pilot's own repository).
     MergeCommitEvidence => MERGE_COMMIT_EVIDENCE = "APLAN035", Warning,
         "commit evidence names a commit that did work, not a merge",
-        points_at: Some("evidence");
+        points_at: Some("evidence"),
+        switch: SwitchDisposition::External;
 
     /// A configured test runner that lists nothing is indistinguishable from a
     /// broken one, and the failure lands on the wrong file
@@ -807,7 +978,8 @@ define_rules! {
     /// why this rule is scoped to the case a count can see.
     RunnerListsNothing => RUNNER_LISTS_NOTHING = "APLAN036", Warning,
         "a configured test runner lists at least one test, or says it expects none",
-        points_at: None;
+        points_at: None,
+        switch: SwitchDisposition::ResolverSwitch(ResolverSwitch::Test);
 
     /// A test that "passed" under `--execute` was distinguishable from one the
     /// runner never selected.
@@ -849,7 +1021,8 @@ define_rules! {
     /// citations it silently passed (`A1-066`).
     RunProvesNothing => RUN_PROVES_NOTHING = "APLAN037", Warning,
         "a test that passed under `--execute` is distinguishable from one the runner never ran",
-        points_at: None;
+        points_at: None,
+        switch: SwitchDisposition::ResolverSwitch(ResolverSwitch::Test);
     /// `done` over a definition of done the author never answered (`A1-224`).
     ///
     /// `aplan add` scaffolds `- [ ] state what done means for this task, in this
@@ -895,7 +1068,8 @@ define_rules! {
     /// (`RD1-26` to `RD4-05`, `A1-266`).
     CriteriaUnanswered => CRITERIA_UNANSWERED = "APLAN038", Warning,
         "a `done` task has answered the acceptance criteria its own body states",
-        points_at: None;
+        points_at: None,
+        switch: SwitchDisposition::Unconditional;
 
     /// A `done` task has not ticked a prompt this tool wrote as though it were a
     /// criterion.
@@ -929,7 +1103,8 @@ define_rules! {
     /// gate blocks.
     ScaffoldTicked => SCAFFOLD_TICKED = "APLAN039", Warning,
         "a `done` task has not ticked a prompt this tool wrote as though it were a criterion",
-        points_at: None;
+        points_at: None,
+        switch: SwitchDisposition::Unconditional;
 
     /// A task does not declare the same `paths` entry twice.
     ///
@@ -956,7 +1131,8 @@ define_rules! {
     /// under one code is what the catalogue exists to prevent (`A1-088`).
     DuplicatePath => DUPLICATE_PATH = "APLAN040", Warning,
         "a task declares each `paths` entry once",
-        points_at: Some("paths");
+        points_at: Some("paths"),
+        switch: SwitchDisposition::Unconditional;
 
     /// The generated block in a repository's `AGENTS.md` still says what its
     /// policy says.
@@ -984,7 +1160,8 @@ define_rules! {
     /// repository decides how loud that is.
     StaleAgentContract => STALE_AGENT_CONTRACT = "APLAN041", Warning,
         "the generated `AGENTS.md` block says what this repository's policy says",
-        points_at: None;
+        points_at: None,
+        switch: SwitchDisposition::Unconditional;
 
     /// A `revisit_at` names a real instant, on a task that is parked.
     ///
@@ -1004,7 +1181,8 @@ define_rules! {
     /// quietly fail to reach the scheduler that was supposed to read it.
     RevisitUnusable => REVISIT_UNUSABLE = "APLAN042", Warning,
         "a `revisit_at` names a real instant, on a task that is parked",
-        points_at: Some("revisit_at");
+        points_at: Some("revisit_at"),
+        switch: SwitchDisposition::Unconditional;
 
     /// A live task does not carry the scaffold's own prompt beside criteria it
     /// wrote (`A1-299`).
@@ -1042,7 +1220,8 @@ define_rules! {
     /// blocks.
     ScaffoldLeftover => SCAFFOLD_LEFTOVER = "APLAN043", Warning,
         "a live task carries the scaffold's own prompt beside the criteria its author wrote",
-        points_at: None;
+        points_at: None,
+        switch: SwitchDisposition::Unconditional;
     /// A closed task claims less of the released version than its level implies,
     /// and says nothing about why (`A1-312`, ADR-0034).
     ///
@@ -1065,7 +1244,8 @@ define_rules! {
     /// repository says every gate blocks.
     VersionImpactUnexplained => VERSION_IMPACT_UNEXPLAINED = "APLAN044", Warning,
         "a closed task claims less of the released version than its level implies, without saying why",
-        points_at: Some("version_impact");
+        points_at: Some("version_impact"),
+        switch: SwitchDisposition::ValidationSwitch(ValidationSwitch::RequireImpact);
     /// A *live* task's traced section has changed since anybody last touched the
     /// task, so its premise moved while it waited (`A1-301`, `p0000000000005`
     /// item 22).
@@ -1109,7 +1289,8 @@ define_rules! {
     /// for; this is the argument).
     StalePremise => STALE_PREMISE = "APLAN045", Warning,
         "a live task's traced section is unchanged since the task's last substantive edit or explicit review",
-        points_at: Some("traces");
+        points_at: Some("traces"),
+        switch: SwitchDisposition::External;
     /// A `done` task whose ratifier has not finished (`A1-306`, ADR-0036).
     ///
     /// `ratified_by` is the half of `blocked_by` that constrains *counting
@@ -1133,7 +1314,8 @@ define_rules! {
     /// making a claim the plan contradicts.
     Unratified => UNRATIFIED = "APLAN046", Error,
         "a done task's ratifiers are done",
-        points_at: Some("ratified_by");
+        points_at: Some("ratified_by"),
+        switch: SwitchDisposition::Unconditional;
     /// `APLAN047`: a `contains` edge is usable -- it names a milestone that
     /// exists, and the containment does not close a loop (`A1-333`, ADR-0042).
     ///
@@ -1157,7 +1339,8 @@ define_rules! {
     /// other, and the number changes with iteration order.
     ContainsUnusable => CONTAINS_UNUSABLE = "APLAN047", Error,
         "a `contains` names a milestone that exists, and closes no loop",
-        points_at: Some("contains");
+        points_at: Some("contains"),
+        switch: SwitchDisposition::Unconditional;
     /// `APLAN048`: the artifact's version has moved as far as the tasks closed
     /// since the last release require (`A1-313`, ADR-0034, ADR-0038).
     ///
@@ -1187,7 +1370,8 @@ define_rules! {
     /// somebody who is not in the room.
     VersionBehind => VERSION_BEHIND = "APLAN048", Error,
         "the released version has moved as far as the closed tasks require",
-        points_at: Some("version_impact");
+        points_at: Some("version_impact"),
+        switch: SwitchDisposition::External;
     /// `APLAN049`: the artifact agrees with what the plan claims about
     /// compatibility (`A1-314`, ADR-0034).
     ///
@@ -1221,7 +1405,8 @@ define_rules! {
     /// `url.check` and `test.list` have.
     ImpactContradicted => IMPACT_CONTRADICTED = "APLAN049", Error,
         "the artifact agrees with what the plan claims about compatibility",
-        points_at: Some("version_impact");
+        points_at: Some("version_impact"),
+        switch: SwitchDisposition::External;
     /// `APLAN050`: a recorded `version` is on a release, and is a version
     /// (`A1-339`, ADR-0038).
     ///
@@ -1242,7 +1427,8 @@ define_rules! {
     /// An *error*, and hermetic: both halves are answerable from the plan alone.
     VersionRecordUnusable => VERSION_RECORD_UNUSABLE = "APLAN050", Error,
         "a recorded `version` is on a release, and is a version this tool can read",
-        points_at: Some("version");
+        points_at: Some("version"),
+        switch: SwitchDisposition::Unconditional;
     /// `APLAN051`: a tag one edit from a word that changes what this tool does
     /// (`A1-212`, ADR-0014).
     ///
@@ -1272,7 +1458,8 @@ define_rules! {
     /// wants the answer to block.
     ReservedTagNearMiss => RESERVED_TAG_NEAR_MISS = "APLAN051", Warning,
         "a tag is not one edit from a word that changes what this tool does",
-        points_at: Some("tags");
+        points_at: Some("tags"),
+        switch: SwitchDisposition::Unconditional;
     /// `APLAN052`: `cross-cutting` means "in no cut", so it is not on a task in
     /// one (`A1-212`).
     ///
@@ -1298,7 +1485,8 @@ define_rules! {
     /// removing it, and an adopter meets this on tasks they already wrote.
     CrossCuttingInACut => CROSS_CUTTING_IN_A_CUT = "APLAN052", Warning,
         "`cross-cutting` is not on a task that is a member of a cut",
-        points_at: Some("tags");
+        points_at: Some("tags"),
+        switch: SwitchDisposition::Unconditional;
     /// `APLAN053`: a task says work on it has started and the repository holds
     /// nothing it claims (`A1-359`).
     ///
@@ -1335,7 +1523,8 @@ define_rules! {
     UnstartedInProgress => UNSTARTED_IN_PROGRESS = "APLAN053", Warning,
         "a task that is `in_progress` has something in the repository to show for it",
         applies: &[Binding::InProgress], binds: &[Binding::Paths],
-        points_at: Some("status");
+        points_at: Some("status"),
+        switch: SwitchDisposition::External;
     /// A mutable `file` evidence referent still has the contents that were
     /// reviewed when the citation was recorded (`A1-196`).
     ///
@@ -1357,7 +1546,8 @@ define_rules! {
         "a closed task's mutable file evidence is covered by a current fingerprint",
         applies: &[Binding::Done, Binding::Evidence(crate::task::EvidenceKind::File)],
         binds: &[Binding::EvidenceFingerprints],
-        points_at: Some("evidence");
+        points_at: Some("evidence"),
+        switch: SwitchDisposition::External;
     /// An author-entered `captured` date appears on machine-resolved evidence
     /// (`A1-197`).
     ///
@@ -1369,7 +1559,8 @@ define_rules! {
     /// metadata look like checked freshness.
     InapplicableCapture => INAPPLICABLE_CAPTURE = "APLAN055", Error,
         "captured dates are used only for authored note evidence",
-        points_at: Some("evidence");
+        points_at: Some("evidence"),
+        switch: SwitchDisposition::Unconditional;
     /// `APLAN056`: a task's free-text owner belongs to the repository's
     /// declared owner vocabulary (`A1-190`).
     ///
@@ -1385,7 +1576,8 @@ define_rules! {
     /// repository make that judgement block its gate.
     OwnerVocabulary => OWNER_VOCABULARY = "APLAN056", Warning,
         "a task's owner belongs to the declared owner vocabulary",
-        points_at: Some("owner");
+        points_at: Some("owner"),
+        switch: SwitchDisposition::Unconditional;
     /// A capture file is one canonical, valid and cross-record-consistent V1
     /// inbox record (`A1-514`, ADR-0063).
     ///
@@ -1396,7 +1588,8 @@ define_rules! {
     /// not become tasks, so none of the task-only rules can report them.
     CaptureInvalid => CAPTURE_INVALID = "APLAN057", Error,
         "every inbox entry is one canonical, valid and cross-record-consistent V1 capture",
-        points_at: None;
+        points_at: None,
+        switch: SwitchDisposition::External;
     /// Every cut and tag named by a `policy[].when` selector can match this
     /// plan (`A2-024`).
     ///
@@ -1418,7 +1611,8 @@ define_rules! {
     /// makes the finding block the gate.
     PolicySelectorUnmatched => POLICY_SELECTOR_UNMATCHED = "APLAN058", Warning,
         "every cut and tag in policy[].when can match this plan",
-        points_at: None;
+        points_at: None,
+        switch: SwitchDisposition::Unconditional;
     /// Every evidence kind named by `evidence.require_min_strength` or
     /// `policy[].evidence.require_min_strength` that requires a configured
     /// resolver has one declared in `.aplan.yml`.
@@ -1441,7 +1635,8 @@ define_rules! {
     /// the finding block the gate.
     PolicyEvidenceUnresolvable => POLICY_EVIDENCE_UNRESOLVABLE = "APLAN059", Warning,
         "every evidence kind required by policy has a configured resolver",
-        points_at: None;
+        points_at: None,
+        switch: SwitchDisposition::Unconditional;
     /// A traced anchor silently retargeted from one element kind to another
     /// (for example a renamed Markdown heading falling through to a same-slug
     /// table row, or a table row captured by a newly added heading; `ADR-0069`,
@@ -1455,36 +1650,42 @@ define_rules! {
     /// this rule.
     TraceRetargeted => TRACE_RETARGETED = "APLAN060", Error,
         "a traced anchor resolves to the same element kind it was written or stamped against",
-        points_at: Some("traces");
+        points_at: Some("traces"),
+        switch: SwitchDisposition::ValidationSwitch(ValidationSwitch::DetectDrift);
     /// A live non-milestone task declares a universal catch-all `paths` glob
     /// (`**`, `*`, `**/*`) that matches every file in the repository and can
     /// never bind commit evidence at close/verify (`A2-099`).
     UniversalPathGlob => UNIVERSAL_PATH_GLOB = "APLAN061", Warning,
         "a live task's paths do not claim every file in the repository with a universal glob",
-        points_at: Some("paths");
+        points_at: Some("paths"),
+        switch: SwitchDisposition::Unconditional;
     /// A task lists the same evidence citation (`kind` plus canonical
     /// reference) more than once (`A2-106`).
     DuplicateEvidence => DUPLICATE_EVIDENCE = "APLAN062", Warning,
         "evidence lists each citation once",
-        points_at: Some("evidence");
+        points_at: Some("evidence"),
+        switch: SwitchDisposition::Unconditional;
     /// A live task declares a literal (non-glob) `paths` entry that either
     /// names an existing tracked directory (missing `/**`) or names a file
     /// that was previously tracked in Git history and later renamed or removed
     /// (`A2-101`, `ADR-0071`).
     LivePathStranded => LIVE_PATH_STRANDED = "APLAN063", Warning,
         "a live task's literal paths name neither a bare tracked directory nor a target removed or renamed in history",
-        points_at: Some("paths");
+        points_at: Some("paths"),
+        switch: SwitchDisposition::External;
     /// A non-milestone task's id contradicts the id family declared for its
     /// cut in `.aplan.yml` `id_families`, or `id_families.cuts` declares an
     /// ambiguous mapping for a cut (`A2-097`).
     CutIdFamilyMismatch => CUT_ID_FAMILY_MISMATCH = "APLAN064", Warning,
         "a task's id matches the id family declared for its cut",
-        points_at: Some("id");
+        points_at: Some("id"),
+        switch: SwitchDisposition::Unconditional;
     /// A `closed_at` or `closed_at_source` record is malformed, out of range,
     /// paired inconsistently, or placed on a non-`done` task (`A2-109`, ADR-0074).
     ClosedAtInvalid => CLOSED_AT_INVALID = "APLAN065", Error,
         "a `closed_at` record is valid canonical UTC and only appears on a `done` task",
-        points_at: Some("closed_at");
+        points_at: Some("closed_at"),
+        switch: SwitchDisposition::Unconditional;
 }
 
 /// A repository's verdict policy: what makes a report fail its build.

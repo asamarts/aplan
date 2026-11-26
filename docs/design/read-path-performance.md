@@ -1,8 +1,8 @@
 # Read-path performance and exact incremental snapshots
 
-Status: Accepted for phased implementation; A1-588, A1-322 and A1-589 delivered
+Status: Accepted for phased implementation; A1-588, A1-322, A1-589 and A2-135 delivered
 
-Owning tasks: `A1-588`, `A1-322`, `A1-589`, `A1-590`-`A1-594`
+Owning tasks: `A1-588`, `A1-322`, `A1-589`, `A1-590`-`A1-594`, `A2-135`
 
 Date: 2026-10-18
 
@@ -531,6 +531,35 @@ Release `show --no-resolve` now meets the p95 target, while release `check` narr
 development structural reads remain above it. That residual is evidence for `A1-589`, not a reason to
 weaken or prematurely claim the budget.
 
+### A2-135 measured single-pass vacuity
+
+`A2-135` replaces `vacuity`'s repeated validation passes with one exhaustive validation pass that
+emits typed per-rule `CheckActivation` observations (`Inapplicable`, `EnabledNoFindings`,
+`EnabledWithFindings`, `Disabled`) driven by mandatory `SwitchDisposition` rows on `Rule` in
+`define_rules!`. `aplan vacuity` builds one borrowed `Graph` shared across optional selection
+(`--cut`, `--status`, etc.) and `validate_with_graph_and_observations`, and parses each distinct
+traced document at most once through the run-scoped `TraceDocuments` cache.
+
+Cache-disabled (`--cache=off`) before/after measurements were recorded on `kbox` (Linux x86_64,
+recorded load average `5.12 4.66 3.68`), 15 samples after two warm-ups, comparing baseline commit
+`b55ca36` (release `39c8b6a7975daf5a`, development `fac51257eb35ff73`) against the single-pass
+implementation (release `432e403e5c72c941`, development `2c1bb8a200e9f9a4`). Every row produced
+byte-identical stdout and exit `0` across both builds:
+
+| corpus / command (`--cache=off`) | release p50 / p95 (before -> after) | dev p50 / p95 (before -> after) | release CPU p50 (before -> after) | graphs (before -> after) | trace reads / MD / struct (before -> after) |
+|---|---:|---:|---:|---:|---:|
+| current (205 tasks) / `vacuity` (human) | 41.3 / 43.9 -> 28.2 / 34.5 ms | 60.4 / 70.5 -> 40.3 / 43.9 ms | 41.0 -> 27.9 ms | 3 -> 1 | 9 / 9 / 0 -> 3 / 3 / 0 |
+| current (205 tasks) / `vacuity --format json` | 41.9 / 49.9 -> 28.3 / 29.0 ms | 61.0 / 69.9 -> 40.7 / 45.5 ms | 41.3 -> 27.9 ms | 3 -> 1 | 9 / 9 / 0 -> 3 / 3 / 0 |
+| current (205 tasks) / `vacuity --status done --format json` | 44.3 / 45.9 -> 31.4 / 32.5 ms | 64.0 / 67.3 -> 44.2 / 45.4 ms | 43.9 -> 31.0 ms | 4 -> 1 | 9 / 9 / 0 -> 3 / 3 / 0 |
+| generated-1000 / `vacuity --no-config --format json` | 62.6 / 64.2 -> 51.0 / 56.5 ms | 82.0 / 86.0 -> 63.6 / 71.1 ms | 62.1 -> 50.5 ms | 5 -> 1 | 0 / 0 / 0 -> 0 / 0 / 0 |
+| generated-1000-traced (switches off, shared MD + YAML) / `vacuity --format json` | 246.3 / 254.6 -> 89.3 / 98.6 ms | 284.8 / 288.7 -> 111.7 / 113.4 ms | 244.9 -> 88.7 ms | 6 -> 1 | 12 / 6 / 6 -> 2 / 1 / 1 |
+
+Every case dropped to `graph_builds=1` (including scoped `--status` / `--cut` runs) and at most one
+read and parse per distinct referenced trace document, cutting release CPU on the 1,000-task
+shared-trace corpus by 2.76x (244.9 ms to 88.7 ms) and bringing its cache-disabled release p95
+under 100 ms. A mutation test restores the pre-`A2-135` repeated-validator path and verifies that it
+produces the same map while failing the deterministic graph-build and trace-parse proof.
+
 ### A1-588 implementation choices
 
 - **Development optimization accepted.** Global development `opt-level = 1` kept debuginfo and
@@ -573,10 +602,11 @@ weaken or prematurely claim the budget.
    deterministic counters distinguish successful reads/bytes from Markdown and structured parse
    attempts. An exact semantic report hit persists that typed result across commands and parses zero
    trace documents; a trace observation change recomputes through the same run-scoped parser.
-6. **`vacuity` can validate repeatedly.** It currently discovers which configuration switches
-   silence rules by comparing complete validation passes. The approach avoids a drifting second
-   rule table, but it makes a report pay for multiple graph and trace passes. Rule evaluation should
-   emit typed activation observations during one pass instead.
+6. **`vacuity` validated repeatedly (removed by A2-135).** Each rule row in `define_rules!` now
+   carries a mandatory `SwitchDisposition`, and one validation pass emits typed `CheckActivation`
+   observations while sharing a single borrowed `Graph` and run-scoped `TraceDocuments` cache.
+   Missing, duplicate and stale switch dispositions fail an executable exhaustive audit across
+   `Rule::ALL`, `.aplan.yml`'s derived schema and the end-to-end rule corpus.
 7. **Configuration was read twice (same-frame duplication removed by A1-588).** Root resolution and
    the command now share one selected value only when discovery identifies the same frame. A later
    security read after configured-provider execution remains a real read by design.
@@ -807,9 +837,9 @@ and regressions stay visible:
    fingerprinting.
 7. **Delivered by A1-592:** install configured-command process-group ownership for every CLI entry
    point, not only TUI termination.
-8. `A1-593`: have rule evaluation emit activation/disabled observations so `vacuity` does not
-   discover them by rerunning the whole validator. Keep the catalogue exhaustive from the same
-   type-level table.
+8. **Delivered by A2-135:** rule evaluation emits typed activation observations in one pass so
+   `vacuity` performs one graph construction and at most one parse per trace document while keeping
+   switch dispositions exhaustive on `Rule` in `define_rules!`.
 9. `A1-594`: stream or paginate large human/JSON/protocol collections only after preserving
    deterministic bytes and atomic-error semantics.
 
@@ -893,7 +923,8 @@ validator regression.
 - `A1-322`: delivered run-scoped trace parsing and deterministic trace-work counters;
 - `A1-592` delivered process-wide cleanup for the non-interactive configured-command orphan
   window;
-- `A1-593`: derive vacuity from one exhaustive validation pass;
+- `A2-135`: delivered single-pass vacuity activation observations and exhaustive switch-catalogue
+  audits;
 - `A1-594`: stream output-dominated responses without weakening machine-output atomicity.
 
 Re-run the matrix here. If every required current-plan command already meets the target in both

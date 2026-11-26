@@ -5614,6 +5614,78 @@ stale_after_days: 30
         }
     }
 
+    /// `A2-135`: the rule/configuration catalogue drives vacuity switch
+    /// dispositions. Every validation and resolver switch key must exist in
+    /// `.aplan.yml`'s derived schema, and missing, duplicate or stale entries
+    /// must fail the executable exhaustive audit.
+    #[test]
+    fn vacuity_switch_catalogue_is_exhaustive_against_accepted_config_keys() {
+        let keys = accepted_keys();
+        let live: Vec<aplan_core::vacuity::SwitchCatalogEntry> = aplan_core::Rule::ALL
+            .iter()
+            .map(|&rule| aplan_core::vacuity::SwitchCatalogEntry {
+                code: rule.code(),
+                disposition: rule.switch_disposition(),
+            })
+            .collect();
+        let failures = aplan_core::vacuity::audit_switch_dispositions(
+            &live,
+            aplan_core::ValidationSwitch::ALL,
+            aplan_core::ResolverSwitch::ALL,
+            &keys,
+        );
+        assert!(
+            failures.is_empty(),
+            "vacuity switch catalogue disagrees with `.aplan.yml` schema:\n  {}",
+            failures.join("\n  ")
+        );
+
+        // Missing disposition fails the audit.
+        let missing = aplan_core::vacuity::audit_switch_dispositions(
+            &live[1..],
+            aplan_core::ValidationSwitch::ALL,
+            aplan_core::ResolverSwitch::ALL,
+            &keys,
+        );
+        assert!(
+            missing.iter().any(|msg| msg.contains("missing")),
+            "expected missing disposition failure, got {missing:?}"
+        );
+
+        // Duplicate disposition fails the audit.
+        let mut duplicated = live.clone();
+        duplicated.push(live[0]);
+        let dup_failures = aplan_core::vacuity::audit_switch_dispositions(
+            &duplicated,
+            aplan_core::ValidationSwitch::ALL,
+            aplan_core::ResolverSwitch::ALL,
+            &keys,
+        );
+        assert!(
+            dup_failures.iter().any(|msg| msg.contains("duplicate")),
+            "expected duplicate disposition failure, got {dup_failures:?}"
+        );
+
+        // Stale switch key absent from `.aplan.yml` schema fails the audit.
+        let pruned_keys: Vec<String> = keys
+            .iter()
+            .filter(|k| k.as_str() != "detect_drift")
+            .cloned()
+            .collect();
+        let stale = aplan_core::vacuity::audit_switch_dispositions(
+            &live,
+            aplan_core::ValidationSwitch::ALL,
+            aplan_core::ResolverSwitch::ALL,
+            &pruned_keys,
+        );
+        assert!(
+            stale
+                .iter()
+                .any(|msg| msg.contains("stale") && msg.contains("detect_drift")),
+            "expected stale switch key failure, got {stale:?}"
+        );
+    }
+
     #[test]
     fn grouping_by_an_undeclared_family_is_an_error() {
         // Grouping by a vocabulary nothing validates would render a heading a
