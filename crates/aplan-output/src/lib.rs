@@ -42,6 +42,7 @@ use aplan_core::{
 
 pub mod markdown;
 pub mod progress;
+pub mod stream;
 pub mod write;
 
 /// Whether a capture mutation is a preview, publication or idempotent no-op.
@@ -1300,17 +1301,203 @@ fn render_kind(
 /// from the diagnostics present in this run, so a result's `ruleId` always
 /// resolves to a described rule, and a clean run still tells a dashboard what
 /// this tool checks.
+fn stream_to_stdout(
+    write: impl FnOnce(
+        &mut crate::stream::StreamingWriter<std::io::StdoutLock<'static>>,
+    ) -> std::io::Result<()>,
+) -> std::io::Result<()> {
+    let mut out = crate::stream::stdout();
+    write(&mut out)?;
+    out.finish()?;
+    Ok(())
+}
+
+fn stream_human_to_stdout(
+    write: impl FnOnce(&mut crate::stream::StyledStreamingWriter) -> std::io::Result<()>,
+) -> std::io::Result<()> {
+    let mut out = crate::stream::anstream_stdout();
+    write(&mut out)?;
+    out.finish()?;
+    Ok(())
+}
+
 fn render_sarif(report: &Report, policy: &Verdict) -> std::io::Result<()> {
-    let mut out = crate::write::stdout();
-    writeln!(
-        out,
-        "{}",
-        serde_json::to_string_pretty(&sarif_document(report, policy))?
-    )
+    stream_to_stdout(|out| write_sarif(out, report, policy))
+}
+
+mod sarif_wire {
+    #[derive(serde::Serialize)]
+    pub(super) struct TextMessage {
+        pub(super) text: String,
+    }
+    #[derive(serde::Serialize)]
+    pub(super) struct RuleDefaultConfig {
+        pub(super) level: &'static str,
+    }
+    #[derive(serde::Serialize)]
+    pub(super) struct RuleProperties {
+        pub(super) tags: [&'static str; 2],
+    }
+    #[derive(serde::Serialize)]
+    pub(super) struct RuleShortDesc {
+        pub(super) text: &'static str,
+    }
+    #[derive(serde::Serialize)]
+    pub(super) struct SarifRule {
+        #[serde(rename = "defaultConfiguration")]
+        pub(super) default_configuration: RuleDefaultConfig,
+        pub(super) id: &'static str,
+        pub(super) name: &'static str,
+        pub(super) properties: RuleProperties,
+        #[serde(rename = "shortDescription")]
+        pub(super) short_description: RuleShortDesc,
+    }
+    #[derive(serde::Serialize)]
+    pub(super) struct SarifDriver<R: serde::Serialize> {
+        #[serde(rename = "informationUri")]
+        pub(super) information_uri: &'static str,
+        pub(super) name: &'static str,
+        pub(super) rules: R,
+        #[serde(rename = "semanticVersion")]
+        pub(super) semantic_version: &'static str,
+        pub(super) version: &'static str,
+    }
+    #[derive(serde::Serialize)]
+    pub(super) struct SarifTool<R: serde::Serialize> {
+        pub(super) driver: SarifDriver<R>,
+    }
+    #[derive(serde::Serialize)]
+    pub(super) struct ArtifactLocation {
+        pub(super) uri: String,
+    }
+    #[derive(serde::Serialize)]
+    pub(super) struct Region {
+        #[serde(rename = "startColumn")]
+        pub(super) start_column: usize,
+        #[serde(rename = "startLine")]
+        pub(super) start_line: usize,
+    }
+    #[derive(serde::Serialize)]
+    pub(super) struct PhysicalLocation {
+        #[serde(rename = "artifactLocation")]
+        pub(super) artifact_location: ArtifactLocation,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        pub(super) region: Option<Region>,
+    }
+    #[derive(serde::Serialize)]
+    pub(super) struct SarifLocation {
+        #[serde(rename = "physicalLocation")]
+        pub(super) physical_location: PhysicalLocation,
+    }
+    #[derive(serde::Serialize)]
+    pub(super) struct Suppression {
+        pub(super) justification: &'static str,
+        pub(super) kind: &'static str,
+    }
+    #[derive(serde::Serialize)]
+    pub(super) struct SarifResult {
+        pub(super) level: &'static str,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        pub(super) locations: Option<[SarifLocation; 1]>,
+        pub(super) message: TextMessage,
+        #[serde(rename = "ruleId")]
+        pub(super) rule_id: &'static str,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        pub(super) suppressions: Option<[Suppression; 1]>,
+    }
+    #[derive(serde::Serialize)]
+    pub(super) struct SarifRun<Res: serde::Serialize, Rul: serde::Serialize> {
+        pub(super) results: Res,
+        pub(super) tool: SarifTool<Rul>,
+    }
+    #[derive(serde::Serialize)]
+    pub(super) struct SarifDoc<Res: serde::Serialize, Rul: serde::Serialize> {
+        #[serde(rename = "$schema")]
+        pub(super) schema: &'static str,
+        pub(super) runs: [SarifRun<Res, Rul>; 1],
+        pub(super) version: &'static str,
+    }
+}
+
+/// Stream a SARIF 2.1.0 report directly into `out` without materializing an
+/// intermediate `serde_json::Value` tree (`A2-136`).
+///
+/// Key order matches `sarif_document` byte-for-byte.
+///
+/// # Errors
+///
+/// Propagates any serialization or downstream I/O error (including `BrokenPipe`).
+pub fn write_sarif(
+    out: &mut impl std::io::Write,
+    report: &Report,
+    policy: &Verdict,
+) -> std::io::Result<()> {
+    use crate::stream::SeqIter;
+    use sarif_wire::{
+        ArtifactLocation, PhysicalLocation, Region, RuleDefaultConfig, RuleProperties,
+        RuleShortDesc, SarifDoc, SarifDriver, SarifLocation, SarifResult, SarifRule, SarifRun,
+        SarifTool, Suppression, TextMessage,
+    };
+
+    let doc = SarifDoc {
+        schema: "https://raw.githubusercontent.com/oasis-tcs/sarif-spec/main/sarif-2.1/schema/sarif-schema-2.1.0.json",
+        runs: [SarifRun {
+            results: SeqIter(|| {
+                report.diagnostics.iter().map(|d| SarifResult {
+                    level: sarif_level(d.severity),
+                    locations: d.file.as_ref().map(|file| {
+                        [SarifLocation {
+                            physical_location: PhysicalLocation {
+                                artifact_location: ArtifactLocation {
+                                    uri: sarif_uri(file),
+                                },
+                                region: d.location.map(|location| Region {
+                                    start_column: location.column,
+                                    start_line: location.line,
+                                }),
+                            },
+                        }]
+                    }),
+                    message: TextMessage {
+                        text: sarif_message(d),
+                    },
+                    rule_id: d.code,
+                    suppressions: policy.is_advisory(d.code).then_some([Suppression {
+                        justification: "listed under `advisory:` in .aplan.yml; reported, and not part of the verdict",
+                        kind: "external",
+                    }]),
+                })
+            }),
+            tool: SarifTool {
+                driver: SarifDriver {
+                    information_uri: "https://github.com/asamarts/aplan",
+                    name: "aplan",
+                    rules: SeqIter(|| {
+                        Rule::ALL.iter().map(|r| SarifRule {
+                            default_configuration: RuleDefaultConfig {
+                                level: sarif_level(r.severity()),
+                            },
+                            id: r.code(),
+                            name: r.code(),
+                            properties: RuleProperties {
+                                tags: ["plan", "evidence"],
+                            },
+                            short_description: RuleShortDesc { text: r.title() },
+                        })
+                    }),
+                    semantic_version: env!("CARGO_PKG_VERSION"),
+                    version: env!("CARGO_PKG_VERSION"),
+                },
+            },
+        }],
+        version: "2.1.0",
+    };
+    crate::stream::stream_json_pretty(out, &doc, |_| Ok(()))
 }
 
 /// The SARIF document for a report, split from the writer so a test can assert
 /// against the value rather than scrape stdout.
+#[cfg(test)]
 fn sarif_document(report: &Report, policy: &Verdict) -> serde_json::Value {
     let rules: Vec<serde_json::Value> = Rule::ALL
         .iter()
@@ -1462,7 +1649,15 @@ fn render_human_evidence_observation(
 }
 
 fn render_human(report: &Report, kind: Kind<'_>, policy: &Verdict) -> std::io::Result<()> {
-    let mut out = crate::write::anstream_stdout();
+    stream_human_to_stdout(|out| write_report_human(out, report, kind, policy))
+}
+
+fn write_report_human(
+    out: &mut impl std::io::Write,
+    report: &Report,
+    kind: Kind<'_>,
+    policy: &Verdict,
+) -> std::io::Result<()> {
     let red = crate::style::ERROR;
     let yellow = crate::style::WARNING;
     let dim = crate::style::DIM;
@@ -1573,7 +1768,7 @@ fn render_human(report: &Report, kind: Kind<'_>, policy: &Verdict) -> std::io::R
              `--format agent` prints every one){dim:#}"
         )?;
     }
-    render_human_evidence_observation(&mut out, kind)?;
+    render_human_evidence_observation(&mut *out, kind)?;
 
     // Counted against the *verdict*, not the raw severities: a repository that
     // made a rule advisory passes, and a summary that said `failed` while the
@@ -1629,99 +1824,110 @@ fn render_json(
     policy: &Verdict,
     kind: &Kind<'_>,
 ) -> std::io::Result<()> {
-    let diags: Vec<serde_json::Value> = report
-        .diagnostics
-        .iter()
-        .map(|d| {
-            let mut o = serde_json::json!({
-                "code": d.code,
-                "severity": d.severity.to_string(),
-                "message": d.message,
-                "task": d.task,
-                "file": d.file.as_ref().map(|p| p.display().to_string()),
-                // Null, not absent and not 1, when the finding has no single
-                // line: a consumer can tell "the tool does not know" from "line
-                // one" only if the two look different (`A1-202`).
-                "line": d.location.map(|l| l.line),
-                "column": d.location.map(|l| l.column),
-            });
-            if agent && let Some(ai) = &d.agent_instruction {
-                o["agent_instruction"] = serde_json::Value::String(ai.clone());
-            }
-            if let Some(repair) = &d.repair {
-                o["repair"] = serde_json::to_value(repair)
-                    .expect("a diagnostic repair is always serializable");
-            }
-            // An array rather than a joined string, so a consumer reads the
-            // lines it was given instead of splitting a sentence back up
-            // (`A1-365`). Present in both shapes, not only under `agent`: a
-            // failed test's output is the finding's evidence, and a machine
-            // reading the plan's results has the same need for it a person has.
-            if !d.detail.is_empty() {
-                o["detail"] = serde_json::Value::Array(
-                    d.detail
-                        .iter()
-                        .map(|l| serde_json::Value::String(l.clone()))
-                        .collect(),
-                );
-            }
-            o
-        })
-        .collect();
+    stream_to_stdout(|out| write_report_json(out, report, agent, schema, policy, kind))
+}
 
-    let mut doc = serde_json::json!({
-        "schema": schema,
-        "tasks_checked": report.tasks_checked,
-        // The counts a consumer scripts against are the blocking ones, for the
-        // same reason the human summary uses them: they must agree with the exit
-        // code. `advisory` says what was heard and not stopped for, so a passing
-        // run is never silent about a downgraded rule (`A1-112`).
-        "errors": report.blocking(policy, Severity::Error),
-        "warnings": report.blocking(policy, Severity::Warning),
-        "advisory": report.advisory_count(policy),
-        "diagnostics": diags,
-    });
-    // Additive, and only where the question arises: a gate branches on this
-    // rather than parsing the summary line, which is the whole reason the count
-    // is published at all (`A1-253`).
-    if let (Some(v), Some(obj)) = (kind.evidence_unresolved(), doc.as_object_mut()) {
-        obj.insert("evidence_unresolved".to_string(), v);
+fn write_report_json(
+    out: &mut impl std::io::Write,
+    report: &Report,
+    agent: bool,
+    schema: &str,
+    policy: &Verdict,
+    kind: &Kind<'_>,
+) -> std::io::Result<()> {
+    use crate::stream::SeqIter;
+
+    #[derive(serde::Serialize)]
+    struct DiagJson<'a> {
+        #[serde(skip_serializing_if = "Option::is_none")]
+        agent_instruction: Option<&'a str>,
+        code: &'static str,
+        column: Option<usize>,
+        #[serde(skip_serializing_if = "<[_]>::is_empty")]
+        detail: &'a [String],
+        file: Option<String>,
+        line: Option<usize>,
+        message: &'a str,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        repair: Option<serde_json::Value>,
+        severity: String,
+        task: Option<&'a str>,
     }
-    if let (Some(observation), Some(obj)) = (kind.evidence_observation(), doc.as_object_mut()) {
-        obj.insert(
-            "evidence_observation".to_string(),
-            serde_json::to_value(observation)
-                .expect("an evidence observation is always serializable"),
-        );
+
+    #[derive(serde::Serialize)]
+    struct ReportDoc<'a, D: serde::Serialize> {
+        advisory: usize,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        agent_contract_provenance: Option<serde_json::Value>,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        candidate_projections: Option<serde_json::Value>,
+        diagnostics: D,
+        errors: usize,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        evidence_observation: Option<serde_json::Value>,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        evidence_unresolved: Option<serde_json::Value>,
+        schema: &'a str,
+        tasks_checked: usize,
+        warnings: usize,
     }
-    if let (Some(provenance), Some(obj)) = (&report.agent_contract_provenance, doc.as_object_mut())
-    {
-        obj.insert(
-            "agent_contract_provenance".to_string(),
-            serde_json::to_value(provenance)
-                .expect("agent contract provenance is always serializable"),
-        );
-    }
-    if !report.candidate_projections.is_empty()
-        && let Some(obj) = doc.as_object_mut()
-    {
-        obj.insert(
-            "candidate_projections".to_string(),
-            serde_json::to_value(&report.candidate_projections)
-                .expect("candidate projections are always serializable"),
-        );
-    }
-    let mut out = crate::write::stdout();
-    serde_json::to_writer_pretty(&mut out, &doc)?;
-    writeln!(out)
+
+    // Preflight optional nested metadata objects before writing byte 0 so no
+    // late serialization failure can publish a partial JSON document.
+    let agent_contract_provenance = report
+        .agent_contract_provenance
+        .as_ref()
+        .map(serde_json::to_value)
+        .transpose()
+        .map_err(|e| crate::stream::json_to_io_error(&e))?;
+    let candidate_projections = (!report.candidate_projections.is_empty())
+        .then(|| serde_json::to_value(&report.candidate_projections))
+        .transpose()
+        .map_err(|e| crate::stream::json_to_io_error(&e))?;
+    let evidence_observation = kind
+        .evidence_observation()
+        .map(serde_json::to_value)
+        .transpose()
+        .map_err(|e| crate::stream::json_to_io_error(&e))?;
+    let evidence_unresolved = kind.evidence_unresolved();
+
+    let doc = ReportDoc {
+        advisory: report.advisory_count(policy),
+        agent_contract_provenance,
+        candidate_projections,
+        diagnostics: SeqIter(|| {
+            report.diagnostics.iter().map(|d| DiagJson {
+                agent_instruction: agent.then_some(d.agent_instruction.as_deref()).flatten(),
+                code: d.code,
+                column: d.location.map(|l| l.column),
+                detail: &d.detail,
+                file: d.file.as_ref().map(|p| p.display().to_string()),
+                line: d.location.map(|l| l.line),
+                message: &d.message,
+                repair: d.repair.as_ref().map(|r| {
+                    serde_json::to_value(r).expect("a diagnostic repair is always serializable")
+                }),
+                severity: d.severity.to_string(),
+                task: d.task.as_deref(),
+            })
+        }),
+        errors: report.blocking(policy, Severity::Error),
+        evidence_observation,
+        evidence_unresolved,
+        schema,
+        tasks_checked: report.tasks_checked,
+        warnings: report.blocking(policy, Severity::Warning),
+    };
+    crate::stream::stream_json_pretty(out, &doc, |_| Ok(()))
 }
 
 fn render_github(report: &Report, policy: &Verdict) -> std::io::Result<()> {
-    let mut out = crate::write::stdout();
-    for d in &report.diagnostics {
-        writeln!(out, "{}", github_line(d, policy.is_advisory(d.code)))?;
-    }
-    Ok(())
+    stream_to_stdout(|out| {
+        for d in &report.diagnostics {
+            writeln!(out, "{}", github_line(d, policy.is_advisory(d.code)))?;
+        }
+        Ok(())
+    })
 }
 
 /// One GitHub workflow-command annotation for a diagnostic.
@@ -1992,12 +2198,13 @@ pub fn render_completed(
     response: &aplan_core::CompletedResponse,
     format: Format,
 ) -> std::io::Result<()> {
-    let text = match format {
-        Format::Json => serde_json::to_string_pretty(response).map_err(std::io::Error::other)?,
-        _ => format_completed_human(response),
-    };
-    let mut out = std::io::stdout().lock();
-    writeln!(out, "{text}")
+    stream_to_stdout(|out| {
+        if format == Format::Json {
+            crate::stream::stream_json_pretty(out, response, |_| Ok(()))
+        } else {
+            writeln!(out, "{}", format_completed_human(response))
+        }
+    })
 }
 
 /// Format a completed-task history response for human reading without relying
@@ -2079,11 +2286,31 @@ pub fn format_completed_human(response: &aplan_core::CompletedResponse) -> Strin
 
 pub fn render_tasks(export: &TaskExport, format: Format) -> std::io::Result<()> {
     if format == Format::Human {
-        return render_tasks_human(export);
+        stream_human_to_stdout(|out| write_tasks_human(out, export))
+    } else {
+        stream_to_stdout(|out| write_tasks_json(out, export))
     }
-    let mut out = crate::write::stdout();
-    serde_json::to_writer_pretty(&mut out, export)?;
-    writeln!(out)
+}
+
+/// Preflight and stream a [`TaskExport`] as pretty-printed JSON into `out`
+/// (`A2-136`).
+///
+/// Refuses non-finite `effort_days` before byte 0 so a malformed float cannot
+/// corrupt or truncate a machine document mid-stream.
+///
+/// # Errors
+///
+/// Returns `InvalidData` on preflight failure or propagates downstream I/O errors.
+pub fn write_tasks_json(out: &mut impl std::io::Write, export: &TaskExport) -> std::io::Result<()> {
+    crate::stream::stream_json_pretty(out, export, |doc| {
+        for row in &doc.tasks {
+            crate::stream::check_finite_opt_f64(
+                row.effort_days,
+                &format!("{}.effort_days", row.id),
+            )?;
+        }
+        Ok(())
+    })
 }
 
 /// The width a column should be printed at: the widest value in it, or `floor`,
@@ -2096,8 +2323,15 @@ fn column<'a>(values: impl Iterator<Item = &'a str>, floor: usize) -> usize {
     values.map(str::len).max().unwrap_or(0).max(floor)
 }
 
-fn render_tasks_human(export: &TaskExport) -> std::io::Result<()> {
-    let mut out = crate::write::anstream_stdout();
+/// Stream the human task table directly into `out` (`A2-136`).
+///
+/// # Errors
+///
+/// Propagates any write error from `out`.
+pub fn write_tasks_human(
+    out: &mut impl std::io::Write,
+    export: &TaskExport,
+) -> std::io::Result<()> {
     let bold = crate::style::HEADING;
     // Wide enough for the widest value, never narrower than the width this table
     // has always had. A fixed 12 was fine while every id was `A1-047`; under
@@ -3251,19 +3485,24 @@ impl GraphView {
     }
 }
 
-/// The view as Mermaid, which renders in a README and in a browser.
-#[must_use]
-pub fn mermaid_of_view(view: &GraphView) -> String {
-    let mut s = String::from("graph TD\n");
+/// Stream the view as Mermaid directly into `out` (`A2-136`).
+///
+/// # Errors
+///
+/// Propagates any write failure on `out`.
+pub fn write_mermaid_of_view(
+    out: &mut impl std::io::Write,
+    view: &GraphView,
+) -> std::io::Result<()> {
+    writeln!(out, "graph TD")?;
     for n in &view.nodes {
         let key = node_key(&n.id);
         let label = format!("{}: {}", escape(&n.id), escape(&n.title));
-        let shape = if n.done {
-            format!("{key}([\"{label}\"])")
+        if n.done {
+            writeln!(out, "    {key}([\"{label}\"])")?;
         } else {
-            format!("{key}[\"{label}\"]")
-        };
-        let _ = writeln!(s, "    {shape}");
+            writeln!(out, "    {key}[\"{label}\"]")?;
+        }
     }
     for e in &view.edges {
         // Dotted for grouping, solid for constraint: when both are drawn they
@@ -3273,49 +3512,148 @@ pub fn mermaid_of_view(view: &GraphView) -> String {
             EdgeKind::Dependency => "-->",
             EdgeKind::Membership => "-.->",
         };
-        let _ = writeln!(s, "    {} {arrow} {}", node_key(&e.from), node_key(&e.to));
+        writeln!(out, "    {} {arrow} {}", node_key(&e.from), node_key(&e.to))?;
     }
     // Comments, so the diagram a reader pastes anywhere is still a diagram.
     for note in view.notes() {
-        let _ = writeln!(s, "%% {}", note.text);
+        writeln!(out, "%% {}", note.text)?;
     }
-    s
+    Ok(())
 }
 
-/// The view as Graphviz DOT, which is what every other layout and analysis tool
-/// reads (`A1-193`).
+/// The view as Mermaid, which renders in a README and in a browser.
 #[must_use]
-pub fn dot_of_view(view: &GraphView) -> String {
-    let mut s = String::from("digraph plan {\n    rankdir=TB;\n");
+pub fn mermaid_of_view(view: &GraphView) -> String {
+    let mut buf = Vec::new();
+    write_mermaid_of_view(&mut buf, view).expect("writing Mermaid to Vec<u8> is infallible");
+    String::from_utf8(buf).expect("Mermaid output is UTF-8")
+}
+
+/// Stream the view as Graphviz DOT directly into `out` (`A2-136`).
+///
+/// # Errors
+///
+/// Propagates any write failure on `out`.
+pub fn write_dot_of_view(out: &mut impl std::io::Write, view: &GraphView) -> std::io::Result<()> {
+    writeln!(out, "digraph plan {{\n    rankdir=TB;")?;
     for n in &view.nodes {
         // A node keeps its id verbatim inside quotes, which DOT allows and
         // Mermaid does not: no sanitising here, so a consumer reading the DOT
         // gets the id the plan uses.
         let shape = if n.done { "ellipse" } else { "box" };
-        let _ = writeln!(
-            s,
+        writeln!(
+            out,
             "    {} [label={}, shape={shape}];",
             dot_quote(&n.id),
             dot_quote(&format!("{}: {}", n.id, n.title))
-        );
+        )?;
     }
     for e in &view.edges {
         let style = match e.kind {
             EdgeKind::Dependency => "",
             EdgeKind::Membership => " [style=dashed]",
         };
-        let _ = writeln!(
-            s,
+        writeln!(
+            out,
             "    {} -> {}{style};",
             dot_quote(&e.from),
             dot_quote(&e.to)
-        );
+        )?;
     }
     for note in view.notes() {
-        let _ = writeln!(s, "    // {}", note.text);
+        writeln!(out, "    // {}", note.text)?;
     }
-    s.push_str("}\n");
-    s
+    writeln!(out, "}}")
+}
+
+/// The view as Graphviz DOT, which is what every other layout and analysis tool
+/// reads (`A1-193`).
+#[must_use]
+pub fn dot_of_view(view: &GraphView) -> String {
+    let mut buf = Vec::new();
+    write_dot_of_view(&mut buf, view).expect("writing DOT to Vec<u8> is infallible");
+    String::from_utf8(buf).expect("DOT output is UTF-8")
+}
+
+/// Stream the view as canonical `aplan/graph/v1` JSON directly into `out`
+/// (`A2-136`) with exact alphabetical key order matching buffered `write_json`.
+///
+/// # Errors
+///
+/// Propagates any serialization or downstream I/O error.
+pub fn write_graph_json(out: &mut impl std::io::Write, view: &GraphView) -> std::io::Result<()> {
+    use crate::stream::SeqIter;
+
+    #[derive(serde::Serialize)]
+    struct EdgeJson<'a> {
+        from: &'a str,
+        kind: EdgeKind,
+        to: &'a str,
+    }
+    #[derive(serde::Serialize)]
+    struct GroupingJson {
+        edges: usize,
+        tasks: usize,
+    }
+    #[derive(serde::Serialize)]
+    struct NodeJson<'a> {
+        done: bool,
+        id: &'a str,
+        status: Status,
+        title: &'a str,
+    }
+    #[derive(serde::Serialize)]
+    struct GraphDoc<'a, E: serde::Serialize, N: serde::Serialize> {
+        edges: E,
+        grouping: GroupingJson,
+        hidden_edges: usize,
+        nodes: N,
+        schema: &'static str,
+        scope: &'a [String],
+    }
+
+    let doc = GraphDoc {
+        edges: SeqIter(|| {
+            view.edges.iter().map(|e| EdgeJson {
+                from: &e.from,
+                kind: e.kind,
+                to: &e.to,
+            })
+        }),
+        grouping: GroupingJson {
+            edges: view.grouping.edges,
+            tasks: view.grouping.tasks,
+        },
+        hidden_edges: view.hidden_edges,
+        nodes: SeqIter(|| {
+            view.nodes.iter().map(|n| NodeJson {
+                done: n.done,
+                id: &n.id,
+                status: n.status,
+                title: &n.title,
+            })
+        }),
+        schema: "aplan/graph/v1",
+        scope: &view.scope,
+    };
+    crate::stream::stream_json_pretty(out, &doc, |_| Ok(()))
+}
+
+/// Stream a [`GraphView`] to stdout in Mermaid, DOT, or JSON format (`A2-136`).
+///
+/// # Errors
+///
+/// Propagates any write failure or rejects unsupported formats with `InvalidInput`.
+pub fn render_graph_view(view: &GraphView, format: Format) -> std::io::Result<()> {
+    stream_to_stdout(|out| match format {
+        Format::Mermaid => write_mermaid_of_view(out, view),
+        Format::Dot => write_dot_of_view(out, view),
+        Format::Json => write_graph_json(out, view),
+        other => Err(std::io::Error::new(
+            std::io::ErrorKind::InvalidInput,
+            format!("`{}` does not stream a graph view", other.as_str()),
+        )),
+    })
 }
 
 /// A DOT double-quoted string.
@@ -3781,15 +4119,30 @@ pub fn render_roadmap(roadmap: &Roadmap, format: Format) -> String {
     }
 }
 
+/// Stream the roadmap directly to stdout in human, JSON, or Markdown format
+/// with bounded memory (`A2-136`).
+///
+/// # Errors
+///
+/// Propagates any preflight or stdout write error (including `BrokenPipe`).
+pub fn render_roadmap_to_stdout(
+    roadmap: &Roadmap,
+    format: Format,
+    regenerate: Option<&str>,
+    written_by: Option<&WrittenBy<'_>>,
+) -> std::io::Result<()> {
+    match format {
+        Format::Human => stream_human_to_stdout(|out| write_roadmap_human(out, roadmap)),
+        Format::Markdown => {
+            stream_to_stdout(|out| write_roadmap_markdown(out, roadmap, regenerate, written_by))
+        }
+        _ => stream_to_stdout(|out| write_roadmap_json(out, roadmap)),
+    }
+}
+
 /// The two lines a `roadmap` opens with: what the report holds, and the one
 /// assumption every duration below it divides by.
-fn roadmap_header(r: &Roadmap) -> String {
-    let mut s = String::new();
-    // A borrowing row's members come from beneath it, so counting it here would
-    // count that work twice (`A1-146`, and `A1-333` for the second kind).
-    // `borrows` rather than `release`: a milestone declaring `contains` borrows
-    // too, and a four-level plan with two real tasks reported `4 task(s)` until
-    // this stopped asking the wrong question (ADR-0042).
+fn write_roadmap_header(out: &mut impl std::io::Write, r: &Roadmap) -> std::io::Result<()> {
     let total: usize = r
         .cuts
         .iter()
@@ -3797,17 +4150,9 @@ fn roadmap_header(r: &Roadmap) -> String {
         .map(|c| c.total)
         .sum::<usize>()
         + r.cross_cutting.len();
-    // The effort a reader gets by adding the rows up, said once at the top so
-    // the column can be reconciled against `summary` without arithmetic
-    // (`A1-147`). Borrowing rows are skipped here as they are in the task
-    // count, for the same reason: their members come from beneath them.
-    // Cuts and releases counted apart, for the reason the task total already
-    // separates them: a release is a checkpoint over cuts, and folding the two
-    // into one number told `p00016` it had fourteen cuts when it had eleven
-    // (`A1-240`).
     let releases = r.cuts.iter().filter(|c| c.release).count();
-    let _ = writeln!(
-        s,
+    writeln!(
+        out,
         "roadmap: {} cut(s){}, {total} task(s), {:.1}d effort",
         r.cuts.len() - releases,
         if releases == 0 {
@@ -3816,21 +4161,14 @@ fn roadmap_header(r: &Roadmap) -> String {
             format!(", {releases} release(s)")
         },
         r.total_effort_days()
-    );
-    // Said once, at the top: every `w` below is this number divided into the
-    // effort on its own row (`A1-147`, ADR-0023).
+    )?;
     if let Some(per_week) = r.effort_days_per_week {
-        let _ = writeln!(s, "throughput: {per_week:.1} effort days a week");
+        writeln!(out, "throughput: {per_week:.1} effort days a week")?;
     }
-    s
+    Ok(())
 }
 
 /// One member row: id, status, then the title as the trailing column.
-///
-/// Extracted because `roadmap_human` rendered it identically in three places --
-/// flat members, grouped members, and the cross-cutting list -- and folding it
-/// made each one four lines longer (`A1-206`). One function, so the three cannot
-/// drift and only one of them fold.
 fn member_row(indent: &str, id_w: usize, m: &aplan_core::roadmap::RoadmapTask) -> String {
     fold::row(
         &format!(
@@ -3844,11 +4182,12 @@ fn member_row(indent: &str, id_w: usize, m: &aplan_core::roadmap::RoadmapTask) -
     )
 }
 
-fn roadmap_human(r: &Roadmap) -> String {
-    let mut s = String::new();
-    // One width for every member of every cut, so the rows of one report line up
-    // with each other rather than each cut inventing its own column. Floored at
-    // the width this has always used, for the reason `column` gives.
+/// Stream the human roadmap directly into `out` (`A2-136`).
+///
+/// # Errors
+///
+/// Propagates any write failure on `out`.
+pub fn write_roadmap_human(out: &mut impl std::io::Write, r: &Roadmap) -> std::io::Result<()> {
     let id_w = column(
         r.cuts
             .iter()
@@ -3861,7 +4200,7 @@ fn roadmap_human(r: &Roadmap) -> String {
             .map(|m| m.id.as_str()),
         10,
     );
-    s.push_str(&roadmap_header(r));
+    write_roadmap_header(out, r)?;
     for c in &r.cuts {
         let ver = if c.version.is_empty() {
             "?"
@@ -3869,22 +4208,8 @@ fn roadmap_human(r: &Roadmap) -> String {
             c.version.as_str()
         };
         let kind = if c.release { " (release)" } else { "" };
-        // **The heading is what a reader scrolls for; the rollup is not**
-        // (`A1-296`, `A1-341`). They were one line of up to 126 characters here,
-        // and at eighty columns it folded at a hanging indent of two -- which is
-        // the *member-row* indent, so the tail of a cut's rollup read as a task
-        // inside it. The break point was arbitrary too: it separated `5.0d` from
-        // the `effort` it labels.
-        //
-        // Two lines, and **neither of them is indented at all**, which is the
-        // invariant rather than a chosen depth: a row of work is always indented
-        // and a header line never is, so no header line can be mistaken for one.
-        // Four was tried first and is wrong -- a plan that sets
-        // `roadmap.group_by` puts its group labels at two and its member rows at
-        // *four*, so the rollup landed back on the member column for exactly the
-        // readers who had asked for more structure (`A1-341`, audit).
-        let _ = writeln!(
-            s,
+        writeln!(
+            out,
             "\n{}",
             fold::fold(
                 &format!(
@@ -3897,10 +4222,7 @@ fn roadmap_human(r: &Roadmap) -> String {
                 fold::out_width(),
                 0
             )
-        );
-        // Not hung either: a continuation at two or four would reach a member
-        // column in one of the two layouts, and a continuation of a dim,
-        // flush-left line is already unmistakable for a row.
+        )?;
         let rollup = fold::fold(
             &format!(
                 "{dim}{}/{} done, {} ready, {} blocked, crit {:.1}d{}, {:.1}d \
@@ -3910,17 +4232,8 @@ fn roadmap_human(r: &Roadmap) -> String {
                 c.ready,
                 c.blocked,
                 c.critical_path.total_effort_days,
-                // **Two scopes, so two labels** (`A1-345`). A cut's chain is the
-                // longest one *inside* it, which is what "how much work is in
-                // this bucket" asks. A row that borrows holds no work, so its
-                // chain is the one that *ends at it* -- and that runs through
-                // the cuts it waits on or holds, which are not its members. Same
-                // word for both would be the defect this fixed, one rung along.
                 if c.borrows { " to here" } else { "" },
                 c.effort_days,
-                // `w` only where a throughput was declared, and never a
-                // second copy of a number: it is this row's own effort,
-                // divided (`A1-147`).
                 match r.weeks_of(c) {
                     (Some(weeks), Some(left)) =>
                         format!(", {}w ({}w left)", weeks_cell(weeks), weeks_cell(left)),
@@ -3931,133 +4244,198 @@ fn roadmap_human(r: &Roadmap) -> String {
             fold::out_width(),
             0,
         );
-        let _ = writeln!(s, "{rollup}");
-        // A release closes cuts; it does not hold work. Its rollup is its cuts'
-        // work borrowed (`A1-146`), and re-listing those rows put every task in
-        // the document twice -- 152 of them on `p00016` -- while saying nothing
-        // about the relationship the release actually has (`A1-240`).
+        writeln!(out, "{rollup}")?;
         if c.release {
             for named in closes_of(r, c) {
-                let _ = writeln!(s, "  closes {}", named.replace('`', ""));
+                writeln!(out, "  closes {}", named.replace('`', ""))?;
             }
             continue;
         }
-        // Grouped when the repository named a family, flat otherwise, so a plan
-        // that declares nothing renders exactly as it always did (`A1-078`).
         if c.groups.is_empty() {
             for m in &c.members {
-                // Title is the trailing column, folded under itself
-                // (`A1-206`).
-                let _ = writeln!(s, "{}", member_row("  ", id_w, m));
+                writeln!(out, "{}", member_row("  ", id_w, m))?;
             }
         } else {
             for g in &c.groups {
-                let _ = writeln!(s, "  {}", g.label.as_deref().unwrap_or("(no group)"));
+                writeln!(out, "  {}", g.label.as_deref().unwrap_or("(no group)"))?;
                 for m in &g.members {
-                    let _ = writeln!(s, "{}", member_row("    ", id_w, m));
+                    writeln!(out, "{}", member_row("    ", id_w, m))?;
                 }
             }
         }
     }
     if !r.cross_cutting.is_empty() {
-        // Cross-cutting work is work, and it used to be the one section with no
-        // effort on it: 21.0 of this repository's 185.5 effort days were held by
-        // tasks in no cut, so the column added up to less than the plan with
-        // nothing on the page to say why (`A1-147`).
         let weeks = weeks_cells(r.cross_cutting_weeks())
             .map_or_else(String::new, |(w, left)| format!(", {w}w ({left}w left)"));
-        let _ = writeln!(
-            s,
+        writeln!(
+            out,
             "\ncross-cutting (in no cut): {:.1}d effort{weeks}",
             r.cross_cutting_effort_days
-        );
+        )?;
         for m in &r.cross_cutting {
-            let _ = writeln!(s, "{}", member_row("  ", id_w, m));
+            writeln!(out, "{}", member_row("  ", id_w, m))?;
         }
     }
-    let _ = writeln!(
-        s,
+    writeln!(
+        out,
         "\n{}",
         fold::note("(statuses are as claimed in the plan and gated by `aplan verify` in CI)")
-    );
-    s
+    )
 }
 
-fn roadmap_task_json(t: &RoadmapTask) -> serde_json::Value {
-    serde_json::json!({
-        "id": t.id,
-        "title": t.title,
-        "status": t.status.to_string(),
-        "blocked_by": t.blocked_by,
-        "evidence": t.evidence,
+fn roadmap_human(r: &Roadmap) -> String {
+    let mut buf = Vec::new();
+    write_roadmap_human(&mut buf, r).expect("writing roadmap to Vec<u8> is infallible");
+    String::from_utf8(buf).expect("roadmap output is UTF-8")
+}
+
+/// Preflight and stream `aplan/roadmap/v1` JSON directly into `out` (`A2-136`).
+///
+/// Key order matches the historical `serde_json::json!` layout byte-for-byte.
+///
+/// # Errors
+///
+/// Returns `InvalidData` before byte 0 if any float field is non-finite, or
+/// propagates downstream I/O errors.
+#[allow(clippy::too_many_lines)]
+pub fn write_roadmap_json(out: &mut impl std::io::Write, r: &Roadmap) -> std::io::Result<()> {
+    use crate::stream::{SeqIter, check_finite_f64, check_finite_opt_f64};
+
+    #[derive(serde::Serialize)]
+    struct TaskJson<'a> {
+        blocked_by: &'a [String],
+        evidence: &'a [String],
+        id: &'a str,
+        status: String,
+        title: &'a str,
+    }
+    #[derive(serde::Serialize)]
+    struct GroupJson<'a, M: serde::Serialize> {
+        label: Option<&'a str>,
+        members: M,
+    }
+    #[derive(serde::Serialize)]
+    struct CutJson<'a, CP: serde::Serialize, G: serde::Serialize, M: serde::Serialize> {
+        blocked: usize,
+        closes: &'a [String],
+        critical_path: CP,
+        critical_path_days: f64,
+        critical_path_to: Option<&'a str>,
+        done: usize,
+        done_effort_days: f64,
+        effort_days: f64,
+        groups: G,
+        members: M,
+        milestone: &'a str,
+        ready: usize,
+        release: bool,
+        status: String,
+        title: &'a str,
+        total: usize,
+        version: &'a str,
+        weeks: Option<f64>,
+        weeks_remaining: Option<f64>,
+    }
+    #[derive(serde::Serialize)]
+    struct RoadmapDoc<CC: serde::Serialize, C: serde::Serialize> {
+        cross_cutting: CC,
+        cross_cutting_done_effort_days: f64,
+        cross_cutting_effort_days: f64,
+        cross_cutting_weeks: Option<f64>,
+        cross_cutting_weeks_remaining: Option<f64>,
+        cuts: C,
+        effort_days_per_week: Option<f64>,
+        schema: &'static str,
+        total_effort_days: f64,
+    }
+
+    fn task_ref(t: &RoadmapTask) -> TaskJson<'_> {
+        TaskJson {
+            blocked_by: &t.blocked_by,
+            evidence: &t.evidence,
+            id: &t.id,
+            status: t.status.to_string(),
+            title: &t.title,
+        }
+    }
+
+    let cc_weeks = r.cross_cutting_weeks();
+    let total_effort = r.total_effort_days();
+
+    let doc = RoadmapDoc {
+        cross_cutting: SeqIter(|| r.cross_cutting.iter().map(task_ref)),
+        cross_cutting_done_effort_days: r.cross_cutting_done_effort_days,
+        cross_cutting_effort_days: r.cross_cutting_effort_days,
+        cross_cutting_weeks: cc_weeks.0,
+        cross_cutting_weeks_remaining: cc_weeks.1,
+        cuts: SeqIter(|| {
+            r.cuts.iter().map(|c| {
+                let weeks = r.weeks_of(c);
+                CutJson {
+                    blocked: c.blocked,
+                    closes: &c.closes,
+                    critical_path: SeqIter(|| c.critical_path.tasks.iter().map(|t| t.id.as_str())),
+                    critical_path_days: c.critical_path.total_effort_days,
+                    critical_path_to: c.borrows.then_some(c.milestone_id.as_str()),
+                    done: c.done,
+                    done_effort_days: c.done_effort_days,
+                    effort_days: c.effort_days,
+                    groups: SeqIter(|| {
+                        c.groups.iter().map(|g| GroupJson {
+                            label: g.label.as_deref(),
+                            members: SeqIter(|| g.members.iter().map(task_ref)),
+                        })
+                    }),
+                    members: SeqIter(|| c.members.iter().map(task_ref)),
+                    milestone: &c.milestone_id,
+                    ready: c.ready,
+                    release: c.release,
+                    status: c.status.to_string(),
+                    title: &c.title,
+                    total: c.total,
+                    version: &c.version,
+                    weeks: weeks.0,
+                    weeks_remaining: weeks.1,
+                }
+            })
+        }),
+        effort_days_per_week: r.effort_days_per_week,
+        schema: "aplan/roadmap/v1",
+        total_effort_days: total_effort,
+    };
+
+    crate::stream::stream_json_pretty(out, &doc, |_| {
+        check_finite_opt_f64(r.effort_days_per_week, "effort_days_per_week")?;
+        check_finite_f64(r.cross_cutting_effort_days, "cross_cutting_effort_days")?;
+        check_finite_f64(
+            r.cross_cutting_done_effort_days,
+            "cross_cutting_done_effort_days",
+        )?;
+        check_finite_opt_f64(cc_weeks.0, "cross_cutting_weeks")?;
+        check_finite_opt_f64(cc_weeks.1, "cross_cutting_weeks_remaining")?;
+        check_finite_f64(total_effort, "total_effort_days")?;
+        for c in &r.cuts {
+            let weeks = r.weeks_of(c);
+            check_finite_f64(c.effort_days, &format!("{}.effort_days", c.milestone_id))?;
+            check_finite_f64(
+                c.done_effort_days,
+                &format!("{}.done_effort_days", c.milestone_id),
+            )?;
+            check_finite_f64(
+                c.critical_path.total_effort_days,
+                &format!("{}.critical_path_days", c.milestone_id),
+            )?;
+            check_finite_opt_f64(weeks.0, &format!("{}.weeks", c.milestone_id))?;
+            check_finite_opt_f64(weeks.1, &format!("{}.weeks_remaining", c.milestone_id))?;
+        }
+        Ok(())
     })
 }
 
 fn roadmap_json(r: &Roadmap) -> String {
-    let cut_json = |c: &Cut| {
-        serde_json::json!({
-            "version": c.version,
-            "title": c.title,
-            "milestone": c.milestone_id,
-            "status": c.status.to_string(),
-            // A release borrows the work of the cuts it closes (`A1-146`,
-            // ADR-0022), so a consumer summing `total` across cuts has to skip
-            // these rows. The model knows; hiding it here would make the machine
-            // surface the only one that cannot tell (`A1-104`).
-            "release": c.release,
-            "total": c.total,
-            "done": c.done,
-            "ready": c.ready,
-            "blocked": c.blocked,
-            "effort_days": c.effort_days,
-            "done_effort_days": c.done_effort_days,
-            // Derived here rather than stored, and `null` where no throughput
-            // was declared (`A1-147`, ADR-0023). Emitted so the machine surface
-            // can answer "how long is this cut" without the consumer
-            // reimplementing the division -- which is how the number drifted in
-            // the first place (pre-public adoption evidence item 2).
-            "weeks": r.weeks_of(c).0,
-            "weeks_remaining": r.weeks_of(c).1,
-            "critical_path_days": c.critical_path.total_effort_days,
-            "critical_path": c.critical_path.tasks.iter().map(|t| t.id.clone()).collect::<Vec<_>>(),
-            // What the chain is bounded by: a borrowing row's ends *at that
-            // row* and runs through the cuts it waits on or holds, a cut's is
-            // the longest chain among its own members (`A1-345`). `null` for a
-            // cut. Same reason as `release` above -- the model knows which
-            // question it answered, and hiding it would make the machine surface
-            // the only one that cannot tell (`A1-104`).
-            "critical_path_to": c.borrows.then(|| c.milestone_id.clone()),
-            "closes": c.closes.clone(),
-            "members": c.members.iter().map(roadmap_task_json).collect::<Vec<_>>(),
-            // Empty unless the repository named a grouping family, so this is
-            // additive for every existing consumer. Present either way, because
-            // the human and markdown views group and a machine reader seeing a
-            // flat list would be a second answer to one question (`A1-078`).
-            "groups": c.groups.iter().map(|g| serde_json::json!({
-                "label": g.label,
-                "members": g.members.iter().map(roadmap_task_json).collect::<Vec<_>>(),
-            })).collect::<Vec<_>>(),
-        })
-    };
-    let doc = serde_json::json!({
-        "schema": "aplan/roadmap/v1",
-        "effort_days_per_week": r.effort_days_per_week,
-        "cuts": r.cuts.iter().map(cut_json).collect::<Vec<_>>(),
-        "cross_cutting": r.cross_cutting.iter().map(roadmap_task_json).collect::<Vec<_>>(),
-        // Siblings rather than a nested object, so a consumer reading
-        // `cross_cutting` as a list still does (`A1-147`). `total_effort_days`
-        // is what the rows add up to -- every cut that is not a release, plus
-        // these -- and it agrees with `summary`.
-        "cross_cutting_effort_days": r.cross_cutting_effort_days,
-        "cross_cutting_done_effort_days": r.cross_cutting_done_effort_days,
-        "cross_cutting_weeks": r.cross_cutting_weeks().0,
-        "cross_cutting_weeks_remaining": r.cross_cutting_weeks().1,
-        "total_effort_days": r.total_effort_days(),
-    });
-    format!(
-        "{}\n",
-        serde_json::to_string_pretty(&doc).expect("roadmap json serialises")
-    )
+    let mut buf = Vec::new();
+    write_roadmap_json(&mut buf, r).expect("roadmap json serialises");
+    String::from_utf8(buf).expect("roadmap JSON is UTF-8")
 }
 
 /// Render the roadmap as the committed `ROADMAP.status.md` (ADR-0009). Tables are
@@ -4146,18 +4524,19 @@ fn roadmap_banner(regenerate: Option<&str>, written_by: Option<&WrittenBy<'_>>) 
     s
 }
 
-pub fn render_roadmap_markdown(
+/// Stream the committed `ROADMAP.status.md` artifact directly into `out` (`A2-136`).
+///
+/// # Errors
+///
+/// Propagates any write failure on `out`.
+pub fn write_roadmap_markdown(
+    out: &mut impl std::io::Write,
     roadmap: &Roadmap,
     regenerate: Option<&str>,
     written_by: Option<&WrittenBy<'_>>,
-) -> String {
-    let mut s = roadmap_banner(regenerate, written_by);
-    let _ = writeln!(s, "\n# Roadmap\n\n## Cuts\n");
-    // `effort` is always known; `weeks` exists only where the repository
-    // declared a throughput, so a plan that declares none renders the table it
-    // always did plus one column of numbers it already had (`A1-147`,
-    // ADR-0023). The first cell is untouched either way, which is what ADR-0015
-    // resolves a `traces` row anchor by.
+) -> std::io::Result<()> {
+    out.write_all(roadmap_banner(regenerate, written_by).as_bytes())?;
+    writeln!(out, "\n# Roadmap\n\n## Cuts\n")?;
     let weeks_column = roadmap.effort_days_per_week.is_some();
     let (head, rule) = if weeks_column {
         (
@@ -4170,38 +4549,29 @@ pub fn render_roadmap_markdown(
             "| --- | --- | --- | --- | --- | --- | --- |",
         )
     };
-    let _ = writeln!(s, "{head}");
-    let _ = writeln!(s, "{rule}");
+    writeln!(out, "{head}")?;
+    writeln!(out, "{rule}")?;
     for c in &roadmap.cuts {
         let ver = if c.version.is_empty() {
             "?"
         } else {
             c.version.as_str()
         };
-        // A release row rolls up the cuts it closes, so a reader adding the
-        // column up needs to know which rows those are (`A1-146`).
         let ver = if c.release {
             format!("{ver} (release)")
         } else {
             ver.to_string()
         };
-        // The cell the sixth pilot maintained by hand, computed from the cell
-        // beside it: "11.5 weeks (8.0 left)" is arithmetic over this row, not a
-        // range on a calendar, and it rescales with the plan because nothing
-        // wrote it down (`A1-147`).
         let weeks = weeks_cells(roadmap.weeks_of(c))
             .map_or_else(String::new, |(w, left)| format!(" {w} ({left} left) |"));
         let weeks = if weeks_column { weeks } else { String::new() };
-        // A borrowing row's chain ends *at it* and runs through the cuts it
-        // waits on or holds; a cut's is the longest chain among its own members.
-        // The column header cannot say both, so the cell says which (`A1-345`).
         let crit = format!(
             "{:.1}d{}",
             c.critical_path.total_effort_days,
             if c.borrows { " to here" } else { "" }
         );
-        let _ = writeln!(
-            s,
+        writeln!(
+            out,
             "| {} | {} | {}/{} | {} | {} | {:.1}d |{} {crit} |",
             md_cell(&ver),
             c.status,
@@ -4211,7 +4581,7 @@ pub fn render_roadmap_markdown(
             c.blocked,
             c.effort_days,
             weeks,
-        );
+        )?;
     }
     for c in &roadmap.cuts {
         let ver = if c.version.is_empty() {
@@ -4219,61 +4589,63 @@ pub fn render_roadmap_markdown(
         } else {
             c.version.as_str()
         };
-        let _ = writeln!(s, "\n## {} {}\n", md_line(ver), md_line(&c.title));
-        // A release closes cuts and holds no work of its own, so it names them
-        // rather than repeating their rows: this document carried every task
-        // twice otherwise, once under its cut and once under the release that
-        // reaches it (`A1-240`).
+        writeln!(out, "\n## {} {}\n", md_line(ver), md_line(&c.title))?;
         if c.release {
             for named in closes_of(roadmap, c) {
-                let _ = writeln!(s, "Closes {}.", md_line(&named));
+                writeln!(out, "Closes {}.", md_line(&named))?;
             }
             continue;
         }
-        // One table per group where the repository named a family, one for the
-        // cut otherwise, so an ungrouped plan's file is byte-identical to the
-        // one it already committed (`A1-078`).
         if c.groups.is_empty() {
-            roadmap_member_table(&mut s, &c.members);
+            write_roadmap_member_table(out, &c.members)?;
         } else {
             for g in &c.groups {
-                let _ = writeln!(
-                    s,
+                writeln!(
+                    out,
                     "### {}\n",
                     md_line(g.label.as_deref().unwrap_or("(no group)"))
-                );
-                roadmap_member_table(&mut s, &g.members);
-                let _ = writeln!(s);
+                )?;
+                write_roadmap_member_table(out, &g.members)?;
+                writeln!(out)?;
             }
         }
     }
     if !roadmap.cross_cutting.is_empty() {
-        let _ = writeln!(s, "\n## Cross-cutting (in no cut)\n");
+        writeln!(out, "\n## Cross-cutting (in no cut)\n")?;
         let weeks = weeks_cells(roadmap.cross_cutting_weeks())
             .map_or_else(String::new, |(w, left)| {
                 format!(", {w} weeks ({left} left)")
             });
-        let _ = writeln!(
-            s,
+        writeln!(
+            out,
             "{:.1}d effort{weeks}, held by tasks in no cut and not counted in the table above.\n",
             roadmap.cross_cutting_effort_days
-        );
-        roadmap_member_table(&mut s, &roadmap.cross_cutting);
+        )?;
+        write_roadmap_member_table(out, &roadmap.cross_cutting)?;
     }
-    // No `ADR-NNNN` citation here, deliberately (`A1-044`): this file is committed
-    // in the *consumer's* repository, whose `docs/adr/` does not hold this
-    // project's decision records, so the number would be a reference its only
-    // reader cannot resolve. What guarantees the statuses is the sentence itself.
-    let _ = writeln!(
-        s,
+    writeln!(
+        out,
         "\n> Statuses are as claimed in the plan and gated by `aplan verify` in CI."
-    );
-    s
+    )
 }
 
-fn roadmap_member_table(s: &mut String, members: &[RoadmapTask]) {
-    let _ = writeln!(s, "| task | title | status | blocked_by | evidence |");
-    let _ = writeln!(s, "| --- | --- | --- | --- | --- |");
+pub fn render_roadmap_markdown(
+    roadmap: &Roadmap,
+    regenerate: Option<&str>,
+    written_by: Option<&WrittenBy<'_>>,
+) -> String {
+    let mut buf = Vec::new();
+    write_roadmap_markdown(&mut buf, roadmap, regenerate, written_by)
+        .expect("writing roadmap markdown to Vec<u8> is infallible");
+    String::from_utf8(buf).expect("roadmap markdown is UTF-8")
+}
+
+fn write_roadmap_member_table(
+    out: &mut impl std::io::Write,
+    members: &[RoadmapTask],
+) -> std::io::Result<()> {
+    writeln!(out, "| task | title | status | blocked_by | evidence |")?;
+    writeln!(out, "| --- | --- | --- | --- | --- |")?;
     for m in members {
         let blocked_by = if m.blocked_by.is_empty() {
             "-".to_string()
@@ -4285,14 +4657,15 @@ fn roadmap_member_table(s: &mut String, members: &[RoadmapTask]) {
         } else {
             md_cell(&m.evidence.join(", "))
         };
-        let _ = writeln!(
-            s,
+        writeln!(
+            out,
             "| {} | {} | {} | {blocked_by} | {evidence} |",
             md_cell(&m.id),
             md_cell(&m.title),
             m.status
-        );
+        )?;
     }
+    Ok(())
 }
 
 /// Escape a value for a markdown table cell: a raw `|` would add a spurious
@@ -4470,6 +4843,7 @@ mod tests {
         };
 
         let rendered = plain(&render_show(&show));
+        let collapsed = rendered.split_whitespace().collect::<Vec<_>>().join(" ");
         for expected in [
             "orphaned fingerprint",
             "unstamped",
@@ -4490,7 +4864,7 @@ mod tests {
             "observed at Unix time 42",
         ] {
             assert!(
-                rendered.contains(expected),
+                collapsed.contains(expected),
                 "missing `{expected}` in:\n{rendered}"
             );
         }
@@ -6216,6 +6590,32 @@ mod tests {
         );
         assert!(md.contains("## ? Loose"), "and in the heading");
     }
+
+    #[test]
+    fn roadmap_streaming_preflights_non_finite_floats_and_writes_banner_identity() {
+        let mut bad = one_cut("v0.1", "Core", vec![rt("A", "Short")]);
+        bad.effort_days_per_week = Some(f64::NAN);
+        let mut sink = Vec::new();
+        let err = write_roadmap_json(&mut sink, &bad)
+            .expect_err("non-finite effort_days_per_week must fail preflight");
+        assert_eq!(err.kind(), std::io::ErrorKind::InvalidData);
+        assert!(sink.is_empty(), "preflight failure writes zero bytes");
+
+        let mut ok = one_cut("v0.1", "Core", vec![rt("A", "Short")]);
+        ok.cuts[0].release = true;
+        ok.cuts[0].closes = vec!["M".into(), "M-other".into()];
+        let md = render_roadmap_markdown(
+            &ok,
+            Some("cargo xtask gen-roadmap"),
+            Some(&WrittenBy {
+                version: "0.8.0-dev",
+                surface: "abc123456789",
+            }),
+        );
+        assert!(md.contains("written by aplan 0.8.0-dev, surface abc123456789"));
+        assert!(md.contains("v0.1 (`M`)"));
+        assert!(md.contains("M-other"));
+    }
     use aplan_core::deprecation::{Fault, Runway, RunwayTask};
 
     fn runway_task(id: &str, status: Status, cut: Option<&str>) -> RunwayTask {
@@ -7842,48 +8242,76 @@ pub struct DueReport {
 ///
 /// When the output cannot be written.
 pub fn render_due(report: &DueReport, format: Format) -> std::io::Result<()> {
-    if format != Format::Human {
-        let doc = serde_json::json!({
-            "schema": "aplan/due/v1",
-            "as_of": report.as_of,
-            "waiting": report.waiting,
-            "tasks": report.tasks.iter().map(|t| serde_json::json!({
-                "id": t.id,
-                "title": t.title,
-                "revisit_at": t.revisit_at,
-                "overdue_seconds": t.overdue_seconds,
-            })).collect::<Vec<_>>(),
-        });
-        let mut out = crate::write::anstream_stdout();
-        return writeln!(out, "{}", serde_json::to_string_pretty(&doc)?);
+    if format == Format::Human {
+        stream_human_to_stdout(|out| write_due_human(out, report))
+    } else {
+        stream_to_stdout(|out| write_due_json(out, report))
     }
-    let mut out = crate::write::anstream_stdout();
-    write!(out, "{}", due_human(report))
 }
 
-/// The human report as text, pure so a test reads what a reader sees.
-#[must_use]
-pub fn due_human(report: &DueReport) -> String {
-    let mut s = String::new();
+/// Stream `aplan/due/v1` JSON directly into `out` (`A2-136`).
+///
+/// # Errors
+///
+/// Propagates any serialization or downstream I/O error.
+pub fn write_due_json(out: &mut impl std::io::Write, report: &DueReport) -> std::io::Result<()> {
+    use crate::stream::SeqIter;
+
+    #[derive(serde::Serialize)]
+    struct DueTaskJson<'a> {
+        id: &'a str,
+        overdue_seconds: i64,
+        revisit_at: &'a str,
+        title: &'a str,
+    }
+    #[derive(serde::Serialize)]
+    struct DueDoc<'a, T: serde::Serialize> {
+        as_of: Option<&'a str>,
+        schema: &'static str,
+        tasks: T,
+        waiting: usize,
+    }
+
+    let doc = DueDoc {
+        as_of: report.as_of.as_deref(),
+        schema: "aplan/due/v1",
+        tasks: SeqIter(|| {
+            report.tasks.iter().map(|t| DueTaskJson {
+                id: &t.id,
+                overdue_seconds: t.overdue_seconds,
+                revisit_at: &t.revisit_at,
+                title: &t.title,
+            })
+        }),
+        waiting: report.waiting,
+    };
+    crate::stream::stream_json_pretty(out, &doc, |_| Ok(()))
+}
+
+/// Stream the human `due` report directly into `out` (`A2-136`).
+///
+/// # Errors
+///
+/// Propagates any write failure on `out`.
+pub fn write_due_human(out: &mut impl std::io::Write, report: &DueReport) -> std::io::Result<()> {
     if report.tasks.is_empty() {
-        let _ = writeln!(
-            s,
+        writeln!(
+            out,
             "no parked task is due for a look; {} carry a revisit still in the future",
             report.waiting
-        );
-        push_due_clock(&mut s, report);
-        return s;
+        )?;
+        return write_due_clock(out, report);
     }
     let id_w = column(report.tasks.iter().map(|t| t.id.as_str()), 10);
     let bold = crate::style::HEADING;
-    let _ = writeln!(
-        s,
+    writeln!(
+        out,
         "{bold}{:<id_w$}  {:<22}  title{bold:#}",
         "task", "revisit due"
-    );
+    )?;
     for t in &report.tasks {
-        let _ = writeln!(
-            s,
+        writeln!(
+            out,
             "{}",
             fold::row(
                 &format!(
@@ -7895,45 +8323,49 @@ pub fn due_human(report: &DueReport) -> String {
                 ),
                 &one_line(&t.title),
             )
-        );
+        )?;
     }
-    let _ = writeln!(s);
-    // The sentence the whole feature turns on. A scheduler that read this as
-    // "the wait is over" would unpark work on a clock, which is the one thing
-    // this field must never be able to say (`A1-264`).
-    let _ = writeln!(
-        s,
+    writeln!(out)?;
+    writeln!(
+        out,
         "{}",
         fold::note(
             "These are due for a look, not unblocked: reaching the instant says nothing about \
              the condition each is parked on, which is in its body. Nothing here changes a \
              status."
         )
-    );
+    )?;
     if report.waiting > 0 {
-        let _ = writeln!(
-            s,
+        writeln!(
+            out,
             "{} more parked task(s) carry a revisit still in the future.",
             report.waiting
-        );
+        )?;
     }
-    push_due_clock(&mut s, report);
-    s
+    write_due_clock(out, report)
+}
+
+/// The human report as text, pure so a test reads what a reader sees.
+#[must_use]
+pub fn due_human(report: &DueReport) -> String {
+    let mut buf = Vec::new();
+    write_due_human(&mut buf, report).expect("writing due report to Vec<u8> is infallible");
+    String::from_utf8(buf).expect("due report is UTF-8")
 }
 
 /// Which clock, always: a reader told a task is due has to know due by when.
-fn push_due_clock(s: &mut String, report: &DueReport) {
-    let _ = match &report.as_of {
-        Some(at) => writeln!(s, "Answered as of {at}, as asked (`--as-of`)."),
+fn write_due_clock(out: &mut impl std::io::Write, report: &DueReport) -> std::io::Result<()> {
+    match &report.as_of {
+        Some(at) => writeln!(out, "Answered as of {at}, as asked (`--as-of`)."),
         None => writeln!(
-            s,
+            out,
             "{}",
             fold::note(
                 "Answered against this machine's clock. Pass `--as-of <instant>` in RFC 3339 -- \
                  when a scheduler woke -- so two runs of one plan agree."
             )
         ),
-    };
+    }
 }
 
 /// What `aplan stale` found.
@@ -7971,61 +8403,48 @@ pub struct StaleReport {
 /// # Errors
 /// Propagates any write failure on stdout.
 pub fn render_stale(report: &StaleReport, format: Format) -> std::io::Result<()> {
-    if format != Format::Human {
-        return render_stale_json(report);
+    if format == Format::Human {
+        stream_human_to_stdout(|out| write_stale_human(out, report))
+    } else {
+        stream_to_stdout(|out| write_stale_json(out, report))
     }
-    let mut out = crate::write::anstream_stdout();
-    write!(out, "{}", stale_human(report))
 }
 
-/// The human report as text.
+/// Stream the human staleness report directly into `out` (`A2-136`).
 ///
-/// Pure, like `roadmap_human`, so a test asserts on what a reader sees rather
-/// than on a copy of it: the first version of this task's audit tested a
-/// reimplementation of these sentences, which proves only that the test agrees
-/// with itself.
-#[must_use]
-pub fn stale_human(report: &StaleReport) -> String {
-    let mut s = String::new();
-    // A report that can see nothing must not read as a clean bill of health.
-    // Pointed at the wrong repository -- `--repo` elsewhere, or a plan checked
-    // out beside one rather than inside it -- every live task has no history
-    // here, and the first version answered "nothing has sat", which is the false
-    // green this project exists to refuse (`A1-020`, found by its audit).
+/// # Errors
+///
+/// Propagates any write failure on `out`.
+pub fn write_stale_human(
+    out: &mut impl std::io::Write,
+    report: &StaleReport,
+) -> std::io::Result<()> {
     if report.fresh == 0 && report.untracked > 0 && report.tasks.is_empty() {
-        let _ = writeln!(
-            s,
+        return writeln!(
+            out,
             "no live task has any history in this repository ({} of them), so this says nothing \
              about staleness. Either the plan is new, or `--repo` is not the repository that \
              holds it.",
             report.untracked
         );
-        return s;
     }
     if report.tasks.is_empty() {
-        let _ = writeln!(
-            s,
+        writeln!(
+            out,
             "nothing live has sat longer than {} day(s); {} live task(s) are inside the window",
             report.window_days, report.fresh
-        );
-        push_untracked(&mut s, report);
-        return s;
+        )?;
+        return write_untracked(out, report);
     }
     let id_w = column(report.tasks.iter().map(|t| t.id.as_str()), 10);
     let bold = crate::style::HEADING;
-    let _ = writeln!(
-        s,
+    writeln!(
+        out,
         "{bold}{:<id_w$}  {:>4}  {:<12}  title{bold:#}",
         "task", "idle", "status"
-    );
+    )?;
     for t in &report.tasks {
-        // The marker rather than a column: a reader scanning for what to pick up
-        // wants the ready ones to stand out, and a second column of mostly
-        // blanks does not do that.
         let ready = if t.ready { " (ready)" } else { "" };
-        // Beside the marker rather than in a column, for the reason above it: a
-        // reader scanning for an abandoned claim wants the held ones to stand
-        // out, and most rows have no holder to show.
         let owner = t.owner.as_deref().map_or_else(String::new, |who| {
             format!(" [owner {}]", crate::sanitize::visible(who))
         });
@@ -8035,8 +8454,8 @@ pub fn stale_human(report: &StaleReport) -> String {
             });
             format!(" [claim {}{age}]", crate::sanitize::visible(who))
         });
-        let _ = writeln!(
-            s,
+        writeln!(
+            out,
             "{}",
             fold::row(
                 &format!(
@@ -8050,38 +8469,28 @@ pub fn stale_human(report: &StaleReport) -> String {
                 ),
                 &format!("{}{ready}{owner}{held}", one_line(&t.title)),
             )
-        );
+        )?;
     }
-    let _ = writeln!(s);
+    writeln!(out)?;
     let ready = report.tasks.iter().filter(|t| t.ready).count();
     if ready > 0 {
-        let _ = writeln!(
-            s,
+        writeln!(
+            out,
             "{}",
             fold::note(&format!(
                 "{ready} of these can be started now: every blocker is done, and they \
                  have sat anyway."
             ))
-        );
+        )?;
     }
-    // What a `blocked` row means, said only when there is one, and said in a
-    // way that is true of every such row (`A1-275`, audit).
-    //
-    // *Not waiting on the plan* was the first wording and it is false for a task
-    // that is parked **and** lists unfinished blockers -- a shape nothing
-    // refuses. What holds either way is that the status, not the graph, is what
-    // keeps it out of `ready`: clearing every blocker would not offer it. The
-    // count is phrased without a verb that has to agree, because one parked task
-    // is the common case and "1 of these are parked" is the sort of thing a
-    // reader notices instead of the report.
     let parked = report
         .tasks
         .iter()
         .filter(|t| t.status == "blocked")
         .count();
     if parked > 0 {
-        let _ = writeln!(
-            s,
+        writeln!(
+            out,
             "{}",
             fold::fold(
                 &format!(
@@ -8092,76 +8501,114 @@ pub fn stale_human(report: &StaleReport) -> String {
                 fold::out_width(),
                 0
             )
-        );
+        )?;
     }
-    let _ = writeln!(
-        s,
+    writeln!(
+        out,
         "{}",
         fold::note(&format!(
             "advice, not a verdict: a task file's date is a proxy for the work's state. \
              {} live task(s) are inside the window.",
             report.fresh
         ))
-    );
-    push_untracked(&mut s, report);
-    s
+    )?;
+    write_untracked(out, report)
+}
+
+/// The human report as text.
+#[must_use]
+pub fn stale_human(report: &StaleReport) -> String {
+    let mut buf = Vec::new();
+    write_stale_human(&mut buf, report).expect("writing stale report to Vec<u8> is infallible");
+    String::from_utf8(buf).expect("stale report is UTF-8")
 }
 
 /// What could not be dated, said wherever the report ends.
-fn push_untracked(s: &mut String, report: &StaleReport) {
-    // Which clock, always, and not only when it is the unusual one. A reader
-    // told "idle 42 days" has to know what that is 42 days *before*, and the
-    // default -- `HEAD`'s own commit time -- is the surprising answer for a
-    // repository that has stopped moving: every age freezes with it.
-    let _ = match &report.as_of {
-        Some(date) => writeln!(s, "Ages measured from {date}, as asked (`--as-of`)."),
+fn write_untracked(out: &mut impl std::io::Write, report: &StaleReport) -> std::io::Result<()> {
+    match &report.as_of {
+        Some(date) => writeln!(out, "Ages measured from {date}, as asked (`--as-of`).")?,
         None => writeln!(
-            s,
+            out,
             "{}",
             fold::note(
                 "Ages measured from `HEAD`'s commit time, so two runs at one commit agree. \
                  Pass `--as-of <YYYY-MM-DD>` to measure from a date instead."
             )
-        ),
-    };
+        )?,
+    }
     if report.untracked > 0 {
-        let _ = writeln!(
-            s,
+        writeln!(
+            out,
             "{} live task(s) have no commit in this history, so they have no age to report.",
             report.untracked
-        );
+        )?;
     }
+    Ok(())
 }
 
-fn render_stale_json(report: &StaleReport) -> std::io::Result<()> {
-    let doc = serde_json::json!({
-        "schema": "aplan/stale/v2",
-        "window_days": report.window_days,
-        "fresh": report.fresh,
-        "untracked": report.untracked,
-        // `null` means `HEAD`'s commit time, which is the default and the
-        // reproducible one.
-        "as_of": report.as_of,
-        "coordination": report.coordination,
-        "claim_observed_at_epoch_seconds": report.claim_observed_at_epoch_seconds,
-        "tasks": report.tasks.iter().map(|t| serde_json::json!({
-            "id": t.id,
-            "title": t.title,
-            "status": t.status,
-            "idle_days": t.idle_days,
-            "ready": t.ready,
-            "owner": t.owner,
-            // Always present, `null` when nobody holds it: a consumer
-            // filtering for abandoned claims should not have to tell a missing
-            // key from an unheld task (`A1-359`).
-            "held_by": t.held_by,
-            "claim": t.claim,
-            "claim_age_seconds": t.claim_age_seconds,
-        })).collect::<Vec<_>>(),
-    });
-    let mut out = crate::write::stdout();
-    serde_json::to_writer_pretty(&mut out, &doc)?;
-    writeln!(out)
+/// Stream `aplan/stale/v2` JSON directly into `out` (`A2-136`).
+///
+/// # Errors
+///
+/// Propagates any serialization or downstream I/O error.
+pub fn write_stale_json(
+    out: &mut impl std::io::Write,
+    report: &StaleReport,
+) -> std::io::Result<()> {
+    use crate::stream::SeqIter;
+
+    #[derive(serde::Serialize)]
+    struct StaleTaskJson<'a> {
+        claim: Option<serde_json::Value>,
+        claim_age_seconds: Option<i64>,
+        held_by: Option<&'a str>,
+        id: &'a str,
+        idle_days: i64,
+        owner: Option<&'a str>,
+        ready: bool,
+        status: &'a str,
+        title: &'a str,
+    }
+    #[derive(serde::Serialize)]
+    struct StaleDoc<'a, T: serde::Serialize> {
+        as_of: Option<&'a str>,
+        claim_observed_at_epoch_seconds: i64,
+        coordination: serde_json::Value,
+        fresh: usize,
+        schema: &'static str,
+        tasks: T,
+        untracked: usize,
+        window_days: i64,
+    }
+
+    let coordination = serde_json::to_value(&report.coordination)
+        .map_err(|e| crate::stream::json_to_io_error(&e))?;
+    let doc = StaleDoc {
+        as_of: report.as_of.as_deref(),
+        claim_observed_at_epoch_seconds: report.claim_observed_at_epoch_seconds,
+        coordination,
+        fresh: report.fresh,
+        schema: "aplan/stale/v2",
+        tasks: SeqIter(|| {
+            report.tasks.iter().map(|t| StaleTaskJson {
+                claim: t
+                    .claim
+                    .as_ref()
+                    .map(|c| serde_json::to_value(c).expect("claim record is always serializable")),
+                claim_age_seconds: t.claim_age_seconds,
+                held_by: t.held_by.as_deref(),
+                id: &t.id,
+                idle_days: t.idle_days,
+                owner: t.owner.as_deref(),
+                ready: t.ready,
+                status: &t.status,
+                title: &t.title,
+            })
+        }),
+        untracked: report.untracked,
+        window_days: report.window_days,
+    };
+    crate::stream::stream_json_pretty(out, &doc, |_| Ok(()))
 }
 
 #[cfg(test)]
@@ -8500,54 +8947,46 @@ fn render_vacuity_json(report: &[RuleReach]) -> std::io::Result<()> {
 /// # Errors
 /// Propagates any write failure on stdout.
 pub fn render_paths(report: &PathsReport, format: Format) -> std::io::Result<()> {
-    if format != Format::Human {
-        return render_paths_json(report);
+    if format == Format::Human {
+        stream_human_to_stdout(|out| write_paths_human(out, report))
+    } else {
+        stream_to_stdout(|out| write_paths_json(out, report))
     }
-    let mut out = crate::write::anstream_stdout();
-    write!(out, "{}", paths_human(report))
 }
 
-/// The human report as text, pure so a test reads what a person reads.
-#[must_use]
-pub fn paths_human(report: &PathsReport) -> String {
-    let mut s = String::new();
-    // `sampled` first, because it decides whether anything below is a
-    // measurement at all. A plan full of `paths` in a repository with no history
-    // must not be told that no task declares any.
+/// Stream the human `paths` report directly into `out` (`A2-136`).
+///
+/// # Errors
+///
+/// Propagates any write failure on `out`.
+pub fn write_paths_human(
+    out: &mut impl std::io::Write,
+    report: &PathsReport,
+) -> std::io::Result<()> {
     if report.sampled == 0 {
-        // A table of `0%` rows here would be this command saying "no recent
-        // commit touches these paths" about a history it never read
-        // (`A1-151`'s audit).
-        let _ = writeln!(
-            s,
+        return writeln!(
+            out,
             "no commit was sampled, so there is nothing to measure `paths` against: this \
              repository has no history yet."
         );
-        return s;
     }
     if report.tasks.is_empty() {
-        // "no task declares `paths`" would be a lie about a plan whose every
-        // `paths` entry is a broken glob, which is a different problem with a
-        // different fix.
         if report.unmeasurable > 0 {
-            let _ = writeln!(
-                s,
+            return writeln!(
+                out,
                 "no task has `paths` this tool can compile, so nothing here is measurable: \
                  `aplan check` reports each entry that will not compile (APLAN032)."
             );
-        } else {
-            let _ = writeln!(
-                s,
-                "no task declares `paths`, so nothing here is measurable: a `commit` citation \
-                 on such a task proves only that `HEAD` reaches the commit."
-            );
         }
-        return s;
+        return writeln!(
+            out,
+            "no task declares `paths`, so nothing here is measurable: a `commit` citation \
+             on such a task proves only that `HEAD` reaches the commit."
+        );
     }
-    // Non-empty by the guard above, so there is a middle.
     let median = median_of(&report.tasks).unwrap_or_default();
-    let _ = writeln!(
-        s,
+    writeln!(
+        out,
         "{}",
         fold::fold(
             &format!(
@@ -8558,85 +8997,97 @@ pub fn paths_human(report: &PathsReport) -> String {
             fold::out_width(),
             0
         )
-    );
-    let _ = writeln!(s);
+    )?;
+    writeln!(out)?;
 
     let id_w = column(report.tasks.iter().map(|t| t.id.as_str()), 10);
     let bold = crate::style::HEADING;
-    let _ = writeln!(
-        s,
+    writeln!(
+        out,
         "{bold}{:<id_w$}  {:>5}  first declared path{bold:#}",
         "task", "share"
-    );
+    )?;
     for t in &report.tasks {
-        let _ = writeln!(
-            s,
+        writeln!(
+            out,
             "{id}{:<id_w$}{id:#}  {:>5}  {}",
             t.id,
             share_cell(t.hits, t.percent),
             one_line(&t.first_path),
             id = crate::style::ID
-        );
+        )?;
     }
-    let _ = writeln!(s);
-    let _ = writeln!(
-        s,
+    writeln!(out)?;
+    writeln!(
+        out,
         "{}",
         fold::note(
             "Read a row against that median, not against a fixed number: the same share means \
              \"almost any commit satisfies this\" in a plan whose median is low, and nothing at \
              all in a plan where one component is the work."
         )
-    );
+    )?;
     if report.without_paths > 0 {
-        let _ = writeln!(
-            s,
+        writeln!(
+            out,
             "{}",
             fold::note(&format!(
                 "{} task(s) declare no `paths`; a `commit` citation there proves the \
                  commit is reachable from `HEAD` and no more.",
                 report.without_paths
             ))
-        );
+        )?;
     }
     if report.unmeasurable > 0 {
-        let _ = writeln!(
-            s,
+        writeln!(
+            out,
             "{} task(s) declare `paths` that do not compile to a glob, so they are not measured \
              here at all; `aplan check` reports each one (APLAN032).",
             report.unmeasurable
-        );
+        )?;
     }
-    s
-}
-
-/// Render the deprecation-runway report.
-///
-/// **A report, not a rule** (`A1-021`). Every runway shape it names is decidable
-/// from the plan alone, but a plan is not wrong for having none, and across the
-/// six repositories this tool has been pointed at exactly zero declare one: the
-/// artifact the research found in GitLab, systemd, Kubernetes and OpenSSL is a
-/// property of projects with public API promises, not of every project. So it
-/// exits `0` whatever it finds, and lives where somebody who has a runway goes
-/// looking, rather than in everybody else's `check` output.
-///
-/// # Errors
-/// Propagates any write failure on stdout.
-pub fn render_deprecations(report: &Deprecations, format: Format) -> std::io::Result<()> {
-    if format != Format::Human {
-        return render_deprecations_json(report);
-    }
-    let mut out = crate::write::anstream_stdout();
-    write!(out, "{}", deprecations_human(report))
+    Ok(())
 }
 
 /// The human report as text, pure so a test reads what a person reads.
 #[must_use]
-pub fn deprecations_human(report: &Deprecations) -> String {
-    let mut s = String::new();
+pub fn paths_human(report: &PathsReport) -> String {
+    let mut buf = Vec::new();
+    write_paths_human(&mut buf, report).expect("writing paths report to Vec<u8> is infallible");
+    String::from_utf8(buf).expect("paths report is UTF-8")
+}
+
+/// Render the deprecation-runway report.
+///
+/// # Errors
+/// Propagates any write failure on stdout.
+pub fn render_deprecations(report: &Deprecations, format: Format) -> std::io::Result<()> {
+    if format == Format::Human {
+        stream_human_to_stdout(|out| write_deprecations_human(out, report))
+    } else {
+        stream_to_stdout(|out| write_deprecations_json(out, report))
+    }
+}
+
+/// Stream the markdown deprecation table directly to stdout (`A2-136`).
+///
+/// # Errors
+/// Propagates any write failure on stdout.
+pub fn render_deprecations_markdown(report: &Deprecations) -> std::io::Result<()> {
+    stream_to_stdout(|out| write_deprecations_markdown(out, report))
+}
+
+/// Stream the human deprecation report directly into `out` (`A2-136`).
+///
+/// # Errors
+/// Propagates any write failure on `out`.
+pub fn write_deprecations_human(
+    out: &mut impl std::io::Write,
+    report: &Deprecations,
+) -> std::io::Result<()> {
     if report.runways.is_empty() && report.unannounced.is_empty() {
-        let _ = writeln!(
-            s,
+        return writeln!(
+            out,
             "{}",
             fold::note(&format!(
                 "no task is tagged `{DEPRECATION_TAG}` or `{REMOVAL_TAG}`, so this plan \
@@ -8645,28 +9096,27 @@ pub fn deprecations_human(report: &Deprecations) -> String {
                      in its `blocked_by`."
             ))
         );
-        return s;
     }
 
     for r in &report.runways {
-        let _ = writeln!(
-            s,
+        writeln!(
+            out,
             "{}",
             fold::row(
                 &format!("{id}{}{id:#}  ", r.announced.id, id = crate::style::ID),
                 &one_line(&r.announced.title),
             )
-        );
-        let _ = writeln!(
-            s,
+        )?;
+        writeln!(
+            out,
             "  announced in {} ({st}{}{st:#})",
             cut_or_none(r.announced.cut.as_deref()),
             r.announced.status,
             st = crate::style::status(&r.announced.status.to_string())
-        );
+        )?;
         for removal in &r.removals {
-            let _ = writeln!(
-                s,
+            writeln!(
+                out,
                 "  removed in {} by {} ({}{})",
                 cut_or_none(removal.cut.as_deref()),
                 removal.id,
@@ -8676,27 +9126,27 @@ pub fn deprecations_human(report: &Deprecations) -> String {
                 } else {
                     ""
                 }
-            );
+            )?;
         }
         for fault in &r.faults {
-            let _ = writeln!(s, "  ! {}", fault.what());
+            writeln!(out, "  ! {}", fault.what())?;
         }
-        let _ = writeln!(s);
+        writeln!(out)?;
     }
 
     for r in &report.unannounced {
-        let _ = writeln!(
-            s,
+        writeln!(
+            out,
             "{}  {}\n  ! tagged `{REMOVAL_TAG}` and blocked by no `{DEPRECATION_TAG}` task: a \
              removal nobody was told about",
             r.id,
             one_line(&r.title)
-        );
-        let _ = writeln!(s);
+        )?;
+        writeln!(out)?;
     }
 
-    let _ = writeln!(
-        s,
+    writeln!(
+        out,
         "{}",
         fold::fold(
             &format!(
@@ -8708,32 +9158,36 @@ pub fn deprecations_human(report: &Deprecations) -> String {
             fold::out_width(),
             0
         )
-    );
-    s
+    )
 }
 
-/// The same report as a markdown table, which is the shape a project publishes.
-///
-/// `markdown` is not a [`Format`] variant, for the reason `roadmap` gives: it
-/// would make `check --format markdown` a thing. The command parses the word and
-/// calls this.
+/// The human report as text, pure so a test reads what a person reads.
 #[must_use]
-pub fn deprecations_markdown(report: &Deprecations) -> String {
-    let mut s = String::new();
-    let _ = writeln!(
-        s,
+pub fn deprecations_human(report: &Deprecations) -> String {
+    let mut buf = Vec::new();
+    write_deprecations_human(&mut buf, report)
+        .expect("writing deprecations report to Vec<u8> is infallible");
+    String::from_utf8(buf).expect("deprecations report is UTF-8")
+}
+
+/// Stream the markdown deprecation table directly into `out` (`A2-136`).
+///
+/// # Errors
+/// Propagates any write failure on `out`.
+pub fn write_deprecations_markdown(
+    out: &mut impl std::io::Write,
+    report: &Deprecations,
+) -> std::io::Result<()> {
+    writeln!(
+        out,
         "<!-- generated by `aplan deprecations --format markdown`; do not edit. -->"
-    );
-    let _ = writeln!(s, "\n# Deprecations\n");
+    )?;
+    writeln!(out, "\n# Deprecations\n")?;
     if report.runways.is_empty() {
-        let _ = writeln!(s, "None announced.");
-        return s;
+        return writeln!(out, "None announced.");
     }
-    // "Announcement", not "Feature": what this column holds is the announcing
-    // task's own title, and calling it the feature would imply the tool knows
-    // the feature's name. Write that title as the notice you want published.
-    let _ = writeln!(s, "| Announcement | Announced in | Removed in | Status |");
-    let _ = writeln!(s, "|---|---|---|---|");
+    writeln!(out, "| Announcement | Announced in | Removed in | Status |")?;
+    writeln!(out, "|---|---|---|---|")?;
     for r in &report.runways {
         let removed = if r.removals.is_empty() {
             "not scheduled".to_string()
@@ -8752,75 +9206,145 @@ pub fn deprecations_markdown(report: &Deprecations) -> String {
             } else {
                 "planned"
             };
-        let _ = writeln!(
-            s,
+        writeln!(
+            out,
             "| {} | {} | {} | {status} |",
             md_cell(&r.announced.title),
             md_cell(&cut_or_none(r.announced.cut.as_deref())),
             md_cell(&removed)
-        );
+        )?;
     }
-    s
+    Ok(())
+}
+
+/// The same report as a markdown table, which is the shape a project publishes.
+#[must_use]
+pub fn deprecations_markdown(report: &Deprecations) -> String {
+    let mut buf = Vec::new();
+    write_deprecations_markdown(&mut buf, report)
+        .expect("writing deprecations markdown to Vec<u8> is infallible");
+    String::from_utf8(buf).expect("deprecations markdown is UTF-8")
 }
 
 fn cut_or_none(cut: Option<&str>) -> String {
     match cut {
         Some(c) if !c.is_empty() => c.to_string(),
-        // A cut with no version label, or no cut at all. Both mean the same
-        // thing to a reader asking "which release": nothing here dates it.
         _ => "no cut".to_string(),
     }
 }
 
-fn render_deprecations_json(report: &Deprecations) -> std::io::Result<()> {
-    let task = |t: &aplan_core::deprecation::RunwayTask| {
-        serde_json::json!({
-            "id": t.id,
-            "title": t.title,
-            "status": t.status.to_string(),
-            "cut": t.cut,
-            "cited": t.cited,
-        })
+/// Stream `aplan/deprecations/v1` JSON directly into `out` (`A2-136`).
+///
+/// # Errors
+/// Propagates any serialization or downstream I/O error.
+pub fn write_deprecations_json(
+    out: &mut impl std::io::Write,
+    report: &Deprecations,
+) -> std::io::Result<()> {
+    use crate::stream::SeqIter;
+
+    #[derive(serde::Serialize)]
+    struct RunwayTaskJson<'a> {
+        cited: bool,
+        cut: Option<&'a str>,
+        id: &'a str,
+        status: String,
+        title: &'a str,
+    }
+    #[derive(serde::Serialize)]
+    struct FaultJson {
+        kind: &'static str,
+        what: &'static str,
+    }
+    #[derive(serde::Serialize)]
+    struct RunwayJson<'a, F: serde::Serialize, R: serde::Serialize> {
+        announced: RunwayTaskJson<'a>,
+        faults: F,
+        removals: R,
+    }
+    #[derive(serde::Serialize)]
+    struct DeprecationsDoc<R: serde::Serialize, U: serde::Serialize> {
+        runways: R,
+        schema: &'static str,
+        unannounced_removals: U,
+    }
+
+    fn task_ref(t: &aplan_core::deprecation::RunwayTask) -> RunwayTaskJson<'_> {
+        RunwayTaskJson {
+            cited: t.cited,
+            cut: t.cut.as_deref(),
+            id: &t.id,
+            status: t.status.to_string(),
+            title: &t.title,
+        }
+    }
+
+    let doc = DeprecationsDoc {
+        runways: SeqIter(|| {
+            report.runways.iter().map(|r| RunwayJson {
+                announced: task_ref(&r.announced),
+                faults: SeqIter(|| {
+                    r.faults.iter().map(|f| FaultJson {
+                        kind: f.kind(),
+                        what: f.what(),
+                    })
+                }),
+                removals: SeqIter(|| r.removals.iter().map(task_ref)),
+            })
+        }),
+        schema: "aplan/deprecations/v1",
+        unannounced_removals: SeqIter(|| report.unannounced.iter().map(task_ref)),
     };
-    let doc = serde_json::json!({
-        "schema": "aplan/deprecations/v1",
-        "runways": report.runways.iter().map(|r| serde_json::json!({
-            "announced": task(&r.announced),
-            "removals": r.removals.iter().map(&task).collect::<Vec<_>>(),
-            "faults": r.faults.iter().map(|f| serde_json::json!({
-                "kind": f.kind(),
-                "what": f.what(),
-            })).collect::<Vec<_>>(),
-        })).collect::<Vec<_>>(),
-        "unannounced_removals": report.unannounced.iter().map(&task).collect::<Vec<_>>(),
-    });
-    let mut out = crate::write::stdout();
-    serde_json::to_writer_pretty(&mut out, &doc)?;
-    writeln!(out)
+    crate::stream::stream_json_pretty(out, &doc, |_| Ok(()))
 }
 
-fn render_paths_json(report: &PathsReport) -> std::io::Result<()> {
-    let doc = serde_json::json!({
-        "schema": "aplan/paths/v1",
-        "sampled": report.sampled,
-        "asked_for": report.asked_for,
-        "median_percent": report.median_percent(),
-        "without_paths": report.without_paths,
-        "unmeasurable": report.unmeasurable,
-        "tasks": report.tasks.iter().map(|t| serde_json::json!({
-            "id": t.id,
-            "title": t.title,
-            // Both: `percent` is what a person reads, `hits` is what a consumer
-            // can divide by `sampled` without losing the rows that round to
-            // nothing.
-            "hits": t.hits,
-            "percent": t.percent,
-            "first_path": t.first_path,
-        })).collect::<Vec<_>>(),
-    });
-    let mut out = crate::write::stdout();
-    serde_json::to_writer_pretty(&mut out, &doc)?;
-    writeln!(out)
+/// Stream `aplan/paths/v1` JSON directly into `out` (`A2-136`).
+///
+/// # Errors
+/// Propagates any serialization or downstream I/O error.
+pub fn write_paths_json(
+    out: &mut impl std::io::Write,
+    report: &PathsReport,
+) -> std::io::Result<()> {
+    use crate::stream::SeqIter;
+
+    #[derive(serde::Serialize)]
+    struct PathTaskJson<'a> {
+        first_path: &'a str,
+        hits: usize,
+        id: &'a str,
+        percent: u32,
+        title: &'a str,
+    }
+    #[derive(serde::Serialize)]
+    struct PathsDoc<T: serde::Serialize> {
+        asked_for: usize,
+        median_percent: Option<u32>,
+        sampled: usize,
+        schema: &'static str,
+        tasks: T,
+        unmeasurable: usize,
+        without_paths: usize,
+    }
+
+    let doc = PathsDoc {
+        asked_for: report.asked_for,
+        median_percent: report.median_percent(),
+        sampled: report.sampled,
+        schema: "aplan/paths/v1",
+        tasks: SeqIter(|| {
+            report.tasks.iter().map(|t| PathTaskJson {
+                first_path: &t.first_path,
+                hits: t.hits,
+                id: &t.id,
+                percent: t.percent,
+                title: &t.title,
+            })
+        }),
+        unmeasurable: report.unmeasurable,
+        without_paths: report.without_paths,
+    };
+    crate::stream::stream_json_pretty(out, &doc, |_| Ok(()))
 }
 
 /// How `aplan paths match` selected the patterns it evaluated (`A2-092`).
@@ -8857,19 +9381,23 @@ const PATHS_MATCH_NOTE: &str = "Exact tracked-file matches show what `paths` cur
 /// # Errors
 /// Propagates any write failure on stdout.
 pub fn render_paths_match(report: &PathsMatchReport, format: Format) -> std::io::Result<()> {
-    if format != Format::Human {
-        return render_paths_match_json(report);
+    if format == Format::Human {
+        stream_human_to_stdout(|out| write_paths_match_human(out, report))
+    } else {
+        stream_to_stdout(|out| write_paths_match_json(out, report))
     }
-    let mut out = crate::write::anstream_stdout();
-    write!(out, "{}", paths_match_human(report))
 }
 
-/// Human text rendering for `aplan paths match`, pure so tests inspect exact output.
-#[must_use]
-pub fn paths_match_human(report: &PathsMatchReport) -> String {
+/// Stream the human `paths match` report directly into `out` (`A2-136`).
+///
+/// # Errors
+/// Propagates any write failure on `out`.
+pub fn write_paths_match_human(
+    out: &mut impl std::io::Write,
+    report: &PathsMatchReport,
+) -> std::io::Result<()> {
     use aplan_core::glob::PathMatchStatus;
 
-    let mut s = String::new();
     let bound = match report.limit {
         Some(n) => format!("limit {n} per entry"),
         None => "unlimited (--all)".to_string(),
@@ -8883,8 +9411,8 @@ pub fn paths_match_human(report: &PathsMatchReport) -> String {
         ),
         None => format!("{} path glob(s)", report.entries.len()),
     };
-    let _ = writeln!(
-        s,
+    writeln!(
+        out,
         "{}",
         fold::fold(
             &format!(
@@ -8894,22 +9422,21 @@ pub fn paths_match_human(report: &PathsMatchReport) -> String {
             fold::out_width(),
             0
         )
-    );
-    let _ = writeln!(s);
+    )?;
+    writeln!(out)?;
 
     if report.entries.is_empty() {
         if let Some(task) = &report.task {
-            let _ = writeln!(s, "task `{}` declares no `paths` entries.", task.id);
+            writeln!(out, "task `{}` declares no `paths` entries.", task.id)?;
         } else {
-            let _ = writeln!(s, "no path globs provided.");
+            writeln!(out, "no path globs provided.")?;
         }
-        let _ = writeln!(s);
-        let _ = writeln!(s, "{}", fold::note(PATHS_MATCH_NOTE));
-        return s;
+        writeln!(out)?;
+        return writeln!(out, "{}", fold::note(PATHS_MATCH_NOTE));
     }
 
     for entry in &report.entries {
-        write_path_match_entry(&mut s, entry);
+        write_path_match_entry(out, entry)?;
     }
 
     let matched = report
@@ -8927,17 +9454,28 @@ pub fn paths_match_human(report: &PathsMatchReport) -> String {
         .iter()
         .filter(|e| e.status == PathMatchStatus::Invalid)
         .count();
-    let _ = writeln!(s);
-    let _ = writeln!(
-        s,
+    writeln!(out)?;
+    writeln!(
+        out,
         "summary: {matched} matched, {empty} empty, {invalid} invalid ({} unique matched file(s)).",
         report.unique_matched_files
-    );
-    let _ = writeln!(s, "{}", fold::note(PATHS_MATCH_NOTE));
-    s
+    )?;
+    writeln!(out, "{}", fold::note(PATHS_MATCH_NOTE))
 }
 
-fn write_path_match_entry(s: &mut String, entry: &aplan_core::glob::PathMatchEntry) {
+/// Human text rendering for `aplan paths match`, pure so tests inspect exact output.
+#[must_use]
+pub fn paths_match_human(report: &PathsMatchReport) -> String {
+    let mut buf = Vec::new();
+    write_paths_match_human(&mut buf, report)
+        .expect("writing paths-match report to Vec<u8> is infallible");
+    String::from_utf8(buf).expect("paths-match report is UTF-8")
+}
+
+fn write_path_match_entry(
+    out: &mut impl std::io::Write,
+    entry: &aplan_core::glob::PathMatchEntry,
+) -> std::io::Result<()> {
     use aplan_core::glob::PathMatchStatus;
 
     let pat = sanitize::visible(&entry.pattern);
@@ -8953,56 +9491,99 @@ fn write_path_match_entry(s: &mut String, entry: &aplan_core::glob::PathMatchEnt
     match entry.status {
         PathMatchStatus::Matched => {
             if entry.truncated {
-                let _ = writeln!(
-                    s,
+                writeln!(
+                    out,
                     "{ok}[matched]{ok:#} `{pat}`{norm_note}: showing {} of {} tracked file(s) (truncated)",
                     entry.returned, entry.total_matched
-                );
+                )?;
             } else {
-                let _ = writeln!(
-                    s,
+                writeln!(
+                    out,
                     "{ok}[matched]{ok:#} `{pat}`{norm_note}: {} tracked file(s)",
                     entry.total_matched
-                );
+                )?;
             }
             for path in &entry.matches {
-                let _ = writeln!(s, "  {}", sanitize::visible(path));
+                writeln!(out, "  {}", sanitize::visible(path))?;
             }
             if entry.truncated {
                 let omitted = entry.total_matched.saturating_sub(entry.returned);
-                let _ = writeln!(
-                    s,
+                writeln!(
+                    out,
                     "  {dim}... and {omitted} more matched file(s) (pass --limit or --all to see more){dim:#}"
-                );
+                )?;
             }
         }
         PathMatchStatus::Empty => {
-            let _ = writeln!(
-                s,
+            writeln!(
+                out,
                 "{warn}[empty]{warn:#}   `{pat}`{norm_note}: 0 tracked files"
-            );
+            )?;
             if entry.bare_tracked_directory {
                 let dir = sanitize::visible(entry.normalised.trim_end_matches('/'));
-                let _ = writeln!(
-                    s,
+                writeln!(
+                    out,
                     "  {dim}hint: `{dir}` is a tracked directory; bare directories match a literal \
                      filename, use `{dir}/**` to match files inside it{dim:#}"
-                );
+                )?;
             }
         }
         PathMatchStatus::Invalid => {
             let err = entry.error.as_deref().unwrap_or("invalid glob");
-            let _ = writeln!(
-                s,
+            writeln!(
+                out,
                 "{err_style}[invalid]{err_style:#} `{pat}`{norm_note}: {}",
                 sanitize::visible(err)
-            );
+            )?;
         }
     }
+    Ok(())
 }
 
-fn render_paths_match_json(report: &PathsMatchReport) -> std::io::Result<()> {
+/// Stream `aplan/paths-match/v1` JSON directly into `out` (`A2-136`).
+///
+/// # Errors
+/// Propagates any serialization or downstream I/O error.
+pub fn write_paths_match_json(
+    out: &mut impl std::io::Write,
+    report: &PathsMatchReport,
+) -> std::io::Result<()> {
+    use crate::stream::SeqIter;
     use aplan_core::glob::PathMatchStatus;
+
+    #[derive(serde::Serialize)]
+    struct EntryJson<'a> {
+        bare_tracked_directory: bool,
+        error: Option<&'a str>,
+        matches: &'a [String],
+        normalised: &'a str,
+        pattern: &'a str,
+        returned: usize,
+        status: PathMatchStatus,
+        total_matched: usize,
+        truncated: bool,
+    }
+    #[derive(serde::Serialize)]
+    struct SummaryJson {
+        empty: usize,
+        entries: usize,
+        invalid: usize,
+        matched: usize,
+        truncated_entries: usize,
+        unique_matched_files: usize,
+    }
+    #[derive(serde::Serialize)]
+    struct PathsMatchDoc<'a, E: serde::Serialize> {
+        entries: E,
+        limit: Option<usize>,
+        mode: PathsMatchMode,
+        note: &'static str,
+        schema: &'static str,
+        summary: SummaryJson,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        task: Option<&'a PathsMatchTask>,
+        tracked_files: usize,
+    }
 
     let matched = report
         .entries
@@ -9021,33 +9602,36 @@ fn render_paths_match_json(report: &PathsMatchReport) -> std::io::Result<()> {
         .count();
     let truncated_entries = report.entries.iter().filter(|e| e.truncated).count();
 
-    let mut doc = serde_json::json!({
-        "schema": "aplan/paths-match/v1",
-        "mode": report.mode,
-        "tracked_files": report.tracked_files,
-        "limit": report.limit,
-        "summary": {
-            "entries": report.entries.len(),
-            "matched": matched,
-            "empty": empty,
-            "invalid": invalid,
-            "unique_matched_files": report.unique_matched_files,
-            "truncated_entries": truncated_entries,
+    let doc = PathsMatchDoc {
+        entries: SeqIter(|| {
+            report.entries.iter().map(|e| EntryJson {
+                bare_tracked_directory: e.bare_tracked_directory,
+                error: e.error.as_deref(),
+                matches: &e.matches,
+                normalised: &e.normalised,
+                pattern: &e.pattern,
+                returned: e.returned,
+                status: e.status,
+                total_matched: e.total_matched,
+                truncated: e.truncated,
+            })
+        }),
+        limit: report.limit,
+        mode: report.mode,
+        note: PATHS_MATCH_NOTE,
+        schema: "aplan/paths-match/v1",
+        summary: SummaryJson {
+            empty,
+            entries: report.entries.len(),
+            invalid,
+            matched,
+            truncated_entries,
+            unique_matched_files: report.unique_matched_files,
         },
-        "entries": report.entries,
-        "note": PATHS_MATCH_NOTE,
-    });
-    if let Some(task) = &report.task
-        && let Some(obj) = doc.as_object_mut()
-    {
-        obj.insert(
-            "task".to_string(),
-            serde_json::to_value(task).unwrap_or(serde_json::Value::Null),
-        );
-    }
-    let mut out = crate::write::stdout();
-    serde_json::to_writer_pretty(&mut out, &doc)?;
-    writeln!(out)
+        task: report.task.as_ref(),
+        tracked_files: report.tracked_files,
+    };
+    crate::stream::stream_json_pretty(out, &doc, |_| Ok(()))
 }
 
 #[cfg(test)]
@@ -9237,6 +9821,568 @@ mod format_table_tests {
                 surface.default_format().renders(*surface),
                 "{surface:?} cannot render {:?}, which its commands default to",
                 surface.default_format()
+            );
+        }
+    }
+
+    #[test]
+    fn streaming_sarif_and_graph_match_buffered_bytes() {
+        let report = Report {
+            tasks_checked: 2,
+            diagnostics: vec![Diagnostic {
+                code: "APLAN009",
+                severity: Severity::Warning,
+                message: "effort is absent".into(),
+                task: Some("T-1".into()),
+                file: Some(std::path::PathBuf::from("aplan/tasks/T-1.md")),
+                location: Some(aplan_core::diagnostic::Location { line: 4, column: 1 }),
+                agent_instruction: Some("add effort_days".into()),
+                detail: vec!["line one".into()],
+                repair: None,
+            }],
+            agent_contract_provenance: None,
+            candidate_projections: Vec::new(),
+        };
+        let policy = Verdict::default();
+        let buffered_sarif = format!(
+            "{}\n",
+            serde_json::to_string_pretty(&sarif_document(&report, &policy)).expect("sarif")
+        );
+        let mut streamed_sarif = Vec::new();
+        write_sarif(&mut streamed_sarif, &report, &policy).expect("write_sarif");
+        assert_eq!(
+            String::from_utf8(streamed_sarif).expect("utf8"),
+            buffered_sarif
+        );
+
+        let view = GraphView {
+            nodes: vec![
+                GraphNode {
+                    id: "T-1".into(),
+                    title: "First".into(),
+                    status: Status::Done,
+                    done: true,
+                },
+                GraphNode {
+                    id: "T-2".into(),
+                    title: "Second".into(),
+                    status: Status::Todo,
+                    done: false,
+                },
+            ],
+            edges: vec![GraphEdge {
+                from: "T-1".into(),
+                to: "T-2".into(),
+                kind: EdgeKind::Dependency,
+            }],
+            hidden_edges: 1,
+            grouping: Grouping { edges: 2, tasks: 1 },
+            scope: vec!["cut M-1".into()],
+        };
+        let mut buffered_graph_val = serde_json::to_value(&view).expect("graph val");
+        buffered_graph_val
+            .as_object_mut()
+            .expect("obj")
+            .insert("schema".into(), serde_json::json!("aplan/graph/v1"));
+        let buffered_graph = format!(
+            "{}\n",
+            serde_json::to_string_pretty(&buffered_graph_val).expect("pretty")
+        );
+        let mut streamed_graph = Vec::new();
+        write_graph_json(&mut streamed_graph, &view).expect("write_graph_json");
+        assert_eq!(
+            String::from_utf8(streamed_graph).expect("utf8"),
+            buffered_graph
+        );
+        assert!(render_graph_view(&view, Format::Human).is_err());
+    }
+
+    #[test]
+    fn streaming_tasks_preflights_non_finite_floats() {
+        let bad_export = TaskExport {
+            schema: "aplan/tasks/v2".into(),
+            coordination: aplan_core::ClaimScope::unavailable("test"),
+            claim_observed_at_epoch_seconds: 0,
+            tasks: vec![aplan_core::export::TaskRow {
+                id: "BAD-1".into(),
+                title: "NaN effort".into(),
+                phase: 1,
+                status: Status::Todo,
+                effort_days: Some(f64::NAN),
+                owner: None,
+                claim: None,
+                claim_state: aplan_core::ClaimCoordinationState::Unavailable,
+                tags: Vec::new(),
+                blocked_by: Vec::new(),
+                cut: None,
+                milestone: None,
+                ready: true,
+                milestone_task: false,
+                rank: Some(1),
+                evidence: Vec::new(),
+                paths: Vec::new(),
+                traces: Vec::new(),
+                prefer_after: Vec::new(),
+                ratified_by: Vec::new(),
+                contains: Vec::new(),
+                trace_fingerprints: std::collections::BTreeMap::new(),
+                evidence_fingerprints: std::collections::BTreeMap::new(),
+                revisit_at: None,
+                version_impact: None,
+                version_impact_reason: None,
+                version: None,
+                closed_at: None,
+                closed_at_source: None,
+            }],
+        };
+        let mut sink = Vec::new();
+        let err = write_tasks_json(&mut sink, &bad_export)
+            .expect_err("non-finite effort_days must fail preflight");
+        assert_eq!(err.kind(), std::io::ErrorKind::InvalidData);
+        assert!(sink.is_empty(), "preflight failure must emit zero bytes");
+    }
+
+    #[test]
+    fn streaming_advisory_reports_cover_due_and_paths() {
+        let due = DueReport {
+            tasks: vec![DueTask {
+                id: "D-1".into(),
+                title: "Revisit overdue".into(),
+                revisit_at: "2026-01-01".into(),
+                overdue_seconds: 90_000,
+            }],
+            waiting: 2,
+            as_of: Some("2026-01-03".into()),
+        };
+        let mut buf = Vec::new();
+        write_due_human(&mut buf, &due).expect("due human");
+        assert!(String::from_utf8(buf).expect("utf8").contains("D-1"));
+        let mut buf = Vec::new();
+        write_due_json(&mut buf, &due).expect("due json");
+        let parsed: serde_json::Value = serde_json::from_slice(&buf).expect("due json parse");
+        assert_eq!(parsed["schema"], "aplan/due/v1");
+        assert_eq!(parsed["waiting"], 2);
+
+        for paths in [
+            PathsReport {
+                sampled: 0,
+                asked_for: 50,
+                tasks: Vec::new(),
+                without_paths: 0,
+                unmeasurable: 0,
+            },
+            PathsReport {
+                sampled: 10,
+                asked_for: 50,
+                tasks: Vec::new(),
+                without_paths: 1,
+                unmeasurable: 1,
+            },
+            PathsReport {
+                sampled: 10,
+                asked_for: 50,
+                tasks: vec![PathBreadth {
+                    id: "P-1".into(),
+                    title: "Broad".into(),
+                    first_path: "src/**".into(),
+                    hits: 5,
+                    percent: 50,
+                }],
+                without_paths: 1,
+                unmeasurable: 1,
+            },
+        ] {
+            let mut h = Vec::new();
+            write_paths_human(&mut h, &paths).expect("paths human");
+            assert!(!h.is_empty());
+            let mut j = Vec::new();
+            write_paths_json(&mut j, &paths).expect("paths json");
+            let val: serde_json::Value = serde_json::from_slice(&j).expect("paths json parse");
+            assert_eq!(val["schema"], "aplan/paths/v1");
+        }
+    }
+
+    #[test]
+    fn streaming_advisory_reports_cover_deprecations_and_paths_match() {
+        let rtask = |id: &str, cut: Option<&str>| aplan_core::deprecation::RunwayTask {
+            id: id.into(),
+            title: format!("Task {id}"),
+            status: Status::Todo,
+            cut: cut.map(str::to_string),
+            cited: true,
+        };
+        let dep = Deprecations {
+            runways: vec![aplan_core::deprecation::Runway {
+                announced: rtask("DEP-1", Some("v1")),
+                removals: vec![rtask("REM-1", Some("v2"))],
+                faults: vec![aplan_core::deprecation::Fault::RemovedWhereAnnounced],
+            }],
+            unannounced: vec![rtask("REM-2", None)],
+        };
+        let mut dh = Vec::new();
+        write_deprecations_human(&mut dh, &dep).expect("dep human");
+        assert!(String::from_utf8(dh).expect("utf8").contains("DEP-1"));
+        assert!(deprecations_markdown(&dep).contains("DEP-1"));
+        let mut dj = Vec::new();
+        write_deprecations_json(&mut dj, &dep).expect("dep json");
+        let val: serde_json::Value = serde_json::from_slice(&dj).expect("dep json parse");
+        assert_eq!(val["schema"], "aplan/deprecations/v1");
+
+        let pm = PathsMatchReport {
+            mode: PathsMatchMode::Globs,
+            task: None,
+            tracked_files: 3,
+            limit: Some(1),
+            unique_matched_files: 2,
+            entries: vec![
+                aplan_core::glob::PathMatchEntry {
+                    pattern: "src/**".into(),
+                    normalised: "src/**".into(),
+                    status: aplan_core::glob::PathMatchStatus::Matched,
+                    total_matched: 2,
+                    returned: 1,
+                    truncated: true,
+                    bare_tracked_directory: false,
+                    error: None,
+                    matches: vec!["src/a.rs".into()],
+                },
+                aplan_core::glob::PathMatchEntry {
+                    pattern: "src".into(),
+                    normalised: "src".into(),
+                    status: aplan_core::glob::PathMatchStatus::Empty,
+                    total_matched: 0,
+                    returned: 0,
+                    truncated: false,
+                    bare_tracked_directory: true,
+                    error: None,
+                    matches: Vec::new(),
+                },
+                aplan_core::glob::PathMatchEntry {
+                    pattern: "[".into(),
+                    normalised: "[".into(),
+                    status: aplan_core::glob::PathMatchStatus::Invalid,
+                    total_matched: 0,
+                    returned: 0,
+                    truncated: false,
+                    bare_tracked_directory: false,
+                    error: Some("invalid glob".into()),
+                    matches: Vec::new(),
+                },
+            ],
+        };
+        let mut pmh = Vec::new();
+        write_paths_match_human(&mut pmh, &pm).expect("paths match human");
+        assert!(String::from_utf8(pmh).expect("utf8").contains("src/a.rs"));
+        let mut pmj = Vec::new();
+        write_paths_match_json(&mut pmj, &pm).expect("paths match json");
+        let val: serde_json::Value = serde_json::from_slice(&pmj).expect("pm json parse");
+        assert_eq!(val["schema"], "aplan/paths-match/v1");
+        assert_eq!(val["summary"]["truncated_entries"], 1);
+    }
+
+    #[test]
+    fn streaming_dot_completed_stale_and_stdout_helpers_cover_branches() {
+        stream_to_stdout(|_| Ok(())).expect("empty stdout stream");
+        stream_human_to_stdout(|_| Ok(())).expect("empty human stdout stream");
+
+        let view = GraphView {
+            nodes: vec![
+                GraphNode {
+                    id: "T-1".into(),
+                    title: "Done \"quoted\" \\line1\nline2".into(),
+                    status: Status::Done,
+                    done: true,
+                },
+                GraphNode {
+                    id: "T-2".into(),
+                    title: "Pending".into(),
+                    status: Status::Todo,
+                    done: false,
+                },
+            ],
+            edges: vec![
+                GraphEdge {
+                    from: "T-1".into(),
+                    to: "T-2".into(),
+                    kind: EdgeKind::Dependency,
+                },
+                GraphEdge {
+                    from: "T-2".into(),
+                    to: "M-1".into(),
+                    kind: EdgeKind::Membership,
+                },
+            ],
+            hidden_edges: 1,
+            grouping: Grouping { edges: 1, tasks: 1 },
+            scope: vec!["phase=1".into()],
+        };
+        let dot = dot_of_view(&view);
+        assert!(dot.contains("shape=ellipse") && dot.contains("shape=box"));
+        assert!(dot.contains("[style=dashed]") && dot.contains("// "));
+        let mut graph_json = Vec::new();
+        write_graph_json(&mut graph_json, &view).expect("graph json");
+        assert!(
+            String::from_utf8(graph_json)
+                .expect("utf8")
+                .contains("aplan/graph/v1")
+        );
+        assert_eq!(
+            render_graph_view(&view, Format::Human)
+                .expect_err("human is rejected for graph view")
+                .kind(),
+            std::io::ErrorKind::InvalidInput
+        );
+    }
+
+    #[test]
+    fn streaming_advisory_empty_and_edge_variants_cover_helpers() {
+        let empty_due = DueReport {
+            tasks: Vec::new(),
+            waiting: 3,
+            as_of: None,
+        };
+        assert!(due_human(&empty_due).contains("no parked task is due"));
+
+        let empty_paths = PathsReport {
+            sampled: 5,
+            asked_for: 10,
+            tasks: Vec::new(),
+            without_paths: 2,
+            unmeasurable: 0,
+        };
+        assert!(paths_human(&empty_paths).contains("no task declares `paths`"));
+
+        let empty_dep = Deprecations {
+            runways: Vec::new(),
+            unannounced: Vec::new(),
+        };
+        assert!(deprecations_human(&empty_dep).contains("declares no deprecation runway"));
+        assert!(deprecations_markdown(&empty_dep).contains("None announced."));
+
+        let rtask =
+            |id: &str, status: Status, cut: Option<&str>| aplan_core::deprecation::RunwayTask {
+                id: id.into(),
+                title: format!("Task {id}"),
+                status,
+                cut: cut.map(str::to_string),
+                cited: true,
+            };
+        let mixed_dep = Deprecations {
+            runways: vec![
+                aplan_core::deprecation::Runway {
+                    announced: rtask("D-1", Status::Done, None),
+                    removals: Vec::new(),
+                    faults: Vec::new(),
+                },
+                aplan_core::deprecation::Runway {
+                    announced: rtask("D-2", Status::Done, Some("v1")),
+                    removals: vec![rtask("R-2", Status::Done, Some("v2"))],
+                    faults: Vec::new(),
+                },
+            ],
+            unannounced: Vec::new(),
+        };
+        let md = deprecations_markdown(&mixed_dep);
+        assert!(
+            md.contains("not scheduled")
+                && md.contains("| announced |")
+                && md.contains("| removed |")
+        );
+
+        let empty_pm_task = PathsMatchReport {
+            mode: PathsMatchMode::Task,
+            task: Some(PathsMatchTask {
+                id: "T-9".into(),
+                title: "Empty paths".into(),
+            }),
+            tracked_files: 4,
+            limit: None,
+            unique_matched_files: 0,
+            entries: Vec::new(),
+        };
+        assert!(paths_match_human(&empty_pm_task).contains("declares no `paths` entries"));
+        let empty_pm_globs = PathsMatchReport {
+            mode: PathsMatchMode::Globs,
+            task: None,
+            tracked_files: 4,
+            limit: None,
+            unique_matched_files: 0,
+            entries: Vec::new(),
+        };
+        assert!(paths_match_human(&empty_pm_globs).contains("no path globs provided"));
+        let norm_pm = PathsMatchReport {
+            mode: PathsMatchMode::Globs,
+            task: None,
+            tracked_files: 4,
+            limit: Some(5),
+            unique_matched_files: 1,
+            entries: vec![aplan_core::glob::PathMatchEntry {
+                pattern: "./src/lib.rs".into(),
+                normalised: "src/lib.rs".into(),
+                status: aplan_core::glob::PathMatchStatus::Matched,
+                total_matched: 1,
+                returned: 1,
+                truncated: false,
+                bare_tracked_directory: false,
+                error: None,
+                matches: vec!["src/lib.rs".into()],
+            }],
+        };
+        let norm_text = paths_match_human(&norm_pm);
+        assert!(norm_text.contains("normalised `src/lib.rs`"));
+    }
+
+    #[test]
+    fn format_completed_human_covers_provenance_variants() {
+        let base_completed = aplan_core::CompletedResponse {
+            schema: "aplan/completed/v1".into(),
+            input_identity: "id".into(),
+            basis_revision: "abc1234".into(),
+            completeness: aplan_core::HistoryCompleteness::Complete,
+            limitations: vec!["bounded".into()],
+            commits_walked: 4,
+            applied: aplan_core::AppliedCompletedRequest {
+                since: None,
+                until: None,
+                oldest_first: true,
+                history: aplan_core::HistoryPolicy::Auto,
+                limit: Some(10),
+                selector: aplan_core::AppliedCompletedSelector::default(),
+            },
+            total_matched: 4,
+            truncated: true,
+            next_cursor: Some("cur1".into()),
+            items: Vec::new(),
+        };
+        assert!(format_completed_human(&base_completed).contains("no completed tasks matched"));
+        let mut populated = base_completed;
+        populated.applied.oldest_first = false;
+        populated.items = vec![
+            aplan_core::CompletedTaskRow {
+                id: "C-1".into(),
+                title: "Local".into(),
+                phase: 1,
+                owner: None,
+                cut: Some("v1".into()),
+                milestone: None,
+                tags: Vec::new(),
+                instant: Some("2026-01-01T00:00:00Z".into()),
+                source: aplan_core::CompletionTimeSource::Recorded,
+                recorded_origin: Some(aplan_core::ClosedAtSource::Local),
+                commit: None,
+                incomparable_candidates: 0,
+            },
+            aplan_core::CompletedTaskRow {
+                id: "C-2".into(),
+                title: "Imported".into(),
+                phase: 1,
+                owner: None,
+                cut: None,
+                milestone: None,
+                tags: Vec::new(),
+                instant: Some("2026-01-02T00:00:00Z".into()),
+                source: aplan_core::CompletionTimeSource::Recorded,
+                recorded_origin: Some(aplan_core::ClosedAtSource::Imported),
+                commit: None,
+                incomparable_candidates: 0,
+            },
+            aplan_core::CompletedTaskRow {
+                id: "C-3".into(),
+                title: "History multi".into(),
+                phase: 1,
+                owner: None,
+                cut: Some("v1".into()),
+                milestone: None,
+                tags: Vec::new(),
+                instant: Some("2026-01-03T00:00:00Z".into()),
+                source: aplan_core::CompletionTimeSource::HistoryFirstSeen,
+                recorded_origin: None,
+                commit: Some("abcdef1234567890".into()),
+                incomparable_candidates: 2,
+            },
+            aplan_core::CompletedTaskRow {
+                id: "C-4".into(),
+                title: "Unknown".into(),
+                phase: 1,
+                owner: None,
+                cut: None,
+                milestone: None,
+                tags: Vec::new(),
+                instant: None,
+                source: aplan_core::CompletionTimeSource::Unknown,
+                recorded_origin: None,
+                commit: None,
+                incomparable_candidates: 0,
+            },
+        ];
+        let completed_text = format_completed_human(&populated);
+        assert!(completed_text.contains("recorded:imported"));
+        assert!(completed_text.contains("history:abcdef1 (2 candidates)"));
+        assert!(completed_text.contains("next page: --cursor cur1"));
+    }
+
+    #[test]
+    fn streaming_stale_writer_covers_empty_fresh_and_populated_reports() {
+        let stale_cases = [
+            StaleReport {
+                window_days: 14,
+                tasks: Vec::new(),
+                fresh: 0,
+                untracked: 2,
+                as_of: None,
+                coordination: aplan_core::ClaimScope::unavailable("test"),
+                claim_observed_at_epoch_seconds: 1_700_000_000,
+            },
+            StaleReport {
+                window_days: 14,
+                tasks: Vec::new(),
+                fresh: 3,
+                untracked: 1,
+                as_of: Some("2026-01-10".into()),
+                coordination: aplan_core::ClaimScope::unavailable("test"),
+                claim_observed_at_epoch_seconds: 1_700_000_000,
+            },
+            StaleReport {
+                window_days: 14,
+                tasks: vec![
+                    StaleTask {
+                        id: "S-1".into(),
+                        title: "Ready stale".into(),
+                        status: "todo".into(),
+                        idle_days: 20,
+                        ready: true,
+                        owner: Some("alice".into()),
+                        held_by: Some("bob".into()),
+                        claim: None,
+                        claim_age_seconds: Some(3600),
+                    },
+                    StaleTask {
+                        id: "S-2".into(),
+                        title: "Parked stale".into(),
+                        status: "blocked".into(),
+                        idle_days: 30,
+                        ready: false,
+                        owner: None,
+                        held_by: None,
+                        claim: None,
+                        claim_age_seconds: None,
+                    },
+                ],
+                fresh: 1,
+                untracked: 0,
+                as_of: None,
+                coordination: aplan_core::ClaimScope::unavailable("test"),
+                claim_observed_at_epoch_seconds: 1_700_000_000,
+            },
+        ];
+        for report in &stale_cases {
+            assert!(!stale_human(report).is_empty());
+            let mut j = Vec::new();
+            write_stale_json(&mut j, report).expect("stale json");
+            assert!(
+                String::from_utf8(j)
+                    .expect("utf8")
+                    .contains("aplan/stale/v2")
             );
         }
     }

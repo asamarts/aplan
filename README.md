@@ -52,8 +52,10 @@ glob semantics, and run `aplan paths` to inspect bounded commit history; neither
 relevance. `aplan show <id> --body` pretty-renders task Markdown for the terminal (`--width`, `--ascii`), while
 `aplan show <id> --raw-body` emits the verbatim stored Markdown bytes for pipes and editors.
 `aplan completed` lists finished work in deterministic chronological order (`recorded` timestamps
-first, with optional bounded Git history inference for legacy `done` tasks). Use the built-in
-command help and `aplan facts` for the complete current surface.
+first, with optional bounded Git history inference for legacy `done` tasks). Whole-plan read tables,
+graphs, roadmaps, and diagnostic reports stream with bounded 16 KiB output buffering and stop
+promptly when downstream pipes close. Use the built-in command help and `aplan facts` for the
+complete current surface.
 
 ## GitHub Actions
 

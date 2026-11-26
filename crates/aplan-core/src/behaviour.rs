@@ -60,6 +60,27 @@ pub struct Behaviour {
 
 /// Every named behaviour this build has.
 pub const ALL: &[Behaviour] = &[
+    // `A2-136`. Previously, large read outputs (`tasks`, `ready`, `roadmap`,
+    // `graph`, `check`, `verify`, `paths`, `stale`, `due`, `deprecations`,
+    // `test list`) either materialized complete `String`/`serde_json::Value`
+    // buffers in memory or emitted unbuffered JSON syscall-by-syscall, and
+    // interrupted MCP sessions could outlive blocking providers. Streaming
+    // preflighted outputs through a bounded 16 KiB writer, enforcing the
+    // derived cross-channel read-surface inventory, and stopping promptly on
+    // pipe closure or MCP peer disconnect changes what existing read surfaces
+    // do without changing deterministic bytes.
+    Behaviour {
+        name: "read.streams_large_outputs_with_bounded_memory",
+        what: "output-dominated CLI read surfaces stream preflighted human, Markdown, graph, and \
+               machine JSON/SARIF output through a bounded 16 KiB buffer with deterministic byte \
+               parity, clean BrokenPipe shutdown, output-work timing counters, an exhaustive \
+               CLI+MCP read-surface disposition inventory, and orphan-free MCP disconnect cleanup",
+        proof: &[
+            "read_streaming::read_surface_inventory_covers_and_drives_every_cli_and_mcp_surface",
+            "read_streaming::large_read_outputs_stream_with_bounded_buffer_and_byte_parity",
+            "read_streaming::broken_pipe_and_interrupted_mcp_consumers_stop_cleanly_without_orphans",
+        ],
+    },
     // `A2-037`. Previously, serde reported only the first missing field in
     // `test` / `test.runners` and treated misplaced keys such as
     // `test.runners[0].schedule` as unknown keys without saying where they

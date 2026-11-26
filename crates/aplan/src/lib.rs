@@ -24,9 +24,8 @@ use aplan_output::{
     BlueprintApplicationReport, BlueprintFile, BlueprintFileKind, BlueprintOutcome, BlueprintTask,
     DependencyBatchOperation, DependencyBatchOutcome, DependencyBatchReport, Format, Surface,
     render_blueprint_application, render_checked, render_critical_path, render_dependency_batch,
-    render_grouped_summary, render_partial, render_proposed, render_roadmap,
-    render_roadmap_markdown, render_summary, render_tasks, render_verified_inbox_invalid,
-    render_verified_observed, render_verified_partial,
+    render_grouped_summary, render_partial, render_proposed, render_summary, render_tasks,
+    render_verified_inbox_invalid, render_verified_observed, render_verified_partial,
 };
 use clap::{CommandFactory, Parser, Subcommand, ValueEnum};
 
@@ -93,6 +92,7 @@ struct TimingState {
     started: std::time::Instant,
     graph_constructions_at_start: usize,
     trace_document_work_at_start: aplan_core::TraceDocumentWork,
+    output_work_at_start: aplan_output::stream::OutputWork,
     phases: std::collections::BTreeMap<&'static str, std::time::Duration>,
     work: ReadWork,
 }
@@ -106,12 +106,14 @@ fn timing_slot() -> &'static std::sync::Mutex<Option<TimingState>> {
 
 fn start_timings(enabled: bool, started: std::time::Instant) {
     if enabled {
+        aplan_output::stream::reset_peak_output_buffer();
         *timing_slot()
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner) = Some(TimingState {
             started,
             graph_constructions_at_start: aplan_core::graph_constructions(),
             trace_document_work_at_start: aplan_core::trace_document_work(),
+            output_work_at_start: aplan_output::stream::output_work(),
             phases: std::collections::BTreeMap::new(),
             work: ReadWork::default(),
         });
@@ -259,6 +261,11 @@ fn finish_timings() {
     let phase = |name| state.phases.get(name).copied().unwrap_or_default();
     let trace_now = aplan_core::trace_document_work();
     let trace_start = state.trace_document_work_at_start;
+    let output_now = aplan_output::stream::output_work();
+    let output_bytes = output_now
+        .bytes_written
+        .saturating_sub(state.output_work_at_start.bytes_written);
+    let peak_output_buffer_bytes = output_now.peak_buffer_bytes;
     let receipt = if state.work.receipt_mode {
         format!(
             " receipt_manifest_ms={:.3} receipt_material_ms={:.3} receipt_parse_ms={:.3} \
@@ -282,7 +289,8 @@ fn finish_timings() {
          project_ms={:.3} render_ms={:.3} config_loads={} plan_loads={} candidates={} readable={} \
          bytes_read={} tasks_parsed={} retained_files={} retained_bytes={} graph_builds={} \
          cache_hits={} cache_reused={} cache_parsed={} cache_bytes_read={} cache_bytes_written={} \
-         trace_reads={} trace_bytes_read={} markdown_parses={} structured_parses={}{}",
+         trace_reads={} trace_bytes_read={} markdown_parses={} structured_parses={} \
+         output_bytes={} peak_output_buffer_bytes={}{}",
         milliseconds(state.started.elapsed()),
         milliseconds(phase("config")),
         milliseconds(phase("load")),
@@ -311,6 +319,8 @@ fn finish_timings() {
         trace_now
             .structured_parses
             .saturating_sub(trace_start.structured_parses),
+        output_bytes,
+        peak_output_buffer_bytes,
         receipt,
     );
 }
@@ -1701,6 +1711,359 @@ fn command_progress_profile(command: &Command) -> CommandProgressProfile {
     }
 }
 
+/// Compile-time exhaustive classification of every top-level [`Command`] into
+/// read-surface vs non-read command (`A2-136`).
+///
+/// Adding a new variant to [`Command`] fails to compile until it is classified
+/// here and, if read-only, given an explicit output-volume disposition in
+/// [`cli_read_surface_inventory`].
+#[allow(dead_code)] // Enforced at compile time over every `Command` variant.
+const fn command_is_read_surface(command: &Command) -> bool {
+    match command {
+        Command::Check(_)
+        | Command::Verify(_)
+        | Command::Show(_)
+        | Command::Explain(_)
+        | Command::Graph(_)
+        | Command::Ready(_)
+        | Command::Due(_)
+        | Command::Why { .. }
+        | Command::Tree { .. }
+        | Command::Paths { .. }
+        | Command::Vacuity { .. }
+        | Command::Stale { .. }
+        | Command::Deprecations { .. }
+        | Command::Version(_)
+        | Command::Attest { .. }
+        | Command::ExportAgentsMd { .. }
+        | Command::ExportRoadmapJson { .. }
+        | Command::Export(_)
+        | Command::CheckDocs { .. }
+        | Command::Completed { .. }
+        | Command::Summary { .. }
+        | Command::Tasks { .. }
+        | Command::CriticalPath(_)
+        | Command::Roadmap(_)
+        | Command::Test { .. }
+        | Command::Inbox(_)
+        | Command::Facts { .. }
+        | Command::Schema => true,
+        Command::Tui(_)
+        | Command::Mcp
+        | Command::Init { .. }
+        | Command::Add(_)
+        | Command::Supersede(_)
+        | Command::Import(_)
+        | Command::Capture(_)
+        | Command::Drop { .. }
+        | Command::Park { .. }
+        | Command::Unpark { .. }
+        | Command::Claim { .. }
+        | Command::Release { .. }
+        | Command::Start { .. }
+        | Command::Stop { .. }
+        | Command::Review { .. }
+        | Command::RetargetPath { .. }
+        | Command::Mv { .. }
+        | Command::Close { .. }
+        | Command::Amend(_)
+        | Command::Tag(_)
+        | Command::Dep { .. }
+        | Command::Blueprint { .. }
+        | Command::Rekey(_) => false,
+    }
+}
+
+fn push_cli_read_entry(
+    entries: &mut Vec<aplan_output::stream::ReadSurfaceEntry>,
+    target: &str,
+    format: &str,
+    potentially_unbounded: bool,
+    disposition: aplan_output::stream::OutputDisposition,
+    atomic_error_boundary: &'static str,
+    rationale: &'static str,
+) {
+    entries.push(aplan_output::stream::ReadSurfaceEntry {
+        surface: format!("cli:{target}:{format}"),
+        channel: aplan_output::stream::ReadChannel::Cli,
+        target: target.to_string(),
+        format: format.to_string(),
+        potentially_unbounded,
+        disposition,
+        atomic_error_boundary,
+        rationale,
+    });
+}
+
+fn classify_formatted_cli_read(
+    command: &str,
+    format: Format,
+) -> (
+    bool,
+    aplan_output::stream::OutputDisposition,
+    &'static str,
+    &'static str,
+) {
+    use aplan_output::stream::OutputDisposition::{
+        Buffered, ExplicitlyCapped, Paginated, Streamed,
+    };
+    match (command, format) {
+        ("check" | "verify", Format::Human | Format::Github) => (
+            true,
+            Streamed,
+            "plan load, validation, and policy verdict complete before byte 0; line stream stops cleanly on BrokenPipe",
+            "Diagnostic streams scale with finding count and emit incrementally through a 16 KiB bounded writer.",
+        ),
+        ("check" | "verify", Format::Json | Format::Agent | Format::Sarif) => (
+            true,
+            Streamed,
+            "optional nested metadata preflighted before byte 0; infallible typed serializer streams diagnostics directly into a 16 KiB buffer",
+            "Machine diagnostic reports stream without intermediate Value trees while preserving byte-exact JSON/SARIF.",
+        ),
+        ("ready" | "tasks" | "roadmap", Format::Human | Format::Markdown) => (
+            true,
+            Streamed,
+            "graph projection and column width scan finish before byte 0; row stream stops cleanly on BrokenPipe",
+            "Whole-plan human tables and roadmap Markdown stream row-by-row through a 16 KiB bounded writer.",
+        ),
+        ("ready" | "tasks" | "roadmap", Format::Json) => (
+            true,
+            Streamed,
+            "all floating-point effort and throughput fields preflighted finite before byte 0; infallible typed serializer streams rows",
+            "Whole-plan JSON collections stream through a 16 KiB bounded writer without building full-document strings or Value trees.",
+        ),
+        ("graph", Format::Mermaid | Format::Dot | Format::Json) => (
+            true,
+            Streamed,
+            "scope, focus, and empty-graph refusals execute before byte 0; node and edge serializer is infallible once started",
+            "Graph exports scale linearly with nodes and edges and stream incrementally with bounded memory.",
+        ),
+        ("graph", Format::Text) => (
+            true,
+            ExplicitlyCapped,
+            "layered canvas capped at MAX_CANVAS_CELLS (8,000,000) and width-validated completely before byte 0; lanes completes 2D layout before painting",
+            "Terminal graph rendering requires complete 2D layout and enforces a hard cell cap so oversized canvases refuse atomically.",
+        ),
+        (
+            "paths" | "stale" | "due" | "deprecations",
+            Format::Human | Format::Json | Format::Markdown,
+        ) => (
+            true,
+            Streamed,
+            "repository and plan projections finish before byte 0; typed row/JSON serializers are infallible and stop cleanly on BrokenPipe",
+            "Advisory whole-plan tables and JSON reports stream through a 16 KiB bounded writer.",
+        ),
+        ("completed", Format::Human | Format::Json) => (
+            true,
+            Paginated,
+            "page sliced to bounded --limit (default 20, max 100) with snapshot-bound cursor before writing",
+            "Chronological completion history paginates deterministically so each response remains bounded.",
+        ),
+        ("inbox", Format::Human | Format::Json) => (
+            true,
+            ExplicitlyCapped,
+            "inbox query rejects limit outside 1..=100 before rendering bounded response",
+            "Capture inbox listing enforces an explicit 100-row ceiling.",
+        ),
+        ("test", Format::Human | Format::Json | Format::Agent) => (
+            true,
+            Streamed,
+            "provider discovery completes before byte 0; JSON and agent catalogues stream via bounded StreamingWriter",
+            "Test catalogues can span thousands of test names and stream machine JSON with bounded memory.",
+        ),
+        (
+            "show" | "why" | "summary" | "critical-path" | "vacuity" | "version",
+            Format::Human | Format::Json,
+        ) => (
+            false,
+            Buffered,
+            "single-task or fixed-cardinality aggregate projection validated completely before writing stdout",
+            "Inherently bounded by one task, one longest chain, phase count, or fixed Rule::ALL cardinality.",
+        ),
+        ("check-docs", Format::Human | Format::Json) => (
+            true,
+            Buffered,
+            "all declared documents scanned and exit verdict computed before writing complete report",
+            "Document reference scans are bounded by declared prose files and buffer for atomic verdict reporting.",
+        ),
+        (cmd, fmt) => panic!(
+            "CLI read surface `{cmd}` with format `{}` is missing an output disposition",
+            fmt.as_str()
+        ),
+    }
+}
+
+fn classify_unformatted_cli_read(
+    name: &str,
+) -> Option<(
+    &'static str,
+    bool,
+    aplan_output::stream::OutputDisposition,
+    &'static str,
+    &'static str,
+)> {
+    use aplan_output::stream::OutputDisposition::Buffered;
+
+    Some(match name {
+        "tree" => (
+            "human",
+            false,
+            Buffered,
+            "single-task neighbourhood built with cycle folding and optional --depth before emission",
+            "Focused single-task neighbourhood bounded by cycle folding and explicit depth.",
+        ),
+        "facts" => (
+            "json",
+            false,
+            Buffered,
+            "static build-surface JSON verified before writing stdout",
+            "Fixed-size compile-time build surface document.",
+        ),
+        "schema" => (
+            "json",
+            false,
+            Buffered,
+            "static frontmatter JSON Schema serialized atomically before writing stdout",
+            "Fixed-size static JSON Schema document.",
+        ),
+        "explain" => (
+            "human",
+            false,
+            Buffered,
+            "rule lookup validated before printing single rule explanation",
+            "Fixed-size single-rule prose explanation.",
+        ),
+        "attest" => (
+            "json",
+            false,
+            Buffered,
+            "whole-plan verification, clean-tree check, and canonical JSON digest complete before stdout or git-note write",
+            "Atomic cryptographic attestation must complete and pass verification before emitting any bytes.",
+        ),
+        "export-agents-md" => (
+            "markdown",
+            false,
+            Buffered,
+            "complete policy block assembled for --check comparison or guarded file write before stdout",
+            "Fixed-size generated AGENTS.md policy block.",
+        ),
+        "export-roadmap-json" => (
+            "json",
+            true,
+            Buffered,
+            "merges caller-supplied template JSON and compares/writes atomically before emitting status",
+            "Template merge can refuse late on user template conflicts and requires whole-file atomic equality checks.",
+        ),
+        "export" => (
+            "checklist",
+            true,
+            Buffered,
+            "conversion report and --check/--out file equality require complete rendered document before emission",
+            "Interop export pairs the document with a conversion report and atomic --check/--out file guards.",
+        ),
+        _ => return None,
+    })
+}
+
+/// Derived read-surface output-disposition inventory across CLI commands and
+/// Exhaustive CLI read-surface output-disposition inventory derived directly
+/// from the live `clap` command tree, [`COMMAND_SURFACES`], and
+/// [`Format::ALL`] (`A2-136`).
+///
+/// Any new CLI command or read format without an explicit disposition fails
+/// compile-time classification or panics here when audited.
+#[must_use]
+pub fn cli_read_surface_inventory() -> Vec<aplan_output::stream::ReadSurfaceEntry> {
+    use aplan_output::stream::OutputDisposition::{Buffered, ExplicitlyCapped};
+
+    let mut entries = Vec::new();
+    let cli = cli_command();
+
+    for sub in cli.get_subcommands() {
+        let name = sub.get_name();
+        match name {
+            // Non-read commands (mutations, interactive TUI, long-lived MCP protocol).
+            "add" | "amend" | "blueprint" | "capture" | "claim" | "close" | "dep" | "drop"
+            | "import" | "init" | "mcp" | "mv" | "park" | "rekey" | "release" | "retarget-path"
+            | "review" | "start" | "stop" | "supersede" | "tag" | "tui" | "unpark" => {}
+            other => {
+                if let Some((format, unbounded, disposition, boundary, rationale)) =
+                    classify_unformatted_cli_read(other)
+                {
+                    push_cli_read_entry(
+                        &mut entries,
+                        other,
+                        format,
+                        unbounded,
+                        disposition,
+                        boundary,
+                        rationale,
+                    );
+                } else {
+                    let Some(surface) = surface_of(other) else {
+                        panic!("CLI subcommand `{other}` is missing a read-surface classification");
+                    };
+                    for format in surface.formats() {
+                        let (unbounded, disposition, boundary, rationale) =
+                            classify_formatted_cli_read(other, format);
+                        push_cli_read_entry(
+                            &mut entries,
+                            other,
+                            format.as_str(),
+                            unbounded,
+                            disposition,
+                            boundary,
+                            rationale,
+                        );
+                    }
+                }
+            }
+        }
+    }
+
+    // Nested read-only subcommands beneath parent commands.
+    for format in [Format::Human, Format::Json] {
+        push_cli_read_entry(
+            &mut entries,
+            "paths match",
+            format.as_str(),
+            true,
+            ExplicitlyCapped,
+            "default --limit 200 bounds each glob entry; explicit --all streams through 16 KiB StreamingWriter",
+            "Tracked-file glob matcher caps per-entry output at 200 by default and streams when --all is requested.",
+        );
+        push_cli_read_entry(
+            &mut entries,
+            "inbox show",
+            format.as_str(),
+            false,
+            Buffered,
+            "single capture record loaded and validated before rendering",
+            "Focused read of one capture record.",
+        );
+    }
+    push_cli_read_entry(
+        &mut entries,
+        "test receipt",
+        "json",
+        true,
+        Buffered,
+        "provider execution and digest binding complete atomically before emitting signed receipt JSON",
+        "Provider receipt carries whole-catalogue digests and must emit atomically only when valid.",
+    );
+
+    entries
+}
+
+/// Complete cross-channel (CLI + MCP) derived read-surface output-disposition
+/// inventory (`A2-136`).
+#[must_use]
+pub fn read_surface_inventory() -> Vec<aplan_output::stream::ReadSurfaceEntry> {
+    let mut entries = cli_read_surface_inventory();
+    entries.extend(aplan_mcp::contract::mcp_read_surface_inventory());
+    entries
+}
+
 fn progress_environment() -> aplan_output::progress::ProgressEnvironment {
     aplan_output::progress::ProgressEnvironment {
         streams: aplan_output::progress::ProgressStreams::from_terminals(
@@ -2208,7 +2571,8 @@ fn timings_from_argv(args: impl Iterator<Item = std::ffi::OsString>) -> bool {
 fn write_stdout(s: &str) -> Result<()> {
     use std::io::Write as _;
     let _progress_write = ProgressWriteGuard::new();
-    match aplan_output::write::anstream_stdout().write_all(s.as_bytes()) {
+    let mut out = aplan_output::write::anstream_stdout();
+    match out.write_all(s.as_bytes()).and_then(|()| out.flush()) {
         Ok(()) => Ok(()),
         Err(e) if e.kind() == std::io::ErrorKind::BrokenPipe => Ok(()),
         Err(e) => Err(e.into()),
@@ -5857,83 +6221,26 @@ fn test_catalogue_count(count: usize, singular: &str, plural: &str) -> String {
     format!("{count} {noun}")
 }
 
-fn push_test_catalogue_runner(
-    out: &mut String,
-    runner: &aplan_app::TestCatalogueRunner,
-    filtered: bool,
-) {
-    use aplan_app::TestCatalogueRunnerState;
-
-    let label = test_catalogue_text(&runner.runner.label);
-    let heading = aplan_output::style::HEADING;
-    match runner.state {
-        TestCatalogueRunnerState::Listed => {
-            let selected = if filtered {
-                format!("{} of {} matching", runner.matched, runner.total)
-            } else {
-                format!("{} listed", runner.total)
-            };
-            let _ = writeln!(
-                out,
-                "{heading}runner #{} `{label}`:{heading:#} {selected}",
-                runner.runner.index
-            );
-        }
-        TestCatalogueRunnerState::Empty => {
-            let _ = writeln!(
-                out,
-                "{heading}runner #{} `{label}`:{heading:#} empty",
-                runner.runner.index
-            );
-        }
-        TestCatalogueRunnerState::Failed => {
-            let _ = writeln!(
-                out,
-                "{heading}runner #{} `{label}`:{heading:#} failed (see finding below)",
-                runner.runner.index
-            );
-        }
-    }
-    for test in &runner.tests {
-        let evidence = test_catalogue_text(&test.evidence);
-        if test.ambiguous {
-            let owners = test
-                .listed_by
-                .iter()
-                .map(|owner| format!("#{} `{}`", owner.index, test_catalogue_text(&owner.label)))
-                .collect::<Vec<_>>()
-                .join(", ");
-            let _ = writeln!(
-                out,
-                "  {id}{evidence}{id:#}  {warning}[ambiguous: listed by {owners}; not valid evidence]{warning:#}",
-                id = aplan_output::style::ID,
-                warning = aplan_output::style::WARNING,
-            );
-        } else {
-            let _ = writeln!(out, "  {id}{evidence}{id:#}", id = aplan_output::style::ID);
-        }
-    }
+fn write_folded_line<W: std::io::Write>(
+    out: &mut W,
+    line: &str,
+    width: usize,
+) -> std::io::Result<()> {
+    writeln!(out, "{}", aplan_output::fold::fold_block(line, width, 0))
 }
 
-fn format_test_catalogue_human(answer: &aplan_app::TestCatalogue) -> String {
+fn format_test_catalogue_header(answer: &aplan_app::TestCatalogue) -> String {
     use aplan_app::TestCatalogueState;
 
-    let mut out = String::new();
     let heading = aplan_output::style::HEADING;
     match answer.state {
-        TestCatalogueState::Unconfigured => {
-            let _ = writeln!(
-                out,
-                "{heading}test catalogue:{heading:#} no test runners are configured; there are no exact test evidence names to discover"
-            );
-        }
+        TestCatalogueState::Unconfigured => format!(
+            "{heading}test catalogue:{heading:#} no test runners are configured; there are no exact test evidence names to discover"
+        ),
         TestCatalogueState::NoMatch => {
             let query = test_catalogue_text(answer.query.as_deref().unwrap_or_default());
             let runners = test_catalogue_count(answer.summary.runners, "runner", "runners");
-            let _ = writeln!(
-                out,
-                "{heading}test catalogue:{heading:#} no names match `{query}` across {runners}"
-            );
+            format!("{heading}test catalogue:{heading:#} no names match `{query}` across {runners}")
         }
         TestCatalogueState::Partial => {
             let answered = test_catalogue_count(
@@ -5942,10 +6249,9 @@ fn format_test_catalogue_human(answer: &aplan_app::TestCatalogue) -> String {
                 "runners",
             );
             let failed = test_catalogue_count(answer.summary.failed_runners, "runner", "runners");
-            let _ = writeln!(
-                out,
+            format!(
                 "{heading}test catalogue:{heading:#} partial - {answered} answered and {failed} failed; absence is not authoritative"
-            );
+            )
         }
         TestCatalogueState::Complete => {
             if let Some(query) = &answer.query {
@@ -5961,10 +6267,9 @@ fn format_test_catalogue_human(answer: &aplan_app::TestCatalogue) -> String {
                     "total unique name",
                     "total unique names",
                 );
-                let _ = writeln!(
-                    out,
+                format!(
                     "{heading}test catalogue:{heading:#} {matches} for `{query}` across {runners} ({names})"
-                );
+                )
             } else {
                 let names = test_catalogue_count(
                     answer.summary.unique_names,
@@ -5972,42 +6277,120 @@ fn format_test_catalogue_human(answer: &aplan_app::TestCatalogue) -> String {
                     "unique names",
                 );
                 let runners = test_catalogue_count(answer.summary.runners, "runner", "runners");
-                let _ = writeln!(
-                    out,
-                    "{heading}test catalogue:{heading:#} {names} from {runners}"
-                );
+                format!("{heading}test catalogue:{heading:#} {names} from {runners}")
             }
         }
     }
+}
+
+fn write_test_catalogue_runner<W: std::io::Write>(
+    out: &mut W,
+    runner: &aplan_app::TestCatalogueRunner,
+    filtered: bool,
+    width: usize,
+) -> std::io::Result<()> {
+    use aplan_app::TestCatalogueRunnerState;
+
+    let label = test_catalogue_text(&runner.runner.label);
+    let heading = aplan_output::style::HEADING;
+    let id = aplan_output::style::ID;
+    let warning = aplan_output::style::WARNING;
+    let runner_line = match runner.state {
+        TestCatalogueRunnerState::Listed => {
+            let selected = if filtered {
+                format!("{} of {} matching", runner.matched, runner.total)
+            } else {
+                format!("{} listed", runner.total)
+            };
+            format!(
+                "{heading}runner #{} `{label}`:{heading:#} {selected}",
+                runner.runner.index
+            )
+        }
+        TestCatalogueRunnerState::Empty => {
+            format!(
+                "{heading}runner #{} `{label}`:{heading:#} empty",
+                runner.runner.index
+            )
+        }
+        TestCatalogueRunnerState::Failed => {
+            format!(
+                "{heading}runner #{} `{label}`:{heading:#} failed (see finding below)",
+                runner.runner.index
+            )
+        }
+    };
+    write_folded_line(out, &runner_line, width)?;
+    for test in &runner.tests {
+        let evidence = test_catalogue_text(&test.evidence);
+        let test_line = if test.ambiguous {
+            let owners = test
+                .listed_by
+                .iter()
+                .map(|owner| format!("#{} `{}`", owner.index, test_catalogue_text(&owner.label)))
+                .collect::<Vec<_>>()
+                .join(", ");
+            format!(
+                "  {id}{evidence}{id:#}  {warning}[ambiguous: listed by {owners}; not valid evidence]{warning:#}"
+            )
+        } else {
+            format!("  {id}{evidence}{id:#}")
+        };
+        write_folded_line(out, &test_line, width)?;
+    }
+    Ok(())
+}
+
+fn write_test_catalogue_human<W: std::io::Write>(
+    answer: &aplan_app::TestCatalogue,
+    width: usize,
+    out: &mut W,
+) -> std::io::Result<()> {
+    let heading = aplan_output::style::HEADING;
+    let id = aplan_output::style::ID;
+    write_folded_line(out, &format_test_catalogue_header(answer), width)?;
+    let filtered = answer.query.is_some();
     for runner in &answer.runners {
-        push_test_catalogue_runner(&mut out, runner, answer.query.is_some());
+        write_test_catalogue_runner(out, runner, filtered, width)?;
     }
     for finding in &answer.findings {
         let message = test_catalogue_text(&finding.message);
         let disposition = if finding.advisory { " (advisory)" } else { "" };
         let severity = aplan_output::style::severity(&finding.severity);
-        let _ = writeln!(
-            out,
+        let header = format!(
             "{severity}{}{severity:#}[{id}{}{id:#}]{disposition}: {message}",
-            finding.severity,
-            finding.code,
-            id = aplan_output::style::ID,
+            finding.severity, finding.code
         );
+        write_folded_line(out, &header, width)?;
         if let Some(file) = &finding.file {
             let rendered = file.display().to_string();
             let shown = test_catalogue_text(&rendered);
-            let _ = writeln!(out, "  {heading}at:{heading:#} {shown}");
+            write_folded_line(out, &format!("  {heading}at:{heading:#} {shown}"), width)?;
         }
         if let Some(instruction) = &finding.instruction {
             let shown = test_catalogue_text(instruction);
-            let _ = writeln!(out, "  {heading}fix:{heading:#} {shown}");
+            write_folded_line(out, &format!("  {heading}fix:{heading:#} {shown}"), width)?;
         }
     }
-    aplan_output::fold::fold_block(&out, aplan_output::fold::out_width(), 0)
+    Ok(())
+}
+
+#[cfg(test)]
+fn format_test_catalogue_human(answer: &aplan_app::TestCatalogue) -> String {
+    let mut out = Vec::new();
+    write_test_catalogue_human(answer, aplan_output::fold::out_width(), &mut out)
+        .expect("writing to Vec cannot fail");
+    String::from_utf8(out).expect("catalogue human output is UTF-8")
 }
 
 fn render_test_catalogue_human(answer: &aplan_app::TestCatalogue) -> Result<()> {
-    write_stdout(&format_test_catalogue_human(answer))
+    let width = aplan_output::fold::out_width();
+    render_tolerant(|| {
+        let mut out = aplan_output::stream::anstream_stdout();
+        write_test_catalogue_human(answer, width, &mut out)?;
+        out.finish()?;
+        Ok(())
+    })
 }
 
 fn render_test_catalogue(answer: &aplan_app::TestCatalogue, format: Format) -> Result<()> {
@@ -6025,14 +6408,19 @@ fn render_test_catalogue(answer: &aplan_app::TestCatalogue, format: Format) -> R
     }
 
     match format {
-        Format::Human => render_test_catalogue_human(answer),
-        Format::Json => write_stdout(&format!(
-            "{}\n",
-            serde_json::to_string_pretty(&Document {
-                schema: "aplan/test-catalogue/v1",
-                catalogue: answer,
-            })?
-        )),
+        Format::Json => render_tolerant(|| {
+            let mut out = aplan_output::stream::stdout();
+            aplan_output::stream::stream_json_pretty(
+                &mut out,
+                &Document {
+                    schema: "aplan/test-catalogue/v1",
+                    catalogue: answer,
+                },
+                |_| Ok(()),
+            )?;
+            out.finish()?;
+            Ok(())
+        }),
         Format::Agent => {
             let instruction = match answer.state {
                 aplan_app::TestCatalogueState::Unconfigured => {
@@ -6048,15 +6436,22 @@ fn render_test_catalogue(answer: &aplan_app::TestCatalogue, format: Format) -> R
                     "Use a returned non-ambiguous `evidence` value unchanged with close or amend."
                 }
             };
-            write_stdout(&format!(
-                "{}\n",
-                serde_json::to_string_pretty(&AgentDocument {
-                    schema: "aplan/test-catalogue-agent/v1",
-                    agent_instruction: instruction,
-                    catalogue: answer,
-                })?
-            ))
+            render_tolerant(|| {
+                let mut out = aplan_output::stream::stdout();
+                aplan_output::stream::stream_json_pretty(
+                    &mut out,
+                    &AgentDocument {
+                        schema: "aplan/test-catalogue-agent/v1",
+                        agent_instruction: instruction,
+                        catalogue: answer,
+                    },
+                    |_| Ok(()),
+                )?;
+                out.finish()?;
+                Ok(())
+            })
         }
+        Format::Human => render_test_catalogue_human(answer),
         _ => unreachable!("the catalogue surface accepts only human, json and agent"),
     }
 }
@@ -6569,16 +6964,18 @@ fn cmd_inbox(root: &std::path::Path, args: &InboxArgs) -> Result<u8> {
         search: args.search.clone(),
         limit: args.limit,
     };
-    let response = aplan_app::list_captures(&context, &query, &aplan_core::capture::SystemClock)?;
-    aplan_output::render_capture_collection(
-        &aplan_output::CaptureCollectionReport {
-            input: serde_json::to_value(&response.input)?,
-            inbox_sha256: response.inbox_sha256,
-            complete: response.complete,
-            list: response.list,
-        },
-        format,
-    )?;
+    let response = timed("project", || {
+        aplan_app::list_captures(&context, &query, &aplan_core::capture::SystemClock)
+    })?;
+    let report = aplan_output::CaptureCollectionReport {
+        input: serde_json::to_value(&response.input)?,
+        inbox_sha256: response.inbox_sha256,
+        complete: response.complete,
+        list: response.list,
+    };
+    timed("render", || {
+        render_tolerant(|| aplan_output::render_capture_collection(&report, format))
+    })?;
     Ok(EXIT_OK)
 }
 
@@ -6587,17 +6984,18 @@ fn cmd_inbox_command(root: &std::path::Path, command: &InboxCommand, format: For
         InboxCommand::Show { id } => {
             let context = hermetic_application_context(root, HermeticContextOptions::default())?;
             let selector = human_capture_selector(id)?;
-            let response =
-                aplan_app::show_capture(&context, &selector, &aplan_core::capture::SystemClock)?;
-            aplan_output::render_capture_focused(
-                &aplan_output::CaptureFocusedReport {
-                    input: serde_json::to_value(&response.input)?,
-                    inbox_sha256: response.inbox_sha256,
-                    complete: response.complete,
-                    capture: response.capture,
-                },
-                format,
-            )?;
+            let response = timed("project", || {
+                aplan_app::show_capture(&context, &selector, &aplan_core::capture::SystemClock)
+            })?;
+            let report = aplan_output::CaptureFocusedReport {
+                input: serde_json::to_value(&response.input)?,
+                inbox_sha256: response.inbox_sha256,
+                complete: response.complete,
+                capture: response.capture,
+            };
+            timed("render", || {
+                render_tolerant(|| aplan_output::render_capture_focused(&report, format))
+            })?;
             Ok(EXIT_OK)
         }
         InboxCommand::Amend(args) => cmd_capture_amend(root, args, format),
@@ -6701,7 +7099,7 @@ fn finish_capture_promotion_with(
             aplan_output::CaptureActionOutcome::Predicted
         };
         let report = capture_promotion_report(&preview, outcome)?;
-        aplan_output::render_capture_action(&report, format)?;
+        render_tolerant(|| aplan_output::render_capture_action(&report, format))?;
         return Ok(if denied { EXIT_VIOLATIONS } else { EXIT_OK });
     }
     let original_capture = preview.original_capture().clone();
@@ -6940,7 +7338,7 @@ fn render_capture_preview_with_detail(
     detail: aplan_output::CaptureActionDetail,
 ) -> Result<u8> {
     let report = capture_action_report(preview, outcome)?;
-    aplan_output::render_capture_action_with_detail(&report, format, detail)?;
+    render_tolerant(|| aplan_output::render_capture_action_with_detail(&report, format, detail))?;
     Ok(EXIT_OK)
 }
 
@@ -6986,7 +7384,7 @@ fn render_capture_report_with_detail(
     detail: aplan_output::CaptureActionDetail,
 ) -> Result<u8> {
     report.outcome = outcome;
-    aplan_output::render_capture_action_with_detail(&report, format, detail)?;
+    render_tolerant(|| aplan_output::render_capture_action_with_detail(&report, format, detail))?;
     Ok(EXIT_OK)
 }
 
@@ -10600,13 +10998,15 @@ fn cmd_graph(root: &std::path::Path, args: &GraphArgs) -> Result<u8> {
         );
     }
     match format {
-        Format::Mermaid => write_stdout(&aplan_output::mermaid_of_view(&view))?,
-        Format::Dot => write_stdout(&aplan_output::dot_of_view(&view))?,
-        Format::Text => {
-            let drawn = render_text_graph(&graph, &view, args)?;
-            write_stdout(&drawn)?;
+        Format::Mermaid | Format::Dot | Format::Json => {
+            timed("render", || {
+                render_tolerant(|| aplan_output::render_graph_view(&view, format))
+            })?;
         }
-        Format::Json => return write_json(&view, "aplan/graph/v1"),
+        Format::Text => {
+            let drawn = timed("project", || render_text_graph(&graph, &view, args))?;
+            timed("render", || write_stdout(&drawn))?;
+        }
         // Refused by `Surface::Graph` before it reaches here.
         other => anyhow::bail!("`{}` does not render a graph", other.as_str()),
     }
@@ -11499,12 +11899,123 @@ fn cmd_ready(root: &std::path::Path, args: &ReadyArgs) -> Result<u8> {
         // `--explain` is not consulted: the reasons are fields here, and a
         // machine shape conditional on a flag is one a consumer has to know the
         // invocation to read.
-        return timed("render", || write_json(&answer, "aplan/ready/v2"));
+        timed("render", || {
+            render_tolerant(|| {
+                let mut out = aplan_output::stream::stdout();
+                write_ready_json(&mut out, &answer)?;
+                out.finish()?;
+                Ok(())
+            })
+        })?;
+        return Ok(EXIT_OK);
     }
 
-    let mut out = String::new();
+    let empty_note = if answer.ready.is_empty() {
+        let tasks: Vec<_> = plan.tasks.iter().map(|lt| &lt.task).collect();
+        Some(why_nothing_is_ready(&build_graph(tasks.iter().copied())))
+    } else {
+        None
+    };
+
+    timed("render", || {
+        render_tolerant(|| {
+            let mut out = aplan_output::stream::anstream_stdout();
+            write_ready_human(&mut out, &answer, explain, empty_note.as_deref())?;
+            out.finish()?;
+            Ok(())
+        })
+    })?;
+    Ok(EXIT_OK)
+}
+
+/// Preflight and stream `aplan/ready/v2` JSON directly into `out` (`A2-136`).
+///
+/// Key order matches buffered `write_json(&answer, "aplan/ready/v2")`
+/// byte-for-byte while avoiding intermediate `serde_json::Value` arrays.
+fn write_ready_json(
+    out: &mut impl std::io::Write,
+    answer: &aplan_mcp::tools::Ready,
+) -> std::io::Result<()> {
+    use aplan_output::stream::{SeqIter, check_finite_opt_f64};
+
+    #[derive(serde::Serialize)]
+    struct ReadyTaskJson<'a> {
+        #[serde(skip_serializing_if = "Option::is_none")]
+        claim: Option<serde_json::Value>,
+        claim_state: aplan_core::ClaimCoordinationState,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        coordination_warning: Option<&'a str>,
+        critical: bool,
+        downstream_depth: usize,
+        effort_days: Option<f64>,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        held_by: Option<&'a str>,
+        id: &'a str,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        owner: Option<&'a str>,
+        prefers_to_follow: &'a [String],
+        releases: usize,
+        #[serde(skip_serializing_if = "str::is_empty")]
+        status: &'a str,
+        title: &'a str,
+    }
+
+    #[derive(serde::Serialize)]
+    struct ReadyDoc<C: serde::Serialize, R: serde::Serialize> {
+        claim_observed_at_epoch_seconds: i64,
+        closeable_cuts: C,
+        coordination: serde_json::Value,
+        ready: R,
+        schema: &'static str,
+    }
+
+    fn row_json(t: &aplan_mcp::tools::ReadyTask) -> ReadyTaskJson<'_> {
+        ReadyTaskJson {
+            claim: t
+                .claim
+                .as_ref()
+                .map(|c| serde_json::to_value(c).expect("claim record is always serializable")),
+            claim_state: t.claim_state,
+            coordination_warning: t.coordination_warning.as_deref(),
+            critical: t.critical,
+            downstream_depth: t.downstream_depth,
+            effort_days: t.effort_days,
+            held_by: t.held_by.as_deref(),
+            id: &t.id,
+            owner: t.owner.as_deref(),
+            prefers_to_follow: &t.prefers_to_follow,
+            releases: t.releases,
+            status: &t.status,
+            title: &t.title,
+        }
+    }
+
+    let coordination = serde_json::to_value(&answer.coordination)
+        .map_err(|e| aplan_output::stream::json_to_io_error(&e))?;
+    let doc = ReadyDoc {
+        claim_observed_at_epoch_seconds: answer.claim_observed_at_epoch_seconds,
+        closeable_cuts: SeqIter(|| answer.closeable_cuts.iter().map(row_json)),
+        coordination,
+        ready: SeqIter(|| answer.ready.iter().map(row_json)),
+        schema: "aplan/ready/v2",
+    };
+    aplan_output::stream::stream_json_pretty(out, &doc, |_| {
+        for t in answer.ready.iter().chain(answer.closeable_cuts.iter()) {
+            check_finite_opt_f64(t.effort_days, &format!("{}.effort_days", t.id))?;
+        }
+        Ok(())
+    })
+}
+
+/// Stream human `ready` rows directly into `out` (`A2-136`).
+fn write_ready_human(
+    out: &mut impl std::io::Write,
+    answer: &aplan_mcp::tools::Ready,
+    explain: bool,
+    empty_note: Option<&str>,
+) -> std::io::Result<()> {
     if !answer.coordination.available {
-        let _ = writeln!(
+        writeln!(
             out,
             "claim coordination unavailable: {}",
             answer
@@ -11512,17 +12023,13 @@ fn cmd_ready(root: &std::path::Path, args: &ReadyArgs) -> Result<u8> {
                 .reason
                 .as_deref()
                 .unwrap_or("no local coordination scope")
-        );
+        )?;
     }
     let mut unclaimed_in_progress = Vec::new();
     for t in &answer.ready {
         let effort = t
             .effort_days
             .map_or_else(String::new, |e| format!(" ({e}d)"));
-        // Responsibility and active coordination ride with the title, named
-        // rather than collapsed into one ambiguous bracket (`A1-531`). The
-        // default set remains complete; `--unclaimed` asks for the narrower
-        // answer without erasing stable ownership.
         let owner = t.owner.as_deref().map_or_else(String::new, |who| {
             format!(" [owner {}]", aplan_output::sanitize::visible(who))
         });
@@ -11534,9 +12041,7 @@ fn cmd_ready(root: &std::path::Path, args: &ReadyArgs) -> Result<u8> {
                 format!(" [claim {}]", aplan_output::sanitize::visible(who))
             })
         };
-        // The title is the trailing column and the effort rides with it, so a
-        // long title folds under itself rather than under the id (`A1-206`).
-        let _ = writeln!(
+        writeln!(
             out,
             "{}",
             aplan_output::fold::row(
@@ -11550,22 +12055,14 @@ fn cmd_ready(root: &std::path::Path, args: &ReadyArgs) -> Result<u8> {
                     dim = aplan_output::style::DIM
                 ),
             )
-        );
+        )?;
         if explain {
-            // Built from the payload's own fields rather than recomputed from
-            // the graph. Both were here at once for a while, which is the
-            // duplication this task removed between the CLI and MCP appearing
-            // again inside the CLI.
             let rank = aplan_core::Rank {
                 releases: t.releases,
                 downstream_depth: t.downstream_depth,
                 critical: t.critical,
                 effort_days: t.effort_days.unwrap_or(0.0),
             };
-            // A preference is the reason a task is *not* first, so it is said
-            // beside the rank rather than folded into it: the rank is derived
-            // from the plan and this is a judgement somebody recorded
-            // (`A1-150`, ADR-0025).
             let because = if t.prefers_to_follow.is_empty() {
                 rank.because()
             } else {
@@ -11575,24 +12072,22 @@ fn cmd_ready(root: &std::path::Path, args: &ReadyArgs) -> Result<u8> {
                     t.prefers_to_follow.join(", ")
                 )
             };
-            let _ = writeln!(out, "    {because}");
+            writeln!(out, "    {because}")?;
         }
     }
     if !unclaimed_in_progress.is_empty() {
-        let _ = writeln!(
+        writeln!(
             out,
             "\nnote: {} `in_progress` task(s) have no active local claim ({}); run `aplan claim \
              <id>` to record who is working on each or `aplan stop <id>` if work stopped.",
             unclaimed_in_progress.len(),
             unclaimed_in_progress.join(", ")
-        );
+        )?;
     }
-    if answer.ready.is_empty() {
-        let tasks: Vec<_> = plan.tasks.iter().map(|lt| &lt.task).collect();
-        out.push_str(&why_nothing_is_ready(&build_graph(tasks.iter().copied())));
+    if let Some(note) = empty_note {
+        out.write_all(note.as_bytes())?;
     }
-    timed("render", || write_stdout(&out))?;
-    Ok(EXIT_OK)
+    Ok(())
 }
 
 /// `aplan dep`, the only per-task ordering the model has, editable at last.
@@ -13137,7 +13632,7 @@ fn evidence_resolves(
     // `deny_warnings: true` and closed under `--deny-warnings`.
     let policy = verdict_policy(config, verdict.deny_warnings, verdict.no_deny_warnings);
     if !resolution.report.diagnostics.is_empty() {
-        render_proposed(&resolution.report, &policy)?;
+        render_tolerant(|| render_proposed(&resolution.report, &policy))?;
     }
     if resolution.refuses(&policy) {
         write_stdout(&format!(
@@ -13471,7 +13966,7 @@ fn render_focused_close_preview(
             agent_contract_provenance: None,
             candidate_projections: Vec::new(),
         };
-        render_proposed(&report, verdict)?;
+        render_tolerant(|| render_proposed(&report, verdict))?;
     }
     for line in preview.change_set().diagnostics().lines() {
         write_stdout(&format!("{line}\n"))?;
@@ -15064,10 +15559,14 @@ fn cmd_deprecations(root: &std::path::Path, format: &str) -> Result<u8> {
     let report = aplan_core::deprecation::of(&tasks, &graph.roadmap());
 
     if markdown {
-        write_stdout(&aplan_output::deprecations_markdown(&report))?;
+        timed("render", || {
+            render_tolerant(|| aplan_output::render_deprecations_markdown(&report))
+        })?;
         return Ok(EXIT_OK);
     }
-    render_tolerant(|| aplan_output::render_deprecations(&report, format))?;
+    timed("render", || {
+        render_tolerant(|| aplan_output::render_deprecations(&report, format))
+    })?;
     // Always `0`: a report is not a verdict (`A1-151` and `A1-020` before it).
     Ok(EXIT_OK)
 }
@@ -15146,7 +15645,9 @@ fn cmd_paths(
         without_paths,
         unmeasurable: breadth.unmeasurable.len(),
     };
-    render_tolerant(|| aplan_output::render_paths(&report, format))?;
+    timed("render", || {
+        render_tolerant(|| aplan_output::render_paths(&report, format))
+    })?;
     // Always `0`: a measurement is not a verdict (`A1-151`, and `A1-020` before
     // it).
     Ok(EXIT_OK)
@@ -15219,7 +15720,9 @@ fn cmd_paths_match(
         unique_matched_files,
         entries,
     };
-    render_tolerant(|| aplan_output::render_paths_match(&report, format))?;
+    timed("render", || {
+        render_tolerant(|| aplan_output::render_paths_match(&report, format))
+    })?;
     if has_invalid {
         Ok(EXIT_VIOLATIONS)
     } else {
@@ -15252,6 +15755,35 @@ fn stale(
 /// reason: the hermetic path may not open a repository, and the structural test
 /// in `aplan-e2e` holds that line by forbidding `git2` in the crates `check`
 /// runs through.
+/// A named date replaces `HEAD`'s commit time as the point ages are measured
+/// from. Refused when it precedes that commit, because every age would then
+/// be negative and the report would say nothing has sat -- the false green
+/// `stale`'s own audit was about (`A1-020`, `A1-162`).
+fn stale_reference_epoch(as_of: Option<&str>, head_time: i64) -> Result<i64> {
+    match as_of {
+        None => Ok(head_time),
+        Some(date) => {
+            // The *end* of the named day, not its midnight. A date names a whole
+            // day, and an adopter's obvious invocation is `--as-of $(date +%F)`
+            // in a weekly review: measured from midnight that is refused on any
+            // day the repository saw a commit, which is most of them
+            // (`A1-162`'s audit). It also reads right -- a task last touched on
+            // the 11th has sat eight days *by* the 19th, not seven.
+            let Some(seconds) = aplan_core::validate::iso_date_to_epoch(date).map(|s| s + 86_399)
+            else {
+                anyhow::bail!("`--as-of {date}` is not an ISO-8601 date (YYYY-MM-DD)");
+            };
+            if seconds < head_time {
+                anyhow::bail!(
+                    "`--as-of {date}` is before `HEAD`'s own commit, so every task would read as \
+                     not yet written. Name a date at or after the last commit."
+                );
+            }
+            Ok(seconds)
+        }
+    }
+}
+
 fn cmd_stale(
     root: &std::path::Path,
     repo: &std::path::Path,
@@ -15315,32 +15847,7 @@ fn cmd_stale(
 
     let (touched, head_time) = aplan_evidence::last_touched(repo, &relative)
         .context("reading the repository's history")?;
-    // A named date replaces `HEAD`'s commit time as the point ages are measured
-    // from. Refused when it precedes that commit, because every age would then
-    // be negative and the report would say nothing has sat -- the false green
-    // this command's own audit was about (`A1-020`, `A1-162`).
-    let now = match as_of {
-        None => head_time,
-        Some(date) => {
-            // The *end* of the named day, not its midnight. A date names a whole
-            // day, and an adopter's obvious invocation is `--as-of $(date +%F)`
-            // in a weekly review: measured from midnight that is refused on any
-            // day the repository saw a commit, which is most of them
-            // (`A1-162`'s audit). It also reads right -- a task last touched on
-            // the 11th has sat eight days *by* the 19th, not seven.
-            let Some(seconds) = aplan_core::validate::iso_date_to_epoch(date).map(|s| s + 86_399)
-            else {
-                anyhow::bail!("`--as-of {date}` is not an ISO-8601 date (YYYY-MM-DD)");
-            };
-            if seconds < head_time {
-                anyhow::bail!(
-                    "`--as-of {date}` is before `HEAD`'s own commit, so every task would read as \
-                     not yet written. Name a date at or after the last commit."
-                );
-            }
-            seconds
-        }
-    };
+    let now = stale_reference_epoch(as_of, head_time)?;
 
     let graph = build_graph(plan.tasks.iter().map(|lt| &lt.task));
     let ready: std::collections::BTreeSet<&str> =
@@ -15390,7 +15897,9 @@ fn cmd_stale(
         coordination: claims.scope,
         claim_observed_at_epoch_seconds: claims.observed_at_epoch_seconds,
     };
-    render_tolerant(|| aplan_output::render_stale(&report, format))?;
+    timed("render", || {
+        render_tolerant(|| aplan_output::render_stale(&report, format))
+    })?;
     // Always `0`: this is advice, and advice does not fail a build (`A1-020`).
     Ok(EXIT_OK)
 }
@@ -15626,7 +16135,9 @@ fn cmd_due(root: &std::path::Path, args: &DueArgs) -> Result<u8> {
         tasks: due,
         waiting,
     };
-    render_tolerant(|| aplan_output::render_due(&report, format))?;
+    timed("render", || {
+        render_tolerant(|| aplan_output::render_due(&report, format))
+    })?;
     Ok(EXIT_OK)
 }
 
@@ -17424,17 +17935,17 @@ fn cmd_retarget_path(
         .map(|(lt, _, _)| lt.task.id.as_str())
         .collect();
     if dry_run {
-        println!(
-            "dry-run: would retarget `{from}` -> `{to}` on {} live task(s): {}",
+        write_stdout(&format!(
+            "dry-run: would retarget `{from}` -> `{to}` on {} live task(s): {}\n",
             live_ids.len(),
             live_ids.join(", ")
-        );
+        ))?;
         if !terminal_preserved.is_empty() {
-            println!(
-                "preserved {} terminal task(s) untouched: {}",
+            write_stdout(&format!(
+                "preserved {} terminal task(s) untouched: {}\n",
                 terminal_preserved.len(),
                 terminal_preserved.join(", ")
-            );
+            ))?;
         }
         return Ok(0);
     }
@@ -17449,17 +17960,17 @@ fn cmd_retarget_path(
         .collect();
     aplan_core::save::replace_all(&batch).map_err(|e| anyhow::anyhow!("{e}"))?;
 
-    println!(
-        "retargeted `{from}` -> `{to}` on {} live task(s): {}",
+    write_stdout(&format!(
+        "retargeted `{from}` -> `{to}` on {} live task(s): {}\n",
         live_ids.len(),
         live_ids.join(", ")
-    );
+    ))?;
     if !terminal_preserved.is_empty() {
-        println!(
-            "preserved {} terminal task(s) untouched: {}",
+        write_stdout(&format!(
+            "preserved {} terminal task(s) untouched: {}\n",
             terminal_preserved.len(),
             terminal_preserved.join(", ")
-        );
+        ))?;
     }
     Ok(0)
 }
@@ -19313,10 +19824,13 @@ fn cmd_completed(cli_root: Option<&std::path::Path>, args: CompletedCliArgs) -> 
         basis_revision,
         limits: aplan_core::HistoryLimits::default(),
     };
-    let response =
+    let response = timed("project", || {
         aplan_app::completed_tasks(&plan, &input_identity, &repo_root, &plan_root_rel, &request)
-            .map_err(|err| anyhow::anyhow!("{err}"))?;
-    aplan_output::render_completed(&response, format)?;
+    })
+    .map_err(|err| anyhow::anyhow!("{err}"))?;
+    timed("render", || {
+        render_tolerant(|| aplan_output::render_completed(&response, format))
+    })?;
     Ok(EXIT_OK)
 }
 
@@ -19330,24 +19844,29 @@ fn cmd_tasks(root: &std::path::Path, format: &str, select: &SelectArgs) -> Resul
     }
     let selector = select.selector()?;
     let claims = aplan_app::claims::snapshot(root, &plan)?;
-    let tasks: Vec<_> = plan.tasks.iter().map(|lt| &lt.task).collect();
-    let graph = build_graph(tasks.iter().copied());
-    refuse_a_release_as_a_cut(&plan, &graph, &selector.cuts)?;
-    // Rows built over the whole plan, then narrowed: every derived field on a
-    // row -- `ready`, `rank`, `cut` -- is the answer the whole plan gives, which
-    // is the only answer that is true (`A1-214`).
-    let mut export = graph.task_rows().with_claims(&claims);
-    export.tasks.retain(|row| {
-        graph.get(&row.id).is_some_and(|t| {
-            selector.matches_claimed(
-                t,
-                row.cut.as_deref(),
-                row.milestone.as_deref(),
-                Some(row.claim.is_some()),
-            )
-        })
-    });
-    render_tolerant(|| render_tasks(&export, format))?;
+    let export = timed("project", || -> Result<aplan_core::TaskExport> {
+        let tasks: Vec<_> = plan.tasks.iter().map(|lt| &lt.task).collect();
+        let graph = build_graph(tasks.iter().copied());
+        refuse_a_release_as_a_cut(&plan, &graph, &selector.cuts)?;
+        // Rows built over the whole plan, then narrowed: every derived field on a
+        // row -- `ready`, `rank`, `cut` -- is the answer the whole plan gives, which
+        // is the only answer that is true (`A1-214`).
+        let mut export = graph.task_rows().with_claims(&claims);
+        export.tasks.retain(|row| {
+            graph.get(&row.id).is_some_and(|t| {
+                selector.matches_claimed(
+                    t,
+                    row.cut.as_deref(),
+                    row.milestone.as_deref(),
+                    Some(row.claim.is_some()),
+                )
+            })
+        });
+        Ok(export)
+    })?;
+    timed("render", || {
+        render_tolerant(|| render_tasks(&export, format))
+    })?;
     Ok(EXIT_OK)
 }
 
@@ -19511,38 +20030,43 @@ fn cmd_roadmap(root: &std::path::Path, args: &RoadmapArgs) -> Result<u8> {
     if !loaded_cleanly(&plan) {
         return Ok(EXIT_VIOLATIONS);
     }
-    let tasks: Vec<_> = plan.tasks.iter().map(|lt| &lt.task).collect();
-    let mut roadmap = build_graph(tasks.iter().copied()).roadmap();
-    // Grouped only where the repository asked for it; the config load already
-    // refused a `group_by` naming a family `tag_families` does not declare, so
-    // the members are here to be grouped by (`A1-078`).
     let (config, _) = config_at(root)?;
-    roadmap = roadmap.with_throughput(config.effort_days_per_week);
-    if let Some(members) = config
-        .roadmap
-        .as_ref()
-        .and_then(|r| r.group_by.as_ref())
-        .and_then(|family| config.tag_families.as_ref().and_then(|f| f.get(family)))
-    {
-        roadmap = roadmap.grouped_by(members.members());
-    }
-    let text = match out {
-        Out::Markdown => {
-            let (version, surface) = written_by();
-            render_roadmap_markdown(
-                &roadmap,
-                regenerate_with,
-                Some(&aplan_output::WrittenBy {
-                    version: &version,
-                    surface: &surface,
-                }),
-            )
+    let roadmap = timed("project", || {
+        let tasks: Vec<_> = plan.tasks.iter().map(|lt| &lt.task).collect();
+        let mut roadmap = build_graph(tasks.iter().copied()).roadmap();
+        roadmap = roadmap.with_throughput(config.effort_days_per_week);
+        if let Some(members) = config
+            .roadmap
+            .as_ref()
+            .and_then(|r| r.group_by.as_ref())
+            .and_then(|family| config.tag_families.as_ref().and_then(|f| f.get(family)))
+        {
+            roadmap = roadmap.grouped_by(members.members());
         }
-        Out::Shared(f) => render_roadmap(&roadmap, f),
+        roadmap
+    });
+    let effective_format = match out {
+        Out::Markdown => Format::Markdown,
+        Out::Shared(f) => f,
     };
-    render_tolerant(|| {
-        use std::io::Write as _;
-        aplan_output::write::anstream_stdout().write_all(text.as_bytes())
+    let (version, surface) = if effective_format == Format::Markdown {
+        written_by()
+    } else {
+        (String::new(), String::new())
+    };
+    let written = (effective_format == Format::Markdown).then_some(aplan_output::WrittenBy {
+        version: &version,
+        surface: &surface,
+    });
+    timed("render", || {
+        render_tolerant(|| {
+            aplan_output::render_roadmap_to_stdout(
+                &roadmap,
+                effective_format,
+                regenerate_with,
+                written.as_ref(),
+            )
+        })
     })?;
     Ok(EXIT_OK)
 }
@@ -24127,5 +24651,223 @@ mod id_race {
                 && mixed.contains("3 attempts over 19ms"),
             "{mixed}"
         );
+    }
+
+    #[test]
+    fn command_is_read_surface_and_streaming_helpers_cover_all_branches() {
+        let parse = |args: &[&str]| {
+            let mut argv = vec!["aplan"];
+            argv.extend_from_slice(args);
+            Cli::try_parse_from(argv).unwrap_or_else(|e| panic!("parse {args:?}: {e}"))
+        };
+        for read_args in [
+            &["check"][..],
+            &["verify"],
+            &["show", "T-1"],
+            &["explain", "rule", "APLAN001"],
+            &["graph"],
+            &["ready"],
+            &["due"],
+            &["why", "T-1"],
+            &["tree", "T-1"],
+            &["paths"],
+            &["vacuity"],
+            &["stale"],
+            &["deprecations"],
+            &["version"],
+            &["attest"],
+            &["export-agents-md"],
+            &["export-roadmap-json", "r.json"],
+            &["export"],
+            &["check-docs", "README.md"],
+            &["completed"],
+            &["summary"],
+            &["tasks"],
+            &["critical-path"],
+            &["roadmap"],
+            &["test", "list"],
+            &["inbox"],
+            &["facts"],
+            &["schema"],
+        ] {
+            assert!(
+                command_is_read_surface(&parse(read_args).command),
+                "expected read surface for {read_args:?}"
+            );
+        }
+        for write_args in [
+            &["mcp"][..],
+            &["init"],
+            &["add", "hello"],
+            &["supersede", "T-1", "replacement"],
+            &["import", "spec.md"],
+            &["capture", "note"],
+            &["drop", "T-1"],
+            &["park", "T-1", "--reason", "waiting"],
+            &["unpark", "T-1"],
+            &["claim", "T-1"],
+            &["release", "T-1"],
+            &["start", "T-1"],
+            &["stop", "T-1"],
+            &["review", "T-1"],
+            &["retarget-path", "a.rs", "b.rs"],
+            &["mv", "T-1", "--phase", "2"],
+            &["close", "T-1"],
+            &["amend", "T-1", "--add-evidence", "note:x"],
+            &["tag", "add", "T-1", "cli"],
+            &["dep", "add", "T-1", "--after", "T-2"],
+            &["blueprint", "apply", "--file", "f.yml", "--cut", "M-1"],
+            &["rekey", "T-1", "T-2"],
+        ] {
+            assert!(
+                !command_is_read_surface(&parse(write_args).command),
+                "expected non-read surface for {write_args:?}"
+            );
+        }
+        #[cfg(feature = "tui")]
+        assert!(!command_is_read_surface(&parse(&["tui"]).command));
+    }
+
+    #[test]
+    fn ready_and_test_catalogue_streaming_helpers_cover_preflight_and_states() {
+        // Verify `write_ready_json` preflight refuses NaN before writing byte 0,
+        // and `write_ready_human` renders empty-note cleanly.
+        let mut ready = aplan_mcp::tools::Ready {
+            coordination: aplan_core::ClaimScope::unavailable("unit"),
+            claim_observed_at_epoch_seconds: 0,
+            ready: vec![aplan_mcp::tools::ReadyTask {
+                id: "T-1".to_string(),
+                title: "Bad float".to_string(),
+                owner: None,
+                effort_days: Some(f64::NAN),
+                releases: 0,
+                critical: false,
+                downstream_depth: 0,
+                status: "todo".to_string(),
+                prefers_to_follow: Vec::new(),
+                claim_state: aplan_core::ClaimCoordinationState::Unavailable,
+                held_by: None,
+                claim: None,
+                coordination_warning: None,
+            }],
+            closeable_cuts: Vec::new(),
+        };
+        let mut bad_buf = Vec::new();
+        let err = write_ready_json(&mut bad_buf, &ready)
+            .expect_err("NaN effort_days must fail preflight");
+        assert_eq!(err.kind(), std::io::ErrorKind::InvalidData);
+        assert!(bad_buf.is_empty());
+
+        ready.ready.clear();
+        let mut empty_buf = Vec::new();
+        write_ready_human(&mut empty_buf, &ready, false, Some("no matching work"))
+            .expect("write empty ready");
+        assert!(
+            String::from_utf8(empty_buf)
+                .expect("utf8")
+                .contains("no matching work")
+        );
+    }
+
+    #[test]
+    fn test_catalogue_streaming_helpers_cover_all_states() {
+        let empty_summary = aplan_app::TestCatalogueSummary {
+            runners: 0,
+            listed_runners: 0,
+            empty_runners: 0,
+            failed_runners: 0,
+            unique_names: 0,
+            runner_name_pairs: 0,
+            matched_names: 0,
+            matched_pairs: 0,
+            ambiguous_names: 0,
+        };
+        let partial_catalogue = aplan_app::TestCatalogue {
+            state: aplan_app::TestCatalogueState::Partial,
+            query: None,
+            denied: true,
+            summary: aplan_app::TestCatalogueSummary {
+                runners: 2,
+                empty_runners: 1,
+                failed_runners: 1,
+                unique_names: 1,
+                runner_name_pairs: 1,
+                matched_names: 1,
+                matched_pairs: 1,
+                ambiguous_names: 1,
+                ..empty_summary
+            },
+            runners: vec![
+                aplan_app::TestCatalogueRunner {
+                    runner: aplan_app::TestCatalogueRunnerIdentity {
+                        index: 1,
+                        label: "empty-runner".to_string(),
+                    },
+                    state: aplan_app::TestCatalogueRunnerState::Empty,
+                    total: 0,
+                    matched: 0,
+                    tests: Vec::new(),
+                },
+                aplan_app::TestCatalogueRunner {
+                    runner: aplan_app::TestCatalogueRunnerIdentity {
+                        index: 2,
+                        label: "broken-runner".to_string(),
+                    },
+                    state: aplan_app::TestCatalogueRunnerState::Failed,
+                    total: 0,
+                    matched: 0,
+                    tests: vec![aplan_app::TestCatalogueName {
+                        name: "dup".to_string(),
+                        evidence: "test:dup".to_string(),
+                        ambiguous: true,
+                        listed_by: vec![aplan_app::TestCatalogueRunnerIdentity {
+                            index: 2,
+                            label: "broken-runner".to_string(),
+                        }],
+                    }],
+                },
+            ],
+            findings: vec![aplan_app::TestCatalogueFinding {
+                code: "APLAN013".to_string(),
+                severity: "error".to_string(),
+                advisory: true,
+                blocking: false,
+                message: "runner failed".to_string(),
+                file: Some(PathBuf::from(".aplan.yml")),
+                instruction: Some("fix runner".to_string()),
+            }],
+        };
+        let rendered_partial =
+            anstream::adapter::strip_str(&format_test_catalogue_human(&partial_catalogue))
+                .to_string();
+        assert!(rendered_partial.contains("partial - 1 runner answered and 1 runner failed"));
+        assert!(rendered_partial.contains("empty"));
+        assert!(rendered_partial.contains("failed (see finding below)"));
+        assert!(rendered_partial.contains("ambiguous: listed by #2 `broken-runner`"));
+        assert!(rendered_partial.contains("at: .aplan.yml"));
+        assert!(rendered_partial.contains("fix: fix runner"));
+
+        let unconfigured = aplan_app::TestCatalogue {
+            state: aplan_app::TestCatalogueState::Unconfigured,
+            query: None,
+            denied: false,
+            summary: empty_summary.clone(),
+            runners: Vec::new(),
+            findings: Vec::new(),
+        };
+        assert!(format_test_catalogue_human(&unconfigured).contains("no test runners"));
+
+        let no_match = aplan_app::TestCatalogue {
+            state: aplan_app::TestCatalogueState::NoMatch,
+            query: Some("nope".to_string()),
+            denied: false,
+            summary: aplan_app::TestCatalogueSummary {
+                runners: 1,
+                ..empty_summary
+            },
+            runners: Vec::new(),
+            findings: Vec::new(),
+        };
+        assert!(format_test_catalogue_human(&no_match).contains("no names match `nope`"));
     }
 }

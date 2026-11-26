@@ -109,6 +109,8 @@ fn timings_report_phases_and_work_without_changing_machine_output() {
         "trace_bytes_read=0",
         "markdown_parses=0",
         "structured_parses=0",
+        "output_bytes=",
+        "peak_output_buffer_bytes=",
     ] {
         assert!(line.contains(field), "missing `{field}` in {line}");
     }

@@ -1,6 +1,10 @@
 {
   "behaviours": [
     {
+      "name": "read.streams_large_outputs_with_bounded_memory",
+      "what": "output-dominated CLI read surfaces stream preflighted human, Markdown, graph, and machine JSON/SARIF output through a bounded 16 KiB buffer with deterministic byte parity, clean BrokenPipe shutdown, output-work timing counters, an exhaustive CLI+MCP read-surface disposition inventory, and orphan-free MCP disconnect cleanup"
+    },
+    {
       "name": "config.test_runner_reports_all_missing_and_misplaced_fields",
       "what": "test-runner configuration errors report every missing required field with its full key path (for example `test.schedule`, `test.runners[0].list`, `test.runners[0].run`) in one refusal and name where misplaced keys belong"
     },
@@ -1528,7 +1532,7 @@
     "version.require_impact"
   ],
   "counts": {
-    "behaviours": 247,
+    "behaviours": 248,
     "build_capabilities": 1,
     "commands": 51,
     "config_keys": 136,

@@ -8,6 +8,21 @@ to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Added
 
+- **Bounded-memory streaming for output-dominated reads and derived read-surface disposition
+  inventory (`A2-136`, `--require read.streams_large_outputs_with_bounded_memory`)**. Established
+  the empirical 256 KiB bounded-response threshold and 16 KiB streaming buffer across current,
+  1,000-task and 10,000-task corpora (`docs/design/read-path-performance.md`,
+  `ci/scripts/read-performance.py --output-matrix`). Whole-plan CLI read outputs (`check`, `verify`,
+  `ready`, `tasks`, `roadmap`, `graph` Mermaid/DOT/JSON, `paths`, `paths match --all`, `stale`,
+  `due`, `deprecations`, `test list`) now stream preflighted human, Markdown, graph and machine
+  JSON/SARIF bytes directly through a bounded 16 KiB `StreamingWriter` with byte-identical output,
+  flat RSS on 10,000 tasks, clean exit `0` on `BrokenPipe`, and `output_bytes` /
+  `peak_output_buffer_bytes` counters in `--timings`. `aplan mcp` enforces `MAX_TOOL_RESULT_BYTES`
+  on structured envelopes, offloads blocking tool/resource calls so client disconnect and
+  cancellation stay responsive, and terminates active configured providers on peer disconnect with
+  zero orphaned descendants. `aplan::read_surface_inventory()` exhaustively classifies every CLI
+  and MCP read surface (`streamed`, `paginated`, `explicitly_capped`, `buffered`) so new read
+  surfaces cannot omit an output disposition.
 - **Actionable test-runner configuration diagnostics (`A2-037`, `A2-038`, addresses #34,
   `--require config.test_runner_reports_all_missing_and_misplaced_fields`,
   `--require config.test_runner_errors_name_expected_shape_and_runner_path`)**. Parsing `test`

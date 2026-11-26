@@ -1213,6 +1213,25 @@ accommodation, two rules quietly weakened.
   cursor cleanly rather than returning mixed-snapshot results; `completed` projects the shared
   `aplan_app::completed_tasks` response directly without adding an `aplan_completed` tool.
 
+## Bounded-memory streaming for large read outputs (`A2-136`, `--require read.streams_large_outputs_with_bounded_memory`)
+
+Output-dominated CLI read commands (`check`, `verify`, `ready`, `tasks`, `roadmap`, `graph`
+Mermaid/DOT/JSON, `paths`, `paths match --all`, `stale`, `due`, `deprecations`, and `test list`)
+now stream preflighted human, Markdown, graph, and machine JSON/SARIF output through a bounded
+16 KiB `StreamingWriter` above the measured 256 KiB bounded-response threshold:
+
+- **Deterministic compatibility**: streamed human, Markdown, graph, and JSON/SARIF bytes stay
+  identical to buffered output, and float-carrying machine formats preflight finite values before
+  emitting byte 0 so a late serialization fault never publishes a partial document.
+- **Early shutdown and orphan cleanup**: closing a downstream pipe (`BrokenPipe` / pager quit)
+  stops output production promptly with exit `0` and zero panics. On `aplan mcp`, oversized tool
+  payloads are refused cleanly at `MAX_TOOL_RESULT_BYTES` (512 KiB) with a pointer to paginated
+  `aplan://` resources, and disconnecting an MCP client while a verification provider is running
+  terminates active configured command process groups with zero orphaned descendants.
+- **Timing counters**: `--timings` now includes `output_bytes=` and `peak_output_buffer_bytes=`
+  alongside the existing loader, graph, cache, and trace counters. Scripts parsing `aplan: timings`
+  with an exact field-set assertion should allow those two fields.
+
 ## The full list
 
 [`CHANGELOG.md`](../CHANGELOG.md) is the complete record, including everything with no adoption

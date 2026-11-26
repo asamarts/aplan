@@ -50,14 +50,121 @@ impl<W> RetryingWriter<W> {
     }
 }
 
-/// Lock `std::io::stdout()` behind a [`RetryingWriter`].
-pub fn stdout() -> RetryingWriter<io::StdoutLock<'static>> {
-    RetryingWriter::new(io::stdout().lock())
+/// Counts post-ANSI-strip bytes written to stdout on buffered render paths so
+/// `--timings` reports exact `output_bytes` and `peak_output_buffer_bytes` for
+/// both buffered and streamed commands (`A2-136`).
+#[derive(Debug)]
+pub struct StdoutCounter<W> {
+    inner: W,
+    total_written: usize,
 }
 
-/// Lock `anstream::stdout()` behind a [`RetryingWriter`].
-pub fn anstream_stdout() -> RetryingWriter<anstream::AutoStream<io::StdoutLock<'static>>> {
-    RetryingWriter::new(anstream::stdout().lock())
+impl<W> StdoutCounter<W> {
+    const fn new(inner: W) -> Self {
+        Self {
+            inner,
+            total_written: 0,
+        }
+    }
+}
+
+impl<W: Write> Write for StdoutCounter<W> {
+    fn write(&mut self, buf: &[u8]) -> io::Result<usize> {
+        let n = self.inner.write(buf)?;
+        if n > 0 {
+            self.total_written = self.total_written.saturating_add(n);
+            crate::stream::record_direct_stdout_write(n, self.total_written);
+        }
+        Ok(n)
+    }
+
+    fn flush(&mut self) -> io::Result<()> {
+        self.inner.flush()
+    }
+}
+
+/// Stateful zero-allocation ANSI stripper over any [`Write`] sink (`A2-136`).
+#[derive(Debug)]
+pub(crate) struct StrippingWriter<W> {
+    stripper: anstream::adapter::StripBytes,
+    inner: W,
+}
+
+impl<W> StrippingWriter<W> {
+    pub(crate) fn new(inner: W) -> Self {
+        Self {
+            stripper: anstream::adapter::StripBytes::new(),
+            inner,
+        }
+    }
+
+    pub(crate) fn into_inner(self) -> W {
+        self.inner
+    }
+}
+
+impl<W: Write> Write for StrippingWriter<W> {
+    fn write(&mut self, buf: &[u8]) -> io::Result<usize> {
+        for chunk in self.stripper.strip_next(buf) {
+            self.inner.write_all(chunk)?;
+        }
+        Ok(buf.len())
+    }
+
+    fn flush(&mut self) -> io::Result<()> {
+        self.inner.flush()
+    }
+}
+
+/// ANSI-aware counting retrying writer for buffered human stdout renders
+/// (`A2-136`).
+#[derive(Debug)]
+pub struct StyledStdoutCounter {
+    inner: StyledStdoutInner,
+}
+
+#[derive(Debug)]
+enum StyledStdoutInner {
+    /// Color disabled (pipe or `--color never`): strip ANSI before counting.
+    Strip(StrippingWriter<StdoutCounter<RetryingWriter<io::StdoutLock<'static>>>>),
+    /// Color enabled: pass through `anstream::stdout()` and count emitted bytes.
+    Styled(StdoutCounter<RetryingWriter<anstream::AutoStream<io::StdoutLock<'static>>>>),
+}
+
+impl Write for StyledStdoutCounter {
+    fn write(&mut self, buf: &[u8]) -> io::Result<usize> {
+        match &mut self.inner {
+            StyledStdoutInner::Strip(strip) => strip.write(buf),
+            StyledStdoutInner::Styled(styled) => styled.write(buf),
+        }
+    }
+
+    fn flush(&mut self) -> io::Result<()> {
+        match &mut self.inner {
+            StyledStdoutInner::Strip(strip) => strip.flush(),
+            StyledStdoutInner::Styled(styled) => styled.flush(),
+        }
+    }
+}
+
+/// Lock `std::io::stdout()` behind a counting [`RetryingWriter`].
+pub fn stdout() -> StdoutCounter<RetryingWriter<io::StdoutLock<'static>>> {
+    StdoutCounter::new(RetryingWriter::new(io::stdout().lock()))
+}
+
+/// Lock `stdout()` behind an ANSI-aware counting [`RetryingWriter`].
+pub fn anstream_stdout() -> StyledStdoutCounter {
+    let choice = anstream::AutoStream::choice(&io::stdout());
+    let inner = if choice == anstream::ColorChoice::Never {
+        StyledStdoutInner::Strip(StrippingWriter::new(StdoutCounter::new(
+            RetryingWriter::new(io::stdout().lock()),
+        )))
+    } else {
+        StyledStdoutInner::Styled(StdoutCounter::new(RetryingWriter::new(
+            anstream::stdout().lock(),
+        )))
+    };
+    StyledStdoutCounter { inner }
 }
 
 impl<W: Write> Write for RetryingWriter<W> {
@@ -272,11 +379,39 @@ mod tests {
 
         let mut other = RetryingWriter::with_budget(
             ScriptedFlushWriter {
-                steps: [Step::Other].into_iter().collect(),
+                steps: [Step::BrokenPipe, Step::Other].into_iter().collect(),
             },
             Duration::from_secs(1),
         );
+        assert_eq!(other.write(b"x").expect("scripted flush write"), 1);
+        assert_eq!(
+            other.flush().expect_err("broken pipe flush").kind(),
+            ErrorKind::BrokenPipe
+        );
         let err = other.flush().expect_err("other flush fault propagates");
         assert_eq!(err.kind(), ErrorKind::Other);
+
+        // StrippingWriter strips ANSI escapes across write boundaries and flushes cleanly.
+        let mut strip = StrippingWriter::new(StdoutCounter::new(Vec::new()));
+        strip.write_all(b"\x1b[32mhello\x1b").expect("part 1");
+        strip.write_all(b"[0m world").expect("part 2");
+        strip.flush().expect("flush");
+        let counter = strip.into_inner();
+        assert_eq!(counter.inner, b"hello world");
+        assert_eq!(counter.total_written, b"hello world".len());
+
+        let mut styled = anstream_stdout();
+        assert_eq!(styled.write(b"").expect("empty write"), 0);
+        styled.flush().expect("flush");
+        let mut styled_arm = StyledStdoutCounter {
+            inner: StyledStdoutInner::Styled(StdoutCounter::new(RetryingWriter::new(
+                anstream::stdout().lock(),
+            ))),
+        };
+        assert_eq!(styled_arm.write(b"").expect("empty styled write"), 0);
+        styled_arm.flush().expect("styled flush");
+        let mut raw = stdout();
+        assert_eq!(raw.write(b"").expect("empty write"), 0);
+        raw.flush().expect("flush");
     }
 }

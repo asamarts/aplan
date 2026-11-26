@@ -1123,6 +1123,7 @@ mod tests {
             17,
             PaintRole::Id,
         );
+        canvas.text(LayeredPoint { x: 10, y: 21 }, "\u{754c}w", 4, PaintRole::Id);
         canvas.text(
             LayeredPoint { x: 10, y: 20 },
             "ignored",
@@ -1136,6 +1137,47 @@ mod tests {
                 .next()
                 .is_some_and(|line| line.contains("visible"))
         );
+        assert!(rendered.contains("\u{754c}w"));
         assert_eq!(rendered.lines().count(), 8);
+
+        let bundled = LayeredEdge {
+            from: "A".into(),
+            to: "B".into(),
+            ordinal: 0,
+            provenance: Vec::new(),
+            points: vec![LayeredPoint { x: 12, y: 22 }, LayeredPoint { x: 10, y: 22 }],
+            source_port: Some(LayeredPoint { x: 12, y: 22 }),
+            target_port: Some(LayeredPoint { x: 10, y: 22 }),
+            arrowhead: Some(LayeredPoint { x: 10, y: 22 }),
+            feedback: false,
+            bundled: true,
+            related: false,
+            degradations: Vec::new(),
+        };
+        paint_segment(
+            &mut canvas,
+            LayeredPoint { x: 10, y: 22 },
+            LayeredPoint { x: 12, y: 23 },
+            &bundled,
+            PaintRole::Muted,
+        );
+        paint_segment(
+            &mut canvas,
+            LayeredPoint { x: 12, y: 22 },
+            LayeredPoint { x: 10, y: 22 },
+            &bundled,
+            PaintRole::Muted,
+        );
+        assert_eq!(arrow_glyph(&bundled, true), "<");
+        assert_eq!(arrow_glyph(&bundled, false), "\u{25c0}");
+        let up = LayeredEdge {
+            points: vec![LayeredPoint { x: 10, y: 23 }, LayeredPoint { x: 10, y: 21 }],
+            source_port: Some(LayeredPoint { x: 10, y: 23 }),
+            target_port: Some(LayeredPoint { x: 10, y: 21 }),
+            arrowhead: Some(LayeredPoint { x: 10, y: 21 }),
+            ..bundled
+        };
+        assert_eq!(arrow_glyph(&up, true), "^");
+        assert_eq!(arrow_glyph(&up, false), "\u{25b2}");
     }
 }

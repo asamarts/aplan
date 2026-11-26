@@ -555,17 +555,10 @@ impl AplanServer {
             Ok(wrapped) => {
                 let legacy_text =
                     serde_json::to_string_pretty(&wrapped).unwrap_or_else(|e| e.to_string());
-                if legacy_text.len() > MAX_TOOL_RESULT_BYTES {
-                    return refusal_outcome(
-                        name,
-                        &requested_subject,
-                        format!(
-                            "tool `{name}` result ({} bytes) exceeds the {MAX_TOOL_RESULT_BYTES}-byte \
-                             MCP tool response limit; use bounded MCP resources (`aplan://collections/ready` \
-                             or `aplan://tasks/{{id}}`) instead",
-                            legacy_text.len()
-                        ),
-                    );
+                if let Some(refusal) =
+                    tool_result_too_large(name, &requested_subject, "result", legacy_text.len())
+                {
+                    return refusal;
                 }
                 let (context_val, payload) =
                     if args.get("root").is_some() && wrapped.get("context").is_some() {
@@ -590,6 +583,15 @@ impl AplanServer {
                     && let Some(obj) = envelope.as_object_mut()
                 {
                     obj.insert("context".to_string(), ctx);
+                }
+                let structured_len = serde_json::to_vec(&envelope).map_or(usize::MAX, |v| v.len());
+                if let Some(refusal) = tool_result_too_large(
+                    name,
+                    &requested_subject,
+                    "structured result",
+                    structured_len,
+                ) {
+                    return refusal;
                 }
                 let concise_text =
                     contract::render_concise_tool_text(name, &subject, denied, effect, &detail);
@@ -927,6 +929,63 @@ fn requested_subject(name: &str, args: &serde_json::Value) -> String {
     "plan".to_string()
 }
 
+fn tool_result_too_large(
+    name: &str,
+    subject: &str,
+    label: &str,
+    bytes: usize,
+) -> Option<StructuredDispatchOutcome> {
+    (bytes > MAX_TOOL_RESULT_BYTES).then(|| {
+        refusal_outcome(
+            name,
+            subject,
+            format!(
+                "tool `{name}` {label} ({bytes} bytes) exceeds the {MAX_TOOL_RESULT_BYTES}-byte \
+                 MCP tool response limit; use bounded MCP resources (`aplan://collections/ready` \
+                 or `aplan://tasks/{{id}}`) instead"
+            ),
+        )
+    })
+}
+
+async fn run_blocking_cancellable<T, F, C>(
+    already_cancelled: bool,
+    cancelled: C,
+    phase: &'static str,
+    work: F,
+) -> Result<T, McpError>
+where
+    T: Send + 'static,
+    F: FnOnce() -> T + Send + 'static,
+    C: std::future::Future<Output = ()>,
+{
+    if already_cancelled {
+        return Err(McpError::internal_error(
+            format!("request cancelled by client before {phase} began"),
+            None,
+        ));
+    }
+    let handle = tokio::task::spawn_blocking(work);
+    tokio::select! {
+        biased;
+        () = cancelled => Err(McpError::internal_error(
+            format!("request cancelled by client during {phase}"),
+            None,
+        )),
+        joined = handle => joined.map_err(|err| {
+            McpError::internal_error(format!("{phase} worker failed: {err}"), None)
+        }),
+    }
+}
+
+fn map_transport_outcome<T, E: std::fmt::Display>(result: Result<T, E>) -> std::io::Result<()> {
+    match result {
+        Ok(_) => Ok(()),
+        Err(err) if is_client_disconnect_message(&err.to_string()) => Ok(()),
+        Err(err) => Err(std::io::Error::other(err.to_string())),
+    }
+}
+
 fn refusal_outcome(name: &str, subject: &str, message: String) -> StructuredDispatchOutcome {
     let clean_error = aplan_output::sanitize::visible(&message).into_owned();
     let structured = serde_json::json!({
@@ -1261,44 +1320,57 @@ impl ServerHandler for AplanServer {
         request: ReadResourceRequestParams,
         context: RequestContext<RoleServer>,
     ) -> impl std::future::Future<Output = Result<ReadResourceResponse, McpError>> + Send {
-        let is_current = is_2026_07_28_or_later(&context);
-        let out = match self.read_resource_payload(&request.uri) {
-            Ok((canonical_uri, value, identity, complete)) => {
-                let text = serde_json::to_string_pretty(&value).unwrap_or_else(|e| e.to_string());
-                let mut meta = MetaObject::new();
-                meta.insert(
-                    "contractVersion".to_string(),
-                    serde_json::json!(MCP_CONTRACT_VERSION),
-                );
-                meta.insert(
-                    "inputIdentity".to_string(),
-                    serde_json::to_value(&identity).unwrap_or(serde_json::Value::Null),
-                );
-                meta.insert("complete".to_string(), serde_json::json!(complete));
-                meta.insert("ttlMs".to_string(), serde_json::json!(0));
-                meta.insert("cacheScope".to_string(), serde_json::json!("private"));
-                let mut result =
-                    ReadResourceResult::new(vec![ResourceContents::TextResourceContents {
-                        uri: canonical_uri,
-                        mime_type: Some("application/json".to_string()),
-                        text,
-                        meta: Some(meta),
-                    }]);
-                if is_current {
-                    result.ttl_ms = Some(0);
-                    result.cache_scope = Some(CacheScope::Private);
+        let server = self.clone();
+        async move {
+            let is_current = is_2026_07_28_or_later(&context);
+            let uri = request.uri;
+            let payload = run_blocking_cancellable(
+                context.ct.is_cancelled(),
+                context.ct.cancelled(),
+                "resource read",
+                move || server.read_resource_payload(&uri),
+            )
+            .await?;
+            match payload {
+                Ok((canonical_uri, value, identity, complete)) => {
+                    let text =
+                        serde_json::to_string_pretty(&value).unwrap_or_else(|e| e.to_string());
+                    let mut meta = MetaObject::new();
+                    meta.insert(
+                        "contractVersion".to_string(),
+                        serde_json::json!(MCP_CONTRACT_VERSION),
+                    );
+                    meta.insert(
+                        "inputIdentity".to_string(),
+                        serde_json::to_value(&identity).unwrap_or(serde_json::Value::Null),
+                    );
+                    meta.insert("complete".to_string(), serde_json::json!(complete));
+                    meta.insert("ttlMs".to_string(), serde_json::json!(0));
+                    meta.insert("cacheScope".to_string(), serde_json::json!("private"));
+                    let mut result =
+                        ReadResourceResult::new(vec![ResourceContents::TextResourceContents {
+                            uri: canonical_uri,
+                            mime_type: Some("application/json".to_string()),
+                            text,
+                            meta: Some(meta),
+                        }]);
+                    if is_current {
+                        result.ttl_ms = Some(0);
+                        result.cache_scope = Some(CacheScope::Private);
+                    }
+                    Ok(ReadResourceResponse::Complete(result))
                 }
-                Ok(ReadResourceResponse::Complete(result))
+                Err(ResourceError::NotFound(message)) => {
+                    Err(McpError::resource_not_found(message, None))
+                }
+                Err(ResourceError::InvalidParams(message)) => {
+                    Err(McpError::invalid_params(message, None))
+                }
+                Err(ResourceError::Internal(message)) => {
+                    Err(McpError::internal_error(message, None))
+                }
             }
-            Err(ResourceError::NotFound(message)) => {
-                Err(McpError::resource_not_found(message, None))
-            }
-            Err(ResourceError::InvalidParams(message)) => {
-                Err(McpError::invalid_params(message, None))
-            }
-            Err(ResourceError::Internal(message)) => Err(McpError::internal_error(message, None)),
-        };
-        std::future::ready(out)
+        }
     }
 
     fn call_tool(
@@ -1312,29 +1384,44 @@ impl ServerHandler for AplanServer {
         // `.into()`d at each site so the choice is visible to whoever adds a
         // tool that does want to ask a question back.
     ) -> impl std::future::Future<Output = Result<CallToolResponse, McpError>> + Send {
-        let args = request
-            .arguments
-            .map_or_else(|| serde_json::json!({}), serde_json::Value::Object);
+        let server = self.clone();
+        async move {
+            let args = request
+                .arguments
+                .map_or_else(|| serde_json::json!({}), serde_json::Value::Object);
+            let name = request.name.into_owned();
+            let structured_mode = supports_structured_content(&context);
 
-        // A refusal is a *result*, not a protocol error: the caller asked a
-        // well-formed question and the answer is no, with the reason. Reporting
-        // it as a transport failure would leave an agent unable to tell "I may
-        // not do that" from "the server broke".
-        let outcome = self.dispatch_structured(&request.name, &args);
-        let result = if supports_structured_content(&context) {
-            let mut res = if outcome.is_error {
-                CallToolResult::error(vec![ContentBlock::text(outcome.concise_text)])
+            // Offload synchronous plan/provider dispatch onto Tokio's blocking pool
+            // so transport EOF and client cancellations remain observable while a
+            // configured provider is running (`A2-136`).
+            let outcome = run_blocking_cancellable(
+                context.ct.is_cancelled(),
+                context.ct.cancelled(),
+                "tool execution",
+                move || server.dispatch_structured(&name, &args),
+            )
+            .await?;
+
+            // A refusal is a *result*, not a protocol error: the caller asked a
+            // well-formed question and the answer is no, with the reason. Reporting
+            // it as a transport failure would leave an agent unable to tell "I may
+            // not do that" from "the server broke".
+            let result = if structured_mode {
+                let mut res = if outcome.is_error {
+                    CallToolResult::error(vec![ContentBlock::text(outcome.concise_text)])
+                } else {
+                    CallToolResult::success(vec![ContentBlock::text(outcome.concise_text)])
+                };
+                res.structured_content = Some(outcome.structured);
+                res
+            } else if outcome.is_error {
+                CallToolResult::error(vec![ContentBlock::text(outcome.legacy_text)])
             } else {
-                CallToolResult::success(vec![ContentBlock::text(outcome.concise_text)])
+                CallToolResult::success(vec![ContentBlock::text(outcome.legacy_text)])
             };
-            res.structured_content = Some(outcome.structured);
-            res
-        } else if outcome.is_error {
-            CallToolResult::error(vec![ContentBlock::text(outcome.legacy_text)])
-        } else {
-            CallToolResult::success(vec![ContentBlock::text(outcome.legacy_text)])
-        };
-        std::future::ready(Ok(CallToolResponse::Complete(result)))
+            Ok(CallToolResponse::Complete(result))
+        }
     }
 }
 
@@ -1355,16 +1442,32 @@ fn policy_for_resolved(
     }
 }
 
+/// Whether a stdio transport error represents an interrupted or disconnected
+/// MCP peer (closed stdin, broken stdout pipe, or transport close before/after
+/// handshake) rather than a server fault (`A2-136`).
+fn is_client_disconnect_message(message: &str) -> bool {
+    let lower = message.to_ascii_lowercase();
+    lower.contains("broken pipe")
+        || lower.contains("connection closed")
+        || lower.contains("unexpected eof")
+        || lower.contains("transport closed")
+        || lower.contains("channel closed")
+        || lower.contains("eof while parsing")
+        || lower.contains("connection reset")
+}
+
+async fn serve_stdio(server: AplanServer) -> std::io::Result<()> {
+    let outcome = match rmcp::serve_server(server, rmcp::transport::io::stdio()).await {
+        Ok(service) => map_transport_outcome(service.waiting().await),
+        Err(err) => map_transport_outcome::<(), _>(Err(err)),
+    };
+    aplan_evidence::terminate_active_configured_commands();
+    outcome
+}
+
 /// Serve over stdio until the client disconnects.
 pub async fn serve_unconfigured(said: String, identity: serde_json::Value) -> std::io::Result<()> {
-    let service = rmcp::serve_server(
-        AplanServer::unconfigured(said, identity),
-        rmcp::transport::io::stdio(),
-    )
-    .await
-    .map_err(std::io::Error::other)?;
-    service.waiting().await.map_err(std::io::Error::other)?;
-    Ok(())
+    serve_stdio(AplanServer::unconfigured(said, identity)).await
 }
 
 /// Serve `root` under `policy`, reporting `identity` as this build.
@@ -1381,22 +1484,16 @@ pub async fn serve(
     written_by: (String, String),
     running_build: aplan_config::RunningBuild,
 ) -> std::io::Result<()> {
-    let service = rmcp::serve_server(
-        AplanServer::new(
-            root,
-            policy,
-            identity,
-            cache_mode,
-            cache_writer_identity,
-            written_by,
-            Some(running_build),
-        ),
-        rmcp::transport::io::stdio(),
-    )
+    serve_stdio(AplanServer::new(
+        root,
+        policy,
+        identity,
+        cache_mode,
+        cache_writer_identity,
+        written_by,
+        Some(running_build),
+    ))
     .await
-    .map_err(std::io::Error::other)?;
-    service.waiting().await.map_err(std::io::Error::other)?;
-    Ok(())
 }
 
 #[cfg(test)]
@@ -1915,5 +2012,63 @@ mod tests {
             "{}",
             outcome.concise_text
         );
+    }
+
+    #[test]
+    fn client_disconnect_classifier_recognises_peer_termination_only() {
+        for msg in [
+            "Broken pipe (os error 32)",
+            "connection closed",
+            "Unexpected EOF while reading frame",
+            "transport closed",
+            "channel closed",
+            "EOF while parsing a value",
+            "Connection reset by peer",
+        ] {
+            assert!(
+                super::is_client_disconnect_message(msg),
+                "expected disconnect match for `{msg}`"
+            );
+        }
+        assert!(!super::is_client_disconnect_message("permission denied"));
+        assert!(super::map_transport_outcome::<(), &str>(Ok(())).is_ok());
+        assert!(super::map_transport_outcome::<(), &str>(Err("broken pipe")).is_ok());
+        assert!(super::map_transport_outcome::<(), &str>(Err("permission denied")).is_err());
+        assert!(super::tool_result_too_large("aplan_ready", "plan", "result", 10).is_none());
+        let refused = super::tool_result_too_large(
+            "aplan_ready",
+            "plan",
+            "structured result",
+            crate::contract::MAX_TOOL_RESULT_BYTES + 1,
+        )
+        .expect("oversized structured result must refuse");
+        assert!(refused.is_error);
+        assert!(refused.concise_text.contains("structured result"));
+    }
+
+    #[tokio::test]
+    async fn run_blocking_cancellable_handles_pre_cancel_in_flight_cancel_and_completion() {
+        let val =
+            super::run_blocking_cancellable(false, std::future::pending(), "unit", || 42usize)
+                .await
+                .expect("normal completion");
+        assert_eq!(val, 42);
+
+        let pre_err =
+            super::run_blocking_cancellable(true, std::future::pending(), "unit", || 1usize)
+                .await
+                .expect_err("pre-cancelled must fail immediately");
+        assert!(pre_err.message.contains("before unit began"));
+
+        let (tx, rx) = std::sync::mpsc::channel::<()>();
+        let mid_err =
+            super::run_blocking_cancellable(false, std::future::ready(()), "unit", move || {
+                let _ = rx.recv_timeout(std::time::Duration::from_millis(200));
+                7usize
+            })
+            .await
+            .expect_err("in-flight cancellation must return error");
+        let _ = tx.send(());
+        assert!(mid_err.message.contains("during unit"));
     }
 }
