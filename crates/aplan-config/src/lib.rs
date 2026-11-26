@@ -2865,44 +2865,7 @@ impl TestRunner {
                 "`{prefix}.list` is an empty command"
             )));
         }
-        if self.run.is_empty() {
-            return Err(Error::BadRunner(format!(
-                "`{prefix}.run` is an empty command"
-            )));
-        }
-        let holes = self
-            .run
-            .iter()
-            .filter(|e| e.as_str() == PLACEHOLDER)
-            .count();
-        if holes != 1 {
-            return Err(Error::BadRunner(format!(
-                "`{prefix}.run` must contain `{PLACEHOLDER}` exactly once, as a whole argument \
-                 (found {holes})"
-            )));
-        }
-        // The placeholder must never be the program (argv[0]): `run: ['{test}']`
-        // would make the untrusted test name the command that is executed. The
-        // command must be a fixed, trusted program, this is the core of the trust
-        // boundary (HLD 5.5), and `validate` is where it is enforced.
-        if self.run.first().map(String::as_str) == Some(PLACEHOLDER) {
-            return Err(Error::BadRunner(format!(
-                "`{PLACEHOLDER}` may not be the command (the first element) of `{prefix}.run`: the \
-                 program to run must be a fixed command, never the test name"
-            )));
-        }
-        // The name must never be concatenated into a larger argument: that is
-        // the only way a shell-using runner could be injected by a task file.
-        if self
-            .run
-            .iter()
-            .any(|e| e.as_str() != PLACEHOLDER && e.contains(PLACEHOLDER))
-        {
-            return Err(Error::BadRunner(format!(
-                "`{prefix}.run` may use `{PLACEHOLDER}` only as a whole argument, never spliced \
-                 inside another one"
-            )));
-        }
+        validate_runner_run_argv(prefix, &self.run)?;
         if let Some(batch) = &self.batch {
             batch.validate_at(&format!("{prefix}.batch"))?;
         }
@@ -2923,6 +2886,44 @@ impl TestRunner {
             })
             .collect()
     }
+}
+
+/// Validate a runner's `run` argv template at key path `prefix`.
+pub(crate) fn validate_runner_run_argv(prefix: &str, run: &[String]) -> Result<(), Error> {
+    if run.is_empty() {
+        return Err(Error::BadRunner(format!(
+            "`{prefix}.run` is an empty command"
+        )));
+    }
+    let holes = run.iter().filter(|e| e.as_str() == PLACEHOLDER).count();
+    if holes != 1 {
+        return Err(Error::BadRunner(format!(
+            "`{prefix}.run` must contain `{PLACEHOLDER}` exactly once, as a whole argument \
+             (found {holes})"
+        )));
+    }
+    // The placeholder must never be the program (argv[0]): `run: ['{test}']`
+    // would make the untrusted test name the command that is executed. The
+    // command must be a fixed, trusted program, this is the core of the trust
+    // boundary (HLD 5.5), and `validate` is where it is enforced.
+    if run.first().map(String::as_str) == Some(PLACEHOLDER) {
+        return Err(Error::BadRunner(format!(
+            "`{PLACEHOLDER}` may not be the command (the first element) of `{prefix}.run`: the \
+             program to run must be a fixed command, never the test name"
+        )));
+    }
+    // The name must never be concatenated into a larger argument: that is
+    // the only way a shell-using runner could be injected by a task file.
+    if run
+        .iter()
+        .any(|e| e.as_str() != PLACEHOLDER && e.contains(PLACEHOLDER))
+    {
+        return Err(Error::BadRunner(format!(
+            "`{prefix}.run` may use `{PLACEHOLDER}` only as a whole argument, never spliced \
+             inside another one"
+        )));
+    }
+    Ok(())
 }
 
 /// Load `.aplan.yml`, discovered by walking up from `start` to the filesystem
@@ -4225,6 +4226,12 @@ fn walk_unknown(
     let Some(map) = node.as_mapping_mut() else {
         return;
     };
+    // A sequence-of-mappings field that received a mapping (for example
+    // `test.runners: {unit: {...}}`) is a type error, not a set of unknown
+    // schema keys.
+    if test_runner_parse::is_test_sequence_of_mappings_path(prefix) {
+        return;
+    }
     let mut drop_these: Vec<(yaml_compat::Value, Option<String>)> = Vec::new();
     let mut keep = yaml_compat::Mapping::new();
     for (k, v) in map.iter_mut() {
@@ -7353,6 +7360,21 @@ future_top_level_key_from_v09:
                     "test.batch: expected a mapping such as {protocol: 1",
                     "TestBatch",
                 ),
+                (
+                    "test:\n  schedule: {capacity: 1}\n  runners:\n    unit:\n      list: ['true']\n      run: ['true', '{test}']\n",
+                    "test.runners: expected a list of runner mappings, got a mapping",
+                    "unknown key",
+                ),
+                (
+                    "test:\n  list: ['true']\n  run: ['true', '{test}']\n  covers_by_test:\n    unit: ['src/**']\n",
+                    "test.covers_by_test: expected a list of mappings",
+                    "unknown key",
+                ),
+                (
+                    "test:\n  schedule:\n    capacity: -1\n  runners:\n    - list: ['true']\n      run: ['true', '{test}']\n      weight: 1.5\n      timeout_seconds: -5\n      output_lines: -1\n",
+                    "test.schedule.capacity: expected a positive integer such as 1, got number `-1`",
+                    "invalid type",
+                ),
             ] {
                 let err = parse_config(yaml, Path::new(".aplan.yml"))
                     .expect_err("type error must fail")
@@ -7364,6 +7386,39 @@ future_top_level_key_from_v09:
                 );
             }
 
+            assert_test_runner_null_and_combo_edge_cases();
+            assert_test_runner_validation_paths();
+        }
+
+        fn assert_test_runner_null_and_combo_edge_cases() {
+            // Explicit null on optional runner fields stays valid while null on
+            // required fields produces a configuration-terms type error.
+            parse_config(
+                "test:\n  name: null\n  dir: null\n  weight: null\n  batch: null\n  list: ['true']\n  run: ['true', '{test}']\n",
+                Path::new(".aplan.yml"),
+            )
+            .expect("explicit null on optional runner fields must remain accepted");
+
+            // Genuine unknown key combined with a misplaced test key still reports
+            // the unknown key and surfaces the misplaced key in `remaining`.
+            let Err(Error::UnknownKeys(combo)) = parse_config(
+                "zzzzzzzz: 1\ntest:\n  runners:\n    - list: ['true']\n      run: ['true', '{test}']\n      schedule: nightly\n",
+                Path::new(".aplan.yml"),
+            ) else {
+                panic!("expected Error::UnknownKeys for genuine unknown key");
+            };
+            assert_eq!(combo.keys, vec![("zzzzzzzz".to_string(), None)]);
+            assert!(
+                combo
+                    .remaining
+                    .as_deref()
+                    .is_some_and(|r| r.contains("test.runners[0].schedule: misplaced key")),
+                "expected misplaced key in remaining: {:?}",
+                combo.remaining
+            );
+        }
+
+        fn assert_test_runner_validation_paths() {
             // Validation errors carry the exact indexed runner path.
             for (yaml, expected_path) in [
                 (

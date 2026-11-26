@@ -81,6 +81,7 @@ pub(crate) fn is_misplaced_test_path(path: &str) -> bool {
             | "test.runners.runners"
             | "test.runners.capacity"
             | "test.runners.protocol"
+            | "test.schedule.schedule"
             | "test.schedule.runners"
             | "test.schedule.protocol"
     ) {
@@ -90,6 +91,19 @@ pub(crate) fn is_misplaced_test_path(path: &str) -> bool {
         return RUNNER_KEYS.contains(&key);
     }
     false
+}
+
+/// Whether `path` expects a sequence of mappings, so a mapping written there is
+/// a shape error rather than a collection of unknown config keys.
+pub(crate) fn is_test_sequence_of_mappings_path(path: &str) -> bool {
+    matches!(
+        path,
+        "test.runners"
+            | "test.covers_by_test"
+            | "test.inputs_by_test"
+            | "test.runners.covers_by_test"
+            | "test.runners.inputs_by_test"
+    )
 }
 
 /// Strip a redundant leading `test: ` added by the YAML deserializer when our
@@ -266,6 +280,10 @@ fn parse_schedule(
         };
         match name {
             "capacity" => capacity_val = Some(val),
+            "schedule" => diag.misplaced.push(format!(
+                "{path}.schedule: misplaced key; `capacity` belongs directly inside \
+                 `test.schedule` (for example `test.schedule: {{capacity: 1}}`)"
+            )),
             "runners" => diag.misplaced.push(format!(
                 "{path}.runners: misplaced key; `runners` belongs one level up at `test.runners`"
             )),
@@ -602,7 +620,20 @@ fn parse_runner_mapping(
         None
     };
 
-    let (identity, execution, list, run) = (identity?, execution?, list?, run?);
+    let (identity, execution, list, run) = match (identity, execution, list, run) {
+        (Some(identity), Some(execution), Some(list), Some(run)) => {
+            (identity, execution, list, run)
+        }
+        (_, _, _, Some(run_argv)) => {
+            if let Err(crate::Error::BadRunner(reason)) =
+                crate::validate_runner_run_argv(path, &run_argv)
+            {
+                diag.semantic_notes.push(reason);
+            }
+            return None;
+        }
+        _ => return None,
+    };
     let runner = TestRunner {
         weight: identity.weight,
         exclusive: identity.exclusive,

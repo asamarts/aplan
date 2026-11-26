@@ -554,6 +554,17 @@ fn issue_34_test_runners_sequence_reaches_valid_config_in_one_step() {
     );
     assert!(!out2.contains("expected a sequence"), "{out2}");
 
+    // Row 4: missing `test.schedule` alongside `run: ['true']` without `{test}`
+    // surfaces both in one refusal, including the runner's own indexed path.
+    let row4 =
+        repo("test:\n  runners:\n    - name: unit\n      list: ['true']\n      run: ['true']\n");
+    let (out4, code4) = aplan(row4.path(), &["check", "--root", "aplan"]);
+    assert_eq!(code4, 2, "{out4}");
+    assert!(
+        out4.contains("test.schedule") && out4.contains("`test.runners[0].run`"),
+        "{out4}"
+    );
+
     // Row 5: misplaced `schedule` inside a runner names `test.schedule` instead
     // of misreporting an unknown key from a newer binary.
     let row5 = repo(
