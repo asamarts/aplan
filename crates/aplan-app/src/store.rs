@@ -1236,13 +1236,14 @@ impl EncodedPath {
     #[cfg(windows)]
     fn to_path(&self) -> Option<PathBuf> {
         use std::os::windows::ffi::OsStringExt as _;
-        if self.encoding != PATH_ENCODING_WINDOWS || self.bytes.len() % 2 != 0 {
+        if self.encoding != PATH_ENCODING_WINDOWS {
             return None;
         }
-        let units = self
-            .bytes
-            .as_chunks::<2>()
-            .0
+        let (chunks, rem) = self.bytes.as_chunks::<2>();
+        if !rem.is_empty() {
+            return None;
+        }
+        let units = chunks
             .iter()
             .map(|pair| u16::from_le_bytes([pair[0], pair[1]]))
             .collect::<Vec<_>>();
@@ -2596,12 +2597,10 @@ mod tests {
     #[cfg(unix)]
     use super::FileObservation;
     #[cfg(unix)]
-    use super::FileType;
-    #[cfg(unix)]
     use super::TimeValue;
     use super::{
-        CacheMode, CachedDiagnostic, CachedReport, EncodedPath, MAX_CACHE_BYTES, MAX_CACHE_TOTAL,
-        MAX_DIAGNOSTIC_TEXT_BYTES, PlanStore, PlanStoreOptions, codec, evict,
+        CacheMode, CachedDiagnostic, CachedReport, EncodedPath, FileType, MAX_CACHE_BYTES,
+        MAX_CACHE_TOTAL, MAX_DIAGNOSTIC_TEXT_BYTES, PlanStore, PlanStoreOptions, codec, evict,
     };
 
     #[test]

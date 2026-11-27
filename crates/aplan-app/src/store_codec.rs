@@ -230,6 +230,7 @@ impl Encoder<'_> {
         self.0.extend_from_slice(&value.to_le_bytes());
     }
 
+    #[cfg(unix)]
     fn write_i64(&mut self, value: i64) {
         self.0.extend_from_slice(&value.to_le_bytes());
     }
@@ -552,6 +553,7 @@ impl<'a> Decoder<'a> {
         Some(u32::from_le_bytes(bytes))
     }
 
+    #[cfg(unix)]
     fn read_i64(&mut self) -> Option<i64> {
         let bytes: [u8; 8] = self.read_slice(8)?.try_into().ok()?;
         Some(i64::from_le_bytes(bytes))
