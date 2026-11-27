@@ -15,7 +15,7 @@
 | hardening | todo | 1/16 | 15 | 0 | 15.8d | 0.6 (0.5 left) | 3.0d |
 | qualification | todo | 0/1 | 0 | 1 | 8.0d | 0.3 (0.3 left) | 8.0d |
 | tui-quality | todo | 0/2 | 1 | 1 | 4.0d | 0.1 (0.1 left) | 4.0d |
-| workflow | todo | 13/17 | 3 | 1 | 50.0d | 1.9 (0.5 left) | 17.5d |
+| workflow | todo | 14/17 | 2 | 1 | 50.0d | 1.9 (0.3 left) | 17.5d |
 
 ## v0.7 Security, safe parsing and gates that tell the truth
 
@@ -236,7 +236,7 @@
 | A2-118 | Add versioned structured MCP outputs and bounded resources | done | - | commit:ff94344, test:mcp::structured_outputs_bounded_resources_and_protocol_matrix, test:mcp_policy::every_mcp_resource_and_template_is_classified_confined_and_driven |
 | A2-119 | Expose completed-task history through bounded MCP resources | done | A2-111, A2-118 | commit:c366ed21467e, test:mcp::completed_history_resource_covers_provenance_paging_shallow_caps_staleness_and_hostile_uris, test:resources::tests::completed_page_shrinks_under_64kib_size_cap_and_continues_cleanly |
 | A2-120 | Render task Markdown in the TUI inspector | done | A2-114 | commit:2dc55e4, test:markdown::tests::every_semantic_member_drives_a_tui_disposition_and_matches_cli_semantic_text, test:markdown::tests::large_body_scrolls_incrementally_without_reparse_or_redundant_redraw, test:tui_portability::portable_tui_markdown_inspector_renders_scrolls_and_reflows_on_resize |
-| A2-134 | Audit every read-only surface against the explicit latency and work budgets | todo | A2-135, A2-136 | - |
+| A2-134 | Audit every read-only surface against the explicit latency and work budgets | done | A2-135, A2-136 | commit:cd5ba8a50c85, test:read_budget_audit::derived_inventory_assigns_every_cli_mcp_and_tui_surface_one_latency_class, test:read_budget_audit::seven_cache_and_observation_states_preserve_cli_mcp_tui_parity_and_ratchet_work_counters, test:read_budget_audit::repository_reads_separate_plan_overhead_and_external_refresh_reports_provider_spawns |
 | A2-135 | Derive vacuity from one exhaustive validation pass | done | - | commit:f71418c55549, test:vacuity::switched_off_tests::single_pass_vacuity_proves_work_bounds_and_rejects_repeated_validator_mutant, test:vacuity::vacuity_performs_one_graph_build_and_one_parse_per_trace_document, test:coverage::switch_dispositions_and_single_pass_observations_agree_with_corpus, test:tests::vacuity_switch_catalogue_is_exhaustive_against_accepted_config_keys |
 | A2-136 | Stream output-dominated read results with bounded memory and prompt first bytes | done | - | commit:d72357d45701, test:read_streaming::read_surface_inventory_covers_and_drives_every_cli_and_mcp_surface, test:read_streaming::large_read_outputs_stream_with_bounded_buffer_and_byte_parity, test:read_streaming::broken_pipe_and_interrupted_mcp_consumers_stop_cleanly_without_orphans |
 | A2-139 | Bound why output through deep ordinary dependency chains | todo | - | - |
