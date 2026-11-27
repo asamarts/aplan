@@ -286,7 +286,8 @@ impl Default for DocumentInputs {
 /// answer questions about it.
 #[derive(Debug)]
 pub struct PlanContext {
-    plan: Plan,
+    loaded: std::sync::Arc<aplan_core::IdentifiedPlan>,
+    has_retained_bytes: bool,
     task_sources: BTreeMap<String, PathBuf>,
     source_inputs: BTreeMap<PathBuf, aplan_core::load::PlanFileContent>,
     documents: DocumentInputs,
@@ -347,6 +348,29 @@ impl PlanContext {
     /// treats any semantic difference as stale.
     #[must_use]
     pub fn new(loaded: aplan_core::IdentifiedPlan, inputs: ContextInputs) -> Self {
+        Self::from_shared(std::sync::Arc::new(loaded), inputs)
+    }
+
+    /// Identify a shared immutable [`PlanStore`] snapshot without cloning its
+    /// tasks or per-file inputs (`A2-134`).
+    #[must_use]
+    pub fn from_shared(
+        loaded: std::sync::Arc<aplan_core::IdentifiedPlan>,
+        inputs: ContextInputs,
+    ) -> Self {
+        Self::from_shared_with_plan_digest(loaded, inputs, None)
+    }
+
+    /// Identify a shared immutable [`PlanStore`] snapshot, optionally reusing
+    /// an exact precomputed `plan_sha256` from [`PlanStore::plan_input_digest`]
+    /// so read-only commands avoid materializing per-file `PlanFileInput`
+    /// records (`A2-134`).
+    #[must_use]
+    pub fn from_shared_with_plan_digest(
+        loaded: std::sync::Arc<aplan_core::IdentifiedPlan>,
+        inputs: ContextInputs,
+        precomputed_plan_sha256: Option<String>,
+    ) -> Self {
         let configuration = ConfigurationIdentity::selected(
             inputs.configuration_file.as_deref(),
             &inputs.options,
@@ -355,7 +379,8 @@ impl PlanContext {
         let plan_root = loaded.root.clone();
         let repository_root = absolute(&inputs.repository_root);
         let repository = repository_identity(&repository_root, inputs.trust);
-        let plan_sha256 = plan_input_digest(&loaded.inputs, &plan_root);
+        let plan_sha256 = precomputed_plan_sha256
+            .unwrap_or_else(|| plan_input_digest(&loaded.inputs, &plan_root));
         let sha256 = input_digest(
             &plan_sha256,
             &repository_root,
@@ -365,33 +390,43 @@ impl PlanContext {
             &inputs.options,
             &inputs.verdict,
         );
-        let source_inputs: BTreeMap<_, _> = loaded
+        let has_retained_bytes = loaded
             .inputs
-            .into_iter()
-            .map(|input| (input.path, input.content))
-            .collect();
-        let mut task_sources = BTreeMap::new();
-        for task in &loaded.plan.tasks {
-            let Some(aplan_core::load::PlanFileContent::Bytes(bytes)) =
-                source_inputs.get(&task.path)
-            else {
-                continue;
-            };
-            let Some((_, _)) = std::str::from_utf8(bytes)
-                .ok()
-                .and_then(aplan_core::load::split_frontmatter)
-            else {
-                continue;
-            };
-            // Match `Graph::new`: the first definition is the one every
-            // projection uses while APLAN001 reports the duplicate. Letting a
-            // later duplicate overwrite only its body would pair two files.
-            task_sources
-                .entry(task.task.id.clone())
-                .or_insert_with(|| task.path.clone());
-        }
+            .iter()
+            .any(|input| matches!(input.content, aplan_core::load::PlanFileContent::Bytes(_)));
+        let (source_inputs, task_sources) = if has_retained_bytes {
+            let source_inputs: BTreeMap<_, _> = loaded
+                .inputs
+                .iter()
+                .map(|input| (input.path.clone(), input.content.clone()))
+                .collect();
+            let mut task_sources = BTreeMap::new();
+            for task in &loaded.plan.tasks {
+                let Some(aplan_core::load::PlanFileContent::Bytes(bytes)) =
+                    source_inputs.get(&task.path)
+                else {
+                    continue;
+                };
+                let Some((_, _)) = std::str::from_utf8(bytes)
+                    .ok()
+                    .and_then(aplan_core::load::split_frontmatter)
+                else {
+                    continue;
+                };
+                // Match `Graph::new`: the first definition is the one every
+                // projection uses while APLAN001 reports the duplicate. Letting a
+                // later duplicate overwrite only its body would pair two files.
+                task_sources
+                    .entry(task.task.id.clone())
+                    .or_insert_with(|| task.path.clone());
+            }
+            (source_inputs, task_sources)
+        } else {
+            (BTreeMap::new(), BTreeMap::new())
+        };
         Self {
-            plan: loaded.plan,
+            loaded,
+            has_retained_bytes,
             task_sources,
             source_inputs,
             documents: DocumentInputs::default(),
@@ -562,8 +597,8 @@ impl PlanContext {
     }
 
     #[must_use]
-    pub const fn plan(&self) -> &Plan {
-        &self.plan
+    pub fn plan(&self) -> &Plan {
+        &self.loaded.plan
     }
 
     /// The body parsed from the same bytes as this context, never from a later
@@ -3540,6 +3575,14 @@ fn hash_repository_identity(digest: &mut Sha256, repository: &RepositoryIdentity
     }
 }
 
+fn raw_path_needs_normalize(path: &Path) -> bool {
+    let bytes = path.as_os_str().as_encoded_bytes();
+    bytes.ends_with(b"/.")
+        || bytes.ends_with(b"\\.")
+        || bytes.windows(3).any(|w| w == b"/./" || w == b"\\.\\")
+        || bytes.windows(2).any(|w| w == b"//" || w == b"\\\\")
+}
+
 fn plan_input_digest(plan_inputs: &[aplan_core::PlanFileInput], plan_root: &Path) -> String {
     let mut digest = Sha256::new();
     hash_part(
@@ -3547,38 +3590,94 @@ fn plan_input_digest(plan_inputs: &[aplan_core::PlanFileInput], plan_root: &Path
         b"plan_root",
         plan_root.as_os_str().as_encoded_bytes(),
     );
-    let mut files: Vec<_> = plan_inputs.iter().collect();
-    files.sort_unstable_by(|a, b| a.path.cmp(&b.path));
-    for file in files {
-        let path = absolute(&file.path);
-        hash_part(
-            &mut digest,
-            b"plan_candidate_path",
-            path.as_os_str().as_encoded_bytes(),
-        );
-        match &file.content {
-            aplan_core::PlanFileContent::Bytes(bytes) => {
-                hash_part(
-                    &mut digest,
-                    b"plan_candidate_sha256",
-                    to_hex(&Sha256::digest(bytes)).as_bytes(),
-                );
+    let already_sorted = plan_inputs
+        .windows(2)
+        .all(|pair| pair[0].path <= pair[1].path);
+    let sorted_storage: Vec<&aplan_core::PlanFileInput>;
+    let files: &[&aplan_core::PlanFileInput];
+    let mut scratch_path = PathBuf::new();
+    // Resolve `current_dir` at most once when any candidate path is relative,
+    // avoiding O(N) `getcwd` syscalls on 10,000-task plans while preserving the
+    // exact byte output of `std::path::absolute`.
+    let cwd = plan_inputs
+        .iter()
+        .any(|input| !input.path.is_absolute())
+        .then(|| std::env::current_dir().ok())
+        .flatten();
+    let hash_one =
+        |digest: &mut Sha256, file: &aplan_core::PlanFileInput, scratch: &mut PathBuf| {
+            let encoded_path = if file.path.is_absolute() {
+                if raw_path_needs_normalize(&file.path)
+                    || file
+                        .path
+                        .components()
+                        .any(|c| matches!(c, std::path::Component::CurDir))
+                {
+                    *scratch = absolute(&file.path);
+                    scratch.as_os_str().as_encoded_bytes()
+                } else {
+                    file.path.as_os_str().as_encoded_bytes()
+                }
+            } else if let Some(base) = cwd.as_deref() {
+                if raw_path_needs_normalize(&file.path)
+                    || file.path.components().any(|c| {
+                        matches!(
+                            c,
+                            std::path::Component::CurDir | std::path::Component::ParentDir
+                        )
+                    })
+                {
+                    *scratch = absolute(&file.path);
+                    scratch.as_os_str().as_encoded_bytes()
+                } else {
+                    scratch.clear();
+                    scratch.push(base);
+                    scratch.push(&file.path);
+                    scratch.as_os_str().as_encoded_bytes()
+                }
+            } else {
+                *scratch = absolute(&file.path);
+                scratch.as_os_str().as_encoded_bytes()
+            };
+            hash_part(digest, b"plan_candidate_path", encoded_path);
+            match &file.content {
+                aplan_core::PlanFileContent::Bytes(bytes) => {
+                    hash_part(
+                        digest,
+                        b"plan_candidate_sha256",
+                        to_hex(&Sha256::digest(bytes)).as_bytes(),
+                    );
+                }
+                aplan_core::PlanFileContent::Sha256(sha256) => {
+                    hash_part(digest, b"plan_candidate_sha256", sha256.as_bytes());
+                }
+                aplan_core::PlanFileContent::ReadError { kind, message } => {
+                    hash_part(
+                        digest,
+                        b"plan_candidate_read_error_kind",
+                        io_error_kind_name(*kind).as_bytes(),
+                    );
+                    hash_part(
+                        digest,
+                        b"plan_candidate_read_error_message",
+                        message.as_bytes(),
+                    );
+                }
             }
-            aplan_core::PlanFileContent::Sha256(sha256) => {
-                hash_part(&mut digest, b"plan_candidate_sha256", sha256.as_bytes());
-            }
-            aplan_core::PlanFileContent::ReadError { kind, message } => {
-                hash_part(
-                    &mut digest,
-                    b"plan_candidate_read_error_kind",
-                    io_error_kind_name(*kind).as_bytes(),
-                );
-                hash_part(
-                    &mut digest,
-                    b"plan_candidate_read_error_message",
-                    message.as_bytes(),
-                );
-            }
+        };
+    if already_sorted {
+        for file in plan_inputs {
+            hash_one(&mut digest, file, &mut scratch_path);
+        }
+    } else {
+        sorted_storage = {
+            let mut v: Vec<_> = plan_inputs.iter().collect();
+            v.sort_unstable_by(|a, b| a.path.cmp(&b.path));
+            v
+        };
+        files = &sorted_storage;
+        for file in files {
+            hash_one(&mut digest, file, &mut scratch_path);
         }
     }
     to_hex(&digest.finalize())
@@ -3750,7 +3849,7 @@ fn document_input_digest(plan_sha256: &str, documents: &DocumentInputs) -> Strin
     to_hex(&digest.finalize())
 }
 
-fn hash_part(digest: &mut Sha256, label: &[u8], value: &[u8]) {
+pub(crate) fn hash_part(digest: &mut Sha256, label: &[u8], value: &[u8]) {
     digest.update(label.len().to_le_bytes());
     digest.update(label);
     digest.update(value.len().to_le_bytes());
@@ -9056,5 +9155,29 @@ mod verification_error_tests {
                 .to_string()
                 .contains("repository verification failed")
         );
+    }
+
+    #[test]
+    fn plan_input_digest_handles_unsorted_relative_normalized_and_read_error_inputs() {
+        let root = PathBuf::from("aplan");
+        let a = aplan_core::PlanFileInput {
+            path: PathBuf::from("aplan/tasks/A.md"),
+            content: aplan_core::PlanFileContent::Bytes(b"alpha".to_vec()),
+        };
+        let b = aplan_core::PlanFileInput {
+            path: PathBuf::from("aplan/./tasks/B.md"),
+            content: aplan_core::PlanFileContent::Sha256("a".repeat(64)),
+        };
+        let c = aplan_core::PlanFileInput {
+            path: PathBuf::from("/tmp/aplan/./tasks/C.md"),
+            content: aplan_core::PlanFileContent::ReadError {
+                kind: std::io::ErrorKind::PermissionDenied,
+                message: "denied".to_string(),
+            },
+        };
+        let d_sorted = plan_input_digest(&[c.clone(), b.clone(), a.clone()], &root);
+        let d_unsorted = plan_input_digest(&[a, c, b], &root);
+        assert_eq!(d_sorted, d_unsorted);
+        assert_eq!(d_sorted.len(), 64);
     }
 }

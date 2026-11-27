@@ -138,7 +138,7 @@ pub use validate::{
     AgentsBlock, Cardinality, CheckActivation, MilestoneScope, Options, StatusScope, TagFamily,
     TraceDocumentWork, ValidationObservations, is_iso_date, is_one_edit_apart, trace_document_work,
     validate, validate_with_graph, validate_with_graph_and_observations,
-    validate_with_observations,
+    validate_with_observations, validation_runs,
 };
 
 #[cfg(test)]

@@ -1,8 +1,8 @@
 # Read-path performance and exact incremental snapshots
 
-Status: Accepted for phased implementation; A1-588, A1-322, A1-589, A2-135 and A2-136 delivered
+Status: Accepted and delivered through A2-134 (A1-588, A1-322, A1-589, A1-590, A1-592, A2-135, A2-136, A2-134)
 
-Owning tasks: `A1-588`, `A1-322`, `A1-589`, `A1-590`-`A1-594`, `A2-135`, `A2-136`
+Owning tasks: `A1-588`, `A1-322`, `A1-589`, `A1-590`, `A1-592`, `A2-135`, `A2-136`, `A2-134`
 
 Date: 2026-10-18
 
@@ -401,7 +401,7 @@ explicit about later observation/output rows:
 | State | Corpus / operation | Current result | Owner of remaining row |
 |---|---|---|---|
 | no index / authoritative load | current and generated 1,000 bounded + structural reads | measured above | complete |
-| exact valid index hit | current, 1,000 and 10,000 bounded + structural reads | delivered and measured; 10,000 remains above target | `A1-591` scale residual |
+| exact valid index hit | current, 1,000 and 10,000 bounded + structural reads | delivered and measured (`A2-134`): release sub-100 ms p95 across current, 1,000 and 10,000 (`why` 83.4 ms, `check` 85.4 ms, `show --no-resolve` 90.7 ms) | complete |
 | one task add/change/rename/remove | same | one edit measured; set changes and renames covered by deterministic tests | complete |
 | trace or relevant config change | structural reads | trace/config invalidation covered; exact report hit performs zero trace parses | complete |
 | unavailable/read-only/corrupt index | same bytes, findings and exit as no index | semantic equivalence and safe miss covered | complete |
@@ -660,6 +660,168 @@ dispositions, audited executably in `crates/aplan/tests/read_streaming.rs`:
 | `paginated` | CLI `completed` (`human`, `json`); MCP `aplan://collections/ready{?limit,cursor}`, `aplan://collections/completed{?cut,phase,owner,tag,since,until,oldest,history,limit,cursor}` | Bounded page limit (`<= 100` CLI, `<= 50` and `<= 64 KiB` MCP) with snapshot-bound continuation cursor |
 | `explicitly_capped` | CLI `graph --format text`, `inbox` (`human`, `json`), `paths match` (`human`, `json`); MCP read tools (`aplan_identity`, `aplan_ready`, `aplan_why`, `aplan_show`, `aplan_check`, `aplan_verify`), `aplan://plan/summary`, `aplan://tasks/{id}` | Hard ceiling enforced before emission (`MAX_CANVAS_CELLS` 8,000,000, `inbox` 100 rows, `paths match` default 200 per entry with `--all` streaming, MCP 512 KiB tool / 64 KiB resource caps) |
 | `buffered` | CLI `show`, `why`, `summary`, `critical-path`, `vacuity`, `version`, `check-docs`, `tree`, `facts`, `schema`, `explain`, `attest`, `export-agents-md`, `export-roadmap-json`, `export`, `inbox show`, `test receipt` | Focused single-task / fixed-cardinality views or atomic `--check`/template/digest contracts that must assemble completely before emitting bytes |
+
+### A2-134 measured cross-surface latency, work-counter, and scale audit
+
+`A2-134` closes the final cross-channel read-surface audit (incorporating the `A1-591` 10,000-task
+scale handoff): it resolves the measured 10,000-task O(n) residual without adding a single new
+crate to `Cargo.lock`, assigns every CLI, MCP and TUI read surface one explicit `ReadLatencyClass`
+in `aplan::read_surface_inventory()`, adds deterministic `repo_ms`, `files_hashed`,
+`report_builds` and `provider_spawns` counters to `--timings` and `ci/scripts/read-performance.py`,
+extends the harness to all seven required cache/observation states plus `--repo-matrix`, verifies
+CLI/MCP/TUI semantic parity across all seven states and `--cache=off`, and publishes quiet
+reference-host release and development measurements alongside contended-host observations.
+
+**Root-cause disposition of the 10,000-task O(n) residual.** Profiling the `A1-589` exact-hit path
+(`235.0 / 345.3 / 349.8 ms` release p95 for `why`, `show --no-resolve` and `check`) separated four
+linear costs:
+
+1. **Private cache encoding and double-serialization (`store_codec.rs`, `FORMAT_EPOCH = 5`).**
+   Replacing the 8.64 MB JSON generation with a zero-dependency, strictly range-checked binary
+   codec (fixed 56-byte header with raw-byte BLAKE3 verification before decode, varint encoding,
+   raw native `EncodedPath` bytes, precomputed per-task `semantic_sha256`, and single-buffer frame
+   encoding) cut the 10,000-task generation 3.71x (8.64 MB to 2.33 MB), eliminated JSON
+   re-serialization on load, and dropped 10,000-task `check` peak RSS from 79.3 MiB to 37.3 MiB.
+2. **Filesystem walk and stat overhead (`load.rs`, `store.rs`).** Replacing `ignore::WalkBuilder`
+   with a sorted `std::fs::read_dir` walk that filters by `d_type` (`entry.file_type()`) before
+   path joining and using one `symlink_metadata` call per regular file cut 10,000-task `statx`
+   syscalls from ~40,000 to ~10,004 while preserving all symlink, skip and ordering semantics.
+3. **Whole-plan cloning and repeated input-digest construction (`store.rs`, `aplan-app/src/lib.rs`).**
+   `PlanStore` now holds `Arc<IdentifiedPlan>`, moves decoded `LoadedTask` records directly into
+   `plan.tasks` via `CachedArtifact::TaskRef` with zero `Task` or `fields` clones, skips per-file
+   `PlanFileInput` materialization on read-only paths that do not retain bytes, and caches the exact
+   root-bound `plan_input_digest` inside the generation (0.0 ms reuse on exact hits, dropping
+   10,000-task `check` projection time from 20.4 ms to 0.1 ms).
+4. **Graph and projection overhead (`graph.rs`, `roadmap.rs`, `export.rs`, `show.rs`).**
+   Single-task `show` uses `Show::assemble_for_task` and `Graph::cut_owner` instead of building all
+   10,000 `TaskRow`s; `Graph::task_rows` uses `Graph::cut_owners_map` instead of running a full
+   roadmap DP; `Graph::roadmap` skips `chains_to` when no releases or containers borrow tasks;
+   `Graph::honour_preferences` fast-paths plans with no `prefer_after` edges; and `indexed_toposort`,
+   `longest_paths`, `releases_dense` and `downstream_depth_dense` use dense `usize` arrays while
+   preserving identical deterministic `BTreeSet` tie-breaking.
+
+**Quiet reference-host release and development measurements (`ci/scripts/read-performance.py`).**
+Recorded on the quiet reference host (four-core, eight-thread Intel Core i7-6700HQ at 2.6 GHz,
+turbo off, performance governor, NVMe, Linux x86_64, pinned to CPUs 2-3 via `taskset -c 2,3`
+inside one exclusive benchmark queue slot, Rust 1.99.1, recorded load average `0.36-1.29`; release
+binary 32,453,520 bytes, SHA-256 `7f6126d588ea6f6e`; development binary 472,587,880 bytes, SHA-256
+`c0cda79939f275b6` for exact hits and `41f1b4458678e568` / `86744b386acf9642` for the companion
+six-state, output and repository matrices from the same source). Every row exited `0`, kept
+identical stdout hashes across samples, and asserted invariant deterministic work counters.
+
+Exact-hit and one-edit latency (p50 / p95 wall ms; current = 206 tasks, 15 samples on current/1k
+and 7 samples on 10k after 2 warm-ups):
+
+| profile / state | current `ready` | current `why` | current `show --no-resolve` | current `check` | 1,000 `why` | 1,000 `show --no-resolve` | 1,000 `check` | 10,000 `why` | 10,000 `show --no-resolve` | 10,000 `check` |
+|---|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|
+| release / hit | 7.9 / 7.9 ms | 6.7 / 6.8 ms | 8.2 / 8.3 ms | 11.4 / 11.5 ms | 11.0 / 11.2 ms | 12.0 / 12.1 ms | 11.4 / 11.5 ms | 81.4 / 83.4 ms | 89.8 / 90.7 ms | 84.7 / 85.4 ms |
+| release / one-edit | 10.9 / 11.2 ms | 10.0 / 10.1 ms | 11.3 / 11.4 ms | 15.0 / 15.1 ms | 14.5 / 14.8 ms | 15.4 / 15.7 ms | 16.7 / 16.8 ms | 92.4 / 92.6 ms | 101.5 / 103.7 ms | 111.9 / 112.3 ms |
+| dev / hit | 9.8 / 9.8 ms | 8.3 / 8.4 ms | 10.0 / 10.1 ms | 14.0 / 14.1 ms | 12.7 / 12.8 ms | 13.9 / 14.1 ms | 13.2 / 13.3 ms | 91.9 / 92.7 ms | 100.1 / 102.2 ms | 92.7 / 93.8 ms |
+| dev / one-edit | 13.8 / 13.9 ms | 12.6 / 12.7 ms | 14.0 / 14.2 ms | 18.6 / 18.6 ms | 17.3 / 17.3 ms | 18.2 / 18.4 ms | 19.5 / 19.8 ms | 101.3 / 104.0 ms | 110.6 / 112.4 ms | 121.2 / 123.2 ms |
+
+Remaining five states on the quiet reference host (release p95 / development p95 wall ms):
+
+| state | current `why` / `show` / `check` | 1,000 `why` / `show` / `check` | 10,000 `why` / `show` / `check` | deterministic work highlight |
+|---|---|---|---|---|
+| `clean` | 32.2 / 44.1 / 48.0 ms (dev: 45.8 / 62.0 / 67.0 ms) | 48.7 / 53.1 / 54.7 ms (dev: 68.8 / 76.4 / 78.5 ms) | 420.0 / 493.8 / 506.7 ms (dev: 609.8 / 721.0 / 740.4 ms) | `cache_hits=0`, `tasks_parsed=N`, `report_builds=1` on `check`/`show` |
+| `corrupt-index` | 41.8 / 44.3 / 48.4 ms (dev: 45.8 / 62.3 / 67.0 ms) | 47.4 / 53.2 / 54.3 ms (dev: 68.1 / 76.2 / 79.1 ms) | 413.4 / 491.6 / 506.2 ms (dev: 612.0 / 713.9 / 741.8 ms) | Corrupt `.bin` rejected before decode; byte-identical to `clean` |
+| `trace-edit` | - / 19.8 / 23.9 ms (dev: - / 25.7 / 30.9 ms) | - / 18.3 / 20.9 ms (dev: - / 22.5 / 28.1 ms) | - / 163.7 / 165.0 ms (dev: - / 196.0 / 241.5 ms) | `tasks_parsed=0`, `report_builds=1`, `trace_reads=1..3`, `markdown_parses=1..3` |
+| `config-edit` | 7.9 (`ready`) / 20.0 / 23.4 ms (dev: 10.0 / 25.8 / 30.9 ms) | 11.4 / 18.3 / 21.1 ms (dev: 13.0 / 22.4 / 27.8 ms) | 84.0 / 162.8 / 163.0 ms (dev: 90.8 / 198.8 / 226.3 ms) | `tasks_parsed=0`, `report_builds=1` on policy change, `provider_spawns=0` |
+| `stale-observation` | default `show`: 16.1-17.3 ms (dev: 18.3-18.4 ms) | default `show`: 15.1 ms (dev: 17.5 ms) | default `show`: 104.8 ms (dev: 117.4 ms) | `tasks_parsed=0`, `provider_spawns=0`, reports `stale` honestly |
+
+Output-dominated matrix on the quiet reference host (`--output-matrix --cache-state hit`):
+
+| corpus / command | bytes | release wall p95 | release TTFB p95 | release xfer p50 | dev wall p95 | peak output buf | release max RSS |
+|---|---:|---:|---:|---:|---:|---:|---:|
+| current / `ready` human | 7,093 | 7.9 ms | 7.2 ms | 0.7 ms | 9.9 ms | 7,093 B | 25,692 KiB |
+| current / `tasks --format json` | 302,046 | 10.9 ms | 8.0 ms | 2.9 ms | 13.5 ms | 16,384 B | 26,396 KiB |
+| current / `roadmap --format json` | 77,151 | 7.9 ms | 6.7 ms | 1.1 ms | 9.6 ms | 16,384 B | 26,524 KiB |
+| generated-1000 / `ready --format json` | 57,082 | 15.3 ms | 14.1 ms | 1.1 ms | 20.3 ms | 16,384 B | 26,380 KiB |
+| generated-1000 / `tasks --format json` | 847,347 | 25.0 ms | 17.4 ms | 7.7 ms | 32.4 ms | 16,384 B | 29,068 KiB |
+| generated-1000 / `roadmap --format json` | 221,620 | 16.4 ms | 13.8 ms | 2.6 ms | 19.6 ms | 16,384 B | 29,068 KiB |
+| generated-1000 / `graph --format json` | 207,452 | 15.5 ms | 13.0 ms | 2.4 ms | 18.2 ms | 16,384 B | 29,068 KiB |
+| generated-10000 / `ready --format json` | 570,082 | 137.5 ms | 130.7 ms | 6.8 ms | 161.5 ms | 16,384 B | 41,992 KiB |
+| generated-10000 / `tasks` human | 909,523 | 208.5 ms | 174.5 ms | 34.0 ms | 254.5 ms | 16,382 B | 47,304 KiB |
+| generated-10000 / `tasks --format json` | 8,413,749 | 251.7 ms | 173.7 ms | 72.6 ms | 292.7 ms | 16,384 B | 60,824 KiB |
+| generated-10000 / `roadmap --format json` | 2,178,252 | 148.6 ms | 125.9 ms | 22.4 ms | 175.6 ms | 16,384 B | 60,824 KiB |
+| generated-10000 / `roadmap --format markdown` | 738,740 | 139.5 ms | 128.7 ms | 10.6 ms | 167.8 ms | 16,384 B | 60,824 KiB |
+| generated-10000 / `graph --format mermaid` | 831,093 | 127.7 ms | 114.8 ms | 12.8 ms | 150.1 ms | 16,384 B | 60,824 KiB |
+| generated-10000 / `graph --format dot` | 1,073,121 | 128.3 ms | 115.2 ms | 12.9 ms | 150.9 ms | 16,384 B | 60,824 KiB |
+| generated-10000 / `graph --format json` | 2,083,054 | 136.7 ms | 115.3 ms | 21.1 ms | 156.8 ms | 16,384 B | 60,824 KiB |
+| generated-10000 / `check --format json` (control) | 136 | 91.5 ms | 89.3 ms | 2.2 ms | 101.2 ms | 136 B | 37,272 KiB |
+
+Repository-read phase separation on the quiet reference host (`--repo-matrix --cache-state hit`, current repository):
+
+| command | release wall p95 | release `load` / `project` p50 | release `repo` p50 | dev wall p95 | dev `load` / `repo` p50 | `tasks_parsed` / `provider_spawns` |
+|---|---:|---:|---:|---:|---:|---:|
+| `paths --sample 50` | 69.2 ms | 2.0 / 0.0 ms | 61.2 ms | 78.1 ms | 2.4 / 68.4 ms | 0 / 0 |
+| `paths match` | 5.1 ms | 0.0 / 0.0 ms | 1.3 ms | 6.3 ms | 0.0 / 1.5 ms | 0 / 0 |
+| `stale` | 114.0 ms | 2.0 / 0.0 ms | 103.7 ms | 125.1 ms | 2.4 / 111.3 ms | 0 / 0 |
+| `summary --at HEAD` | 32.3 ms | 16.5 / 0.5 ms | 9.2 ms | 44.2 ms | 26.0 / 10.0 ms | 0 / 0 |
+| `completed --limit 20` | 105.8 ms | 2.1 / 0.3 ms | 96.0 ms | 127.8 ms | 2.4 / 116.8 ms | 0 / 0 |
+
+**Contended shared-host observations (not a product budget).** On the shared development host
+(`kbox`, Linux x86_64, release binary 31,294,288 bytes, SHA-256 `fec11f21957b0d2a`) under concurrent
+host load averages of `38.45-47.42`, exact-hit release wall p95 rose to `25.0-78.0 ms` on the
+current plan, `42.6-129.7 ms` on 1,000 tasks, and `324.0-500.5 ms` on 10,000 tasks even while
+deterministic work counters stayed identical (`cache_hits=1`, `tasks_parsed=0`, `report_builds=0`,
+`check` `project_ms=0.1`). Standard GitHub-hosted runners exhibit the same multi-tenant variance
+(about 35% between machines) and therefore remain observational only; CI ratchets the deterministic
+work counters (`read_budget_audit`, `read_streaming`, `timings`, `cache`) and the independent
+6,000-task `scale::check_does_not_care_how_wide_a_cut_is` complexity-ratio gate (verified passing
+in 4.68 s in release).
+
+**Cross-channel derived latency-class inventory (`aplan::read_surface_inventory()`).** Every
+read-only CLI command/format (derived from `clap` + `COMMAND_SURFACES` + `Format::ALL`), every
+read-only MCP tool/resource/template (6 tools, 1 static resource, 3 templates from `TOOLS`,
+`RESOURCES`, `RESOURCE_TEMPLATES`), and every TUI read operation (6 read `EffectKind`s excluding
+`Mutation` plus all 7 `Route`s = 13 TUI surfaces) carries both a `ReadLatencyClass`
+(`local_bounded_read`, `full_structural_read`, `evidence_backed_inspection`, `repository_read`,
+`external_refresh`, `output_dominated_read`) and an `OutputDisposition` (`streamed`, `paginated`,
+`explicitly_capped`, `buffered`). Missing, duplicate or stale entries fail
+`read_budget_audit::derived_inventory_assigns_every_cli_mcp_and_tui_surface_one_latency_class`.
+
+**Dependency, binary-size and hardware/filesystem limits.**
+
+- **Dependencies and binary size:** Zero crates were added to `Cargo.lock` (`xtask dependency-audit`:
+  `lock=293 default=202 headless=171 tui_increment=31`). Removing `serde_json` cache-envelope
+  codegen shrank the local `kbox` release binary by 504 KiB (`31,798,336` to `31,294,288` bytes)
+  and the development binary by 87 KiB (`108,011,416` to `107,924,448` bytes).
+- **10,000-task limits on the 2.6 GHz turbo-off reference host:** Release exact hits meet sub-100 ms
+  p95 on `why` (83.4 ms), `check` (85.4 ms) and `show --no-resolve` (90.7 ms). Development exact
+  hits meet sub-100 ms p95 on `why` (92.7 ms) and `check` (93.8 ms), while `show --no-resolve` lands
+  at 102.2 ms p95 (100.1 ms p50, 99.8 ms TTFB p95). Release 10,000-task one-edit meets sub-100 ms
+  on `why` (92.6 ms) and reaches 103.7 ms on `show --no-resolve` and 112.3 ms on `check` because
+  re-publishing the 2.33 MB generation and recomputing `plan_input_digest` adds 12-20 ms. Unscoped
+  10,000-row output-dominated tables/graphs stream with `<= 16 KiB` output buffering, but their
+  TTFB on this 2.6 GHz turbo-off CPU is 114.8-174.5 ms (`79-80 ms` 10k `lstat` + `.bin` decode plus
+  `30-89 ms` single-threaded whole-plan graph ranking/projection before byte 0). Clean-checkout and
+  corrupt-index 10,000-task parses remain separately budgeted at 413-507 ms (release) and
+  610-742 ms (development).
+- **Filesystem and provider limits:** Filesystems with coarse timestamp resolution (FAT, ext3,
+  NFS/FUSE) or platforms without Unix inode/ctime metadata trigger conservative content-hash
+  verification rather than silently reusing stale entries; a deleted or read-only cache falls back
+  to the full authoritative loader without altering bytes, findings or exit codes. External
+  refreshes (`verify`, `show --refresh-evidence`, `test list`, `attest`, `version` with configured
+  command, MCP `aplan_verify`, TUI `Verify`/`TestCatalogue`) execute arbitrary configured programs
+  and remain explicitly excluded from the 100 ms completion SLO.
+
+**Collecting timing diagnostics and reproducing the matrix.** Pass global `--timings` to any CLI
+command to emit one `aplan: timings ...` diagnostic line on stderr (without altering stdout bytes
+or exit code), covering `total_ms`, `config_ms`, `load_ms`, `validate_ms`, `project_ms`, `repo_ms`,
+`render_ms` and deterministic work counters (`files_hashed`, `tasks_parsed`, `graph_builds`,
+`report_builds`, `provider_spawns`, cache, trace and output-buffer counts). Reproduce any state or
+matrix with `ci/scripts/read-performance.py`:
+
+```sh
+python3 ci/scripts/read-performance.py --binary target/release/aplan --profile release --cache-state hit --generated-tasks 10000
+python3 ci/scripts/read-performance.py --binary target/release/aplan --profile release --cache-state one-edit --generated-tasks 1000
+python3 ci/scripts/read-performance.py --binary target/release/aplan --profile release --output-matrix --generated-tasks 10000
+python3 ci/scripts/read-performance.py --binary target/release/aplan --profile release --repo-matrix --generated-tasks 0
+```
+
+Supported `--cache-state` values are `hit`, `clean`, `one-edit`, `trace-edit`, `config-edit`,
+`corrupt-index` and `stale-observation`.
 
 ### A1-588 implementation choices
 
@@ -971,7 +1133,7 @@ YAML document for each command.
 | Git index/HEAD as the cache key | Reject | Misses untracked and dirty task/config bytes, excludes non-Git plans and conflates source control state with aplan's exact inputs. Git may accelerate repository-specific providers, not define plan identity. |
 | Cache rendered command output | Reject initially | Multiplies keys and compatibility state. Cache normalized parsed/validated inputs and derive output. |
 | Memory-map every Markdown file | Reject initially | It does not remove directory walks, schema/YAML work or provider execution, complicates mutation and small-file portability, and needs measurement before adding unsafe/platform-specific machinery. |
-| New zero-copy/binary cache encoding | Defer | It can reduce decoding and allocation but adds a dependency and format complexity before JSON has been shown to miss the exact-hit budget. |
+| New zero-copy/binary cache encoding | Adopted without new dependencies (`A2-134`) | 10,000-task exact hits missed the 100 ms budget under JSON (235-350 ms release p95); a zero-dependency, BLAKE3-checksummed, range-checked private binary codec (`FORMAT_EPOCH = 5`) shrank the 10k generation 3.71x (8.64 MB to 2.33 MB) and brought release 10k `why`/`check`/`show --no-resolve` hits to 83.4/85.4/90.7 ms with zero lockfile additions. |
 | Run fewer runners for bare test evidence | Reject | A skipped runner can contain the same name; accepting it would weaken fail-closed ambiguity detection. |
 | Keep default `show` synchronous but print progress | Useful but insufficient | Fixes the apparent hang and remains required for explicit refresh, but does not meet completion below 100 ms. |
 
@@ -1058,10 +1220,16 @@ be justified by old numbers.
 
 ### P1: broaden and harden
 
-- `A1-591`: audit repository and large-output commands with separate budgets;
+- `A2-134` delivered (incorporating `A1-591`): audited every CLI, MCP and TUI read surface against
+  explicit latency classes and output dispositions, replaced the private JSON cache with a
+  zero-dependency binary codec (`FORMAT_EPOCH = 5`) plus dense graph/projection optimizations,
+  separated `repo_ms` and added `files_hashed`/`report_builds`/`provider_spawns` counters, verified
+  all seven cache/observation states across CLI/MCP/TUI, and published quiet reference-host and
+  contended-host measurements;
 - use in-process watching for TUI/MCP only if polling/stat validation consumes the measured margin;
-- evaluate a cross-process daemon only if the persistent index cannot meet the CLI target;
-- ratchet the best demonstrated work counts and update release evidence.
+- evaluate a cross-process daemon only if the persistent index cannot meet future scale targets;
+- deterministic work counters and the independent `scale::` ratio gate remain the portable CI
+  ratchets.
 
 These headings describe priority lanes, not extra dependency edges. The task metadata is the source
 of truth: after `A1-588`, independent cleanup can proceed in parallel; `A1-589` waits only for the

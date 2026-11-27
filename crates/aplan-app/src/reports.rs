@@ -832,7 +832,7 @@ fn path_measurements(tasks: &BTreeMap<&str, &Task>, breadth: &Breadth) -> Vec<Pa
 #[must_use]
 pub fn report_workspace(context: &PlanContext, catalogue: Vec<TaskBrowserRow>) -> ReportWorkspace {
     let tasks = context
-        .plan
+        .plan()
         .tasks
         .iter()
         .map(|loaded| loaded.task.clone())
@@ -841,7 +841,7 @@ pub fn report_workspace(context: &PlanContext, catalogue: Vec<TaskBrowserRow>) -
     let canonical_repository =
         std::fs::canonicalize(repository_root).unwrap_or_else(|_| repository_root.clone());
     let paths = context
-        .plan
+        .plan()
         .tasks
         .iter()
         .map(|loaded| {

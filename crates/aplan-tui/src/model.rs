@@ -1474,7 +1474,6 @@ pub(crate) enum EffectKind {
 }
 
 impl EffectKind {
-    #[cfg(test)]
     pub(crate) const ALL: [Self; 7] = [
         Self::Startup,
         Self::Probe,

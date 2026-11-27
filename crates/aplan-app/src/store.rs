@@ -9,7 +9,8 @@ use std::collections::BTreeMap;
 use std::fs::{self, OpenOptions};
 use std::io::{self, Read as _, Write as _};
 use std::path::{Path, PathBuf};
-use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
+use std::sync::{Arc, OnceLock};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use aplan_core::diagnostic::{Diagnostic, Location, code};
@@ -18,7 +19,7 @@ use aplan_core::load::{
     PlanFileInput, parse_plan_candidate, plan_candidate_paths,
 };
 use aplan_core::{Plan, Task};
-use serde::{Deserialize, Serialize};
+use serde::Serialize;
 use sha2::{Digest as _, Sha256};
 
 use crate::{
@@ -26,8 +27,11 @@ use crate::{
     ProgressMeasure, ProgressPhase, ProgressUnit,
 };
 
+#[path = "store_codec.rs"]
+mod codec;
+
 const MAGIC: &str = "aplan-plan-cache";
-const FORMAT_EPOCH: u32 = 4;
+const FORMAT_EPOCH: u32 = 5;
 const SEMANTIC_EPOCH: u32 = 1;
 const MAX_CACHE_BYTES: u64 = 64 * 1024 * 1024;
 const MAX_CANDIDATES: usize = 100_000;
@@ -39,6 +43,18 @@ const MAX_CACHE_AGE: Duration = Duration::from_secs(30 * 24 * 60 * 60);
 const MAX_CACHE_TOTAL: u64 = 256 * 1024 * 1024;
 
 static TEMP_SEQUENCE: AtomicU64 = AtomicU64::new(0);
+static STORE_FILES_HASHED: AtomicUsize = AtomicUsize::new(0);
+static SCHEMA_IDENTITY: OnceLock<String> = OnceLock::new();
+
+/// Cumulative plan candidates, trace documents and agent-contract files
+/// content-hashed by [`PlanStore`] in this process (`A2-134`).
+///
+/// Callers measure one operation by subtracting the value before it from the
+/// value afterwards. Exact metadata-reused hits hash zero candidate files.
+#[must_use]
+pub fn store_files_hashed() -> usize {
+    STORE_FILES_HASHED.load(Ordering::Relaxed)
+}
 
 /// A source-authoritative snapshot could not stabilize while other writers
 /// changed the plan's candidate-file set.
@@ -100,6 +116,12 @@ pub struct PlanStoreOptions {
     pub writer_identity: Option<String>,
     /// Retain authoritative candidate bytes for source/body projections.
     pub retain_inputs: bool,
+    /// Populate per-file SHA-256 `PlanFileInput` entries when `retain_inputs`
+    /// is false. Callers that only read `Plan` without constructing an
+    /// `InputIdentity` can disable this to avoid allocating per-file digest
+    /// strings on large plans (`A2-134`). Read-error inputs are always retained
+    /// so structural report keys stay invariant.
+    pub include_input_digests: bool,
     /// Coalesce an incremental artifact generation with the structural report
     /// that the caller is about to compute. If no report is computed, skipping
     /// publication only loses a future optimization.
@@ -114,6 +136,7 @@ impl Default for PlanStoreOptions {
             cache_root: None,
             writer_identity: None,
             retain_inputs: true,
+            include_input_digests: true,
             defer_publication: false,
         }
     }
@@ -126,6 +149,7 @@ pub struct PlanStoreStats {
     pub cache_generation_hit: bool,
     pub artifacts_reused: usize,
     pub artifacts_parsed: usize,
+    pub files_hashed: usize,
     pub cache_bytes_read: u64,
     pub cache_bytes_written: u64,
 }
@@ -139,9 +163,10 @@ pub struct PlanStore {
     /// Absolute, non-canonical identity used only for cache isolation.
     identity_root: PathBuf,
     options: PlanStoreOptions,
-    snapshot: IdentifiedPlan,
+    snapshot: Arc<IdentifiedPlan>,
     candidates: Vec<CachedCandidate>,
     reports: Vec<CachedReport>,
+    plan_input_digest: Option<CachedPlanDigest>,
     reuse_horizon: TimeValue,
     stats: PlanStoreStats,
 }
@@ -183,6 +208,7 @@ impl PlanStore {
         Self::open_inner(root, options, Some(emitter), Some(cancellation))
     }
 
+    #[allow(clippy::too_many_lines)]
     fn open_inner(
         root: &Path,
         options: &PlanStoreOptions,
@@ -216,33 +242,46 @@ impl PlanStore {
             );
         }
         stats.cache_generation_hit = generation.is_some();
-        let reports = if options.writer_identity.is_some() {
-            generation
-                .as_ref()
-                .map_or_else(Vec::new, |generation| generation.reports.clone())
-        } else {
-            Vec::new()
+        let (reports, previous_horizon, previous, previous_plan_digest) = match generation {
+            Some(generation) => (
+                if options.writer_identity.is_some() {
+                    generation.reports
+                } else {
+                    Vec::new()
+                },
+                Some(generation.created_at),
+                generation.candidates,
+                generation.plan_input_digest,
+            ),
+            None => (Vec::new(), None, Vec::new(), None),
         };
-        let previous_horizon = generation.as_ref().map(|generation| generation.created_at);
-        let previous = generation
-            .map(|generation| {
-                generation
-                    .candidates
-                    .into_iter()
-                    .map(|candidate| (candidate.path.clone(), candidate))
-                    .collect::<BTreeMap<_, _>>()
-            })
-            .unwrap_or_default();
+        let previous_len = previous.len();
 
-        let (snapshot, candidates) = capture(
+        let (snapshot, candidates, exact_previous_paths) = capture_owned(
             &root,
-            &previous,
+            previous,
             previous_horizon,
             options.retain_inputs,
+            options.include_input_digests,
             &mut stats,
             progress.as_deref_mut(),
             cancellation,
         )?;
+        let has_read_errors = snapshot
+            .inputs
+            .iter()
+            .any(|input| matches!(input.content, PlanFileContent::ReadError { .. }));
+        let plan_input_digest = if exact_previous_paths
+            && stats.cache_generation_hit
+            && stats.artifacts_parsed == 0
+            && stats.artifacts_reused == candidates.len()
+            && candidates.len() == previous_len
+            && !has_read_errors
+        {
+            previous_plan_digest
+        } else {
+            None
+        };
         let reuse_horizon = TimeValue::now();
         if options.mode != CacheMode::Off
             && !options.defer_publication
@@ -259,14 +298,17 @@ impl PlanStore {
                     ProgressMeasure::Indeterminate,
                 );
             }
-            let generation = Generation::new(
+            publish_generation_parts(
+                location,
                 &identity_root,
                 options,
                 reuse_horizon,
-                candidates.clone(),
-                reports.clone(),
+                plan_input_digest.as_ref(),
+                &candidates,
+                &reports,
+                &snapshot.plan.tasks,
+                &mut stats,
             );
-            publish_generation(location, &generation, &mut stats);
             evict(&location.directory);
             if let Some(emitter) = progress {
                 emitter.phase_completed(
@@ -281,9 +323,10 @@ impl PlanStore {
             root,
             identity_root,
             options: options.clone(),
-            snapshot,
+            snapshot: Arc::new(snapshot),
             candidates,
             reports,
+            plan_input_digest,
             reuse_horizon,
             stats,
         })
@@ -329,26 +372,25 @@ impl PlanStore {
     ) -> io::Result<()> {
         check_cancelled(cancellation)?;
         let mut stats = PlanStoreStats::default();
-        let previous = if self.options.mode == CacheMode::Auto {
+        let previous: &[CachedCandidate] = if self.options.mode == CacheMode::Auto {
             stats.cache_generation_hit = true;
-            self.candidates
-                .iter()
-                .cloned()
-                .map(|candidate| (candidate.path.clone(), candidate))
-                .collect()
+            &self.candidates
         } else {
-            BTreeMap::new()
+            &[]
         };
-        let (snapshot, candidates) = capture(
+        let (snapshot, candidates) = capture_borrowed(
             &self.root,
-            &previous,
+            previous,
+            &self.snapshot.plan.tasks,
             Some(self.reuse_horizon),
             self.options.retain_inputs,
+            self.options.include_input_digests,
             &mut stats,
             progress.as_deref_mut(),
             cancellation,
         )?;
         let reuse_horizon = TimeValue::now();
+        let plan_input_digest = None;
         if self.options.mode != CacheMode::Off
             && !self.options.defer_publication
             && (self.options.mode == CacheMode::Refresh || stats.artifacts_parsed > 0)
@@ -362,14 +404,17 @@ impl PlanStore {
                     ProgressMeasure::Indeterminate,
                 );
             }
-            let generation = Generation::new(
+            publish_generation_parts(
+                &location,
                 &self.identity_root,
                 &self.options,
                 reuse_horizon,
-                candidates.clone(),
-                self.reports.clone(),
+                plan_input_digest.as_ref(),
+                &candidates,
+                &self.reports,
+                &snapshot.plan.tasks,
+                &mut stats,
             );
-            publish_generation(&location, &generation, &mut stats);
             evict(&location.directory);
             if let Some(emitter) = progress {
                 emitter.phase_completed(
@@ -379,16 +424,24 @@ impl PlanStore {
                 );
             }
         }
-        self.snapshot = snapshot;
+        self.snapshot = Arc::new(snapshot);
         self.candidates = candidates;
+        self.plan_input_digest = plan_input_digest;
         self.reuse_horizon = reuse_horizon;
         self.stats = stats;
         Ok(())
     }
 
     #[must_use]
-    pub const fn snapshot(&self) -> &IdentifiedPlan {
+    pub fn snapshot(&self) -> &IdentifiedPlan {
         &self.snapshot
+    }
+
+    /// Share the immutable loaded snapshot without cloning its tasks or input
+    /// buffers (`A2-134`).
+    #[must_use]
+    pub fn snapshot_arc(&self) -> Arc<IdentifiedPlan> {
+        Arc::clone(&self.snapshot)
     }
 
     #[must_use]
@@ -398,15 +451,21 @@ impl PlanStore {
 
     #[must_use]
     pub fn into_snapshot(self) -> IdentifiedPlan {
-        self.snapshot
+        Arc::try_unwrap(self.snapshot).unwrap_or_else(|arc| (*arc).clone())
     }
 
     /// Bind a validation request to this exact plan and trace-input state.
     #[must_use]
     pub fn structural_report_key(&self, options: &aplan_core::Options) -> Option<String> {
-        (self.options.writer_identity.is_some() && self.options.mode != CacheMode::Off)
-            .then(|| report_key(&self.root, &self.candidates, &self.snapshot.inputs, options))
-            .flatten()
+        (self.options.writer_identity.is_some() && self.options.mode != CacheMode::Off).then(|| {
+            report_key(
+                &self.root,
+                &self.candidates,
+                &self.snapshot.plan.tasks,
+                &self.snapshot.inputs,
+                options,
+            )
+        })
     }
 
     /// Rehydrate a report for an already-bound key.
@@ -422,6 +481,74 @@ impl PlanStore {
         None
     }
 
+    /// Whether the loaded generation already carries a matching persisted
+    /// `plan_input_digest` for this root spelling and identity root (`A2-134`).
+    #[must_use]
+    pub fn has_cached_plan_input_digest(&self) -> bool {
+        let root_spelling = EncodedPath::from_path(&self.root);
+        let identity_root = EncodedPath::from_path(&self.identity_root);
+        self.plan_input_digest.as_ref().is_some_and(|cached| {
+            cached.root_spelling == root_spelling && cached.identity_root == identity_root
+        })
+    }
+
+    /// Return the exact canonical `plan_sha256` matching `PlanContext`'s
+    /// `plan_input_digest`, reusing the persisted generation digest when the
+    /// candidate set, root spelling and absolute identity root are unchanged
+    /// (`A2-134`).
+    #[must_use]
+    pub fn plan_input_digest(&mut self) -> String {
+        let root_spelling = EncodedPath::from_path(&self.root);
+        let identity_root = EncodedPath::from_path(&self.identity_root);
+        if let Some(cached) = &self.plan_input_digest
+            && cached.root_spelling == root_spelling
+            && cached.identity_root == identity_root
+        {
+            return cached.sha256.clone();
+        }
+        let sha256 = compute_plan_input_digest(
+            &self.root,
+            &self.identity_root,
+            &self.candidates,
+            &self.snapshot.inputs,
+        );
+        let has_read_errors = self
+            .snapshot
+            .inputs
+            .iter()
+            .any(|input| matches!(input.content, PlanFileContent::ReadError { .. }));
+        if !has_read_errors {
+            self.plan_input_digest = Some(CachedPlanDigest {
+                root_spelling,
+                identity_root,
+                sha256: sha256.clone(),
+            });
+        }
+        sha256
+    }
+
+    /// Publish the store's current generation without cloning candidate
+    /// metadata or re-hashing an already-verified report key (`A2-134`).
+    pub fn publish_current_generation(&mut self) {
+        if self.options.writer_identity.is_some()
+            && self.options.mode != CacheMode::Off
+            && let Some(location) = CacheLocation::resolve(&self.identity_root, &self.options)
+        {
+            publish_generation_parts(
+                &location,
+                &self.identity_root,
+                &self.options,
+                self.reuse_horizon,
+                self.plan_input_digest.as_ref(),
+                &self.candidates,
+                &self.reports,
+                &self.snapshot.plan.tasks,
+                &mut self.stats,
+            );
+            evict(&location.directory);
+        }
+    }
+
     /// Publish a report only if the store still observes the key it was
     /// computed for. A concurrent refresh therefore cannot install an old
     /// answer over a newer snapshot.
@@ -433,8 +560,13 @@ impl PlanStore {
     ) {
         if self.options.writer_identity.is_some()
             && self.options.mode != CacheMode::Off
-            && report_key(&self.root, &self.candidates, &self.snapshot.inputs, options).as_deref()
-                == Some(key)
+            && report_key(
+                &self.root,
+                &self.candidates,
+                &self.snapshot.plan.tasks,
+                &self.snapshot.inputs,
+                options,
+            ) == key
         {
             self.reports.retain(|cached| cached.key != key);
             self.reports
@@ -443,27 +575,31 @@ impl PlanStore {
                 self.reports.remove(0);
             }
             if let Some(location) = CacheLocation::resolve(&self.identity_root, &self.options) {
-                let generation = Generation::new(
+                publish_generation_parts(
+                    &location,
                     &self.identity_root,
                     &self.options,
                     self.reuse_horizon,
-                    self.candidates.clone(),
-                    self.reports.clone(),
+                    self.plan_input_digest.as_ref(),
+                    &self.candidates,
+                    &self.reports,
+                    &self.snapshot.plan.tasks,
+                    &mut self.stats,
                 );
-                publish_generation(&location, &generation, &mut self.stats);
                 evict(&location.directory);
             }
         }
     }
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
-struct Envelope {
-    checksum: String,
-    generation: Generation,
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct CachedPlanDigest {
+    root_spelling: EncodedPath,
+    identity_root: EncodedPath,
+    sha256: String,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone)]
 struct Generation {
     magic: String,
     format_epoch: u32,
@@ -474,38 +610,12 @@ struct Generation {
     root: EncodedPath,
     configuration_file: Option<EncodedPath>,
     created_at: TimeValue,
+    plan_input_digest: Option<CachedPlanDigest>,
     candidates: Vec<CachedCandidate>,
     reports: Vec<CachedReport>,
 }
 
 impl Generation {
-    fn new(
-        root: &Path,
-        options: &PlanStoreOptions,
-        created_at: TimeValue,
-        candidates: Vec<CachedCandidate>,
-        reports: Vec<CachedReport>,
-    ) -> Self {
-        Self {
-            magic: MAGIC.to_string(),
-            format_epoch: FORMAT_EPOCH,
-            semantic_epoch: SEMANTIC_EPOCH,
-            platform: platform_tag().to_string(),
-            schema_sha256: schema_identity(),
-            writer_identity: options.writer_identity.clone(),
-            root: EncodedPath::from_path(root),
-            configuration_file: options
-                .configuration_file
-                .as_deref()
-                .map(absolute)
-                .as_deref()
-                .map(EncodedPath::from_path),
-            created_at,
-            candidates,
-            reports,
-        }
-    }
-
     fn matches(&self, root: &Path, options: &PlanStoreOptions) -> bool {
         self.magic == MAGIC
             && self.format_epoch == FORMAT_EPOCH
@@ -529,29 +639,53 @@ impl Generation {
     }
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone)]
 struct CachedCandidate {
     path: EncodedPath,
-    sha256: String,
+    sha256: [u8; 32],
     observation: FileObservation,
     artifact: CachedArtifact,
 }
 
 impl CachedCandidate {
     fn bounded(&self) -> bool {
-        self.path.encoded.len() <= MAX_PATH_BYTES.saturating_mul(2)
+        self.path.bytes.len() <= MAX_PATH_BYTES
             && self.path.is_bounded_relative()
-            && self.sha256.len() == 64
-            && self.sha256.bytes().all(|byte| byte.is_ascii_hexdigit())
             && self.observation.bounded()
     }
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum FileType {
+    File,
+    Directory,
+    Other,
+}
+
+impl FileType {
+    const fn to_tag(self) -> u8 {
+        match self {
+            Self::File => 0,
+            Self::Directory => 1,
+            Self::Other => 2,
+        }
+    }
+
+    const fn from_tag(tag: u8) -> Option<Self> {
+        match tag {
+            0 => Some(Self::File),
+            1 => Some(Self::Directory),
+            2 => Some(Self::Other),
+            _ => None,
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
 struct FileObservation {
     length: u64,
     modified: Option<TimeValue>,
-    file_type: String,
+    file_type: FileType,
     symlink_target: Option<EncodedPath>,
     #[cfg(unix)]
     device: u64,
@@ -565,7 +699,7 @@ struct FileObservation {
     change_nanoseconds: i64,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
 struct TimeValue {
     before_epoch: bool,
     seconds: u64,
@@ -574,27 +708,31 @@ struct TimeValue {
 
 impl FileObservation {
     fn capture(path: &Path) -> io::Result<Self> {
-        let followed = fs::metadata(path)?;
+        // Call `symlink_metadata` once: for regular files (the vast majority of
+        // plan candidates), `lstat` returns the exact target metadata without a
+        // second `stat` syscall. Symlinks still resolve target metadata and
+        // `read_link` identically.
         let link = fs::symlink_metadata(path)?;
-        let file_type = if followed.is_file() {
-            "file"
-        } else if followed.is_dir() {
-            "directory"
+        let (followed, symlink_target) = if link.file_type().is_symlink() {
+            let target = fs::read_link(path).map(|target| EncodedPath::from_path(&target))?;
+            (fs::metadata(path)?, Some(target))
         } else {
-            "other"
+            (link, None)
         };
-        let symlink_target = link
-            .file_type()
-            .is_symlink()
-            .then(|| fs::read_link(path).map(|target| EncodedPath::from_path(&target)))
-            .transpose()?;
+        let file_type = if followed.is_file() {
+            FileType::File
+        } else if followed.is_dir() {
+            FileType::Directory
+        } else {
+            FileType::Other
+        };
         #[cfg(unix)]
         {
             use std::os::unix::fs::MetadataExt as _;
             Ok(Self {
                 length: followed.len(),
                 modified: followed.modified().ok().map(TimeValue::from_system),
-                file_type: file_type.to_string(),
+                file_type,
                 symlink_target,
                 device: followed.dev(),
                 inode: followed.ino(),
@@ -608,7 +746,7 @@ impl FileObservation {
             Ok(Self {
                 length: followed.len(),
                 modified: followed.modified().ok().map(TimeValue::from_system),
-                file_type: file_type.to_string(),
+                file_type,
                 symlink_target,
             })
         }
@@ -619,7 +757,7 @@ impl FileObservation {
     }
 
     fn has_strong_change_identity(&self) -> bool {
-        if self.file_type != "file" {
+        if self.file_type != FileType::File {
             return false;
         }
         #[cfg(unix)]
@@ -638,12 +776,11 @@ impl FileObservation {
     }
 
     fn bounded(&self) -> bool {
-        self.file_type.len() <= 16
-            && self.modified.is_none_or(TimeValue::bounded)
+        self.modified.is_none_or(TimeValue::bounded)
             && self
                 .symlink_target
                 .as_ref()
-                .is_none_or(|target| target.encoded.len() <= MAX_PATH_BYTES.saturating_mul(2))
+                .is_none_or(|target| target.bytes.len() <= MAX_PATH_BYTES)
             && {
                 #[cfg(unix)]
                 {
@@ -707,30 +844,40 @@ impl TimeValue {
     }
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
-#[serde(tag = "kind", rename_all = "snake_case")]
+#[derive(Debug, Clone)]
 enum CachedArtifact {
     NotTask,
-    Task(Box<CachedTask>),
+    Task(Arc<CachedTask>),
+    /// Task moved directly into `PlanStore.snapshot.plan.tasks[task_index]`
+    /// without cloning `Task` or `fields` (`A2-134`).
+    TaskRef {
+        semantic_sha256: [u8; 32],
+        task_index: usize,
+    },
     /// A load failure stays in the content manifest but is reparsed so an old
     /// diagnostic implementation is never treated as a current parser result.
     Uncacheable,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone)]
 struct CachedTask {
+    /// Precomputed SHA-256 of the task's structural-validation semantics
+    /// (every rule-visible field, locations and criteria, excluding `title`).
+    /// Computed once at parse time so `report_key()` does zero clones and zero
+    /// JSON serializations on cache hits (`A2-134`).
+    semantic_sha256: [u8; 32],
     task: Task,
-    fields: BTreeMap<String, CachedLocation>,
+    fields: BTreeMap<String, Location>,
     criteria: CachedCriteria,
 }
 
-#[derive(Debug, Clone, Copy, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, Serialize)]
 struct CachedLocation {
     line: usize,
     column: usize,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize)]
 struct CachedCriteria {
     total: usize,
     ticked: usize,
@@ -742,95 +889,130 @@ struct CachedCriteria {
     why_untouched: bool,
 }
 
+#[derive(Serialize)]
+struct SemanticTaskDigestView<'a> {
+    task: &'a Task,
+    fields: BTreeMap<&'a str, CachedLocation>,
+    criteria: &'a CachedCriteria,
+}
+
+fn compute_semantic_sha256(
+    task: &Task,
+    fields: &BTreeMap<String, Location>,
+    criteria: &CachedCriteria,
+) -> [u8; 32] {
+    // No structural rule reads title text. Its presence and type were
+    // established by parsing; changing one non-empty title to another changes
+    // projections but cannot change the structural report. Every field a rule
+    // does read, plus field/criterion locations, remains in the canonical
+    // typed JSON below.
+    let mut normalized = task.clone();
+    normalized.title.clear();
+    let view = SemanticTaskDigestView {
+        task: &normalized,
+        fields: fields
+            .iter()
+            .map(|(k, v)| {
+                (
+                    k.as_str(),
+                    CachedLocation {
+                        line: v.line,
+                        column: v.column,
+                    },
+                )
+            })
+            .collect(),
+        criteria,
+    };
+    let bytes = serde_json::to_vec(&view).expect("CachedTask is canonically serialisable");
+    Sha256::digest(&bytes).into()
+}
+
+fn criteria_from_cached(cached: &CachedCriteria) -> Option<Criteria> {
+    let prompt = match cached.scaffold_prompt.as_deref() {
+        Some(value) => Some(
+            aplan_core::scaffold::criterion_prompts()
+                .into_iter()
+                .find(|known| *known == value)?,
+        ),
+        None => None,
+    };
+    Some(Criteria {
+        total: cached.total,
+        ticked: cached.ticked,
+        first_unticked: cached.first_unticked,
+        scaffold_prompt: prompt,
+        scaffold_ticked: cached.scaffold_ticked,
+        scaffold_unticked: cached.scaffold_unticked,
+        prompts: cached.prompts,
+        why_untouched: cached.why_untouched,
+    })
+}
+
+fn cached_criteria_from_loaded(criteria: Criteria) -> CachedCriteria {
+    CachedCriteria {
+        total: criteria.total,
+        ticked: criteria.ticked,
+        first_unticked: criteria.first_unticked,
+        scaffold_prompt: criteria.scaffold_prompt.map(str::to_string),
+        scaffold_ticked: criteria.scaffold_ticked,
+        scaffold_unticked: criteria.scaffold_unticked,
+        prompts: criteria.prompts,
+        why_untouched: criteria.why_untouched,
+    }
+}
+
 impl CachedArtifact {
-    fn from_parsed(parsed: &ParsedCandidate) -> Self {
-        match parsed {
-            ParsedCandidate::NotTask => Self::NotTask,
-            ParsedCandidate::Task(loaded) => Self::Task(Box::new(CachedTask {
-                task: loaded.task.clone(),
-                fields: loaded
-                    .fields
-                    .iter()
-                    .map(|(name, location)| {
-                        (
-                            name.clone(),
-                            CachedLocation {
-                                line: location.line,
-                                column: location.column,
-                            },
-                        )
-                    })
-                    .collect(),
-                criteria: CachedCriteria {
-                    total: loaded.criteria.total,
-                    ticked: loaded.criteria.ticked,
-                    first_unticked: loaded.criteria.first_unticked,
-                    scaffold_prompt: loaded.criteria.scaffold_prompt.map(str::to_string),
-                    scaffold_ticked: loaded.criteria.scaffold_ticked,
-                    scaffold_unticked: loaded.criteria.scaffold_unticked,
-                    prompts: loaded.criteria.prompts,
-                    why_untouched: loaded.criteria.why_untouched,
-                },
-            })),
-            ParsedCandidate::Failed { .. } => Self::Uncacheable,
-        }
+    fn from_loaded_task(loaded: &LoadedTask) -> [u8; 32] {
+        let criteria = cached_criteria_from_loaded(loaded.criteria);
+        compute_semantic_sha256(&loaded.task, &loaded.fields, &criteria)
     }
 
-    fn parsed(&self, path: &Path) -> Option<ParsedCandidate> {
+    fn parsed_borrowed(&self, path: &Path, prev_tasks: &[LoadedTask]) -> Option<ParsedCandidate> {
         match self {
             Self::NotTask => Some(ParsedCandidate::NotTask),
             Self::Task(cached) => {
-                let prompt = match cached.criteria.scaffold_prompt.as_deref() {
-                    Some(value) => Some(
-                        aplan_core::scaffold::criterion_prompts()
-                            .into_iter()
-                            .find(|known| *known == value)?,
-                    ),
-                    None => None,
-                };
+                let criteria = criteria_from_cached(&cached.criteria)?;
                 Some(ParsedCandidate::Task(Box::new(LoadedTask {
                     task: cached.task.clone(),
                     path: path.to_path_buf(),
-                    fields: cached
-                        .fields
-                        .iter()
-                        .map(|(name, location)| {
-                            (
-                                name.clone(),
-                                Location {
-                                    line: location.line,
-                                    column: location.column,
-                                },
-                            )
-                        })
-                        .collect(),
-                    criteria: Criteria {
-                        total: cached.criteria.total,
-                        ticked: cached.criteria.ticked,
-                        first_unticked: cached.criteria.first_unticked,
-                        scaffold_prompt: prompt,
-                        scaffold_ticked: cached.criteria.scaffold_ticked,
-                        scaffold_unticked: cached.criteria.scaffold_unticked,
-                        prompts: cached.criteria.prompts,
-                        why_untouched: cached.criteria.why_untouched,
-                    },
+                    fields: cached.fields.clone(),
+                    criteria,
+                })))
+            }
+            Self::TaskRef { task_index, .. } => {
+                let loaded = prev_tasks.get(*task_index)?;
+                Some(ParsedCandidate::Task(Box::new(LoadedTask {
+                    task: loaded.task.clone(),
+                    path: path.to_path_buf(),
+                    fields: loaded.fields.clone(),
+                    criteria: loaded.criteria,
                 })))
             }
             Self::Uncacheable => None,
         }
     }
+
+    fn semantic_sha256(&self) -> Option<[u8; 32]> {
+        match self {
+            Self::Task(cached) => Some(cached.semantic_sha256),
+            Self::TaskRef {
+                semantic_sha256, ..
+            } => Some(*semantic_sha256),
+            Self::NotTask | Self::Uncacheable => None,
+        }
+    }
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone)]
 struct CachedReport {
     key: String,
     tasks_checked: usize,
     diagnostics: Vec<CachedDiagnostic>,
-    #[serde(default)]
     agent_contract_provenance: Option<CachedAgentContractProvenance>,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone)]
 struct CachedAgentContractProvenance {
     file: EncodedPath,
     written_by: Option<String>,
@@ -838,7 +1020,7 @@ struct CachedAgentContractProvenance {
     note: String,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone)]
 struct CachedDiagnostic {
     code: String,
     severity: String,
@@ -880,7 +1062,7 @@ impl CachedReport {
                 || diagnostic
                     .file
                     .as_ref()
-                    .is_some_and(|path| path.encoded.len() > MAX_PATH_BYTES.saturating_mul(2))
+                    .is_some_and(|path| path.bytes.len() > MAX_PATH_BYTES)
             {
                 return false;
             }
@@ -893,9 +1075,7 @@ impl CachedReport {
                 .map_or(0, String::len)
                 .saturating_add(provenance.checked_by.len())
                 .saturating_add(provenance.note.len());
-            if local > MAX_DIAGNOSTIC_TEXT_BYTES
-                || provenance.file.encoded.len() > MAX_PATH_BYTES.saturating_mul(2)
-            {
+            if local > MAX_DIAGNOSTIC_TEXT_BYTES || provenance.file.bytes.len() > MAX_PATH_BYTES {
                 return false;
             }
             aggregate = aggregate.saturating_add(local);
@@ -987,10 +1167,15 @@ impl CachedDiagnostic {
     }
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
+#[cfg(unix)]
+const PATH_ENCODING_UNIX: u8 = 0;
+#[cfg(windows)]
+const PATH_ENCODING_WINDOWS: u8 = 1;
+
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
 struct EncodedPath {
-    encoding: String,
-    encoded: String,
+    encoding: u8,
+    bytes: Vec<u8>,
 }
 
 impl EncodedPath {
@@ -998,8 +1183,8 @@ impl EncodedPath {
     fn from_path(path: &Path) -> Self {
         use std::os::unix::ffi::OsStrExt as _;
         Self {
-            encoding: "unix-bytes-hex".to_string(),
-            encoded: hex(path.as_os_str().as_bytes()),
+            encoding: PATH_ENCODING_UNIX,
+            bytes: path.as_os_str().as_bytes().to_vec(),
         }
     }
 
@@ -1011,32 +1196,54 @@ impl EncodedPath {
             bytes.extend_from_slice(&unit.to_le_bytes());
         }
         Self {
-            encoding: "windows-wide-hex".to_string(),
-            encoded: hex(&bytes),
+            encoding: PATH_ENCODING_WINDOWS,
+            bytes,
         }
+    }
+
+    #[cfg(unix)]
+    fn matches_path(&self, path: &Path) -> bool {
+        use std::os::unix::ffi::OsStrExt as _;
+        self.encoding == PATH_ENCODING_UNIX && self.bytes == path.as_os_str().as_bytes()
+    }
+
+    #[cfg(windows)]
+    fn matches_path(&self, path: &Path) -> bool {
+        use std::os::windows::ffi::OsStrExt as _;
+        if self.encoding != PATH_ENCODING_WINDOWS {
+            return false;
+        }
+        let mut iter = path.as_os_str().encode_wide();
+        let (chunks, rem) = self.bytes.as_chunks::<2>();
+        if !rem.is_empty() {
+            return false;
+        }
+        for pair in chunks {
+            if iter.next() != Some(u16::from_le_bytes([pair[0], pair[1]])) {
+                return false;
+            }
+        }
+        iter.next().is_none()
     }
 
     #[cfg(unix)]
     fn to_path(&self) -> Option<PathBuf> {
         use std::os::unix::ffi::OsStringExt as _;
-        (self.encoding == "unix-bytes-hex")
-            .then(|| unhex(&self.encoded).map(std::ffi::OsString::from_vec))?
-            .map(PathBuf::from)
+        (self.encoding == PATH_ENCODING_UNIX)
+            .then(|| PathBuf::from(std::ffi::OsString::from_vec(self.bytes.clone())))
     }
 
     #[cfg(windows)]
     fn to_path(&self) -> Option<PathBuf> {
         use std::os::windows::ffi::OsStringExt as _;
-        if self.encoding != "windows-wide-hex" {
+        if self.encoding != PATH_ENCODING_WINDOWS {
             return None;
         }
-        let bytes = unhex(&self.encoded)?;
-        if bytes.len() % 2 != 0 {
+        let (chunks, rem) = self.bytes.as_chunks::<2>();
+        if !rem.is_empty() {
             return None;
         }
-        let units = bytes
-            .as_chunks::<2>()
-            .0
+        let units = chunks
             .iter()
             .map(|pair| u16::from_le_bytes([pair[0], pair[1]]))
             .collect::<Vec<_>>();
@@ -1044,13 +1251,33 @@ impl EncodedPath {
     }
 
     fn is_bounded_relative(&self) -> bool {
-        let Some(path) = self.to_path() else {
-            return false;
-        };
-        !path.as_os_str().is_empty()
-            && path
-                .components()
-                .all(|component| matches!(component, std::path::Component::Normal(_)))
+        #[cfg(unix)]
+        {
+            if self.encoding != PATH_ENCODING_UNIX || self.bytes.is_empty() || self.bytes[0] == b'/'
+            {
+                return false;
+            }
+            !self
+                .bytes
+                .split(|&byte| byte == b'/')
+                .any(|segment| segment.is_empty() || segment == b"." || segment == b"..")
+        }
+        #[cfg(not(unix))]
+        {
+            let Some(path) = self.to_path() else {
+                return false;
+            };
+            !path.as_os_str().is_empty()
+                && path
+                    .components()
+                    .all(|component| matches!(component, std::path::Component::Normal(_)))
+        }
+    }
+
+    fn hash_into(&self, digest: &mut Sha256) {
+        digest.update([self.encoding]);
+        digest.update((self.bytes.len() as u64).to_le_bytes());
+        digest.update(&self.bytes);
     }
 }
 
@@ -1061,30 +1288,130 @@ struct CacheLocation {
     lock: PathBuf,
 }
 
+fn hex_stack(bytes: &[u8; 32]) -> [u8; 64] {
+    const DIGITS: &[u8; 16] = b"0123456789abcdef";
+    let mut out = [0_u8; 64];
+    for (i, &b) in bytes.iter().enumerate() {
+        out[i * 2] = DIGITS[usize::from(b >> 4)];
+        out[i * 2 + 1] = DIGITS[usize::from(b & 0x0f)];
+    }
+    out
+}
+
+fn compute_plan_input_digest(
+    root: &Path,
+    identity_root: &Path,
+    candidates: &[CachedCandidate],
+    inputs: &[PlanFileInput],
+) -> String {
+    enum Entry<'a> {
+        Candidate(&'a CachedCandidate),
+        ReadError(&'a PlanFileInput),
+    }
+    let mut digest = Sha256::new();
+    super::hash_part(
+        &mut digest,
+        b"plan_root",
+        root.as_os_str().as_encoded_bytes(),
+    );
+    let read_errors: Vec<&PlanFileInput> = inputs
+        .iter()
+        .filter(|input| matches!(input.content, PlanFileContent::ReadError { .. }))
+        .collect();
+    let mut scratch = PathBuf::new();
+    let hash_candidate =
+        |digest: &mut Sha256, candidate: &CachedCandidate, scratch: &mut PathBuf| {
+            scratch.clear();
+            scratch.push(identity_root);
+            #[cfg(unix)]
+            {
+                use std::os::unix::ffi::OsStrExt as _;
+                scratch.push(Path::new(std::ffi::OsStr::from_bytes(
+                    &candidate.path.bytes,
+                )));
+            }
+            #[cfg(not(unix))]
+            {
+                if let Some(rel) = candidate.path.to_path() {
+                    scratch.push(rel);
+                }
+            }
+            super::hash_part(
+                digest,
+                b"plan_candidate_path",
+                scratch.as_os_str().as_encoded_bytes(),
+            );
+            let hex_bytes = hex_stack(&candidate.sha256);
+            super::hash_part(digest, b"plan_candidate_sha256", &hex_bytes);
+        };
+
+    if read_errors.is_empty() {
+        for candidate in candidates {
+            hash_candidate(&mut digest, candidate, &mut scratch);
+        }
+        return hex(&digest.finalize());
+    }
+
+    let mut merged: Vec<(PathBuf, Entry<'_>)> =
+        Vec::with_capacity(candidates.len() + read_errors.len());
+    for candidate in candidates {
+        if let Some(rel) = candidate.path.to_path() {
+            merged.push((root.join(rel), Entry::Candidate(candidate)));
+        }
+    }
+    for error in read_errors {
+        merged.push((error.path.clone(), Entry::ReadError(error)));
+    }
+    merged.sort_unstable_by(|a, b| a.0.cmp(&b.0));
+    for (_, entry) in merged {
+        match entry {
+            Entry::Candidate(candidate) => hash_candidate(&mut digest, candidate, &mut scratch),
+            Entry::ReadError(file) => {
+                let abs_path = absolute(&file.path);
+                super::hash_part(
+                    &mut digest,
+                    b"plan_candidate_path",
+                    abs_path.as_os_str().as_encoded_bytes(),
+                );
+                if let PlanFileContent::ReadError { kind, message } = &file.content {
+                    super::hash_part(
+                        &mut digest,
+                        b"plan_candidate_read_error_kind",
+                        super::io_error_kind_name(*kind).as_bytes(),
+                    );
+                    super::hash_part(
+                        &mut digest,
+                        b"plan_candidate_read_error_message",
+                        message.as_bytes(),
+                    );
+                }
+            }
+        }
+    }
+    hex(&digest.finalize())
+}
+
 fn report_key(
     root: &Path,
     candidates: &[CachedCandidate],
+    plan_tasks: &[LoadedTask],
     inputs: &[PlanFileInput],
     options: &aplan_core::Options,
-) -> Option<String> {
+) -> String {
     let mut digest = Sha256::new();
-    digest.update(b"aplan-structural-report-v1\0");
+    digest.update(b"aplan-structural-report-v2\0");
     // Parsed artifacts are reconstructed with the current root spelling, but
     // a persisted Report already contains the diagnostic paths produced by the
     // invocation that computed it. Keep relative and absolute (or otherwise
     // lexically distinct) invocations from borrowing each other's prose.
     digest.update(b"root-spelling\0");
-    digest.update(EncodedPath::from_path(root).encoding.as_bytes());
-    digest.update([0]);
-    digest.update(EncodedPath::from_path(root).encoded.as_bytes());
+    EncodedPath::from_path(root).hash_into(&mut digest);
     digest.update([0]);
     digest.update(
         super::validation_policy_digest(options, &aplan_core::Verdict::default()).as_bytes(),
     );
     for candidate in candidates {
-        digest.update(candidate.path.encoding.as_bytes());
-        digest.update([0]);
-        digest.update(candidate.path.encoded.as_bytes());
+        candidate.path.hash_into(&mut digest);
         digest.update([0]);
         match &candidate.artifact {
             CachedArtifact::NotTask => digest.update(b"not-task"),
@@ -1092,18 +1419,17 @@ fn report_key(
                 // Load diagnostics carry parser wording and source locations,
                 // so malformed input remains byte-identified.
                 digest.update(b"unloadable\0");
-                digest.update(candidate.sha256.as_bytes());
+                digest.update(candidate.sha256);
             }
             CachedArtifact::Task(task) => {
-                // No structural rule reads title text. Its presence and type
-                // were established by parsing; changing one non-empty title to
-                // another changes projections but cannot change this report.
-                // Every field a rule does read, plus field/criterion locations,
-                // remains in the canonical typed artifact below.
-                let mut semantic = task.clone();
-                semantic.task.title.clear();
-                digest.update(b"task\0");
-                digest.update(serde_json::to_vec(&semantic).ok()?);
+                digest.update(b"task-sha256\0");
+                digest.update(task.semantic_sha256);
+            }
+            CachedArtifact::TaskRef {
+                semantic_sha256, ..
+            } => {
+                digest.update(b"task-sha256\0");
+                digest.update(semantic_sha256);
             }
         }
         digest.update([0]);
@@ -1118,9 +1444,7 @@ fn report_key(
             continue;
         };
         digest.update(b"read-error\0");
-        digest.update(EncodedPath::from_path(&input.path).encoding.as_bytes());
-        digest.update([0]);
-        digest.update(EncodedPath::from_path(&input.path).encoded.as_bytes());
+        EncodedPath::from_path(&input.path).hash_into(&mut digest);
         digest.update([0]);
         digest.update(super::io_error_kind_name(*kind).as_bytes());
         digest.update([0]);
@@ -1141,15 +1465,22 @@ fn report_key(
 
     let Some(traces_root) = options.traces_root.as_deref() else {
         digest.update(b"traces-absent\0");
-        return Some(hex(&digest.finalize()));
+        return hex(&digest.finalize());
     };
     digest.update(b"traces-present\0");
     let mut paths = std::collections::BTreeSet::new();
     for candidate in candidates {
-        let CachedArtifact::Task(task) = &candidate.artifact else {
-            continue;
+        let traces: &[String] = match &candidate.artifact {
+            CachedArtifact::Task(task) => &task.task.traces,
+            CachedArtifact::TaskRef { task_index, .. } => {
+                let Some(loaded) = plan_tasks.get(*task_index) else {
+                    continue;
+                };
+                &loaded.task.traces
+            }
+            CachedArtifact::NotTask | CachedArtifact::Uncacheable => continue,
         };
-        for trace in &task.task.traces {
+        for trace in traces {
             let Some((relative, _)) = trace.split_once('#') else {
                 continue;
             };
@@ -1159,7 +1490,7 @@ fn report_key(
         }
     }
     for path in paths {
-        digest.update(EncodedPath::from_path(&path).encoded.as_bytes());
+        EncodedPath::from_path(&path).hash_into(&mut digest);
         digest.update([0]);
         // Unlike task candidates, reports do not persist a prior trace
         // observation plus its capture horizon. Hashing the bounded referenced
@@ -1167,12 +1498,13 @@ fn report_key(
         // Markdown/YAML trace parse on a hit.
         hash_observed_file(&mut digest, &path);
     }
-    Some(hex(&digest.finalize()))
+    hex(&digest.finalize())
 }
 
 fn hash_observed_file(digest: &mut Sha256, path: &Path) {
     match stable_hash(path) {
         Ok(content_sha256) => {
+            STORE_FILES_HASHED.fetch_add(1, Ordering::Relaxed);
             digest.update(b"bytes\0");
             digest.update(content_sha256);
         }
@@ -1206,35 +1538,177 @@ impl CacheLocation {
         let directory = base.join("aplan").join("plan-v1");
         let mut digest = Sha256::new();
         digest.update(b"aplan-cache-key-v1\0");
-        digest.update(EncodedPath::from_path(root).encoded.as_bytes());
+        EncodedPath::from_path(root).hash_into(&mut digest);
         digest.update(b"\0config\0");
         match options.configuration_file.as_deref() {
-            Some(path) => digest.update(EncodedPath::from_path(&absolute(path)).encoded.as_bytes()),
+            Some(path) => EncodedPath::from_path(&absolute(path)).hash_into(&mut digest),
             None => digest.update(b"absent"),
         }
         digest.update(b"\0writer\0");
         digest.update(writer_identity.as_bytes());
         let name = hex(&digest.finalize());
         Some(Self {
-            generation: directory.join(format!("{name}.json")),
+            generation: directory.join(format!("{name}.bin")),
             lock: directory.join(format!("{name}.lock")),
             directory,
         })
     }
 }
 
+struct PreviousLookup<'a> {
+    candidates: &'a [CachedCandidate],
+    cursor: usize,
+    fallback: Option<BTreeMap<&'a EncodedPath, usize>>,
+}
+
+impl<'a> PreviousLookup<'a> {
+    const fn new(candidates: &'a [CachedCandidate]) -> Self {
+        Self {
+            candidates,
+            cursor: 0,
+            fallback: None,
+        }
+    }
+
+    fn find_index(&mut self, relative: &Path) -> Option<usize> {
+        if self.candidates.is_empty() {
+            return None;
+        }
+        if self.fallback.is_none() {
+            if let Some(candidate) = self.candidates.get(self.cursor)
+                && candidate.path.matches_path(relative)
+            {
+                let idx = self.cursor;
+                self.cursor += 1;
+                return Some(idx);
+            }
+            let index: BTreeMap<&'a EncodedPath, usize> = self
+                .candidates
+                .iter()
+                .enumerate()
+                .map(|(i, c)| (&c.path, i))
+                .collect();
+            self.fallback = Some(index);
+        }
+        let key = EncodedPath::from_path(relative);
+        self.fallback
+            .as_ref()
+            .and_then(|map| map.get(&key).copied())
+    }
+}
+
+fn sort_tasks_and_remap(plan: &mut Plan, candidates: &mut [CachedCandidate]) {
+    if plan.tasks.windows(2).all(|w| w[0].task.id <= w[1].task.id) {
+        return;
+    }
+    let len = plan.tasks.len();
+    let mut order: Vec<usize> = (0..len).collect();
+    order.sort_by(|&a, &b| plan.tasks[a].task.id.cmp(&plan.tasks[b].task.id));
+    let mut inverse = vec![0_usize; len];
+    for (new_idx, &old_idx) in order.iter().enumerate() {
+        inverse[old_idx] = new_idx;
+    }
+    let mut slots: Vec<Option<LoadedTask>> = plan.tasks.drain(..).map(Some).collect();
+    for old_idx in order {
+        if let Some(task) = slots[old_idx].take() {
+            plan.tasks.push(task);
+        }
+    }
+    for candidate in candidates {
+        if let CachedArtifact::TaskRef { task_index, .. } = &mut candidate.artifact {
+            *task_index = inverse[*task_index];
+        }
+    }
+}
+
+fn push_parsed_as_artifact(
+    plan: &mut Plan,
+    parsed: ParsedCandidate,
+    path: &Path,
+    known_semantic: Option<[u8; 32]>,
+) -> CachedArtifact {
+    match parsed {
+        ParsedCandidate::NotTask => CachedArtifact::NotTask,
+        ParsedCandidate::Task(loaded) => {
+            let semantic_sha256 =
+                known_semantic.unwrap_or_else(|| CachedArtifact::from_loaded_task(&loaded));
+            let task_index = plan.tasks.len();
+            plan.tasks.push(*loaded);
+            CachedArtifact::TaskRef {
+                semantic_sha256,
+                task_index,
+            }
+        }
+        ParsedCandidate::Failed {
+            id,
+            mut diagnostics,
+        } => {
+            if let Some(id) = id {
+                plan.unloadable.insert(id, path.to_path_buf());
+            }
+            plan.load_diagnostics.append(&mut diagnostics);
+            CachedArtifact::Uncacheable
+        }
+    }
+}
+
+/// Move a decoded `CachedArtifact` directly into `plan.tasks` without cloning
+/// `Task` or `fields` (`A2-134`). Returns `None` if `artifact` is uncacheable
+/// or carries an unrecognized scaffold prompt.
+fn take_owned_artifact(
+    artifact: &mut CachedArtifact,
+    path: &Path,
+    plan: &mut Plan,
+) -> Option<CachedArtifact> {
+    match artifact {
+        CachedArtifact::NotTask => Some(CachedArtifact::NotTask),
+        CachedArtifact::Task(arc) => {
+            let criteria = criteria_from_cached(&arc.criteria)?;
+            let semantic_sha256 = arc.semantic_sha256;
+            let loaded = if Arc::strong_count(arc) == 1 {
+                let owned = std::mem::replace(artifact, CachedArtifact::NotTask);
+                let CachedArtifact::Task(owned_arc) = owned else {
+                    unreachable!("matched Task variant");
+                };
+                let inner = Arc::try_unwrap(owned_arc).expect("checked strong count == 1");
+                LoadedTask {
+                    task: inner.task,
+                    path: path.to_path_buf(),
+                    fields: inner.fields,
+                    criteria,
+                }
+            } else {
+                LoadedTask {
+                    task: arc.task.clone(),
+                    path: path.to_path_buf(),
+                    fields: arc.fields.clone(),
+                    criteria,
+                }
+            };
+            let task_index = plan.tasks.len();
+            plan.tasks.push(loaded);
+            Some(CachedArtifact::TaskRef {
+                semantic_sha256,
+                task_index,
+            })
+        }
+        CachedArtifact::TaskRef { .. } | CachedArtifact::Uncacheable => None,
+    }
+}
+
 // One loop intentionally owns candidate-set comparison and every per-file
 // result: splitting its state machine made it easier to return a mixed retry.
-#[allow(clippy::too_many_lines)]
-fn capture(
+#[allow(clippy::too_many_lines, clippy::too_many_arguments)]
+fn capture_owned(
     root: &Path,
-    previous: &BTreeMap<EncodedPath, CachedCandidate>,
+    mut previous: Vec<CachedCandidate>,
     previous_horizon: Option<TimeValue>,
     retain_inputs: bool,
+    include_input_digests: bool,
     stats: &mut PlanStoreStats,
     mut progress: Option<&mut ProgressEmitter<'_>>,
     cancellation: Option<&CancellationToken>,
-) -> io::Result<(IdentifiedPlan, Vec<CachedCandidate>)> {
+) -> io::Result<(IdentifiedPlan, Vec<CachedCandidate>, bool)> {
     for attempt in 0..3 {
         check_cancelled(cancellation)?;
         let child = Some(ProgressChildId::new(attempt));
@@ -1259,43 +1733,93 @@ fn capture(
             );
         }
         let mut plan = Plan::default();
-        let mut inputs = Vec::with_capacity(before.len());
+        let mut inputs = if retain_inputs || include_input_digests {
+            Vec::with_capacity(before.len())
+        } else {
+            Vec::new()
+        };
         let mut candidates = Vec::with_capacity(before.len());
         let mut local = LoadStats::default();
+        let mut attempt_reused = 0_usize;
+        let mut attempt_parsed = 0_usize;
+        let mut attempt_hashed = 0_usize;
+
+        // Fast linear cursor for the common sorted-set case; lazily indexes
+        // `previous` on the first path mismatch.
+        let mut cursor = 0_usize;
+        let mut fallback: Option<BTreeMap<EncodedPath, usize>> = None;
 
         for (candidate_index, path) in before.iter().enumerate() {
             check_cancelled(cancellation)?;
             local.candidate_files += 1;
             let relative = path.strip_prefix(root).unwrap_or(path);
-            let encoded = EncodedPath::from_path(relative);
+            let prior_index = if previous.is_empty() {
+                None
+            } else if fallback.is_none() {
+                if previous
+                    .get(cursor)
+                    .is_some_and(|c| c.path.matches_path(relative))
+                {
+                    let idx = cursor;
+                    cursor += 1;
+                    Some(idx)
+                } else {
+                    let map: BTreeMap<EncodedPath, usize> = previous
+                        .iter()
+                        .enumerate()
+                        .map(|(i, c)| (c.path.clone(), i))
+                        .collect();
+                    let found = map.get(&EncodedPath::from_path(relative)).copied();
+                    fallback = Some(map);
+                    found
+                }
+            } else {
+                fallback
+                    .as_ref()
+                    .and_then(|map| map.get(&EncodedPath::from_path(relative)).copied())
+            };
+
             let observed = FileObservation::capture(path);
-            let metadata_reuse = observed.as_ref().ok().and_then(|observation| {
-                previous.get(&encoded).and_then(|candidate| {
-                    previous_horizon
-                        .is_some_and(|horizon| {
-                            candidate
+            let can_metadata_reuse = !retain_inputs
+                && observed.as_ref().is_ok_and(|observation| {
+                    prior_index.is_some_and(|idx| {
+                        previous_horizon.is_some_and(|horizon| {
+                            previous[idx]
                                 .observation
                                 .permits_metadata_reuse(observation, horizon)
                         })
-                        .then(|| candidate.artifact.parsed(path))
-                        .flatten()
-                        .map(|parsed| (candidate, parsed))
-                })
-            });
-            if let Some((candidate, parsed)) = metadata_reuse
-                && !retain_inputs
+                    })
+                });
+            if can_metadata_reuse
+                && let Some(idx) = prior_index
+                && let Some(new_artifact) =
+                    take_owned_artifact(&mut previous[idx].artifact, path, &mut plan)
             {
+                let is_not_task = matches!(new_artifact, CachedArtifact::NotTask);
                 local.readable_files += 1;
-                if !matches!(candidate.artifact, CachedArtifact::NotTask) {
+                if !is_not_task {
                     local.frontmatter_candidates += 1;
                 }
-                stats.artifacts_reused += 1;
-                apply_parsed(&mut plan, parsed, path);
-                candidates.push(candidate.clone());
-                inputs.push(PlanFileInput {
-                    path: path.clone(),
-                    content: PlanFileContent::Sha256(candidate.sha256.clone()),
+                attempt_reused += 1;
+                let sha256 = previous[idx].sha256;
+                candidates.push(CachedCandidate {
+                    path: std::mem::replace(
+                        &mut previous[idx].path,
+                        EncodedPath {
+                            encoding: 0,
+                            bytes: Vec::new(),
+                        },
+                    ),
+                    sha256,
+                    observation: previous[idx].observation.clone(),
+                    artifact: new_artifact,
                 });
+                if include_input_digests {
+                    inputs.push(PlanFileInput {
+                        path: path.clone(),
+                        content: PlanFileContent::Sha256(hex(&sha256)),
+                    });
+                }
                 if let Some(emitter) = progress.as_deref_mut() {
                     emitter.phase_advanced(
                         ProgressPhase::SourceParsing,
@@ -1322,42 +1846,46 @@ fn capture(
                             .retained_bytes
                             .saturating_add(u64::try_from(bytes.len()).unwrap_or(u64::MAX));
                     }
-                    let digest = hex_sha256(&bytes);
-                    let reused = previous.get(&encoded).and_then(|candidate| {
-                        (candidate.sha256 == digest)
-                            .then(|| candidate.artifact.parsed(path))
+                    let digest: [u8; 32] = Sha256::digest(&bytes).into();
+                    attempt_hashed += 1;
+                    STORE_FILES_HASHED.fetch_add(1, Ordering::Relaxed);
+                    let reused_artifact = prior_index.and_then(|idx| {
+                        (previous[idx].sha256 == digest)
+                            .then(|| {
+                                take_owned_artifact(&mut previous[idx].artifact, path, &mut plan)
+                            })
                             .flatten()
                     });
-                    let was_reused = reused.is_some();
-                    let parsed = if let Some(parsed) = reused {
-                        stats.artifacts_reused += 1;
-                        parsed
+                    let artifact = if let Some(reused) = reused_artifact {
+                        attempt_reused += 1;
+                        if !matches!(reused, CachedArtifact::NotTask) {
+                            local.frontmatter_candidates += 1;
+                        }
+                        reused
                     } else {
-                        stats.artifacts_parsed += 1;
-                        parse_plan_candidate(path, &bytes)
-                    };
-                    if !matches!(parsed, ParsedCandidate::NotTask) {
-                        local.frontmatter_candidates += 1;
-                        if !was_reused {
+                        attempt_parsed += 1;
+                        let parsed = parse_plan_candidate(path, &bytes);
+                        if !matches!(parsed, ParsedCandidate::NotTask) {
+                            local.frontmatter_candidates += 1;
                             local.task_files_parsed += 1;
                         }
-                    }
-                    apply_parsed(&mut plan, parsed.clone(), path);
+                        push_parsed_as_artifact(&mut plan, parsed, path, None)
+                    };
                     candidates.push(CachedCandidate {
-                        path: encoded,
-                        sha256: digest.clone(),
+                        path: EncodedPath::from_path(relative),
+                        sha256: digest,
                         observation: captured.observation,
-                        artifact: CachedArtifact::from_parsed(&parsed),
+                        artifact,
                     });
                     if retain_inputs {
                         inputs.push(PlanFileInput {
                             path: path.clone(),
                             content: PlanFileContent::Bytes(bytes),
                         });
-                    } else {
+                    } else if include_input_digests {
                         inputs.push(PlanFileInput {
                             path: path.clone(),
-                            content: PlanFileContent::Sha256(digest),
+                            content: PlanFileContent::Sha256(hex(&digest)),
                         });
                     }
                 }
@@ -1418,8 +1946,279 @@ fn capture(
             );
         }
         if before == after {
-            plan.tasks.sort_by(|a, b| a.task.id.cmp(&b.task.id));
+            let exact_previous_paths = fallback.is_none()
+                && cursor == previous.len()
+                && candidates.len() == previous.len();
+            sort_tasks_and_remap(&mut plan, &mut candidates);
             stats.load = local;
+            stats.artifacts_reused = attempt_reused;
+            stats.artifacts_parsed = attempt_parsed;
+            stats.files_hashed = attempt_hashed;
+            return Ok((
+                IdentifiedPlan {
+                    root: root.to_path_buf(),
+                    plan,
+                    inputs,
+                },
+                candidates,
+                exact_previous_paths,
+            ));
+        }
+        if attempt == 2 {
+            return Err(io::Error::other(PlanSnapshotChanged));
+        }
+        // Rehydrate `previous` from what this attempt already moved/parsed so
+        // the next retry stays sound without losing reusable artifacts.
+        let mut slots: Vec<Option<LoadedTask>> = plan.tasks.into_iter().map(Some).collect();
+        previous = candidates
+            .into_iter()
+            .map(|mut c| {
+                if let CachedArtifact::TaskRef {
+                    semantic_sha256,
+                    task_index,
+                } = c.artifact
+                    && let Some(loaded) = slots.get_mut(task_index).and_then(Option::take)
+                {
+                    let criteria = cached_criteria_from_loaded(loaded.criteria);
+                    c.artifact = CachedArtifact::Task(Arc::new(CachedTask {
+                        semantic_sha256,
+                        task: loaded.task,
+                        fields: loaded.fields,
+                        criteria,
+                    }));
+                }
+                c
+            })
+            .collect();
+    }
+    unreachable!("the bounded capture loop returns")
+}
+
+// Long-lived in-process `refresh` borrows the prior snapshot without mutating
+// `self.candidates` or `self.snapshot` until the new snapshot is confirmed.
+#[allow(clippy::too_many_lines, clippy::too_many_arguments)]
+fn capture_borrowed(
+    root: &Path,
+    previous: &[CachedCandidate],
+    previous_tasks: &[LoadedTask],
+    previous_horizon: Option<TimeValue>,
+    retain_inputs: bool,
+    include_input_digests: bool,
+    stats: &mut PlanStoreStats,
+    mut progress: Option<&mut ProgressEmitter<'_>>,
+    cancellation: Option<&CancellationToken>,
+) -> io::Result<(IdentifiedPlan, Vec<CachedCandidate>)> {
+    for attempt in 0..3 {
+        check_cancelled(cancellation)?;
+        let child = Some(ProgressChildId::new(attempt));
+        if let Some(emitter) = progress.as_deref_mut() {
+            emitter.phase_started(
+                ProgressPhase::SourceEnumeration,
+                child,
+                ProgressMeasure::Indeterminate,
+            );
+        }
+        let before = plan_candidate_paths(root);
+        if let Some(emitter) = progress.as_deref_mut() {
+            emitter.phase_completed(
+                ProgressPhase::SourceEnumeration,
+                child,
+                ProgressMeasure::Indeterminate,
+            );
+            emitter.phase_started(
+                ProgressPhase::SourceParsing,
+                child,
+                ProgressMeasure::bounded(0, before.len(), ProgressUnit::Sources),
+            );
+        }
+        let mut plan = Plan::default();
+        let mut inputs = if retain_inputs || include_input_digests {
+            Vec::with_capacity(before.len())
+        } else {
+            Vec::new()
+        };
+        let mut candidates = Vec::with_capacity(before.len());
+        let mut local = LoadStats::default();
+        let mut lookup = PreviousLookup::new(previous);
+        let mut attempt_reused = 0_usize;
+        let mut attempt_parsed = 0_usize;
+        let mut attempt_hashed = 0_usize;
+
+        for (candidate_index, path) in before.iter().enumerate() {
+            check_cancelled(cancellation)?;
+            local.candidate_files += 1;
+            let relative = path.strip_prefix(root).unwrap_or(path);
+            let prior = lookup.find_index(relative).map(|idx| &previous[idx]);
+            let observed = FileObservation::capture(path);
+            let metadata_reuse = observed.as_ref().ok().and_then(|observation| {
+                prior.and_then(|candidate| {
+                    previous_horizon
+                        .is_some_and(|horizon| {
+                            candidate
+                                .observation
+                                .permits_metadata_reuse(observation, horizon)
+                        })
+                        .then(|| candidate.artifact.parsed_borrowed(path, previous_tasks))
+                        .flatten()
+                        .map(|parsed| (candidate, parsed))
+                })
+            });
+            if let Some((candidate, parsed)) = metadata_reuse
+                && !retain_inputs
+            {
+                local.readable_files += 1;
+                if !matches!(candidate.artifact, CachedArtifact::NotTask) {
+                    local.frontmatter_candidates += 1;
+                }
+                attempt_reused += 1;
+                let artifact = push_parsed_as_artifact(
+                    &mut plan,
+                    parsed,
+                    path,
+                    candidate.artifact.semantic_sha256(),
+                );
+                candidates.push(CachedCandidate {
+                    path: candidate.path.clone(),
+                    sha256: candidate.sha256,
+                    observation: candidate.observation.clone(),
+                    artifact,
+                });
+                if include_input_digests {
+                    inputs.push(PlanFileInput {
+                        path: path.clone(),
+                        content: PlanFileContent::Sha256(hex(&candidate.sha256)),
+                    });
+                }
+                if let Some(emitter) = progress.as_deref_mut() {
+                    emitter.phase_advanced(
+                        ProgressPhase::SourceParsing,
+                        child,
+                        ProgressMeasure::bounded(
+                            candidate_index.saturating_add(1),
+                            before.len(),
+                            ProgressUnit::Sources,
+                        ),
+                    );
+                }
+                continue;
+            }
+            match stable_read(path) {
+                Ok(captured) => {
+                    let bytes = captured.bytes;
+                    local.readable_files += 1;
+                    local.bytes_read = local
+                        .bytes_read
+                        .saturating_add(u64::try_from(bytes.len()).unwrap_or(u64::MAX));
+                    if retain_inputs {
+                        local.retained_files += 1;
+                        local.retained_bytes = local
+                            .retained_bytes
+                            .saturating_add(u64::try_from(bytes.len()).unwrap_or(u64::MAX));
+                    }
+                    let digest: [u8; 32] = Sha256::digest(&bytes).into();
+                    attempt_hashed += 1;
+                    STORE_FILES_HASHED.fetch_add(1, Ordering::Relaxed);
+                    let reused = prior.and_then(|candidate| {
+                        (candidate.sha256 == digest)
+                            .then(|| candidate.artifact.parsed_borrowed(path, previous_tasks))
+                            .flatten()
+                            .map(|parsed| (candidate, parsed))
+                    });
+                    let was_reused = reused.is_some();
+                    let (parsed, known_semantic) = if let Some((candidate, parsed)) = reused {
+                        attempt_reused += 1;
+                        (parsed, candidate.artifact.semantic_sha256())
+                    } else {
+                        attempt_parsed += 1;
+                        (parse_plan_candidate(path, &bytes), None)
+                    };
+                    if !matches!(parsed, ParsedCandidate::NotTask) {
+                        local.frontmatter_candidates += 1;
+                        if !was_reused {
+                            local.task_files_parsed += 1;
+                        }
+                    }
+                    let artifact = push_parsed_as_artifact(&mut plan, parsed, path, known_semantic);
+                    candidates.push(CachedCandidate {
+                        path: EncodedPath::from_path(relative),
+                        sha256: digest,
+                        observation: captured.observation,
+                        artifact,
+                    });
+                    if retain_inputs {
+                        inputs.push(PlanFileInput {
+                            path: path.clone(),
+                            content: PlanFileContent::Bytes(bytes),
+                        });
+                    } else if include_input_digests {
+                        inputs.push(PlanFileInput {
+                            path: path.clone(),
+                            content: PlanFileContent::Sha256(hex(&digest)),
+                        });
+                    }
+                }
+                Err(error) => {
+                    if retain_inputs {
+                        local.retained_files += 1;
+                    }
+                    plan.load_diagnostics.push(
+                        Diagnostic::error(code::SCHEMA, format!("cannot read: {error}"))
+                            .with_file(path)
+                            .with_agent_instruction(
+                                "Make the file readable, or remove it from the plan directory."
+                                    .to_string(),
+                            ),
+                    );
+                    inputs.push(PlanFileInput {
+                        path: path.clone(),
+                        content: PlanFileContent::ReadError {
+                            kind: error.kind(),
+                            message: error.to_string(),
+                        },
+                    });
+                }
+            }
+            if let Some(emitter) = progress.as_deref_mut() {
+                emitter.phase_advanced(
+                    ProgressPhase::SourceParsing,
+                    child,
+                    ProgressMeasure::bounded(
+                        candidate_index.saturating_add(1),
+                        before.len(),
+                        ProgressUnit::Sources,
+                    ),
+                );
+            }
+        }
+
+        if let Some(emitter) = progress.as_deref_mut() {
+            emitter.phase_completed(
+                ProgressPhase::SourceParsing,
+                child,
+                ProgressMeasure::bounded(before.len(), before.len(), ProgressUnit::Sources),
+            );
+            emitter.phase_started(
+                ProgressPhase::SnapshotConfirmation,
+                child,
+                ProgressMeasure::Indeterminate,
+            );
+        }
+
+        let after = plan_candidate_paths(root);
+        check_cancelled(cancellation)?;
+        if let Some(emitter) = progress.as_deref_mut() {
+            emitter.phase_completed(
+                ProgressPhase::SnapshotConfirmation,
+                child,
+                ProgressMeasure::Indeterminate,
+            );
+        }
+        if before == after {
+            sort_tasks_and_remap(&mut plan, &mut candidates);
+            stats.load = local;
+            stats.artifacts_reused = attempt_reused;
+            stats.artifacts_parsed = attempt_parsed;
+            stats.files_hashed = attempt_hashed;
             return Ok((
                 IdentifiedPlan {
                     root: root.to_path_buf(),
@@ -1438,22 +2237,6 @@ fn capture(
 
 fn check_cancelled(cancellation: Option<&CancellationToken>) -> io::Result<()> {
     cancellation.map_or(Ok(()), CancellationToken::check)
-}
-
-fn apply_parsed(plan: &mut Plan, parsed: ParsedCandidate, path: &Path) {
-    match parsed {
-        ParsedCandidate::NotTask => {}
-        ParsedCandidate::Task(task) => plan.tasks.push(*task),
-        ParsedCandidate::Failed {
-            id,
-            mut diagnostics,
-        } => {
-            if let Some(id) = id {
-                plan.unloadable.insert(id, path.to_path_buf());
-            }
-            plan.load_diagnostics.append(&mut diagnostics);
-        }
-    }
 }
 
 struct CapturedFile {
@@ -1535,19 +2318,23 @@ fn read_generation(
         return None;
     }
     stats.cache_bytes_read = u64::try_from(bytes.len()).unwrap_or(u64::MAX);
-    let envelope: Envelope = serde_json::from_slice(&bytes).ok()?;
-    let generation_bytes = serde_json::to_vec(&envelope.generation).ok()?;
-    if envelope.checksum != hex_sha256(&generation_bytes)
-        || !envelope.generation.matches(root, options)
-    {
+    let generation = codec::decode_generation(&bytes)?;
+    if !generation.matches(root, options) {
         return None;
     }
-    Some(envelope.generation)
+    Some(generation)
 }
 
-fn publish_generation(
+#[allow(clippy::too_many_arguments)]
+fn publish_generation_parts(
     location: &CacheLocation,
-    generation: &Generation,
+    identity_root: &Path,
+    options: &PlanStoreOptions,
+    created_at: TimeValue,
+    plan_input_digest: Option<&CachedPlanDigest>,
+    candidates: &[CachedCandidate],
+    reports: &[CachedReport],
+    plan_tasks: &[LoadedTask],
     stats: &mut PlanStoreStats,
 ) {
     if ensure_private_directory(&location.directory).is_err() {
@@ -1556,14 +2343,28 @@ fn publish_generation(
     let Some(_lock) = CacheLock::acquire(&location.lock) else {
         return;
     };
-    let Ok(generation_bytes) = serde_json::to_vec(generation) else {
-        return;
-    };
-    let envelope = Envelope {
-        checksum: hex_sha256(&generation_bytes),
-        generation: generation.clone(),
-    };
-    let Ok(bytes) = serde_json::to_vec(&envelope) else {
+    let root_encoded = EncodedPath::from_path(identity_root);
+    let config_encoded = options
+        .configuration_file
+        .as_deref()
+        .map(absolute)
+        .as_deref()
+        .map(EncodedPath::from_path);
+    let Some(bytes) = codec::encode_generation_parts(
+        MAGIC,
+        FORMAT_EPOCH,
+        SEMANTIC_EPOCH,
+        platform_tag(),
+        schema_identity(),
+        options.writer_identity.as_deref(),
+        &root_encoded,
+        config_encoded.as_ref(),
+        created_at,
+        plan_input_digest,
+        candidates,
+        reports,
+        plan_tasks,
+    ) else {
         return;
     };
     if u64::try_from(bytes.len()).unwrap_or(u64::MAX) > MAX_CACHE_BYTES {
@@ -1756,9 +2557,13 @@ fn platform_tag() -> &'static str {
     }
 }
 
-fn schema_identity() -> String {
-    let bytes = serde_json::to_vec(&aplan_core::load::derived_schema()).unwrap_or_default();
-    hex_sha256(&bytes)
+fn schema_identity() -> &'static str {
+    SCHEMA_IDENTITY
+        .get_or_init(|| {
+            let bytes = serde_json::to_vec(&aplan_core::load::derived_schema()).unwrap_or_default();
+            hex(&Sha256::digest(&bytes))
+        })
+        .as_str()
 }
 
 fn absolute(path: &Path) -> PathBuf {
@@ -1772,10 +2577,6 @@ fn now_nanos() -> u128 {
         .as_nanos()
 }
 
-fn hex_sha256(bytes: &[u8]) -> String {
-    hex(&Sha256::digest(bytes))
-}
-
 fn hex(bytes: &[u8]) -> String {
     const DIGITS: &[u8; 16] = b"0123456789abcdef";
     let mut out = String::with_capacity(bytes.len().saturating_mul(2));
@@ -1784,21 +2585,6 @@ fn hex(bytes: &[u8]) -> String {
         out.push(char::from(DIGITS[usize::from(byte & 0x0f)]));
     }
     out
-}
-
-fn unhex(value: &str) -> Option<Vec<u8>> {
-    let (pairs, remainder) = value.as_bytes().as_chunks::<2>();
-    if !remainder.is_empty() {
-        return None;
-    }
-    pairs
-        .iter()
-        .map(|pair| {
-            let high = (pair[0] as char).to_digit(16)?;
-            let low = (pair[1] as char).to_digit(16)?;
-            u8::try_from((high << 4) | low).ok()
-        })
-        .collect()
 }
 
 #[cfg(test)]
@@ -1813,9 +2599,8 @@ mod tests {
     #[cfg(unix)]
     use super::TimeValue;
     use super::{
-        CacheMode, CachedDiagnostic, CachedReport, EncodedPath, Envelope, MAX_CACHE_BYTES,
-        MAX_CACHE_TOTAL, MAX_DIAGNOSTIC_TEXT_BYTES, PlanStore, PlanStoreOptions, evict, hex_sha256,
-        unhex,
+        CacheMode, CachedDiagnostic, CachedReport, EncodedPath, FileType, MAX_CACHE_BYTES,
+        MAX_CACHE_TOTAL, MAX_DIAGNOSTIC_TEXT_BYTES, PlanStore, PlanStoreOptions, codec, evict,
     };
 
     #[test]
@@ -1824,8 +2609,6 @@ mod tests {
         assert_eq!(CacheMode::from_name("off"), Some(CacheMode::Off));
         assert_eq!(CacheMode::from_name("refresh"), Some(CacheMode::Refresh));
         assert_eq!(CacheMode::from_name("unknown"), None);
-        assert!(unhex("0").is_none());
-        assert!(unhex("zz").is_none());
 
         let invalid_key = CachedReport {
             key: "not-a-digest".to_string(),
@@ -1877,14 +2660,14 @@ mod tests {
             .tempdir_in(aplan_core::fixture::fixture_root())
             .expect("temporary directory");
         let directory = FileObservation::capture(temporary.path()).expect("directory observation");
-        assert_eq!(directory.file_type, "directory");
+        assert_eq!(directory.file_type, FileType::Directory);
         assert!(!directory.has_strong_change_identity());
 
         assert_eq!(
             FileObservation::capture(Path::new("/dev/null"))
                 .expect("device observation")
                 .file_type,
-            "other"
+            FileType::Other
         );
 
         let before_epoch = TimeValue::from_system(
@@ -1900,8 +2683,8 @@ mod tests {
         assert!(!no_modified.changed_before(TimeValue::now()));
 
         let foreign = EncodedPath {
-            encoding: "future-encoding".to_string(),
-            encoded: "00".to_string(),
+            encoding: 99,
+            bytes: vec![0],
         };
         assert!(foreign.to_path().is_none());
         let traversal = EncodedPath::from_path(Path::new("../outside"));
@@ -1914,7 +2697,7 @@ mod tests {
             .prefix("aplan-cache-eviction-")
             .tempdir_in(aplan_core::fixture::fixture_root())
             .expect("temporary cache directory");
-        let stale = temporary.path().join("stale.json");
+        let stale = temporary.path().join("stale.bin");
         fs::write(&stale, b"old").expect("stale generation");
         fs::File::options()
             .write(true)
@@ -1926,7 +2709,7 @@ mod tests {
         evict(temporary.path());
         assert!(!stale.exists());
 
-        for name in ["a.json", "b.json", "c.json"] {
+        for name in ["a.bin", "b.bin", "c.bin"] {
             let file = fs::File::create(temporary.path().join(name)).expect("size generation");
             file.set_len(MAX_CACHE_TOTAL / 2)
                 .expect("sparse cache file");
@@ -1955,7 +2738,7 @@ mod tests {
                 seconds: 20,
                 nanoseconds: 500,
             }),
-            file_type: "file".to_string(),
+            file_type: FileType::File,
             symlink_target: None,
             device: 1,
             inode: 2,
@@ -2087,26 +2870,17 @@ mod tests {
             .expect("cache directory")
             .flatten()
             .map(|entry| entry.path())
-            .find(|path| {
-                path.extension()
-                    .is_some_and(|extension| extension == "json")
-            })
+            .find(|path| path.extension().is_some_and(|extension| extension == "bin"))
             .expect("generation")
     }
 
     fn rewrite_generation(cache: &Path, mutate: impl FnOnce(&mut super::Generation)) {
         let path = generation(cache);
-        let mut envelope: Envelope =
-            serde_json::from_slice(&fs::read(&path).expect("read generation"))
-                .expect("decode generation");
-        mutate(&mut envelope.generation);
-        envelope.checksum =
-            hex_sha256(&serde_json::to_vec(&envelope.generation).expect("encode body"));
-        fs::write(
-            path,
-            serde_json::to_vec(&envelope).expect("encode envelope"),
-        )
-        .expect("rewrite generation");
+        let mut decoded =
+            codec::decode_generation(&fs::read(&path).expect("read generation")).expect("decode");
+        mutate(&mut decoded);
+        let encoded = codec::encode_generation(&decoded, &[]).expect("re-encode");
+        fs::write(path, encoded).expect("rewrite generation");
     }
 
     #[test]
@@ -2280,7 +3054,7 @@ mod tests {
             |generation| generation.semantic_epoch += 1,
             |generation| generation.platform.push_str("-other"),
             |generation| generation.schema_sha256 = "0".repeat(64),
-            |generation| generation.root.encoded.push_str("00"),
+            |generation| generation.root.bytes.push(0),
             |generation| {
                 generation.candidates[0].path = EncodedPath::from_path(Path::new(".."));
             },
@@ -2774,6 +3548,93 @@ mod tests {
                     && ev.lifecycle == crate::ProgressLifecycle::Completed
             }),
             "{events:#?}"
+        );
+    }
+
+    #[test]
+    fn plan_input_digest_matches_context_digest_across_hits_spellings_and_edits() {
+        let (_temporary, root, cache) = fixture();
+        fs::create_dir_all(root.join("nested")).expect("nested dir");
+        fs::write(root.join("nested/A-2.md"), task("A-2", "Nested")).expect("write nested");
+
+        let mut opts = options(&cache);
+        opts.include_input_digests = false;
+        let mut store = PlanStore::open(&root, &opts).expect("open without input digests");
+        let full = PlanStore::open(&root, &options(&cache)).expect("open with input digests");
+        let expected = crate::plan_input_digest(&full.snapshot().inputs, &full.snapshot().root);
+
+        // Publish with cached plan_input_digest, then re-open for exact hit reuse.
+        assert!(!store.has_cached_plan_input_digest());
+        assert_eq!(store.plan_input_digest(), expected);
+        assert!(store.has_cached_plan_input_digest());
+        store.publish_current_generation();
+        let mut hit = PlanStore::open(&root, &opts).expect("hit store");
+        assert!(hit.stats().cache_generation_hit);
+        assert_eq!(hit.stats().artifacts_parsed, 0);
+        assert!(hit.has_cached_plan_input_digest());
+        assert_eq!(hit.snapshot_arc().plan.tasks.len(), 2);
+        assert_eq!(hit.plan_input_digest(), expected);
+        for ft in [FileType::File, FileType::Directory, FileType::Other] {
+            assert_eq!(FileType::from_tag(ft.to_tag()), Some(ft));
+        }
+        assert!(FileType::from_tag(99).is_none());
+
+        // Different lexical spelling of the same root must compute a distinct digest
+        // matching PlanContext's root-spelling-sensitive plan_input_digest.
+        let alternate = root
+            .parent()
+            .expect("parent")
+            .join(".")
+            .join(root.file_name().expect("file name"));
+        let mut alt_store = PlanStore::open(&alternate, &opts).expect("alternate store");
+        let alt_full = PlanStore::open(&alternate, &options(&cache)).expect("alt full");
+        let alt_expected =
+            crate::plan_input_digest(&alt_full.snapshot().inputs, &alt_full.snapshot().root);
+        assert_eq!(alt_store.plan_input_digest(), alt_expected);
+        assert_ne!(alt_expected, expected);
+
+        // Editing one task invalidates the persisted plan_input_digest.
+        fs::write(root.join("nested/A-2.md"), task("A-2", "Edited nested")).expect("edit nested");
+        let mut edited = PlanStore::open(&root, &opts).expect("edited store");
+        assert!(edited.plan_input_digest.is_none());
+        let edited_full = PlanStore::open(&root, &options(&cache)).expect("edited full");
+        let edited_expected =
+            crate::plan_input_digest(&edited_full.snapshot().inputs, &edited_full.snapshot().root);
+        assert_eq!(edited.plan_input_digest(), edited_expected);
+        assert_ne!(edited_expected, expected);
+    }
+
+    #[test]
+    fn compute_plan_input_digest_matches_context_digest_with_read_errors_and_path_bounds() {
+        let (_temporary, root, cache) = fixture();
+        let store = PlanStore::open(&root, &options(&cache)).expect("open");
+        let read_err = aplan_core::load::PlanFileInput {
+            path: root.join("unreadable.md"),
+            content: aplan_core::load::PlanFileContent::ReadError {
+                kind: std::io::ErrorKind::PermissionDenied,
+                message: "permission denied".to_string(),
+            },
+        };
+        let mut combined_inputs = store.snapshot().inputs.clone();
+        combined_inputs.push(read_err);
+        let computed = super::compute_plan_input_digest(
+            &store.root,
+            &store.identity_root,
+            &store.candidates,
+            &combined_inputs,
+        );
+        let expected = crate::plan_input_digest(&combined_inputs, &store.root);
+        assert_eq!(computed, expected);
+
+        assert!(!EncodedPath::from_path(Path::new("")).is_bounded_relative());
+        assert!(!EncodedPath::from_path(Path::new("/abs/a.md")).is_bounded_relative());
+        assert!(!EncodedPath::from_path(Path::new("a/../b.md")).is_bounded_relative());
+        assert!(EncodedPath::from_path(Path::new("tasks/A-1.md")).is_bounded_relative());
+        assert!(super::CachedArtifact::NotTask.semantic_sha256().is_none());
+        assert!(
+            super::CachedArtifact::Uncacheable
+                .semantic_sha256()
+                .is_none()
         );
     }
 }

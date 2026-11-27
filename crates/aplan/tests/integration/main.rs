@@ -278,6 +278,9 @@ mod quoted_ids;
 #[path = "../reachability.rs"]
 mod reachability;
 #[cfg(unix)]
+#[path = "../read_budget_audit.rs"]
+mod read_budget_audit;
+#[cfg(unix)]
 #[path = "../read_streaming.rs"]
 mod read_streaming;
 #[cfg(unix)]

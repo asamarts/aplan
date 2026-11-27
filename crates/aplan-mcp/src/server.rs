@@ -191,6 +191,7 @@ impl AplanServer {
                     // MCP responses expose typed task fields, never Markdown
                     // prose bodies, so exact digests are sufficient identity.
                     retain_inputs: false,
+                    include_input_digests: true,
                     defer_publication: false,
                 };
                 let store = aplan_app::PlanStore::open(root, &options)

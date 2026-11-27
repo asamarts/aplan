@@ -57,6 +57,20 @@ graphs, roadmaps, and diagnostic reports stream with bounded 16 KiB output buffe
 promptly when downstream pipes close. Use the built-in command help and `aplan facts` for the
 complete current surface.
 
+## Read-path latency and timing diagnostics
+
+Bounded local and structural reads (`ready`, `why`, `check`, default `show`) target sub-100 ms p95
+on exact snapshot hits and ordinary edits via a disposable, content-validated per-user cache
+(`--cache off` bypasses it without changing output or verdicts). Repository reads (`paths`,
+`stale`, `summary --at`, `completed`) report plan overhead separately from bounded Git work,
+responses above 256 KiB stream with bounded 16 KiB output buffering, and explicit external
+refreshes (`verify`, `show --refresh-evidence`, `test list`, `attest`) run arbitrary configured
+commands and are excluded from the 100 ms completion budget. Pass global `--timings` to inspect
+per-phase durations (`config_ms`, `load_ms`, `validate_ms`, `project_ms`, `repo_ms`, `render_ms`)
+and deterministic work counters on stderr without altering stdout; see
+[Read-path performance](docs/design/read-path-performance.md) for the complete quiet-host contract
+and benchmark harness (`ci/scripts/read-performance.py`).
+
 ## GitHub Actions
 
 Grant the workflow read access to both release assets and their provenance:

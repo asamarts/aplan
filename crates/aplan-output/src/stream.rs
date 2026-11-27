@@ -416,31 +416,86 @@ impl OutputDisposition {
     }
 }
 
-/// Transport channel owning a read surface in the derived inventory (`A2-136`).
+/// Read latency and work-budget class assigned to every read surface in the
+/// derived inventory (`A2-134`, `docs/design/read-path-performance.md`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, serde::Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ReadLatencyClass {
+    /// Single-task or fixed-cardinality local plan read (sub-100 ms p95).
+    LocalBoundedRead,
+    /// Whole-plan structural validation or configured-document check
+    /// (sub-100 ms p95 on exact index hit and one ordinary edit).
+    FullStructuralRead,
+    /// Task inspection combining structural state with stored evidence
+    /// observations (sub-100 ms p95; zero configured provider spawns).
+    EvidenceBackedInspection,
+    /// Read consulting Git repository history or worktree metadata (plan
+    /// overhead below 100 ms; Git work reported separately).
+    RepositoryRead,
+    /// Explicit external provider execution (excluded from the 100 ms
+    /// completion SLO; bounded, cancellable, observable and reusable).
+    ExternalRefresh,
+    /// Potentially large unscoped table, graph, roadmap or collection response
+    /// (first bounded response below 100 ms, then O(1)-buffered streaming,
+    /// pagination or explicit cap).
+    OutputDominatedRead,
+}
+
+impl ReadLatencyClass {
+    /// Every latency class in canonical documentation order.
+    pub const ALL: &'static [Self] = &[
+        Self::LocalBoundedRead,
+        Self::FullStructuralRead,
+        Self::EvidenceBackedInspection,
+        Self::RepositoryRead,
+        Self::ExternalRefresh,
+        Self::OutputDominatedRead,
+    ];
+
+    /// Stable lowercase token used in docs, diagnostics, and audit tables.
+    #[must_use]
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::LocalBoundedRead => "local_bounded_read",
+            Self::FullStructuralRead => "full_structural_read",
+            Self::EvidenceBackedInspection => "evidence_backed_inspection",
+            Self::RepositoryRead => "repository_read",
+            Self::ExternalRefresh => "external_refresh",
+            Self::OutputDominatedRead => "output_dominated_read",
+        }
+    }
+}
+
+/// Transport channel owning a read surface in the derived inventory (`A2-136`,
+/// `A2-134`).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, serde::Serialize)]
 #[serde(rename_all = "snake_case")]
 pub enum ReadChannel {
     Cli,
     McpTool,
     McpResource,
+    TuiOperation,
 }
 
-/// One entry in the exhaustive derived read-surface output-disposition
-/// inventory (`A2-136`).
+/// One entry in the exhaustive derived read-surface latency and
+/// output-disposition inventory (`A2-136`, `A2-134`).
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
 pub struct ReadSurfaceEntry {
     /// Canonical stable identifier (`cli:<cmd>:<format>`, `mcp:tool:<name>`,
-    /// `mcp:resource:<uri>`).
+    /// `mcp:resource:<uri>`, `tui:<kind>:<name>`).
     pub surface: String,
     /// Transport channel.
     pub channel: ReadChannel,
-    /// CLI command name, MCP tool name, or MCP resource URI / template.
+    /// CLI command name, MCP tool name, MCP resource URI/template, or TUI
+    /// read operation name.
     pub target: String,
     /// Output format or protocol representation.
     pub format: String,
     /// Whether the underlying projection can grow linearly with plan, history,
     /// or repository size when unscoped.
     pub potentially_unbounded: bool,
+    /// Assigned read latency and work-budget class (`A2-134`).
+    pub latency_class: ReadLatencyClass,
     /// Assigned output-volume disposition.
     pub disposition: OutputDisposition,
     /// How atomic error semantics are preserved before emitting output bytes.
@@ -576,6 +631,18 @@ mod tests {
         assert_eq!(
             OutputDisposition::ExplicitlyCapped.as_str(),
             "explicitly_capped"
+        );
+        let class_labels: Vec<&str> = ReadLatencyClass::ALL.iter().map(|c| c.as_str()).collect();
+        assert_eq!(
+            class_labels,
+            vec![
+                "local_bounded_read",
+                "full_structural_read",
+                "evidence_backed_inspection",
+                "repository_read",
+                "external_refresh",
+                "output_dominated_read",
+            ]
         );
         record_buffered_output(12);
         reset_peak_output_buffer();

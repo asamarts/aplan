@@ -125,10 +125,7 @@ fn cache_bytes(cache: &std::path::Path) -> Vec<(std::path::PathBuf, Vec<u8>)> {
     let mut values = std::fs::read_dir(directory)
         .expect("cache directory")
         .map(|entry| entry.expect("cache entry").path())
-        .filter(|path| {
-            path.extension()
-                .is_some_and(|extension| extension == "json")
-        })
+        .filter(|path| path.extension().is_some_and(|extension| extension == "bin"))
         .map(|path| {
             let bytes = std::fs::read(&path).expect("cache generation");
             (path, bytes)

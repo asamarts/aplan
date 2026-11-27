@@ -1715,6 +1715,16 @@ pub fn verify_observed_with_test_observations(
 
 pub use resolve::CommandCancellationScope;
 
+/// Cumulative configured provider child processes spawned in this process
+/// (`A2-134`).
+///
+/// Used by `--timings` and deterministic work-counter audits to assert zero
+/// provider spawns on local, structural, repository and default `show` reads.
+#[must_use]
+pub fn configured_command_spawns() -> u64 {
+    resolve::configured_command_spawns()
+}
+
 /// Stop repository-configured commands before a process lifecycle owner
 /// re-raises a termination signal. New command starts are refused once this is
 /// called.

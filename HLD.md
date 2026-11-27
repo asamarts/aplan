@@ -1546,28 +1546,35 @@ we can report *which* tasks form the cycle rather than one path through it. We a
 a tested `toposort` for free, which `summary` and `critical-path` both want. It is
 ubiquitous, dual-licensed, and cheap.
 
-**Targets.** A bounded local read over a current plan has an end-to-end p95 below 100 ms,
-including process startup and rendering. State and output size are part of that sentence: the target
-applies to an exact persistent-snapshot hit and to one ordinary input edit on the current and
-representative 1,000-task corpora. A 10,000-task exact hit has the same bounded-read target, while a
-clean checkout publishes its parse budget separately; output-dominated commands must begin a bounded
-response below 100 ms and report transfer separately. A changed trace or configuration, an unavailable
-cache and an explicit external-provider refresh are distinct states with distinct budgets. The cache is
-never authority, so deleting or corrupting it may change cost but not bytes, diagnostics or exit status.
+**Targets.** A bounded local or structural read over a current plan has an end-to-end p95 below
+100 ms, including process startup and rendering. State, corpus and output size are part of that
+sentence: the target applies to an exact persistent-snapshot hit and to one ordinary input edit on
+the current and representative 1,000-task corpora in both release and development profiles, and to
+10,000-task release exact hits (`why` 83.4 ms, `check` 85.4 ms, `show --no-resolve` 90.7 ms on the
+quiet reference host via the zero-dependency private binary `PlanStore` codec, `FORMAT_EPOCH = 5`).
+Clean-checkout and corrupt-index parses, trace/configuration invalidations, repository reads
+(`paths`, `stale`, `summary --at`, `completed`, reporting Git work separately in `repo_ms`),
+output-dominated responses above 256 KiB (streaming through a bounded 16 KiB writer), and explicit
+external refreshes (`verify`, `show --refresh-evidence`, `test list`, `attest`, excluded from the
+100 ms completion SLO) are distinct latency classes with explicit contracts. The private cache is
+never authority, so deleting, disabling (`--cache=off`) or corrupting it may change cost but never
+bytes, diagnostics or exit status across CLI, MCP or TUI.
 
-`ci/scripts/read-performance.py` records min/p50/p95/max wall time, CPU, time to first byte,
-transfer time, per-child peak RSS, output bytes, peak output buffer bytes and deterministic
-loader/graph/trace work for development and release binaries (`--output-matrix` exercises bounded
-and output-dominated human, JSON, Markdown and graph reads). Output-dominated CLI surfaces stream
-preflighted output through a bounded 16 KiB writer above the measured 256 KiB bounded-response
-threshold with deterministic byte parity and clean `BrokenPipe` shutdown, MCP read surfaces enforce
-hard 512 KiB tool / 64 KiB paginated-resource ceilings and terminate active providers on client
-disconnect, and `aplan::read_surface_inventory()` exhaustively classifies every CLI and MCP read
-surface as `streamed`, `paginated`, `explicitly_capped` or `buffered` (`A2-136`). Wall time on a
-busy host is an observation, not a shared-runner gate; portable gates assert work counts and the
-existing 1,500/3,000/6,000-task complexity ratios. `docs/design/read-path-performance.md` owns the
-complete state matrix, invalidation model and latest baseline. This replaces the earlier ambiguous
-and unmet "10,000 tasks in under 100 ms, cold" claim without weakening its intended scale bound.
+Global `--timings` emits one stderr line per invocation with per-phase durations (`config_ms`,
+`load_ms`, `validate_ms`, `project_ms`, `repo_ms`, `render_ms`) and deterministic work counters
+(`files_hashed`, `tasks_parsed`, `graph_builds`, `report_builds`, `provider_spawns`, cache, trace
+and output-buffer counts) without changing stdout. `ci/scripts/read-performance.py` exercises all
+seven cache/observation states (`hit`, `clean`, `one-edit`, `trace-edit`, `config-edit`,
+`corrupt-index`, `stale-observation`), `--output-matrix` and `--repo-matrix` for release and
+development profiles. `aplan::read_surface_inventory()` exhaustively classifies every CLI command,
+MCP tool/resource and TUI read operation into one of six `ReadLatencyClass` values and one of four
+`OutputDisposition` values (`A2-136`, `A2-134`). Wall time on a contended or GitHub-hosted runner
+is an observation, not a portable CI gate; portable gates ratchet deterministic work counters and
+the independent 6,000-task complexity-ratio gate (`scale::check_does_not_care_how_wide_a_cut_is`).
+`docs/design/read-path-performance.md` owns the complete state matrix, invalidation model,
+reference-host measurements and known hardware/filesystem limits. This replaces the earlier
+ambiguous and unmet "10,000 tasks in under 100 ms, cold" claim without weakening its intended scale
+bound.
 
 ---
 

@@ -906,19 +906,23 @@ pub fn derived_schema() -> Value {
 /// unbounded response cannot silently slip onto the protocol surface.
 #[must_use]
 pub fn mcp_read_surface_inventory() -> Vec<aplan_output::stream::ReadSurfaceEntry> {
-    use aplan_output::stream::{OutputDisposition, ReadChannel, ReadSurfaceEntry};
+    use aplan_output::stream::{
+        OutputDisposition, ReadChannel, ReadLatencyClass, ReadSurfaceEntry,
+    };
 
     let mut entries = Vec::new();
 
     for spec in TOOLS {
-        let potentially_unbounded = match spec.name {
+        let (potentially_unbounded, latency_class) = match spec.name {
             // Mutating tools are excluded from the read-surface inventory.
             "aplan_add" | "aplan_dep" | "aplan_close" | "aplan_claim" | "aplan_release"
             | "aplan_start" | "aplan_stop" | "aplan_review" => continue,
-            // Read tools whose underlying plan projections scale with task count.
-            "aplan_ready" | "aplan_check" | "aplan_verify" => true,
-            // Read tools focused on server identity or one task.
-            "aplan_identity" | "aplan_why" | "aplan_show" => false,
+            // Read tools classified by latency and work contract.
+            "aplan_identity" | "aplan_why" => (false, ReadLatencyClass::LocalBoundedRead),
+            "aplan_ready" => (true, ReadLatencyClass::OutputDominatedRead),
+            "aplan_show" => (false, ReadLatencyClass::EvidenceBackedInspection),
+            "aplan_check" => (true, ReadLatencyClass::FullStructuralRead),
+            "aplan_verify" => (true, ReadLatencyClass::ExternalRefresh),
             other => panic!(
                 "MCP tool `{other}` is missing an explicit output disposition classification"
             ),
@@ -929,6 +933,7 @@ pub fn mcp_read_surface_inventory() -> Vec<aplan_output::stream::ReadSurfaceEntr
             target: spec.name.to_string(),
             format: "json-rpc/structured".to_string(),
             potentially_unbounded,
+            latency_class,
             disposition: OutputDisposition::ExplicitlyCapped,
             atomic_error_boundary: "complete JSON-RPC response checked against MAX_TOOL_RESULT_BYTES (512 KiB) before framing; oversized results become a bounded structured refusal",
             rationale: "Single JSON-RPC tool frames cannot stream incrementally; hard 512 KiB byte cap keeps memory bounded and directs callers to paginated aplan:// resources.",
@@ -936,8 +941,11 @@ pub fn mcp_read_surface_inventory() -> Vec<aplan_output::stream::ReadSurfaceEntr
     }
 
     for spec in crate::resources::RESOURCES {
-        let disposition = match spec.uri {
-            "aplan://plan/summary" => OutputDisposition::ExplicitlyCapped,
+        let (latency_class, disposition) = match spec.uri {
+            "aplan://plan/summary" => (
+                ReadLatencyClass::LocalBoundedRead,
+                OutputDisposition::ExplicitlyCapped,
+            ),
             other => {
                 panic!("MCP static resource `{other}` is missing an explicit output disposition")
             }
@@ -948,6 +956,7 @@ pub fn mcp_read_surface_inventory() -> Vec<aplan_output::stream::ReadSurfaceEntr
             target: spec.uri.to_string(),
             format: spec.mime_type.to_string(),
             potentially_unbounded: false,
+            latency_class,
             disposition,
             atomic_error_boundary: "bounded aggregate JSON validated within MAX_RESOURCE_BYTES (64 KiB) before framing",
             rationale: "Fixed-size aggregate plan summary bounded well below MAX_RESOURCE_BYTES (64 KiB).",
@@ -955,20 +964,30 @@ pub fn mcp_read_surface_inventory() -> Vec<aplan_output::stream::ReadSurfaceEntr
     }
 
     for spec in crate::resources::RESOURCE_TEMPLATES {
-        let (potentially_unbounded, disposition, boundary, rationale) = match spec.uri_template {
+        let (potentially_unbounded, latency_class, disposition, boundary, rationale) = match spec
+            .uri_template
+        {
             "aplan://tasks/{id}" => (
                 false,
+                ReadLatencyClass::LocalBoundedRead,
                 OutputDisposition::ExplicitlyCapped,
                 "single-task JSON verified <= MAX_RESOURCE_BYTES (64 KiB) before framing; oversized task refuses cleanly",
                 "Focused single-task projection without body, strictly capped at 64 KiB.",
             ),
-            "aplan://collections/ready{?limit,cursor}"
-            | "aplan://collections/completed{?cut,phase,owner,tag,since,until,oldest,history,limit,cursor}" => {
+            "aplan://collections/ready{?limit,cursor}" => (
+                true,
+                ReadLatencyClass::OutputDominatedRead,
+                OutputDisposition::Paginated,
+                "page sliced to limit <= 50 and dynamically shrunk to <= MAX_RESOURCE_BYTES (64 KiB) with snapshot-bound cursor before framing",
+                "Potentially unbounded ready collection served as bounded deterministic pages with input-identity-bound cursors.",
+            ),
+            "aplan://collections/completed{?cut,phase,owner,tag,since,until,oldest,history,limit,cursor}" => {
                 (
                     true,
+                    ReadLatencyClass::RepositoryRead,
                     OutputDisposition::Paginated,
                     "page sliced to limit <= 50 and dynamically shrunk to <= MAX_RESOURCE_BYTES (64 KiB) with snapshot-bound cursor before framing",
-                    "Potentially unbounded collection served as bounded deterministic pages with input-identity-bound cursors.",
+                    "Chronological completion history (with optional bounded Git history inference) served as bounded deterministic pages with input-identity-bound cursors.",
                 )
             }
             other => {
@@ -981,6 +1000,7 @@ pub fn mcp_read_surface_inventory() -> Vec<aplan_output::stream::ReadSurfaceEntr
             target: spec.uri_template.to_string(),
             format: spec.mime_type.to_string(),
             potentially_unbounded,
+            latency_class,
             disposition,
             atomic_error_boundary: boundary,
             rationale,

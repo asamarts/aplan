@@ -425,7 +425,7 @@ fn live_effort(tasks: &[&Task]) -> (f64, f64) {
     (effort, done)
 }
 
-impl Graph<'_> {
+impl<'a> Graph<'a> {
     /// Group the plan by cut for the roadmap view. Cuts are the milestone
     /// meta-tasks (ADR-0008), ordered by their `vN.N` tag parsed *numerically*
     /// (unversioned milestones sort last, by id); each cut's members are its
@@ -447,7 +447,11 @@ impl Graph<'_> {
             .filter(|(_, m)| m.is_milestone() && (m.is_release() || !m.contains.is_empty()))
             .map(|(id, _)| *id)
             .collect();
-        let bounded = self.chains_to(&borrowing).unwrap_or_default();
+        let bounded = if borrowing.is_empty() {
+            std::collections::BTreeMap::new()
+        } else {
+            self.chains_to(&borrowing).unwrap_or_default()
+        };
 
         for (&id, &m) in &self.by_id {
             if !m.is_milestone() {
@@ -488,9 +492,7 @@ impl Graph<'_> {
                     active.insert(mid);
                     if t.status == Status::Done {
                         done += 1;
-                    } else if t.status.is_workable()
-                        && self.blockers_of(&t.id).iter().all(|b| !self.blocks(t, b))
-                    {
+                    } else if self.is_ready(&t.id) {
                         ready += 1;
                     } else {
                         blocked += 1;
@@ -551,18 +553,7 @@ impl Graph<'_> {
         }
 
         cuts.sort_by(|a, b| {
-            match (parse_cut_version(&a.version), parse_cut_version(&b.version)) {
-                (Some(x), Some(y)) => x.cmp(&y),
-                // A versioned cut sorts before an unversioned one.
-                (Some(_), None) => std::cmp::Ordering::Less,
-                (None, Some(_)) => std::cmp::Ordering::Greater,
-                // Neither is a release version, so compare the labels the way a
-                // reader does: `s2` before `s10`, `phase-2` before `phase-10`.
-                // Ordering by id was the old fallback and put `s10` second
-                // (`A1-037`).
-                (None, None) => natural_cmp(&a.version, &b.version),
-            }
-            .then_with(|| a.milestone_id.cmp(&b.milestone_id))
+            compare_cut_order(&a.version, &a.milestone_id, &b.version, &b.milestone_id)
         });
 
         let loose: Vec<&Task> = self
@@ -584,6 +575,85 @@ impl Graph<'_> {
             effort_days_per_week: None,
         }
     }
+
+    /// Map every task id to its owning `(cut_label, milestone_id)` without
+    /// computing whole-plan roadmap rollups, effort totals or critical paths
+    /// (`A2-134`).
+    ///
+    /// Matches `cut_owners(&self.roadmap())` identically: the first
+    /// non-borrowing cut in canonical roadmap order naming a task (as its
+    /// milestone or a direct member) owns it.
+    pub(crate) fn cut_owners_map(&self) -> std::collections::HashMap<&'a str, (&'a str, &'a str)> {
+        let mut cuts: Vec<(&'a str, &'a Task)> = self
+            .by_id
+            .values()
+            .copied()
+            .filter(|m| m.is_milestone() && !m.is_release() && m.contains.is_empty())
+            .map(|m| (cut_label(m), m))
+            .collect();
+        cuts.sort_by(|(va, a), (vb, b)| compare_cut_order(va, &a.id, vb, &b.id));
+        let mut owners = std::collections::HashMap::new();
+        for (label, m) in cuts {
+            let owner = (label, m.id.as_str());
+            owners.entry(m.id.as_str()).or_insert(owner);
+            for b in &m.blocked_by {
+                if let Some((key, member)) = self.by_id.get_key_value(b.as_str())
+                    && !member.is_milestone()
+                {
+                    owners.entry(*key).or_insert(owner);
+                }
+            }
+        }
+        owners
+    }
+
+    /// The owning cut `(label, milestone_id)` for a single task without
+    /// computing whole-plan roadmap rollups, critical paths, or `TaskRow`s.
+    ///
+    /// Returns the first non-borrowing cut in canonical roadmap order whose
+    /// milestone id is `id` or whose membership includes `id`, matching
+    /// `Graph::task_rows` identically.
+    #[must_use]
+    pub fn cut_owner(&self, id: &str) -> (Option<String>, Option<String>) {
+        let Some(target) = self.get(id) else {
+            return (None, None);
+        };
+        let target_is_milestone = target.is_milestone();
+        let mut cuts: Vec<(&str, &Task)> = self
+            .by_id
+            .values()
+            .copied()
+            .filter(|m| m.is_milestone() && !m.is_release() && m.contains.is_empty())
+            .map(|m| (cut_label(m), m))
+            .collect();
+        cuts.sort_by(|(va, a), (vb, b)| compare_cut_order(va, &a.id, vb, &b.id));
+        for (label, m) in cuts {
+            if m.id == id || (!target_is_milestone && m.blocked_by.iter().any(|b| b == id)) {
+                return (Some(label.to_string()), Some(m.id.clone()));
+            }
+        }
+        (None, None)
+    }
+}
+
+fn compare_cut_order(
+    version_a: &str,
+    id_a: &str,
+    version_b: &str,
+    id_b: &str,
+) -> std::cmp::Ordering {
+    match (parse_cut_version(version_a), parse_cut_version(version_b)) {
+        (Some(x), Some(y)) => x.cmp(&y),
+        // A versioned cut sorts before an unversioned one.
+        (Some(_), None) => std::cmp::Ordering::Less,
+        (None, Some(_)) => std::cmp::Ordering::Greater,
+        // Neither is a release version, so compare the labels the way a
+        // reader does: `s2` before `s10`, `phase-2` before `phase-10`.
+        // Ordering by id was the old fallback and put `s10` second
+        // (`A1-037`).
+        (None, None) => natural_cmp(version_a, version_b),
+    }
+    .then_with(|| id_a.cmp(id_b))
 }
 
 #[cfg(test)]

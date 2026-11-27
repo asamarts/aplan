@@ -81,6 +81,27 @@ pub const ALL: &[Behaviour] = &[
             "read_streaming::broken_pipe_and_interrupted_mcp_consumers_stop_cleanly_without_orphans",
         ],
     },
+    // `A2-134`. Previously, `--timings` folded repository Git work into
+    // `project_ms` or unattributed time and omitted files-hashed, report-build
+    // and provider-spawn work counters, while `read_surface_inventory()`
+    // covered CLI and MCP dispositions without assigning a latency class to
+    // every CLI, MCP and TUI read surface. Exposing those deterministic work
+    // counters, separating repository-read Git phases and auditing every read
+    // surface's latency class changes what `--timings` and the derived
+    // inventory report.
+    Behaviour {
+        name: "read.reports_latency_classes_and_work_counters",
+        what: "`--timings` separates repository Git work (`repo_ms`) from plan overhead and \
+               reports deterministic `files_hashed`, `report_builds` and `provider_spawns` \
+               counters, while the derived CLI+MCP+TUI read-surface inventory assigns every \
+               read surface one explicit latency class and preserves CLI/MCP/TUI semantic \
+               parity across all cache and observation states",
+        proof: &[
+            "read_budget_audit::derived_inventory_assigns_every_cli_mcp_and_tui_surface_one_latency_class",
+            "read_budget_audit::seven_cache_and_observation_states_preserve_cli_mcp_tui_parity_and_ratchet_work_counters",
+            "read_budget_audit::repository_reads_separate_plan_overhead_and_external_refresh_reports_provider_spawns",
+        ],
+    },
     // `A2-037`. Previously, serde reported only the first missing field in
     // `test` / `test.runners` and treated misplaced keys such as
     // `test.runners[0].schedule` as unknown keys without saying where they

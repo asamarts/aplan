@@ -38,6 +38,7 @@ TIMING_MS_FIELDS = (
     "load_ms",
     "validate_ms",
     "project_ms",
+    "repo_ms",
     "render_ms",
 )
 TIMING_WORK_FIELDS = (
@@ -46,10 +47,13 @@ TIMING_WORK_FIELDS = (
     "candidates",
     "readable",
     "bytes_read",
+    "files_hashed",
     "tasks_parsed",
     "retained_files",
     "retained_bytes",
     "graph_builds",
+    "report_builds",
+    "provider_spawns",
     "cache_hits",
     "cache_reused",
     "cache_parsed",
@@ -253,11 +257,36 @@ def run_case(
     timeout_seconds: float,
     one_edit: Path | None = None,
     clean_cache: bool = False,
+    corrupt_cache: bool = False,
+    mutate_file: tuple[Path, bytes, bytes] | None = None,
+    prime_argv: list[str] | None = None,
 ) -> dict[str, object]:
     cache_root = Path(os.environ["APLAN_CACHE_DIR"])
 
     def reset_cache() -> None:
         shutil.rmtree(cache_root, ignore_errors=True)
+
+    def corrupt_plan_index() -> None:
+        plan_dir = cache_root / "aplan" / "plan-v1"
+        if not plan_dir.is_dir():
+            raise RuntimeError(f"corrupt-index state found no cache directory at {plan_dir}")
+        bins = sorted(plan_dir.glob("*.bin"))
+        if not bins:
+            raise RuntimeError(f"corrupt-index state found no .bin generation in {plan_dir}")
+        for target in bins:
+            target.write_bytes(b"corrupt-truncated-generation")
+
+    saved_cache = cache_root.parent / "saved-cache"
+
+    def save_primed_cache() -> None:
+        shutil.rmtree(saved_cache, ignore_errors=True)
+        if cache_root.exists():
+            shutil.copytree(cache_root, saved_cache)
+
+    def restore_primed_cache() -> None:
+        reset_cache()
+        if saved_cache.exists():
+            shutil.copytree(saved_cache, cache_root)
 
     if clean_cache:
         for _ in range(warmups):
@@ -267,6 +296,43 @@ def run_case(
         for _ in range(runs):
             reset_cache()
             samples.append(run_once(argv, cwd, timeout_seconds))
+    elif corrupt_cache:
+        reset_cache()
+        time.sleep(0.02)
+        run_once(argv, cwd, timeout_seconds)
+        save_primed_cache()
+        try:
+            for _ in range(warmups):
+                restore_primed_cache()
+                corrupt_plan_index()
+                run_once(argv, cwd, timeout_seconds)
+            samples = []
+            for _ in range(runs):
+                restore_primed_cache()
+                corrupt_plan_index()
+                samples.append(run_once(argv, cwd, timeout_seconds))
+        finally:
+            shutil.rmtree(saved_cache, ignore_errors=True)
+    elif mutate_file is not None:
+        target_path, original, changed = mutate_file
+        primer = prime_argv if prime_argv is not None else argv
+        samples = []
+        try:
+            reset_cache()
+            target_path.write_bytes(original)
+            time.sleep(0.02)
+            run_once(primer, cwd, timeout_seconds)
+            save_primed_cache()
+            target_path.write_bytes(changed)
+            for _ in range(warmups):
+                restore_primed_cache()
+                run_once(argv, cwd, timeout_seconds)
+            for _ in range(runs):
+                restore_primed_cache()
+                samples.append(run_once(argv, cwd, timeout_seconds))
+        finally:
+            target_path.write_bytes(original)
+            shutil.rmtree(saved_cache, ignore_errors=True)
     elif one_edit is None:
         for _ in range(warmups):
             run_once(argv, cwd, timeout_seconds)
@@ -276,21 +342,27 @@ def run_case(
         changed = mutate_task_bytes(original)
         samples = []
         try:
+            reset_cache()
+            one_edit.write_bytes(original)
+            time.sleep(0.02)
+            run_once(argv, cwd, timeout_seconds)
+            save_primed_cache()
+            one_edit.write_bytes(changed)
             for _ in range(warmups):
-                reset_cache()
-                one_edit.write_bytes(original)
+                restore_primed_cache()
                 run_once(argv, cwd, timeout_seconds)
             for _ in range(runs):
-                reset_cache()
-                one_edit.write_bytes(original)
-                run_once(argv, cwd, timeout_seconds)
-                one_edit.write_bytes(changed)
+                restore_primed_cache()
                 samples.append(run_once(argv, cwd, timeout_seconds))
         finally:
             one_edit.write_bytes(original)
+            shutil.rmtree(saved_cache, ignore_errors=True)
     varying_work = (
         {"cache_bytes_read", "cache_bytes_written"}
-        if one_edit is not None or clean_cache
+        if one_edit is not None
+        or clean_cache
+        or corrupt_cache
+        or mutate_file is not None
         else set()
     )
     timing_shapes = {
@@ -585,11 +657,11 @@ def render_markdown(report: dict[str, object]) -> str:
             "",
             "## CLI phase medians",
             "",
-            "The CLI total starts before argument parsing. Unattributed time is total minus the five "
+            "The CLI total starts before argument parsing. Unattributed time is total minus the six "
             "instrumented phases and includes orchestration and any work not yet assigned to a phase.",
             "",
-            "| corpus / command | CLI total | config | load | validate | project | render | unattributed |",
-            "|---|---:|---:|---:|---:|---:|---:|---:|",
+            "| corpus / command | CLI total | config | load | validate | project | repo | render | unattributed |",
+            "|---|---:|---:|---:|---:|---:|---:|---:|---:|",
         ]
     )
     for case in report["cases"]:
@@ -598,7 +670,7 @@ def render_markdown(report: dict[str, object]) -> str:
         assert isinstance(phase, dict)
         lines.append(
             "| {name} | {total:.1f} ms | {config:.1f} ms | {load:.1f} ms | "
-            "{validate:.1f} ms | {project:.1f} ms | {render:.1f} ms | "
+            "{validate:.1f} ms | {project:.1f} ms | {repo:.1f} ms | {render:.1f} ms | "
             "{unattributed:.1f} ms |".format(name=case["name"], **phase)
         )
     lines.extend(
@@ -606,8 +678,8 @@ def render_markdown(report: dict[str, object]) -> str:
             "",
             "## Deterministic work",
             "",
-            "| corpus / command | configs | loads | candidates | read | bytes read | tasks parsed | retained files | retained bytes | graphs | cache hits | reused | parsed | cache read | cache written | trace reads | trace bytes | Markdown parses | structured parses | output bytes | peak buf |",
-            "|---|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|",
+            "| corpus / command | configs | loads | candidates | read | bytes read | hashed | tasks parsed | retained files | retained bytes | graphs | reports | providers | cache hits | reused | parsed | cache read | cache written | trace reads | trace bytes | Markdown parses | structured parses | output bytes | peak buf |",
+            "|---|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|",
         ]
     )
     for case in report["cases"]:
@@ -616,10 +688,10 @@ def render_markdown(report: dict[str, object]) -> str:
         assert isinstance(work, dict)
         lines.append(
             "| {name} | {config_loads} | {plan_loads} | {candidates} | {readable} | {bytes_read} | "
-            "{tasks_parsed} | {retained_files} | {retained_bytes} | {graph_builds} | "
-            "{cache_hits} | {cache_reused} | {cache_parsed} | {cache_bytes_read} | {cache_bytes_written} | "
-            "{trace_reads} | {trace_bytes_read} | {markdown_parses} | {structured_parses} | "
-            "{output_bytes} | {peak_output_buffer_bytes} |".format(
+            "{files_hashed} | {tasks_parsed} | {retained_files} | {retained_bytes} | {graph_builds} | "
+            "{report_builds} | {provider_spawns} | {cache_hits} | {cache_reused} | {cache_parsed} | "
+            "{cache_bytes_read} | {cache_bytes_written} | {trace_reads} | {trace_bytes_read} | "
+            "{markdown_parses} | {structured_parses} | {output_bytes} | {peak_output_buffer_bytes} |".format(
                 name=case["name"], **work
             )
         )
@@ -640,6 +712,112 @@ def resolve_default_task_id(root: Path) -> str:
     return "A2-136"
 
 
+def write_traced_generated_plan(
+    root: Path, count: int
+) -> tuple[str, Path, Path, Path, Path]:
+    """Generate a self-contained plan with config, shared trace doc, and observed source."""
+    tasks = root / "aplan" / "tasks"
+    tasks.mkdir(parents=True)
+    src_dir = root / "src"
+    src_dir.mkdir(parents=True)
+    observed_src = src_dir / "lib.rs"
+    observed_src.write_text("pub fn observed() -> u32 { 1 }\n", encoding="utf-8")
+    trace_doc = root / "DESIGN.md"
+    trace_doc.write_text("# Shared section\n\nBaseline design text.\n", encoding="utf-8")
+    config_file = root / ".aplan.yml"
+    config_file.write_text(
+        "root: aplan\n"
+        "evidence:\n"
+        "  observation_inputs:\n"
+        "    - .aplan.yml\n"
+        "    - 'src/**'\n"
+        "test:\n"
+        "  name: unit\n"
+        "  list:\n"
+        "    - printf\n"
+        "    - 'suite::ok\\n'\n"
+        "  run:\n"
+        "    - 'true'\n"
+        "    - '{test}'\n"
+        "  run_selects: true\n",
+        encoding="utf-8",
+    )
+    width = max(5, len(str(count)))
+    for number in range(1, count + 1):
+        task_id = f"G-{number:0{width}d}"
+        if number == 1:
+            (tasks / f"{task_id}.md").write_text(
+                "---\n"
+                f"id: {task_id}\n"
+                f"title: Generated traced task {number}\n"
+                "phase: 1\n"
+                "status: done\n"
+                "effort_days: 1\n"
+                "paths:\n"
+                "- src/lib.rs\n"
+                "traces:\n"
+                "- DESIGN.md#shared-section\n"
+                "evidence:\n"
+                "- kind: test\n"
+                "  ref: suite::ok\n"
+                "---\n\n"
+                "Generated traced task.\n",
+                encoding="utf-8",
+            )
+        else:
+            (tasks / f"{task_id}.md").write_text(
+                "---\n"
+                f"id: {task_id}\n"
+                f"title: Generated task {number}\n"
+                "phase: 1\n"
+                "status: todo\n"
+                "effort_days: 1\n"
+                "---\n\n"
+                "Generated by ci/scripts/read-performance.py.\n",
+                encoding="utf-8",
+            )
+    first = f"G-{1:0{width}d}"
+    return first, tasks / f"{first}.md", trace_doc, config_file, observed_src
+
+
+def init_minimal_git_repo(repo_root: Path) -> None:
+    subprocess.run(
+        ["git", "init", "-q", "."],
+        cwd=repo_root,
+        check=True,
+        stdout=subprocess.DEVNULL,
+        stderr=subprocess.DEVNULL,
+    )
+    subprocess.run(
+        ["git", "config", "user.email", "bench@example.com"],
+        cwd=repo_root,
+        check=True,
+        stdout=subprocess.DEVNULL,
+        stderr=subprocess.DEVNULL,
+    )
+    subprocess.run(
+        ["git", "config", "user.name", "bench"],
+        cwd=repo_root,
+        check=True,
+        stdout=subprocess.DEVNULL,
+        stderr=subprocess.DEVNULL,
+    )
+    subprocess.run(
+        ["git", "add", "-A"],
+        cwd=repo_root,
+        check=True,
+        stdout=subprocess.DEVNULL,
+        stderr=subprocess.DEVNULL,
+    )
+    subprocess.run(
+        ["git", "commit", "-q", "-m", "benchmark fixture"],
+        cwd=repo_root,
+        check=True,
+        stdout=subprocess.DEVNULL,
+        stderr=subprocess.DEVNULL,
+    )
+
+
 def main() -> int:
     parser = argparse.ArgumentParser()
     parser.add_argument("--binary", required=True, type=Path)
@@ -650,10 +828,21 @@ def main() -> int:
     parser.add_argument("--warmups", type=int, default=2)
     parser.add_argument("--generated-tasks", type=int, default=1000)
     parser.add_argument(
-        "--cache-state", choices=("hit", "clean", "one-edit"), default="hit"
+        "--cache-state",
+        choices=(
+            "hit",
+            "clean",
+            "one-edit",
+            "trace-edit",
+            "config-edit",
+            "corrupt-index",
+            "stale-observation",
+        ),
+        default="hit",
     )
     parser.add_argument("--timeout-seconds", type=float, default=30.0)
     parser.add_argument("--output-matrix", action="store_true")
+    parser.add_argument("--repo-matrix", action="store_true")
     parser.add_argument("--scratch-root", type=Path)
     parser.add_argument("--output", type=Path)
     parser.add_argument("--json-output", type=Path)
@@ -669,6 +858,8 @@ def main() -> int:
             "runs and timeout-seconds must be positive; warmups and generated-tasks "
             "must be non-negative"
         )
+    if args.output_matrix and args.repo_matrix:
+        parser.error("--output-matrix and --repo-matrix are mutually exclusive")
     cwd = Path.cwd().resolve()
     binary = args.binary.resolve()
     if not binary.is_file():
@@ -689,7 +880,13 @@ def main() -> int:
         current_cwd = cwd
         current_edit: Path | None = None
         config_file: Path | None = None
-        if args.cache_state == "one-edit":
+        needs_current_copy = args.cache_state in (
+            "one-edit",
+            "trace-edit",
+            "config-edit",
+            "stale-observation",
+        )
+        if needs_current_copy:
             try:
                 root_relative = current_root.relative_to(cwd)
             except ValueError:
@@ -704,22 +901,286 @@ def main() -> int:
                     symlinks=True,
                     ignore=shutil.ignore_patterns(".git", "target", "__pycache__"),
                 )
-                # Structural policy discovers repository containment from this
-                # marker; the benchmark never invokes Git or evidence providers.
-                (copied_repo / ".git").mkdir()
+                if args.cache_state == "stale-observation":
+                    init_minimal_git_repo(copied_repo)
+                else:
+                    # Structural policy discovers repository containment from this
+                    # marker; the benchmark never invokes Git or evidence providers.
+                    (copied_repo / ".git").mkdir()
                 current_root = copied_repo / root_relative
                 current_cwd = copied_repo
                 discovered = copied_repo / ".aplan.yml"
                 if discovered.is_file():
                     config_file = discovered
-            matches = list(current_root.rglob(f"{task_id}.md"))
-            if len(matches) != 1:
-                raise RuntimeError(
-                    f"one-edit state found {len(matches)} files for {task_id!r}"
-                )
-            current_edit = matches[0]
+            if args.cache_state == "one-edit":
+                matches = list(current_root.rglob(f"{task_id}.md"))
+                if len(matches) != 1:
+                    raise RuntimeError(
+                        f"one-edit state found {len(matches)} files for {task_id!r}"
+                    )
+                current_edit = matches[0]
 
-        if args.output_matrix:
+        # Each spec: (name, argv, one_edit, case_cwd, mutate_file, prime_argv)
+        CaseSpec = tuple[
+            str,
+            list[str],
+            Path | None,
+            Path,
+            tuple[Path, bytes, bytes] | None,
+            list[str] | None,
+        ]
+        cases: list[CaseSpec] = []
+
+        if args.repo_matrix:
+            repo_specs = [
+                ("paths --sample 50", ["paths", "--sample", "50", "--format", "json"]),
+                (
+                    "paths match",
+                    ["paths", "match", "crates/aplan-core/**", "--format", "json"],
+                ),
+                ("stale", ["stale", "--format", "json"]),
+                ("summary --at HEAD", ["summary", "--at", "HEAD", "--format", "json"]),
+                ("completed", ["completed", "--limit", "20", "--format", "json"]),
+            ]
+            for label, words in repo_specs:
+                cases.append(
+                    (
+                        f"current / {label}",
+                        command(
+                            binary,
+                            current_root,
+                            words,
+                            config_file=config_file,
+                            cache_mode=cache_mode,
+                        ),
+                        None,
+                        current_cwd,
+                        None,
+                        None,
+                    )
+                )
+        elif args.cache_state in ("trace-edit", "config-edit", "stale-observation"):
+            # Current-plan case for trace-edit / config-edit / stale-observation.
+            if args.cache_state == "trace-edit":
+                trace_target = current_cwd / "docs" / "design" / "workflow-ergonomics.md"
+                if not trace_target.is_file():
+                    trace_target = current_cwd / "HLD.md"
+                if not trace_target.is_file():
+                    raise RuntimeError(f"trace-edit expected {trace_target}")
+                orig = trace_target.read_bytes()
+                edited = orig + b"\n\n## Trace-edit benchmark sentinel\n\nSentinel.\n"
+                cases.extend(
+                    [
+                        (
+                            "current / check",
+                            command(
+                                binary,
+                                current_root,
+                                ["check", "--format", "json"],
+                                config_file=config_file,
+                                cache_mode=cache_mode,
+                            ),
+                            None,
+                            current_cwd,
+                            (trace_target, orig, edited),
+                            None,
+                        ),
+                        (
+                            "current / show --no-resolve",
+                            command(
+                                binary,
+                                current_root,
+                                ["show", task_id, "--no-resolve", "--format", "json"],
+                                config_file=config_file,
+                                cache_mode=cache_mode,
+                            ),
+                            None,
+                            current_cwd,
+                            (trace_target, orig, edited),
+                            None,
+                        ),
+                    ]
+                )
+            elif args.cache_state == "config-edit":
+                if config_file is None:
+                    raise RuntimeError("config-edit requires a copied .aplan.yml")
+                orig = config_file.read_bytes()
+                if b"owners: [asamarts]" in orig:
+                    edited = orig.replace(
+                        b"owners: [asamarts]", b"owners: [asamarts, bench-observer]", 1
+                    )
+                else:
+                    edited = orig + b"\nowners: [bench-observer]\n"
+                for label, words in [
+                    ("ready", ["ready", "--format", "json"]),
+                    ("show --no-resolve", ["show", task_id, "--no-resolve", "--format", "json"]),
+                    ("check", ["check", "--format", "json"]),
+                ]:
+                    cases.append(
+                        (
+                            f"current / {label}",
+                            command(
+                                binary,
+                                current_root,
+                                words,
+                                config_file=config_file,
+                                cache_mode=cache_mode,
+                            ),
+                            None,
+                            current_cwd,
+                            (config_file, orig, edited),
+                            None,
+                        )
+                    )
+            else:
+                # stale-observation: refresh observation once with a fast dummy runner,
+                # then mutate an observed input and measure default `show` (0 provider spawns).
+                dummy_cfg = current_cwd / ".aplan.yml"
+                dummy_src = current_cwd / "crates" / "aplan-core" / "src" / "lib.rs"
+                orig_src = dummy_src.read_bytes()
+                edited_src = orig_src + b"\n// stale-observation sentinel\n"
+                dummy_cfg.write_text(
+                    "root: aplan\n"
+                    "evidence:\n"
+                    "  observation_inputs:\n"
+                    "    - .aplan.yml\n"
+                    "    - 'crates/aplan-core/src/lib.rs'\n"
+                    "test:\n"
+                    "  name: bench-fast\n"
+                    "  list:\n"
+                    "    - printf\n"
+                    "    - 'read_streaming::derived_inventory_and_output_dispositions_are_complete_and_executable\\n'\n"
+                    "  run:\n"
+                    "    - 'true'\n"
+                    "    - '{test}'\n"
+                    "  run_selects: true\n",
+                    encoding="utf-8",
+                )
+                prime = command(
+                    binary,
+                    current_root,
+                    ["show", task_id, "--refresh-evidence", "--format", "json"],
+                    config_file=dummy_cfg,
+                    cache_mode=cache_mode,
+                )
+                measure = command(
+                    binary,
+                    current_root,
+                    ["show", task_id, "--format", "json"],
+                    config_file=dummy_cfg,
+                    cache_mode=cache_mode,
+                )
+                cases.append(
+                    (
+                        "current / show (stale observation)",
+                        measure,
+                        None,
+                        current_cwd,
+                        (dummy_src, orig_src, edited_src),
+                        prime,
+                    )
+                )
+
+            if args.generated_tasks:
+                generated_root = temporary_root / "generated-state"
+                gen_id, _, gen_trace, gen_cfg, gen_src = write_traced_generated_plan(
+                    generated_root, args.generated_tasks
+                )
+                if args.cache_state == "stale-observation":
+                    init_minimal_git_repo(generated_root)
+                else:
+                    (generated_root / ".git").mkdir()
+                plan_root = generated_root / "aplan"
+                if args.cache_state == "trace-edit":
+                    orig = gen_trace.read_bytes()
+                    edited = orig + b"\nUpdated shared section.\n"
+                    cases.extend(
+                        [
+                            (
+                                f"generated-{args.generated_tasks} / check",
+                                command(
+                                    binary,
+                                    plan_root,
+                                    ["check", "--format", "json"],
+                                    config_file=gen_cfg,
+                                    cache_mode=cache_mode,
+                                ),
+                                None,
+                                generated_root,
+                                (gen_trace, orig, edited),
+                                None,
+                            ),
+                            (
+                                f"generated-{args.generated_tasks} / show --no-resolve",
+                                command(
+                                    binary,
+                                    plan_root,
+                                    ["show", gen_id, "--no-resolve", "--format", "json"],
+                                    config_file=gen_cfg,
+                                    cache_mode=cache_mode,
+                                ),
+                                None,
+                                generated_root,
+                                (gen_trace, orig, edited),
+                                None,
+                            ),
+                        ]
+                    )
+                elif args.cache_state == "config-edit":
+                    orig = gen_cfg.read_bytes()
+                    edited = orig + b"\nrequire_effort: false\n"
+                    for label, words in [
+                        ("why", ["why", gen_id, "--format", "json"]),
+                        (
+                            "show --no-resolve",
+                            ["show", gen_id, "--no-resolve", "--format", "json"],
+                        ),
+                        ("check", ["check", "--format", "json"]),
+                    ]:
+                        cases.append(
+                            (
+                                f"generated-{args.generated_tasks} / {label}",
+                                command(
+                                    binary,
+                                    plan_root,
+                                    words,
+                                    config_file=gen_cfg,
+                                    cache_mode=cache_mode,
+                                ),
+                                None,
+                                generated_root,
+                                (gen_cfg, orig, edited),
+                                None,
+                            )
+                        )
+                else:
+                    orig = gen_src.read_bytes()
+                    edited = orig + b"\n// mutated observed input\n"
+                    prime = command(
+                        binary,
+                        plan_root,
+                        ["show", gen_id, "--refresh-evidence", "--format", "json"],
+                        config_file=gen_cfg,
+                        cache_mode=cache_mode,
+                    )
+                    measure = command(
+                        binary,
+                        plan_root,
+                        ["show", gen_id, "--format", "json"],
+                        config_file=gen_cfg,
+                        cache_mode=cache_mode,
+                    )
+                    cases.append(
+                        (
+                            f"generated-{args.generated_tasks} / show (stale observation)",
+                            measure,
+                            None,
+                            generated_root,
+                            (gen_src, orig, edited),
+                            prime,
+                        )
+                    )
+        elif args.output_matrix:
             output_specs = [
                 ("ready human", ["ready"]),
                 ("ready json", ["ready", "--format", "json"]),
@@ -733,7 +1194,7 @@ def main() -> int:
                 ("graph json", ["graph", "--format", "json"]),
                 ("check json", ["check", "--format", "json"]),
             ]
-            cases: list[tuple[str, list[str], Path | None, Path]] = [
+            cases = [
                 (
                     f"current / {label}",
                     command(
@@ -745,6 +1206,8 @@ def main() -> int:
                     ),
                     current_edit,
                     current_cwd,
+                    None,
+                    None,
                 )
                 for label, words in output_specs
             ]
@@ -768,6 +1231,8 @@ def main() -> int:
                             ),
                             edit,
                             cwd,
+                            None,
+                            None,
                         )
                         for label, words in output_specs
                     ]
@@ -785,6 +1250,8 @@ def main() -> int:
                     ),
                     current_edit,
                     current_cwd,
+                    None,
+                    None,
                 ),
                 (
                     "current / why",
@@ -797,6 +1264,8 @@ def main() -> int:
                     ),
                     current_edit,
                     current_cwd,
+                    None,
+                    None,
                 ),
                 (
                     "current / show --no-resolve",
@@ -809,6 +1278,8 @@ def main() -> int:
                     ),
                     current_edit,
                     current_cwd,
+                    None,
+                    None,
                 ),
                 (
                     "current / check --no-traces",
@@ -821,6 +1292,8 @@ def main() -> int:
                     ),
                     current_edit,
                     current_cwd,
+                    None,
+                    None,
                 ),
                 (
                     "current / check",
@@ -833,6 +1306,8 @@ def main() -> int:
                     ),
                     current_edit,
                     current_cwd,
+                    None,
+                    None,
                 ),
             ]
             if args.generated_tasks:
@@ -855,6 +1330,8 @@ def main() -> int:
                             ),
                             edit,
                             cwd,
+                            None,
+                            None,
                         ),
                         (
                             f"generated-{args.generated_tasks} / show --no-resolve",
@@ -867,6 +1344,8 @@ def main() -> int:
                             ),
                             edit,
                             cwd,
+                            None,
+                            None,
                         ),
                         (
                             f"generated-{args.generated_tasks} / check",
@@ -879,10 +1358,14 @@ def main() -> int:
                             ),
                             edit,
                             cwd,
+                            None,
+                            None,
                         ),
                     ]
                 )
         warmups = max(1, args.warmups) if args.cache_state == "hit" else args.warmups
+        # Advance past coarse filesystem timestamp ticks before priming any generation.
+        time.sleep(0.02)
         measured = [
             run_case(
                 name,
@@ -893,8 +1376,11 @@ def main() -> int:
                 args.timeout_seconds,
                 one_edit,
                 clean_cache=args.cache_state == "clean",
+                corrupt_cache=args.cache_state == "corrupt-index",
+                mutate_file=mutate_file,
+                prime_argv=prime_argv,
             )
-            for name, argv, one_edit, case_cwd in cases
+            for name, argv, one_edit, case_cwd, mutate_file, prime_argv in cases
         ]
 
     if file_identity(binary) != (binary_bytes, binary_sha256, binary_mode):

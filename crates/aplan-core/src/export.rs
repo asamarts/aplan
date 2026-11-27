@@ -21,6 +21,7 @@ use schemars::{JsonSchema, Schema, SchemaGenerator};
 use serde::{Deserialize, Serialize};
 
 use crate::graph::Graph;
+#[cfg(test)]
 use crate::roadmap::Roadmap;
 use crate::task::EvidenceKind;
 use crate::task::Status;
@@ -264,15 +265,14 @@ impl Graph<'_> {
     /// Every task in the plan, in id order.
     #[must_use]
     pub fn task_rows(&self) -> TaskExport {
-        let roadmap = self.roadmap();
-        let rank: std::collections::BTreeMap<&str, usize> = self
+        let rank: std::collections::HashMap<&str, usize> = self
             .ready()
             .iter()
             .enumerate()
             .map(|(i, t)| (t.id.as_str(), i + 1))
             .collect();
 
-        let owners = cut_owners(&roadmap);
+        let owners = self.cut_owners_map();
         let tasks = self
             .by_id
             .values()
@@ -347,6 +347,7 @@ impl Graph<'_> {
 /// cut rather than the one that lists it. ADR-0042's own stated test is that a
 /// task belongs to exactly one cut at any depth, and it failed on the first
 /// four-level plan built against it. `borrows` is what says which rows lend.
+#[cfg(test)]
 fn cut_owners(roadmap: &Roadmap) -> std::collections::HashMap<&str, (&str, &str)> {
     let mut owners = std::collections::HashMap::new();
     for cut in roadmap.cuts.iter().filter(|c| !c.borrows) {
@@ -590,6 +591,13 @@ mod tests {
         let roadmap = graph.roadmap();
         let rows = graph.task_rows();
         assert_eq!(rows.tasks.len(), tasks.len());
+        let expected_owners = cut_owners(&roadmap);
+        let fast_owners = graph.cut_owners_map();
+        assert_eq!(fast_owners.len(), expected_owners.len());
+        for (id, (ver, ms)) in &expected_owners {
+            let actual = fast_owners.get(*id).expect("fast owner entry");
+            assert_eq!(*actual, (*ver, *ms), "{id}");
+        }
         for row in &rows.tasks {
             assert_eq!(
                 (row.cut.clone(), row.milestone.clone()),

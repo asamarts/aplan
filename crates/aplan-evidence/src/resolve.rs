@@ -4984,6 +4984,18 @@ fn output_truncated(what: &str, stream: &str, omitted: u64) -> Error {
 
 static CONFIGURED_COMMANDS_TERMINATING: AtomicBool = AtomicBool::new(false);
 static NEXT_COMMAND_SCOPE_ID: AtomicU64 = AtomicU64::new(1);
+static CONFIGURED_COMMAND_SPAWNS: AtomicU64 = AtomicU64::new(0);
+
+/// Cumulative configured provider child processes spawned in this process
+/// (`A2-134`).
+///
+/// Read-only commands and `--timings` measure provider spawns by taking the
+/// delta across an operation. Local, structural, repository and default `show`
+/// reads must observe zero spawns.
+#[must_use]
+pub(crate) fn configured_command_spawns() -> u64 {
+    CONFIGURED_COMMAND_SPAWNS.load(Ordering::Relaxed)
+}
 
 #[derive(Clone)]
 struct ActiveCommandEntry {
@@ -5149,6 +5161,7 @@ fn register_configured_command(
     cgroup: Option<PathBuf>,
     what: &str,
 ) -> Result<ActiveConfiguredCommand, Error> {
+    CONFIGURED_COMMAND_SPAWNS.fetch_add(1, Ordering::Relaxed);
     let active = ActiveConfiguredCommand::register(child.id(), cgroup);
     if let Err(error) = refuse_terminating_command(what) {
         kill_group(child);

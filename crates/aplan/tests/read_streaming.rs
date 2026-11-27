@@ -472,7 +472,11 @@ fn drive_mcp_inventory(inventory: &[aplan_output::stream::ReadSurfaceEntry], pla
         }),
     ];
     let mut expected_mcp = Vec::new();
-    for (id, entry) in (2u64..).zip(inventory.iter().filter(|e| e.channel != ReadChannel::Cli)) {
+    for (id, entry) in (2u64..).zip(
+        inventory
+            .iter()
+            .filter(|e| matches!(e.channel, ReadChannel::McpTool | ReadChannel::McpResource)),
+    ) {
         let (req, cap) = match entry.channel {
             ReadChannel::McpTool => {
                 let args = match entry.target.as_str() {
@@ -512,7 +516,7 @@ fn drive_mcp_inventory(inventory: &[aplan_output::stream::ReadSurfaceEntry], pla
                     MAX_RESOURCE_BYTES,
                 )
             }
-            ReadChannel::Cli => unreachable!(),
+            ReadChannel::Cli | ReadChannel::TuiOperation => unreachable!(),
         };
         requests.push(req);
         expected_mcp.push((id, entry.target.clone(), cap));

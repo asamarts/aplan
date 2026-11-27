@@ -91,6 +91,9 @@ struct ReadWork {
 struct TimingState {
     started: std::time::Instant,
     graph_constructions_at_start: usize,
+    validation_runs_at_start: usize,
+    store_files_hashed_at_start: usize,
+    provider_spawns_at_start: u64,
     trace_document_work_at_start: aplan_core::TraceDocumentWork,
     output_work_at_start: aplan_output::stream::OutputWork,
     phases: std::collections::BTreeMap<&'static str, std::time::Duration>,
@@ -112,6 +115,9 @@ fn start_timings(enabled: bool, started: std::time::Instant) {
             .unwrap_or_else(std::sync::PoisonError::into_inner) = Some(TimingState {
             started,
             graph_constructions_at_start: aplan_core::graph_constructions(),
+            validation_runs_at_start: aplan_core::validation_runs(),
+            store_files_hashed_at_start: aplan_app::store_files_hashed(),
+            provider_spawns_at_start: aplan_evidence::configured_command_spawns(),
             trace_document_work_at_start: aplan_core::trace_document_work(),
             output_work_at_start: aplan_output::stream::output_work(),
             phases: std::collections::BTreeMap::new(),
@@ -286,26 +292,31 @@ fn finish_timings() {
     };
     errln!(
         "aplan: timings total_ms={:.3} config_ms={:.3} load_ms={:.3} validate_ms={:.3} \
-         project_ms={:.3} render_ms={:.3} config_loads={} plan_loads={} candidates={} readable={} \
-         bytes_read={} tasks_parsed={} retained_files={} retained_bytes={} graph_builds={} \
-         cache_hits={} cache_reused={} cache_parsed={} cache_bytes_read={} cache_bytes_written={} \
-         trace_reads={} trace_bytes_read={} markdown_parses={} structured_parses={} \
-         output_bytes={} peak_output_buffer_bytes={}{}",
+         project_ms={:.3} repo_ms={:.3} render_ms={:.3} config_loads={} plan_loads={} \
+         candidates={} readable={} bytes_read={} files_hashed={} tasks_parsed={} \
+         retained_files={} retained_bytes={} graph_builds={} report_builds={} \
+         provider_spawns={} cache_hits={} cache_reused={} cache_parsed={} cache_bytes_read={} \
+         cache_bytes_written={} trace_reads={} trace_bytes_read={} markdown_parses={} \
+         structured_parses={} output_bytes={} peak_output_buffer_bytes={}{}",
         milliseconds(state.started.elapsed()),
         milliseconds(phase("config")),
         milliseconds(phase("load")),
         milliseconds(phase("validate")),
         milliseconds(phase("project")),
+        milliseconds(phase("repo")),
         milliseconds(phase("render")),
         state.work.config_loads,
         state.work.plan_loads,
         state.work.candidate_files,
         state.work.readable_files,
         state.work.bytes_read,
+        aplan_app::store_files_hashed().saturating_sub(state.store_files_hashed_at_start),
         state.work.task_files_parsed,
         state.work.retained_files,
         state.work.retained_bytes,
         aplan_core::graph_constructions().saturating_sub(state.graph_constructions_at_start),
+        aplan_core::validation_runs().saturating_sub(state.validation_runs_at_start),
+        aplan_evidence::configured_command_spawns().saturating_sub(state.provider_spawns_at_start),
         state.work.cache_generation_hits,
         state.work.cache_artifacts_reused,
         state.work.cache_artifacts_parsed,
@@ -1774,11 +1785,13 @@ const fn command_is_read_surface(command: &Command) -> bool {
     }
 }
 
+#[allow(clippy::too_many_arguments)]
 fn push_cli_read_entry(
     entries: &mut Vec<aplan_output::stream::ReadSurfaceEntry>,
     target: &str,
     format: &str,
     potentially_unbounded: bool,
+    latency_class: aplan_output::stream::ReadLatencyClass,
     disposition: aplan_output::stream::OutputDisposition,
     atomic_error_boundary: &'static str,
     rationale: &'static str,
@@ -1789,10 +1802,29 @@ fn push_cli_read_entry(
         target: target.to_string(),
         format: format.to_string(),
         potentially_unbounded,
+        latency_class,
         disposition,
         atomic_error_boundary,
         rationale,
     });
+}
+
+fn formatted_cli_latency_class(command: &str) -> aplan_output::stream::ReadLatencyClass {
+    use aplan_output::stream::ReadLatencyClass::{
+        EvidenceBackedInspection, ExternalRefresh, FullStructuralRead, LocalBoundedRead,
+        OutputDominatedRead, RepositoryRead,
+    };
+    match command {
+        "check" | "vacuity" | "check-docs" => FullStructuralRead,
+        "verify" | "test" => ExternalRefresh,
+        "ready" | "tasks" | "roadmap" | "graph" => OutputDominatedRead,
+        "paths" | "stale" | "completed" => RepositoryRead,
+        "show" => EvidenceBackedInspection,
+        "due" | "deprecations" | "inbox" | "why" | "summary" | "critical-path" | "version" => {
+            LocalBoundedRead
+        }
+        other => panic!("CLI read surface `{other}` is missing a latency class"),
+    }
 }
 
 fn classify_formatted_cli_read(
@@ -1800,6 +1832,7 @@ fn classify_formatted_cli_read(
     format: Format,
 ) -> (
     bool,
+    aplan_output::stream::ReadLatencyClass,
     aplan_output::stream::OutputDisposition,
     &'static str,
     &'static str,
@@ -1807,18 +1840,19 @@ fn classify_formatted_cli_read(
     use aplan_output::stream::OutputDisposition::{
         Buffered, ExplicitlyCapped, Paginated, Streamed,
     };
-    match (command, format) {
+    let latency = formatted_cli_latency_class(command);
+    let (unbounded, disposition, boundary, rationale) = match (command, format) {
         ("check" | "verify", Format::Human | Format::Github) => (
             true,
             Streamed,
-            "plan load, validation, and policy verdict complete before byte 0; line stream stops cleanly on BrokenPipe",
-            "Diagnostic streams scale with finding count and emit incrementally through a 16 KiB bounded writer.",
+            "plan load, validation/verification, and policy verdict complete before byte 0; line stream stops cleanly on BrokenPipe",
+            "Diagnostic streams scale with finding count and emit incrementally through a 16 KiB bounded writer (`verify` is an explicit external refresh excluded from the 100 ms SLO).",
         ),
         ("check" | "verify", Format::Json | Format::Agent | Format::Sarif) => (
             true,
             Streamed,
             "optional nested metadata preflighted before byte 0; infallible typed serializer streams diagnostics directly into a 16 KiB buffer",
-            "Machine diagnostic reports stream without intermediate Value trees while preserving byte-exact JSON/SARIF.",
+            "Machine diagnostic reports stream without intermediate Value trees while preserving byte-exact JSON/SARIF (`verify` is an explicit external refresh excluded from the 100 ms SLO).",
         ),
         ("ready" | "tasks" | "roadmap", Format::Human | Format::Markdown) => (
             true,
@@ -1850,14 +1884,14 @@ fn classify_formatted_cli_read(
         ) => (
             true,
             Streamed,
-            "repository and plan projections finish before byte 0; typed row/JSON serializers are infallible and stop cleanly on BrokenPipe",
-            "Advisory whole-plan tables and JSON reports stream through a 16 KiB bounded writer.",
+            "plan and optional repository projections finish before byte 0; typed row/JSON serializers are infallible and stop cleanly on BrokenPipe",
+            "Advisory tables and JSON reports stream through a 16 KiB bounded writer (`paths` and `stale` report Git work separately in `repo_ms`).",
         ),
         ("completed", Format::Human | Format::Json) => (
             true,
             Paginated,
             "page sliced to bounded --limit (default 20, max 100) with snapshot-bound cursor before writing",
-            "Chronological completion history paginates deterministically so each response remains bounded.",
+            "Chronological completion history paginates deterministically and bounds optional Git history lookups.",
         ),
         ("inbox", Format::Human | Format::Json) => (
             true,
@@ -1869,7 +1903,7 @@ fn classify_formatted_cli_read(
             true,
             Streamed,
             "provider discovery completes before byte 0; JSON and agent catalogues stream via bounded StreamingWriter",
-            "Test catalogues can span thousands of test names and stream machine JSON with bounded memory.",
+            "Configured test-runner discovery is an explicit external refresh excluded from the 100 ms completion SLO and streams its catalogue with bounded memory.",
         ),
         (
             "show" | "why" | "summary" | "critical-path" | "vacuity" | "version",
@@ -1878,7 +1912,7 @@ fn classify_formatted_cli_read(
             false,
             Buffered,
             "single-task or fixed-cardinality aggregate projection validated completely before writing stdout",
-            "Inherently bounded by one task, one longest chain, phase count, or fixed Rule::ALL cardinality.",
+            "Focused single-task, single-pass vacuity, or fixed-cardinality aggregate view (`show` uses stored evidence observations with zero default provider spawns; `version`/`summary --at` report Git work in `repo_ms`).",
         ),
         ("check-docs", Format::Human | Format::Json) => (
             true,
@@ -1890,7 +1924,8 @@ fn classify_formatted_cli_read(
             "CLI read surface `{cmd}` with format `{}` is missing an output disposition",
             fmt.as_str()
         ),
-    }
+    };
+    (unbounded, latency, disposition, boundary, rationale)
 }
 
 fn classify_unformatted_cli_read(
@@ -1898,16 +1933,21 @@ fn classify_unformatted_cli_read(
 ) -> Option<(
     &'static str,
     bool,
+    aplan_output::stream::ReadLatencyClass,
     aplan_output::stream::OutputDisposition,
     &'static str,
     &'static str,
 )> {
     use aplan_output::stream::OutputDisposition::Buffered;
+    use aplan_output::stream::ReadLatencyClass::{
+        ExternalRefresh, LocalBoundedRead, OutputDominatedRead,
+    };
 
     Some(match name {
         "tree" => (
             "human",
             false,
+            LocalBoundedRead,
             Buffered,
             "single-task neighbourhood built with cycle folding and optional --depth before emission",
             "Focused single-task neighbourhood bounded by cycle folding and explicit depth.",
@@ -1915,6 +1955,7 @@ fn classify_unformatted_cli_read(
         "facts" => (
             "json",
             false,
+            LocalBoundedRead,
             Buffered,
             "static build-surface JSON verified before writing stdout",
             "Fixed-size compile-time build surface document.",
@@ -1922,6 +1963,7 @@ fn classify_unformatted_cli_read(
         "schema" => (
             "json",
             false,
+            LocalBoundedRead,
             Buffered,
             "static frontmatter JSON Schema serialized atomically before writing stdout",
             "Fixed-size static JSON Schema document.",
@@ -1929,6 +1971,7 @@ fn classify_unformatted_cli_read(
         "explain" => (
             "human",
             false,
+            LocalBoundedRead,
             Buffered,
             "rule lookup validated before printing single rule explanation",
             "Fixed-size single-rule prose explanation.",
@@ -1936,13 +1979,15 @@ fn classify_unformatted_cli_read(
         "attest" => (
             "json",
             false,
+            ExternalRefresh,
             Buffered,
             "whole-plan verification, clean-tree check, and canonical JSON digest complete before stdout or git-note write",
-            "Atomic cryptographic attestation must complete and pass verification before emitting any bytes.",
+            "Atomic cryptographic attestation runs full verification and is excluded from the 100 ms read completion SLO.",
         ),
         "export-agents-md" => (
             "markdown",
             false,
+            LocalBoundedRead,
             Buffered,
             "complete policy block assembled for --check comparison or guarded file write before stdout",
             "Fixed-size generated AGENTS.md policy block.",
@@ -1950,6 +1995,7 @@ fn classify_unformatted_cli_read(
         "export-roadmap-json" => (
             "json",
             true,
+            OutputDominatedRead,
             Buffered,
             "merges caller-supplied template JSON and compares/writes atomically before emitting status",
             "Template merge can refuse late on user template conflicts and requires whole-file atomic equality checks.",
@@ -1957,6 +2003,7 @@ fn classify_unformatted_cli_read(
         "export" => (
             "checklist",
             true,
+            OutputDominatedRead,
             Buffered,
             "conversion report and --check/--out file equality require complete rendered document before emission",
             "Interop export pairs the document with a conversion report and atomic --check/--out file guards.",
@@ -1965,15 +2012,18 @@ fn classify_unformatted_cli_read(
     })
 }
 
-/// Exhaustive CLI read-surface output-disposition inventory derived directly
-/// from the live `clap` command tree, [`COMMAND_SURFACES`], and
-/// [`Format::ALL`] (`A2-136`).
+/// Exhaustive CLI read-surface latency and output-disposition inventory derived
+/// directly from the live `clap` command tree, [`COMMAND_SURFACES`], and
+/// [`Format::ALL`] (`A2-136`, `A2-134`).
 ///
-/// Any new CLI command or read format without an explicit disposition fails
+/// Any new CLI command or read format without an explicit classification fails
 /// compile-time classification or panics here when audited.
 #[must_use]
 pub fn cli_read_surface_inventory() -> Vec<aplan_output::stream::ReadSurfaceEntry> {
     use aplan_output::stream::OutputDisposition::{Buffered, ExplicitlyCapped};
+    use aplan_output::stream::ReadLatencyClass::{
+        ExternalRefresh, LocalBoundedRead, RepositoryRead,
+    };
 
     let mut entries = Vec::new();
     let cli = cli_command();
@@ -1986,7 +2036,7 @@ pub fn cli_read_surface_inventory() -> Vec<aplan_output::stream::ReadSurfaceEntr
             | "import" | "init" | "mcp" | "mv" | "park" | "rekey" | "release" | "retarget-path"
             | "review" | "start" | "stop" | "supersede" | "tag" | "tui" | "unpark" => {}
             other => {
-                if let Some((format, unbounded, disposition, boundary, rationale)) =
+                if let Some((format, unbounded, latency_class, disposition, boundary, rationale)) =
                     classify_unformatted_cli_read(other)
                 {
                     push_cli_read_entry(
@@ -1994,6 +2044,7 @@ pub fn cli_read_surface_inventory() -> Vec<aplan_output::stream::ReadSurfaceEntr
                         other,
                         format,
                         unbounded,
+                        latency_class,
                         disposition,
                         boundary,
                         rationale,
@@ -2003,13 +2054,14 @@ pub fn cli_read_surface_inventory() -> Vec<aplan_output::stream::ReadSurfaceEntr
                         panic!("CLI subcommand `{other}` is missing a read-surface classification");
                     };
                     for format in surface.formats() {
-                        let (unbounded, disposition, boundary, rationale) =
+                        let (unbounded, latency_class, disposition, boundary, rationale) =
                             classify_formatted_cli_read(other, format);
                         push_cli_read_entry(
                             &mut entries,
                             other,
                             format.as_str(),
                             unbounded,
+                            latency_class,
                             disposition,
                             boundary,
                             rationale,
@@ -2027,15 +2079,17 @@ pub fn cli_read_surface_inventory() -> Vec<aplan_output::stream::ReadSurfaceEntr
             "paths match",
             format.as_str(),
             true,
+            RepositoryRead,
             ExplicitlyCapped,
             "default --limit 200 bounds each glob entry; explicit --all streams through 16 KiB StreamingWriter",
-            "Tracked-file glob matcher caps per-entry output at 200 by default and streams when --all is requested.",
+            "Tracked-file glob matcher separates repository index reads from plan load, caps per-entry output at 200 by default, and streams with --all.",
         );
         push_cli_read_entry(
             &mut entries,
             "inbox show",
             format.as_str(),
             false,
+            LocalBoundedRead,
             Buffered,
             "single capture record loaded and validated before rendering",
             "Focused read of one capture record.",
@@ -2046,20 +2100,23 @@ pub fn cli_read_surface_inventory() -> Vec<aplan_output::stream::ReadSurfaceEntr
         "test receipt",
         "json",
         true,
+        ExternalRefresh,
         Buffered,
         "provider execution and digest binding complete atomically before emitting signed receipt JSON",
-        "Provider receipt carries whole-catalogue digests and must emit atomically only when valid.",
+        "Explicit external provider receipt excluded from the 100 ms read completion SLO; emits atomically only when valid.",
     );
 
     entries
 }
 
-/// Complete cross-channel (CLI + MCP) derived read-surface output-disposition
-/// inventory (`A2-136`).
+/// Complete cross-channel (CLI + MCP + TUI) derived read-surface latency and
+/// output-disposition inventory (`A2-136`, `A2-134`).
 #[must_use]
 pub fn read_surface_inventory() -> Vec<aplan_output::stream::ReadSurfaceEntry> {
     let mut entries = cli_read_surface_inventory();
     entries.extend(aplan_mcp::contract::mcp_read_surface_inventory());
+    #[cfg(feature = "tui")]
+    entries.extend(aplan_tui::tui_read_surface_inventory());
     entries
 }
 
@@ -2584,8 +2641,23 @@ fn write_stdout(s: &str) -> Result<()> {
 /// typo` printed `ok: 0 tasks` and exited 0, so a renamed plan directory left CI
 /// green forever while validating nothing. A gate that silently disables itself
 /// is worse than no gate, so this is a usage error (exit 2).
-fn load_checked(root: &std::path::Path) -> Result<aplan_core::load::Plan> {
-    Ok(load_store_snapshot(root, false, false)?.plan)
+/// Shared read-only handle to a [`PlanStore`] snapshot's [`Plan`], avoiding
+/// deep-cloning every task across CLI read commands (`A2-134`).
+#[derive(Debug, Clone)]
+struct SharedPlan(std::sync::Arc<aplan_core::IdentifiedPlan>);
+
+impl std::ops::Deref for SharedPlan {
+    type Target = aplan_core::load::Plan;
+
+    fn deref(&self) -> &Self::Target {
+        &self.0.plan
+    }
+}
+
+fn load_checked(root: &std::path::Path) -> Result<SharedPlan> {
+    Ok(SharedPlan(load_store_snapshot_arc(
+        root, false, false, false,
+    )?))
 }
 
 /// Load for a bulk creation mutation that may establish an absent plan root.
@@ -2593,25 +2665,35 @@ fn load_checked(root: &std::path::Path) -> Result<aplan_core::load::Plan> {
 /// This exception belongs to `add --from` and `import`, whose established
 /// bootstrap contract is to create their destination. Read commands must keep
 /// using [`load_checked`] so a missing root can never look like a clean plan.
-fn load_for_bootstrap(root: &std::path::Path) -> Result<aplan_core::load::Plan> {
+fn load_for_bootstrap(root: &std::path::Path) -> Result<SharedPlan> {
     if root.is_dir() {
         load_checked(root)
     } else {
-        Ok(aplan_core::Plan::default())
+        Ok(SharedPlan(std::sync::Arc::new(
+            aplan_core::IdentifiedPlan {
+                root: root.to_path_buf(),
+                plan: aplan_core::Plan::default(),
+                inputs: Vec::new(),
+            },
+        )))
     }
 }
 
-fn load_semantic_checked(root: &std::path::Path) -> Result<aplan_core::load::Plan> {
-    Ok(load_store_snapshot(root, false, true)?.plan)
+fn load_semantic_checked(root: &std::path::Path) -> Result<SharedPlan> {
+    Ok(SharedPlan(load_store_snapshot_arc(
+        root, false, true, false,
+    )?))
 }
 
 /// The checked-root form used where an application response must retain the
 /// exact candidate bytes from which its plan was parsed.
-fn load_identified_checked(root: &std::path::Path) -> Result<aplan_core::IdentifiedPlan> {
-    load_store_snapshot(root, true, true)
+fn load_identified_checked(
+    root: &std::path::Path,
+) -> Result<std::sync::Arc<aplan_core::IdentifiedPlan>> {
+    load_store_snapshot_arc(root, true, true, true)
 }
 
-type PlanStoreKey = (PathBuf, bool, bool);
+type PlanStoreKey = (PathBuf, bool, bool, bool);
 type PlanStores = std::collections::BTreeMap<PlanStoreKey, aplan_app::PlanStore>;
 static PLAN_STORES: std::sync::OnceLock<std::sync::Mutex<PlanStores>> = std::sync::OnceLock::new();
 static NEXT_PROGRESS_OPERATION: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(1);
@@ -3219,11 +3301,12 @@ fn write_progress_line_to(
     sink.write_row(&rendered, animated);
 }
 
-fn load_store_snapshot(
+fn load_store_snapshot_arc(
     root: &std::path::Path,
     retain_inputs: bool,
     semantic_cache: bool,
-) -> Result<aplan_core::IdentifiedPlan> {
+    include_input_digests: bool,
+) -> Result<std::sync::Arc<aplan_core::IdentifiedPlan>> {
     refuse_missing_root(root)?;
     let identity_root = std::path::absolute(root).unwrap_or_else(|_| root.to_path_buf());
     let stores =
@@ -3232,7 +3315,12 @@ fn load_store_snapshot(
         .lock()
         .unwrap_or_else(std::sync::PoisonError::into_inner);
     let operation = next_progress_operation();
-    let store = match stores.entry((identity_root.clone(), retain_inputs, semantic_cache)) {
+    let store = match stores.entry((
+        identity_root.clone(),
+        retain_inputs,
+        semantic_cache,
+        include_input_digests,
+    )) {
         std::collections::btree_map::Entry::Occupied(mut entry) => {
             if cli_progress_enabled() {
                 timed("load", || {
@@ -3247,7 +3335,12 @@ fn load_store_snapshot(
         }
         std::collections::btree_map::Entry::Vacant(entry) => {
             let store = timed("load", || {
-                let options = store_options(&identity_root, retain_inputs, semantic_cache);
+                let options = store_options(
+                    &identity_root,
+                    retain_inputs,
+                    semantic_cache,
+                    include_input_digests,
+                );
                 if cli_progress_enabled() {
                     aplan_app::PlanStore::open_with_progress(
                         root,
@@ -3263,7 +3356,7 @@ fn load_store_snapshot(
         }
     };
     record_store_work(store.stats());
-    Ok(store.snapshot().clone())
+    Ok(store.snapshot_arc())
 }
 
 #[cfg(feature = "tui")]
@@ -3273,7 +3366,7 @@ fn load_store_snapshot_observed(
     semantic_cache: bool,
     progress: &mut aplan_app::ProgressEmitter<'_>,
     cancellation: &aplan_app::CancellationToken,
-) -> Result<aplan_core::IdentifiedPlan> {
+) -> Result<std::sync::Arc<aplan_core::IdentifiedPlan>> {
     cancellation.check()?;
     refuse_missing_root(root)?;
     let identity_root = std::path::absolute(root).unwrap_or_else(|_| root.to_path_buf());
@@ -3282,7 +3375,7 @@ fn load_store_snapshot_observed(
     let mut stores = stores
         .lock()
         .unwrap_or_else(std::sync::PoisonError::into_inner);
-    let store = match stores.entry((identity_root.clone(), retain_inputs, semantic_cache)) {
+    let store = match stores.entry((identity_root.clone(), retain_inputs, semantic_cache, true)) {
         std::collections::btree_map::Entry::Occupied(mut entry) => {
             timed("load", || {
                 entry.get_mut().refresh_observed(progress, cancellation)
@@ -3290,7 +3383,7 @@ fn load_store_snapshot_observed(
             entry.into_mut()
         }
         std::collections::btree_map::Entry::Vacant(entry) => {
-            let options = store_options(&identity_root, retain_inputs, semantic_cache);
+            let options = store_options(&identity_root, retain_inputs, semantic_cache, true);
             let store = timed("load", || {
                 aplan_app::PlanStore::open_observed(root, &options, progress, cancellation)
             })?;
@@ -3298,13 +3391,14 @@ fn load_store_snapshot_observed(
         }
     };
     record_store_work(store.stats());
-    Ok(store.snapshot().clone())
+    Ok(store.snapshot_arc())
 }
 
 fn store_options(
     root: &std::path::Path,
     retain_inputs: bool,
     semantic_cache: bool,
+    include_input_digests: bool,
 ) -> aplan_app::PlanStoreOptions {
     let configuration_file = match CONFIG_SOURCE.get() {
         Some(aplan_config::ConfigSource::File(path)) => Some(path.clone()),
@@ -3320,6 +3414,7 @@ fn store_options(
         // source locations or parser behaviour that do not alter Task's shape.
         writer_identity: Some(cache_writer_identity()),
         retain_inputs,
+        include_input_digests,
         defer_publication: semantic_cache,
     }
 }
@@ -3328,25 +3423,40 @@ fn structural_report_cache(
     root: &std::path::Path,
     retain_inputs: bool,
     defer_cache_publication: bool,
+    include_input_digests: bool,
     options: &Options,
-) -> Option<aplan_app::StructuralReportCache> {
+) -> (Option<aplan_app::StructuralReportCache>, Option<String>) {
     let root = std::path::absolute(root).unwrap_or_else(|_| root.to_path_buf());
-    let stores = PLAN_STORES.get()?;
+    let Some(stores) = PLAN_STORES.get() else {
+        return (None, None);
+    };
     let mut stores = stores
         .lock()
         .unwrap_or_else(std::sync::PoisonError::into_inner);
-    let store = stores.get_mut(&(root.clone(), retain_inputs, defer_cache_publication))?;
-    let key = store.structural_report_key(options)?;
+    let Some(store) = stores.get_mut(&(
+        root.clone(),
+        retain_inputs,
+        defer_cache_publication,
+        include_input_digests,
+    )) else {
+        return (None, None);
+    };
+    let had_cached_plan_digest = store.has_cached_plan_input_digest();
+    let plan_digest = Some(store.plan_input_digest());
+    let Some(key) = store.structural_report_key(options) else {
+        return (None, plan_digest);
+    };
     let cached = store.cached_structural_report(&key);
-    if let Some(report) = &cached
-        && store.stats().artifacts_parsed > 0
+    if cached.is_some()
+        && (store.stats().artifacts_parsed > 0
+            || (!had_cached_plan_digest && store.has_cached_plan_input_digest()))
     {
         let before = store.stats().cache_bytes_written;
-        store.remember_structural_report(&key, options, report);
+        store.publish_current_generation();
         record_cache_publication(store.stats().cache_bytes_written.saturating_sub(before));
     }
     let options = options.clone();
-    Some(aplan_app::StructuralReportCache::new(
+    let cache = Some(aplan_app::StructuralReportCache::new(
         cached,
         move |report| {
             let Some(stores) = PLAN_STORES.get() else {
@@ -3355,15 +3465,19 @@ fn structural_report_cache(
             let mut stores = stores
                 .lock()
                 .unwrap_or_else(std::sync::PoisonError::into_inner);
-            if let Some(store) =
-                stores.get_mut(&(root.clone(), retain_inputs, defer_cache_publication))
-            {
+            if let Some(store) = stores.get_mut(&(
+                root.clone(),
+                retain_inputs,
+                defer_cache_publication,
+                include_input_digests,
+            )) {
                 let before = store.stats().cache_bytes_written;
                 store.remember_structural_report(&key, &options, report);
                 record_cache_publication(store.stats().cache_bytes_written.saturating_sub(before));
             }
         },
-    ))
+    ));
+    (cache, plan_digest)
 }
 
 fn validate_with_store_graph(
@@ -3374,18 +3488,17 @@ fn validate_with_store_graph(
     graph: &Graph<'_>,
 ) -> aplan_core::Report {
     let root = std::path::absolute(root).unwrap_or_else(|_| root.to_path_buf());
+    let include_digests = retain_inputs;
     let key_and_cached = PLAN_STORES.get().and_then(|stores| {
         let mut stores = stores
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
-        let store = stores.get_mut(&(root.clone(), retain_inputs, true))?;
+        let store = stores.get_mut(&(root.clone(), retain_inputs, true, include_digests))?;
         let key = store.structural_report_key(options)?;
         let cached = store.cached_structural_report(&key);
-        if let Some(report) = &cached
-            && store.stats().artifacts_parsed > 0
-        {
+        if cached.is_some() && store.stats().artifacts_parsed > 0 {
             let before = store.stats().cache_bytes_written;
-            store.remember_structural_report(&key, options, report);
+            store.publish_current_generation();
             record_cache_publication(store.stats().cache_bytes_written.saturating_sub(before));
         }
         Some((key, cached))
@@ -3400,7 +3513,7 @@ fn validate_with_store_graph(
         let mut stores = stores
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
-        if let Some(store) = stores.get_mut(&(root, retain_inputs, true)) {
+        if let Some(store) = stores.get_mut(&(root, retain_inputs, true, include_digests)) {
             let before = store.stats().cache_bytes_written;
             store.remember_structural_report(&key, options, &report);
             record_cache_publication(store.stats().cache_bytes_written.saturating_sub(before));
@@ -4094,10 +4207,12 @@ fn hermetic_application_context_from_config(
         TraceSelection::Disabled => (None, true),
     };
     let defer_cache_publication = context_options.cache_publication.defers();
-    let plan = load_store_snapshot(
+    let include_input_digests = context_options.retain_sources;
+    let plan = load_store_snapshot_arc(
         root,
         context_options.retain_sources,
         defer_cache_publication,
+        include_input_digests,
     )?;
     let opts = resolve_check_options(
         config,
@@ -4111,11 +4226,12 @@ fn hermetic_application_context_from_config(
     let opts = timed("project", || {
         with_agents_block(opts, root, config_dir, config, &plan.plan)
     });
-    let report_cache = timed("load", || {
+    let (report_cache, plan_digest) = timed("load", || {
         structural_report_cache(
             root,
             context_options.retain_sources,
             defer_cache_publication,
+            include_input_digests,
             &opts,
         )
     });
@@ -4125,7 +4241,7 @@ fn hermetic_application_context_from_config(
         context_options.verdict.no_deny_warnings,
     );
     let context = timed("project", || -> Result<aplan_app::PlanContext> {
-        let context = aplan_app::PlanContext::new(
+        let context = aplan_app::PlanContext::from_shared_with_plan_digest(
             plan,
             aplan_app::ContextInputs {
                 repository_root: plan_repository(root),
@@ -4134,6 +4250,7 @@ fn hermetic_application_context_from_config(
                 options: opts,
                 verdict: policy,
             },
+            plan_digest,
         );
         let mut context = context.with_captured_report_config(config.clone())?;
         if let Some(cache) = report_cache {
@@ -4183,11 +4300,12 @@ fn hermetic_application_context_from_config_observed(
     let opts = timed("project", || {
         with_agents_block(opts, root, config_dir, config, &plan.plan)
     });
-    let report_cache = timed("load", || {
+    let (report_cache, plan_digest) = timed("load", || {
         structural_report_cache(
             root,
             context_options.retain_sources,
             defer_cache_publication,
+            true,
             &opts,
         )
     });
@@ -4203,7 +4321,7 @@ fn hermetic_application_context_from_config_observed(
         aplan_app::ProgressMeasure::Indeterminate,
     );
     let context = timed("project", || -> Result<aplan_app::PlanContext> {
-        let context = aplan_app::PlanContext::new(
+        let context = aplan_app::PlanContext::from_shared_with_plan_digest(
             plan,
             aplan_app::ContextInputs {
                 repository_root: plan_repository(root),
@@ -4212,6 +4330,7 @@ fn hermetic_application_context_from_config_observed(
                 options: opts,
                 verdict: policy,
             },
+            plan_digest,
         );
         let mut context = context.with_captured_report_config(config.clone())?;
         if let Some(cache) = report_cache {
@@ -5741,7 +5860,7 @@ fn post_resolution_repair_state(
         ))?;
         return Ok(None);
     }
-    let mut after = plan;
+    let mut after: aplan_core::load::Plan = (*plan).clone();
     for ((id, updated_task), replacement) in batch.updated_tasks.iter().zip(&batch.writes) {
         let current = locate(&after, id)?;
         let unchanged = current.path == replacement.path
@@ -10548,8 +10667,8 @@ fn cmd_show(root: &std::path::Path, args: &ShowArgs) -> Result<u8> {
     } else {
         None
     };
-    let plan = identified.as_ref().map_or_else(
-        || typed.as_ref().expect("typed show load"),
+    let plan: &aplan_core::load::Plan = identified.as_ref().map_or_else(
+        || &**typed.as_ref().expect("typed show load"),
         |loaded| &loaded.plan,
     );
     if !loaded_cleanly(plan) {
@@ -10592,19 +10711,15 @@ fn cmd_show(root: &std::path::Path, args: &ShowArgs) -> Result<u8> {
         .extend(inspection.report.diagnostics.iter().cloned());
 
     let view = timed("project", || {
-        let rows = graph.task_rows();
         let body = need_body
-            .then(|| show_body(identified.as_ref(), plan, &args.id))
+            .then(|| show_body(identified.as_deref(), plan, &args.id))
             .flatten()
             .map(str::to_string);
-        aplan_core::Show::assemble(
-            aplan_core::ShowSources {
-                graph: &graph,
-                rows: &rows,
-                diagnostics: &report.diagnostics,
-                unloadable: &plan.unloadable,
-                claims: &claims,
-            },
+        aplan_core::Show::assemble_for_task(
+            &graph,
+            &report.diagnostics,
+            &plan.unloadable,
+            &claims,
             &args.id,
             false,
             body,
@@ -10907,97 +11022,67 @@ fn cmd_graph(root: &std::path::Path, args: &GraphArgs) -> Result<u8> {
     if !loaded_cleanly(&plan) {
         return Ok(EXIT_VIOLATIONS);
     }
-    let tasks: Vec<_> = plan.tasks.iter().map(|lt| &lt.task).collect();
-    let graph = build_graph(tasks.iter().copied());
+    let (graph, view) = timed("project", || -> Result<_> {
+        let tasks: Vec<_> = plan.tasks.iter().map(|lt| &lt.task).collect();
+        let graph = build_graph(tasks.iter().copied());
 
-    let mut include: std::collections::BTreeSet<&str> = graph.by_id.keys().copied().collect();
-    let mut scoped = Vec::new();
+        let mut include: std::collections::BTreeSet<&str> = graph.by_id.keys().copied().collect();
+        let mut scoped = Vec::new();
 
-    let selector = args.select.selector()?;
-    // A cut still means "the milestone and its members", which is a graph
-    // question the general selector cannot answer: it resolves a label through
-    // the same resolver every writing command uses, and pulls in the milestone
-    // itself so the diagram has something to hang the members on.
-    if !args.select.cut.is_empty() {
-        // The *union* of the cuts named, then one intersection with the view.
-        // Retaining once per cut intersects them, so `--cut a --cut b` matched
-        // nothing while `aplan tasks` with the same flags returned both -- two
-        // commands, one documented rule, opposite answers, from the task that
-        // exists to remove exactly that (`A1-214`).
-        refuse_a_release_as_a_cut(&plan, &graph, &args.select.cut)?;
-        let mut members: std::collections::BTreeSet<&str> = std::collections::BTreeSet::new();
-        for cut in &args.select.cut {
-            members.extend(cut_members(&plan, &graph, cut)?);
-        }
-        include.retain(|id| members.contains(id));
-    }
-    if !selector.is_empty() {
-        apply_graph_selector(root, &plan, &graph, &selector, &mut include)?;
-        scoped.extend(selector.describe());
-    }
-    // A *selection*, intersected with the others rather than replacing them:
-    // `--cut X --reach downstream:Y` is "what Y unblocks, within X", which is
-    // one question and not two (`A1-221`). It walks the same edges the view
-    // draws, so the scope and the picture cannot disagree about which graph
-    // this is.
-    if let Some(query) = &args.reach {
-        let reach = parse_reach(query)?;
-        let edges = if args.membership {
-            aplan_core::reach::Edges::Any
-        } else {
-            aplan_core::reach::Edges::Dependency
-        };
-        for id in reach.ids() {
-            if graph.get(id).is_some() {
-                continue;
+        let selector = args.select.selector()?;
+        if !args.select.cut.is_empty() {
+            refuse_a_release_as_a_cut(&plan, &graph, &args.select.cut)?;
+            let mut members: std::collections::BTreeSet<&str> = std::collections::BTreeSet::new();
+            for cut in &args.select.cut {
+                members.extend(cut_members(&plan, &graph, cut)?);
             }
-            // A id with a space in it that names nothing is almost always
-            // somebody reaching for a conjunction. Telling them "no task
-            // `R-1 and status=todo`" is true and answers a question they did
-            // not ask; there is no grammar, and that is what to say. An id that
-            // really does contain a space still resolves above (`A1-221`).
-            if id.split_whitespace().count() > 1 {
-                return Err(reach_grammar_refusal(query));
-            }
-            anyhow::bail!("no task `{id}` in this plan");
+            include.retain(|id| members.contains(id));
         }
-        let selected = reach.select(&graph, edges).ok_or_else(|| {
-            anyhow::anyhow!("`--reach {query}` names a task this plan does not have")
-        })?;
-        include.retain(|id| selected.contains(id));
-        scoped.push(format!("`{query}` over {}", reach.walks(edges).describe()));
-    }
+        if !selector.is_empty() {
+            apply_graph_selector(root, &plan, &graph, &selector, &mut include)?;
+            scoped.extend(selector.describe());
+        }
+        if let Some(query) = &args.reach {
+            let reach = parse_reach(query)?;
+            let edges = if args.membership {
+                aplan_core::reach::Edges::Any
+            } else {
+                aplan_core::reach::Edges::Dependency
+            };
+            for id in reach.ids() {
+                if graph.get(id).is_some() {
+                    continue;
+                }
+                if id.split_whitespace().count() > 1 {
+                    return Err(reach_grammar_refusal(query));
+                }
+                anyhow::bail!("no task `{id}` in this plan");
+            }
+            let selected = reach.select(&graph, edges).ok_or_else(|| {
+                anyhow::anyhow!("`--reach {query}` names a task this plan does not have")
+            })?;
+            include.retain(|id| selected.contains(id));
+            scoped.push(format!("`{query}` over {}", reach.walks(edges).describe()));
+        }
 
-    // An empty diagram is three characters of valid Mermaid that renders as a
-    // blank rectangle, which reads as "this plan has nothing in it" rather than
-    // as "your filter matched nothing" (`A1-126`).
-    if include.is_empty() {
-        // "to draw" was written when Mermaid was the only shape. The refusal is
-        // about the scope, which every shape shares, so it says so without
-        // assuming which one was asked for (`A1-193`).
-        anyhow::bail!(
-            "nothing matches {}: no task is in view, so there is no graph",
-            scoped.join(" and ")
-        );
-    }
-    // One scoped view, three renderings of it. Computing the scope once is what
-    // stops the shapes disagreeing about what is in view (`A1-193`).
-    let mut view = aplan_output::GraphView::of_kinds(&graph, &include, args.membership);
-    // Said by the view rather than by this command, so every shape carries it:
-    // a reachability scope that did not name its graph would leave a reader to
-    // assume which one (`A1-221`).
-    view.scope.clone_from(&scoped);
-    validate_graph_focus(&graph, &include, &view, &scoped, args.focus.as_deref())?;
-    // The narrowing can empty a view that the scope did not: a cut whose members
-    // depend on nothing has edges only by membership. Refused for the same
-    // reason an empty filter is, and saying which of the two happened.
-    if view.nodes.is_empty() {
-        anyhow::bail!(
-            "no task in view has a dependency on another, so there is no graph. \
-             `--membership` draws the {} cut-membership edge(s) instead",
-            view.grouping.edges
-        );
-    }
+        if include.is_empty() {
+            anyhow::bail!(
+                "nothing matches {}: no task is in view, so there is no graph",
+                scoped.join(" and ")
+            );
+        }
+        let mut view = aplan_output::GraphView::of_kinds(&graph, &include, args.membership);
+        view.scope.clone_from(&scoped);
+        validate_graph_focus(&graph, &include, &view, &scoped, args.focus.as_deref())?;
+        if view.nodes.is_empty() {
+            anyhow::bail!(
+                "no task in view has a dependency on another, so there is no graph. \
+                 `--membership` draws the {} cut-membership edge(s) instead",
+                view.grouping.edges
+            );
+        }
+        Ok((graph, view))
+    })?;
     match format {
         Format::Mermaid | Format::Dot | Format::Json => {
             timed("render", || {
@@ -12468,7 +12553,7 @@ fn cmd_single_dependency(root: &std::path::Path, args: &DepArgs, adding: bool) -
         args.verdict.deny_warnings,
         args.verdict.no_deny_warnings,
     );
-    let context = aplan_app::PlanContext::new(
+    let context = aplan_app::PlanContext::from_shared(
         plan,
         aplan_app::ContextInputs {
             repository_root: plan_repository(root),
@@ -12623,7 +12708,7 @@ fn cmd_dependency_batch(
         Some(plan_repository(root)),
     );
     let policy = verdict_policy(&config, verdict.deny_warnings, verdict.no_deny_warnings);
-    let context = aplan_app::PlanContext::new(
+    let context = aplan_app::PlanContext::from_shared(
         plan,
         aplan_app::ContextInputs {
             repository_root: plan_repository(root),
@@ -15611,8 +15696,10 @@ fn cmd_paths(
         anyhow::bail!("`--sample 0` measures nothing; ask for at least one commit");
     }
 
-    let breadth = aplan_evidence::commit_breadth(repo, &with_paths, sample)
-        .context("reading the repository's history")?;
+    let breadth = timed("repo", || {
+        aplan_evidence::commit_breadth(repo, &with_paths, sample)
+    })
+    .context("reading the repository's history")?;
 
     let by_id: std::collections::BTreeMap<&str, &aplan_core::task::Task> =
         tasks.iter().map(|t| (t.id.as_str(), *t)).collect();
@@ -15695,14 +15782,16 @@ fn cmd_paths_match(
         )
     };
 
-    let discovered = aplan_evidence::Repo::discover(repo)
-        .with_context(|| format!("opening git repository at `{}`", repo.display()))?;
-    let mut tracked: Vec<String> = discovered
-        .tracked_paths()
-        .context("reading tracked files from the git index")?
-        .into_iter()
-        .map(|p| p.to_string_lossy().replace('\\', "/"))
-        .collect();
+    let mut tracked: Vec<String> = timed("repo", || -> Result<Vec<String>> {
+        let discovered = aplan_evidence::Repo::discover(repo)
+            .with_context(|| format!("opening git repository at `{}`", repo.display()))?;
+        Ok(discovered
+            .tracked_paths()
+            .context("reading tracked files from the git index")?
+            .into_iter()
+            .map(|p| p.to_string_lossy().replace('\\', "/"))
+            .collect())
+    })?;
     tracked.sort();
     tracked.dedup();
 
@@ -15846,7 +15935,7 @@ fn cmd_stale(
         })
         .collect();
 
-    let (touched, head_time) = aplan_evidence::last_touched(repo, &relative)
+    let (touched, head_time) = timed("repo", || aplan_evidence::last_touched(repo, &relative))
         .context("reading the repository's history")?;
     let now = stale_reference_epoch(as_of, head_time)?;
 
@@ -16330,29 +16419,29 @@ fn cmd_version_next(
     floors: aplan_core::task::VersionFloors,
     format: Format,
 ) -> Result<u8> {
-    // The repository first, and `--repo` before anything reads it: standing
-    // outside one is a fact about where the caller is standing, and reporting a
-    // missing config key instead would send them to the wrong file.
-    let handle = aplan_evidence::Repo::discover(repo)?;
-    let Some(declared) = &policy.current else {
-        anyhow::bail!(
-            "`aplan version` needs to know what this repository ships today, and nothing \
-             declares it. Add `version.current.command` to `.aplan.yml` -- argv that prints \
-             the current version -- or ask about a node instead: `aplan version <cut>` \
-             answers what that cut owes, from the plan alone."
-        );
-    };
-    let current = aplan_evidence::version::current_version(declared, repo)?;
+    let (handle, current, next) = timed("repo", || -> Result<_> {
+        let handle = aplan_evidence::Repo::discover(repo)?;
+        let Some(declared) = &policy.current else {
+            anyhow::bail!(
+                "`aplan version` needs to know what this repository ships today, and nothing \
+                 declares it. Add `version.current.command` to `.aplan.yml` -- argv that prints \
+                 the current version -- or ask about a node instead: `aplan version <cut>` \
+                 answers what that cut owes, from the plan alone."
+            );
+        };
+        let current = aplan_evidence::version::current_version(declared, repo)?;
 
-    // **One window decision, used by the number and by `APLAN048`** (`A1-348`).
-    let next = aplan_evidence::version::next_release(
-        &handle,
-        repo,
-        plan,
-        graph,
-        floors,
-        policy.release_tag(),
-    )?;
+        // **One window decision, used by the number and by `APLAN048`** (`A1-348`).
+        let next = aplan_evidence::version::next_release(
+            &handle,
+            repo,
+            plan,
+            graph,
+            floors,
+            policy.release_tag(),
+        )?;
+        Ok((handle, current, next))
+    })?;
     let (owed, window_said, window_json) = describe_window(&next)?;
 
     // The baseline is the last release, whichever window was used: what the plan
@@ -16964,8 +17053,10 @@ fn mcp_agents_block(
     config_dir: Option<&std::path::Path>,
     config: &aplan_config::Config,
 ) -> Options {
-    let plan = load_store_snapshot(root, false, false)
-        .map_or_else(|_| aplan_core::load_plan(root), |snapshot| snapshot.plan);
+    let plan = load_store_snapshot_arc(root, false, false, false).map_or_else(
+        |_| aplan_core::load_plan(root),
+        |snapshot| snapshot.plan.clone(),
+    );
     with_agents_block(options, root, config_dir, config, &plan)
 }
 
@@ -17494,57 +17585,60 @@ fn cmd_summary_at(
         .cloned()
         .unwrap_or(aplan_config::ConfigSource::Discover);
 
-    // Discovery itself is revision-addressed. An explicit config remains the
-    // caller's trust boundary, and --no-config remains a refusal to read one.
-    let (repo, commit, config, root) = match source {
-        aplan_config::ConfigSource::Discover => {
-            let probe = cli_root.unwrap_or_else(|| std::path::Path::new("."));
-            let repo_probe = revision_plan_repository(probe);
-            let repo = aplan_evidence::Repo::discover(&repo_probe)?;
-            let workdir = repo
-                .effective_workdir(&repo_probe)
-                .ok_or_else(|| anyhow::anyhow!("a historical plan needs a Git worktree"))?;
-            let commit = repo.resolve_revision(revision).ok_or_else(|| {
-                anyhow::anyhow!("revision `{revision}` does not resolve to a commit")
+    let (config, root, snapshot) = timed("repo", || -> Result<_> {
+        // Discovery itself is revision-addressed. An explicit config remains the
+        // caller's trust boundary, and --no-config remains a refusal to read one.
+        let (repo, commit, config, root) = match source {
+            aplan_config::ConfigSource::Discover => {
+                let probe = cli_root.unwrap_or_else(|| std::path::Path::new("."));
+                let repo_probe = revision_plan_repository(probe);
+                let repo = aplan_evidence::Repo::discover(&repo_probe)?;
+                let workdir = repo
+                    .effective_workdir(&repo_probe)
+                    .ok_or_else(|| anyhow::anyhow!("a historical plan needs a Git worktree"))?;
+                let commit = repo.resolve_revision(revision).ok_or_else(|| {
+                    anyhow::anyhow!("revision `{revision}` does not resolve to a commit")
+                })?;
+                let (config, config_dir) =
+                    config_at_revision(&repo, &commit, &workdir).map_err(config_err)?;
+                let root = cli_root.map_or_else(
+                    || root_from_config(config.root.clone(), config_dir.as_deref()),
+                    std::path::Path::to_path_buf,
+                );
+                (repo, commit, config, root)
+            }
+            aplan_config::ConfigSource::File(_) | aplan_config::ConfigSource::None => {
+                let (config, config_dir) = config_at(std::path::Path::new("."))?;
+                let root = cli_root.map_or_else(
+                    || root_from_config(config.root.clone(), config_dir.as_deref()),
+                    std::path::Path::to_path_buf,
+                );
+                let repo = aplan_evidence::Repo::discover(&revision_plan_repository(&root))?;
+                let commit = repo.resolve_revision(revision).ok_or_else(|| {
+                    anyhow::anyhow!("revision `{revision}` does not resolve to a commit")
+                })?;
+                (repo, commit, config, root)
+            }
+        };
+        let workdir = repo
+            .effective_workdir(&revision_plan_repository(&root))
+            .ok_or_else(|| anyhow::anyhow!("a historical plan needs a Git worktree"))?;
+        let relative_root = repository_relative(&workdir, &root, "plan root")?;
+        let snapshot = repo
+            .plan_files_at(&commit, &relative_root)?
+            .ok_or_else(|| {
+                anyhow::anyhow!("resolved commit `{commit}` disappeared while reading it")
             })?;
-            let (config, config_dir) =
-                config_at_revision(&repo, &commit, &workdir).map_err(config_err)?;
-            let root = cli_root.map_or_else(
-                || root_from_config(config.root.clone(), config_dir.as_deref()),
-                std::path::Path::to_path_buf,
+        if !snapshot.root_found {
+            anyhow::bail!(
+                "revision `{}` does not contain plan root `{}`",
+                snapshot.commit,
+                relative_root.display()
             );
-            (repo, commit, config, root)
         }
-        aplan_config::ConfigSource::File(_) | aplan_config::ConfigSource::None => {
-            let (config, config_dir) = config_at(std::path::Path::new("."))?;
-            let root = cli_root.map_or_else(
-                || root_from_config(config.root.clone(), config_dir.as_deref()),
-                std::path::Path::to_path_buf,
-            );
-            let repo = aplan_evidence::Repo::discover(&revision_plan_repository(&root))?;
-            let commit = repo.resolve_revision(revision).ok_or_else(|| {
-                anyhow::anyhow!("revision `{revision}` does not resolve to a commit")
-            })?;
-            (repo, commit, config, root)
-        }
-    };
-    let workdir = repo
-        .effective_workdir(&revision_plan_repository(&root))
-        .ok_or_else(|| anyhow::anyhow!("a historical plan needs a Git worktree"))?;
-    let relative_root = repository_relative(&workdir, &root, "plan root")?;
-    let snapshot = repo
-        .plan_files_at(&commit, &relative_root)?
-        .ok_or_else(|| {
-            anyhow::anyhow!("resolved commit `{commit}` disappeared while reading it")
-        })?;
-    if !snapshot.root_found {
-        anyhow::bail!(
-            "revision `{}` does not contain plan root `{}`",
-            snapshot.commit,
-            relative_root.display()
-        );
-    }
-    let plan = load_plan_files(&root, snapshot.files);
+        Ok((config, root, snapshot))
+    })?;
+    let plan = timed("load", || load_plan_files(&root, snapshot.files));
     errln!(
         "aplan: summary reads committed plan at {} (resolved from `{revision}`).",
         snapshot.commit
@@ -17923,7 +18017,7 @@ fn cmd_retarget_path(
     let (live_targets, terminal_preserved) =
         collect_retarget_targets(&plan, from, &from_canon, to, ids)?;
 
-    let mut after = plan.clone();
+    let mut after: aplan_core::load::Plan = (*plan).clone();
     for (lt, _, updated) in &live_targets {
         after = aplan_core::mutation::with_replaced(
             &after,
@@ -19729,85 +19823,89 @@ fn cmd_completed(cli_root: Option<&std::path::Path>, args: CompletedCliArgs) -> 
     let history = parse_history_policy(&args.history)?;
     let selector = args.select.selector()?;
 
-    let (plan, input_identity, repo_root, plan_root_rel, basis_revision) =
-        if let Some(revision) = args.at.as_deref() {
-            let source = CONFIG_SOURCE
-                .get()
-                .cloned()
-                .unwrap_or(aplan_config::ConfigSource::Discover);
-            let (repo, commit, root) = match source {
-                aplan_config::ConfigSource::Discover => {
-                    let probe = cli_root.unwrap_or_else(|| std::path::Path::new("."));
-                    let repo_probe = revision_plan_repository(probe);
-                    let repo = aplan_evidence::Repo::discover(&repo_probe)?;
-                    let workdir = repo
-                        .effective_workdir(&repo_probe)
-                        .ok_or_else(|| anyhow::anyhow!("a historical plan needs a Git worktree"))?;
-                    let commit = repo.resolve_revision(revision).ok_or_else(|| {
-                        anyhow::anyhow!("revision `{revision}` does not resolve to a commit")
-                    })?;
-                    let (config, config_dir) =
-                        config_at_revision(&repo, &commit, &workdir).map_err(config_err)?;
-                    let root = cli_root.map_or_else(
-                        || root_from_config(config.root.clone(), config_dir.as_deref()),
-                        std::path::Path::to_path_buf,
-                    );
-                    (repo, commit, root)
-                }
-                aplan_config::ConfigSource::File(_) | aplan_config::ConfigSource::None => {
-                    let (config, config_dir) = config_at(std::path::Path::new("."))?;
-                    let root = cli_root.map_or_else(
-                        || root_from_config(config.root.clone(), config_dir.as_deref()),
-                        std::path::Path::to_path_buf,
-                    );
-                    let repo = aplan_evidence::Repo::discover(&revision_plan_repository(&root))?;
-                    let commit = repo.resolve_revision(revision).ok_or_else(|| {
-                        anyhow::anyhow!("revision `{revision}` does not resolve to a commit")
-                    })?;
-                    (repo, commit, root)
-                }
-            };
-            let workdir = repo
-                .effective_workdir(&revision_plan_repository(&root))
-                .ok_or_else(|| anyhow::anyhow!("a historical plan needs a Git worktree"))?;
-            let relative_root = repository_relative(&workdir, &root, "plan root")?;
-            let snapshot = repo
-                .plan_files_at(&commit, &relative_root)?
-                .ok_or_else(|| {
-                    anyhow::anyhow!("resolved commit `{commit}` disappeared while reading it")
+    let (plan, input_identity, repo_root, plan_root_rel, basis_revision) = if let Some(revision) =
+        args.at.as_deref()
+    {
+        let source = CONFIG_SOURCE
+            .get()
+            .cloned()
+            .unwrap_or(aplan_config::ConfigSource::Discover);
+        let (repo, commit, root) = match source {
+            aplan_config::ConfigSource::Discover => {
+                let probe = cli_root.unwrap_or_else(|| std::path::Path::new("."));
+                let repo_probe = revision_plan_repository(probe);
+                let repo = aplan_evidence::Repo::discover(&repo_probe)?;
+                let workdir = repo
+                    .effective_workdir(&repo_probe)
+                    .ok_or_else(|| anyhow::anyhow!("a historical plan needs a Git worktree"))?;
+                let commit = repo.resolve_revision(revision).ok_or_else(|| {
+                    anyhow::anyhow!("revision `{revision}` does not resolve to a commit")
                 })?;
-            if !snapshot.root_found {
-                anyhow::bail!(
-                    "revision `{}` does not contain plan root `{}`",
-                    snapshot.commit,
-                    relative_root.display()
+                let (config, config_dir) =
+                    config_at_revision(&repo, &commit, &workdir).map_err(config_err)?;
+                let root = cli_root.map_or_else(
+                    || root_from_config(config.root.clone(), config_dir.as_deref()),
+                    std::path::Path::to_path_buf,
                 );
+                (repo, commit, root)
             }
-            let plan = load_plan_files(&root, snapshot.files);
-            errln!(
-                "aplan: completed reads committed plan at {} (resolved from `{revision}`).",
-                snapshot.commit
+            aplan_config::ConfigSource::File(_) | aplan_config::ConfigSource::None => {
+                let (config, config_dir) = config_at(std::path::Path::new("."))?;
+                let root = cli_root.map_or_else(
+                    || root_from_config(config.root.clone(), config_dir.as_deref()),
+                    std::path::Path::to_path_buf,
+                );
+                let repo = aplan_evidence::Repo::discover(&revision_plan_repository(&root))?;
+                let commit = repo.resolve_revision(revision).ok_or_else(|| {
+                    anyhow::anyhow!("revision `{revision}` does not resolve to a commit")
+                })?;
+                (repo, commit, root)
+            }
+        };
+        let workdir = repo
+            .effective_workdir(&revision_plan_repository(&root))
+            .ok_or_else(|| anyhow::anyhow!("a historical plan needs a Git worktree"))?;
+        let relative_root = repository_relative(&workdir, &root, "plan root")?;
+        let snapshot = repo
+            .plan_files_at(&commit, &relative_root)?
+            .ok_or_else(|| {
+                anyhow::anyhow!("resolved commit `{commit}` disappeared while reading it")
+            })?;
+        if !snapshot.root_found {
+            anyhow::bail!(
+                "revision `{}` does not contain plan root `{}`",
+                snapshot.commit,
+                relative_root.display()
             );
-            if !loaded_cleanly(&plan) {
-                return Ok(EXIT_VIOLATIONS);
-            }
-            let identity = format!("commit:{}", snapshot.commit);
-            (
-                plan,
-                identity,
-                workdir,
-                relative_root,
-                Some(snapshot.commit),
-            )
-        } else {
-            let root = resolve_root(cli_root.map(std::path::Path::to_path_buf))?;
-            let identified = aplan_core::load_plan_identified(&root);
-            if !loaded_cleanly(&identified.plan) {
-                return Ok(EXIT_VIOLATIONS);
-            }
-            let identity = aplan_app::plan_inputs_identity(&identified.inputs);
-            let repo_probe = plan_repository(&root);
-            let (repo_root, plan_root_rel) = match aplan_evidence::Repo::discover(&repo_probe) {
+        }
+        let plan = load_plan_files(&root, snapshot.files);
+        errln!(
+            "aplan: completed reads committed plan at {} (resolved from `{revision}`).",
+            snapshot.commit
+        );
+        if !loaded_cleanly(&plan) {
+            return Ok(EXIT_VIOLATIONS);
+        }
+        let identity = format!("commit:{}", snapshot.commit);
+        (
+            plan,
+            identity,
+            workdir,
+            relative_root,
+            Some(snapshot.commit),
+        )
+    } else {
+        let root = resolve_root(cli_root.map(std::path::Path::to_path_buf))?;
+        let identified = load_store_snapshot_arc(&root, false, false, true)?;
+        if !loaded_cleanly(&identified.plan) {
+            return Ok(EXIT_VIOLATIONS);
+        }
+        let identity = timed("project", || {
+            aplan_app::plan_inputs_identity(&identified.inputs)
+        });
+        let repo_probe = plan_repository(&root);
+        let (repo_root, plan_root_rel) = timed("repo", || {
+            match aplan_evidence::Repo::discover(&repo_probe) {
                 Ok(repo) => {
                     if let Some(workdir) = repo.effective_workdir(&repo_probe) {
                         let rel = repository_relative(&workdir, &root, "plan root")
@@ -19818,9 +19916,16 @@ fn cmd_completed(cli_root: Option<&std::path::Path>, args: CompletedCliArgs) -> 
                     }
                 }
                 Err(_) => (repo_probe, std::path::PathBuf::from("aplan")),
-            };
-            (identified.plan, identity, repo_root, plan_root_rel, None)
-        };
+            }
+        });
+        (
+            identified.plan.clone(),
+            identity,
+            repo_root,
+            plan_root_rel,
+            None,
+        )
+    };
 
     let request = aplan_app::CompletedRequest {
         selector,
@@ -19833,7 +19938,12 @@ fn cmd_completed(cli_root: Option<&std::path::Path>, args: CompletedCliArgs) -> 
         basis_revision,
         limits: aplan_core::HistoryLimits::default(),
     };
-    let response = timed("project", || {
+    let phase = if history == aplan_core::HistoryPolicy::Never {
+        "project"
+    } else {
+        "repo"
+    };
+    let response = timed(phase, || {
         aplan_app::completed_tasks(&plan, &input_identity, &repo_root, &plan_root_rel, &request)
     })
     .map_err(|err| anyhow::anyhow!("{err}"))?;
