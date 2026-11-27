@@ -97,6 +97,28 @@ scenario with the toggle rather than firing it unconditionally.
 The same shape applies to a new `--format`: add the variant, its `as_str`/`from_str`
 arms (the compiler forces the render arm), and list it in the format audit, or CI fails.
 
+## Read-path performance and timing diagnostics
+
+Every new read-only CLI command/format, MCP tool/resource, or TUI read operation must declare its
+`ReadLatencyClass` and `OutputDisposition` in `aplan::read_surface_inventory()` (audited by
+`read_budget_audit` and `read_streaming`). Inspect per-phase timings and deterministic work counts
+on any CLI invocation with global `--timings` (stderr only, preserving stdout and exit status), and
+reproduce the seven-state, output and repository matrices with `ci/scripts/read-performance.py`:
+
+```sh
+cargo run --release -p aplan -- --timings check --format json >/dev/null
+python3 ci/scripts/read-performance.py --binary target/release/aplan --profile release --cache-state hit
+python3 ci/scripts/read-performance.py --binary target/release/aplan --profile release --output-matrix
+python3 ci/scripts/read-performance.py --binary target/release/aplan --profile release --repo-matrix --generated-tasks 0
+cargo test --release -p aplan-e2e --test integration 'scale::' -- --ignored --nocapture
+```
+
+Absolute wall-clock release budgets belong only to the quiet reference host (see
+[`docs/design/read-path-performance.md`](docs/design/read-path-performance.md)); never publish a
+contended-host or GitHub-hosted runner wall time as a product budget, and always check deterministic
+work counters (`tasks_parsed`, `files_hashed`, `graph_builds`, `report_builds`, `provider_spawns`,
+`peak_output_buffer_bytes`) and `--cache=off` parity.
+
 ## The source of truth
 
 - The **Rust types** are the spec; `schemas/v1/task.json` (from `Task`) and

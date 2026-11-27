@@ -67,6 +67,176 @@ pub fn generated_action_reference_markdown() -> String {
     shell::generated_action_reference_markdown()
 }
 
+/// Exhaustive read-surface latency and output-disposition inventory for the
+/// interactive terminal adapter, derived directly from `model::EffectKind::ALL`
+/// and `model::Route::ALL` (`A2-134`).
+///
+/// Adding any new background effect or interactive route fails to compile until
+/// it is classified here as a non-read mutation or given an explicit latency
+/// class and output-volume disposition.
+#[must_use]
+pub fn tui_read_surface_inventory() -> Vec<aplan_output::stream::ReadSurfaceEntry> {
+    let mut entries = Vec::with_capacity(EffectKind::ALL.len() + model::Route::ALL.len());
+    for kind in EffectKind::ALL {
+        if let Some(entry) = tui_effect_read_surface(kind) {
+            entries.push(entry);
+        }
+    }
+    for route in model::Route::ALL {
+        entries.push(tui_route_read_surface(route));
+    }
+    entries
+}
+
+fn tui_effect_read_surface(kind: EffectKind) -> Option<aplan_output::stream::ReadSurfaceEntry> {
+    use aplan_output::stream::{
+        OutputDisposition, ReadChannel, ReadLatencyClass, ReadSurfaceEntry,
+    };
+
+    let (target, potentially_unbounded, latency_class, disposition, boundary, rationale) =
+        match kind {
+            // Guarded write pipeline is excluded from the read-surface inventory.
+            EffectKind::Mutation => return None,
+            EffectKind::Startup => (
+                "effect:startup",
+                true,
+                ReadLatencyClass::FullStructuralRead,
+                OutputDisposition::ExplicitlyCapped,
+                "first interactive loading frame paints before plan load; worker builds one PlanStore snapshot and replaces state only if generation matches",
+                "Interactive launch loads PlanStore and computes one shared structural snapshot off the UI thread with explicit loading feedback.",
+            ),
+            EffectKind::Probe => (
+                "effect:probe",
+                false,
+                ReadLatencyClass::LocalBoundedRead,
+                OutputDisposition::Buffered,
+                "periodic 5 s probe checks PlanStore input identity only without constructing projections or verification sheets",
+                "Bounded external-change probe compares snapshot identities and yields cooperatively on quit.",
+            ),
+            EffectKind::Refresh => (
+                "effect:refresh",
+                true,
+                ReadLatencyClass::FullStructuralRead,
+                OutputDisposition::ExplicitlyCapped,
+                "background refresh builds a complete snapshot through PlanStore and commits atomically on generation match",
+                "Explicit interactive refresh reuses PlanStore artifacts and structural reports off the UI thread.",
+            ),
+            EffectKind::Retry => (
+                "effect:retry",
+                false,
+                ReadLatencyClass::LocalBoundedRead,
+                OutputDisposition::Buffered,
+                "onboarding retry re-runs launch resolution off the UI thread and either enters Loaded or updates Onboarding atomically",
+                "Bounded onboarding recovery check without mutating plan files.",
+            ),
+            EffectKind::Verify => (
+                "effect:verify",
+                true,
+                ReadLatencyClass::ExternalRefresh,
+                OutputDisposition::ExplicitlyCapped,
+                "explicit user-triggered verification runs off the UI thread with live progress, resource caps, and clean process-group cancellation",
+                "Explicit external evidence refresh excluded from the 100 ms completion SLO; bounded, cancellable, and observable.",
+            ),
+            EffectKind::TestCatalogue => (
+                "effect:test_catalogue",
+                true,
+                ReadLatencyClass::ExternalRefresh,
+                OutputDisposition::ExplicitlyCapped,
+                "configured test-catalogue discovery runs off the UI thread with provider bounds and modal pagination/windowing",
+                "Explicit configured-runner discovery excluded from the 100 ms completion SLO.",
+            ),
+        };
+    Some(ReadSurfaceEntry {
+        surface: format!("tui:{target}:frame"),
+        channel: ReadChannel::TuiOperation,
+        target: target.to_string(),
+        format: "terminal-frame".to_string(),
+        potentially_unbounded,
+        latency_class,
+        disposition,
+        atomic_error_boundary: boundary,
+        rationale,
+    })
+}
+
+fn tui_route_read_surface(route: model::Route) -> aplan_output::stream::ReadSurfaceEntry {
+    use aplan_output::stream::{
+        OutputDisposition, ReadChannel, ReadLatencyClass, ReadSurfaceEntry,
+    };
+    use model::Route;
+
+    let (target, potentially_unbounded, latency_class, disposition, boundary, rationale) =
+        match route {
+            Route::Overview => (
+                "route:overview",
+                false,
+                ReadLatencyClass::LocalBoundedRead,
+                OutputDisposition::ExplicitlyCapped,
+                "viewport-bounded summary frame painted directly from the active immutable Snapshot",
+                "Fixed-cardinality plan overview painted to the active terminal viewport.",
+            ),
+            Route::Tasks => (
+                "route:tasks",
+                true,
+                ReadLatencyClass::OutputDominatedRead,
+                OutputDisposition::ExplicitlyCapped,
+                "virtualized viewport slice paints only visible rows plus one focused inspector from the immutable Snapshot",
+                "Task browser scales to 10,000 tasks via viewport windowing with O(viewport) frame paint.",
+            ),
+            Route::Diagnostics => (
+                "route:diagnostics",
+                true,
+                ReadLatencyClass::FullStructuralRead,
+                OutputDisposition::ExplicitlyCapped,
+                "diagnostic workbench renders viewport-sliced rows from the cached structural Report",
+                "Structural diagnostic workbench bounded to the terminal viewport over the active snapshot.",
+            ),
+            Route::Graph => (
+                "route:graph",
+                true,
+                ReadLatencyClass::OutputDominatedRead,
+                OutputDisposition::ExplicitlyCapped,
+                "multiscale layered explorer enforces hard viewport/cell caps and falls back deterministically when too wide",
+                "Interactive multiscale graph renders a bounded 2D viewport window over the cell scene.",
+            ),
+            Route::Reports => (
+                "route:reports",
+                false,
+                ReadLatencyClass::LocalBoundedRead,
+                OutputDisposition::ExplicitlyCapped,
+                "bounded aggregate report tables painted to the active terminal viewport from the immutable Snapshot",
+                "Aggregate plan reports bounded by phase/cut/tag cardinality and viewport height.",
+            ),
+            Route::Inbox => (
+                "route:inbox",
+                true,
+                ReadLatencyClass::LocalBoundedRead,
+                OutputDisposition::ExplicitlyCapped,
+                "viewport-bounded capture list read from the active Snapshot",
+                "Interactive inbox listing bounded to the terminal viewport.",
+            ),
+            Route::Completed => (
+                "route:completed",
+                true,
+                ReadLatencyClass::RepositoryRead,
+                OutputDisposition::Paginated,
+                "chronological completion workspace slices explicit page limits with optional bounded Git history policy",
+                "Interactive completed-work browser paginates recorded and optional Git-inferred completion history.",
+            ),
+        };
+    ReadSurfaceEntry {
+        surface: format!("tui:{target}:frame"),
+        channel: ReadChannel::TuiOperation,
+        target: target.to_string(),
+        format: "terminal-frame".to_string(),
+        potentially_unbounded,
+        latency_class,
+        disposition,
+        atomic_error_boundary: boundary,
+        rationale,
+    }
+}
+
 const IDLE_POLL_TIMEOUT: Duration = Duration::from_secs(60);
 const ACTIVE_POLL_TIMEOUT: Duration = Duration::from_millis(250);
 const EXTERNAL_POLL_INTERVAL: Duration = Duration::from_secs(5);

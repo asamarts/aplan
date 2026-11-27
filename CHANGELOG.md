@@ -8,6 +8,24 @@ to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Added
 
+- **Cross-channel read-surface latency audit, zero-dependency binary `PlanStore` codec, and
+  deterministic work counters (`A2-134`, `--require read.reports_latency_classes_and_work_counters`)**.
+  Extended `aplan::read_surface_inventory()` to derive and audit every CLI command/format, MCP
+  tool/resource/template, and TUI read operation (`EffectKind::ALL` + `Route::ALL`) with one
+  explicit `ReadLatencyClass` (`local_bounded_read`, `full_structural_read`,
+  `evidence_backed_inspection`, `repository_read`, `external_refresh`, `output_dominated_read`)
+  and `OutputDisposition`. Added `repo_ms=`, `files_hashed=`, `report_builds=`, and
+  `provider_spawns=` to `--timings` and `ci/scripts/read-performance.py` (with all seven
+  `--cache-state` modes and `--repo-matrix`), separating plan overhead from bounded Git work across
+  `paths`, `paths match`, `stale`, `summary --at`, `version`, and `completed`. Upgraded the private
+  disposable `PlanStore` cache to a zero-dependency, BLAKE3-checksummed, range-checked binary codec
+  (`FORMAT_EPOCH = 5`) with `d_type`-filtered directory walks, single-`symlink_metadata` file
+  observations, `Arc<IdentifiedPlan>` snapshot sharing, persisted root-bound `plan_input_digest`,
+  `Show::assemble_for_task`, `Graph::cut_owners_map`, and dense `indexed_toposort`/`ready_ranked`
+  projections -- cutting 10,000-task release exact hits on the quiet reference host to 83.4 ms
+  (`why`), 85.4 ms (`check`), and 90.7 ms (`show --no-resolve`) with zero new `Cargo.lock`
+  dependencies, 3.71x smaller cache files (2.33 MB vs 8.64 MB), and >2x lower peak RSS (37.3 MiB
+  vs 79.3 MiB).
 - **Bounded-memory streaming for output-dominated reads and derived read-surface disposition
   inventory (`A2-136`, `--require read.streams_large_outputs_with_bounded_memory`)**. Established
   the empirical 256 KiB bounded-response threshold and 16 KiB streaming buffer across current,

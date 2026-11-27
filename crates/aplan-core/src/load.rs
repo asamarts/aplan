@@ -1061,40 +1061,73 @@ pub fn parse_plan_candidate(path: &Path, bytes: &[u8]) -> ParsedCandidate {
 /// read diagnostic; an entry the filesystem cannot enumerate is not invented.
 #[must_use]
 pub fn plan_candidate_paths(root: &Path) -> Vec<PathBuf> {
-    plan_walk(root)
-        .filter_map(Result::ok)
-        .filter_map(|entry| {
-            let path = entry.path();
-            let relative = path.strip_prefix(root).unwrap_or(path);
-            (path.is_file() && is_plan_file_path(relative)).then(|| path.to_path_buf())
-        })
-        .collect()
+    let mut out = Vec::new();
+    collect_plan_candidates(root, root, 1, &mut out);
+    out
 }
 
-fn plan_walk(root: &Path) -> ignore::Walk {
-    ignore::WalkBuilder::new(root)
-        .hidden(false)
-        .parents(false)
-        .ignore(false)
-        .git_ignore(false)
-        .git_global(false)
-        .git_exclude(false)
-        .filter_entry(|e| {
-            if e.depth() == 0 {
-                return true;
+fn collect_plan_candidates(root: &Path, dir: &Path, depth: usize, out: &mut Vec<PathBuf>) {
+    let Ok(read_dir) = std::fs::read_dir(dir) else {
+        return;
+    };
+    // Sorting sibling entries by `file_name` (`OsString::cmp`) is identical to
+    // `Path::cmp` on `dir.join(file_name)` because every entry shares `dir`,
+    // while avoiding O(N log N) multi-component path splits on large directories.
+    let mut entries: Vec<(std::ffi::OsString, Option<std::fs::FileType>)> = read_dir
+        .filter_map(Result::ok)
+        .filter_map(|entry| {
+            let name = entry.file_name();
+            if let Some(name_str) = name.to_str() {
+                if matches!(name_str, ".git" | ".jj" | ".hg" | ".svn") {
+                    return None;
+                }
+                if depth == 1
+                    && matches!(
+                        name_str,
+                        "target" | "node_modules" | crate::capture::INBOX_DIR
+                    )
+                {
+                    return None;
+                }
             }
-            let name = e.file_name().to_str();
-            if matches!(name, Some(".git" | ".jj" | ".hg" | ".svn")) {
-                return false;
+            let file_type = entry.file_type().ok();
+            // Reject non-markdown regular files before sorting or joining paths.
+            if let Some(ft) = file_type
+                && ft.is_file()
+                && !Path::new(&name)
+                    .extension()
+                    .is_some_and(|e| e.eq_ignore_ascii_case("md"))
+            {
+                return None;
             }
-            !(e.depth() == 1
-                && matches!(
-                    name,
-                    Some("target" | "node_modules" | crate::capture::INBOX_DIR)
-                ))
+            Some((name, file_type))
         })
-        .sort_by_file_path(Path::cmp)
-        .build()
+        .collect();
+    entries.sort_unstable_by(|a, b| a.0.cmp(&b.0));
+
+    for (name, file_type) in entries {
+        let path = dir.join(&name);
+        match file_type {
+            Some(ft) if ft.is_dir() => {
+                collect_plan_candidates(root, &path, depth + 1, out);
+            }
+            Some(ft) if ft.is_file() => {
+                let relative = path.strip_prefix(root).unwrap_or(&path);
+                if is_plan_file_path(relative) {
+                    out.push(path);
+                }
+            }
+            // Symlinks (or filesystems with DT_UNKNOWN): preserve historical
+            // `path.is_file()` behavior for symlinked task files without
+            // following symlinked directories.
+            _ => {
+                let relative = path.strip_prefix(root).unwrap_or(&path);
+                if is_plan_file_path(relative) && path.is_file() {
+                    out.push(path);
+                }
+            }
+        }
+    }
 }
 
 fn load_worktree_candidate(path: &Path, validator: &jsonschema::Validator) -> WorktreeCandidate {
@@ -1167,14 +1200,8 @@ fn load_plan_worktree(root: &Path, retain_inputs: bool) -> (IdentifiedPlan, Load
     // Sort the walk so load order, and therefore the order of any tie-broken
     // diagnostics, is identical across filesystems and CI runners, not the
     // OS `readdir` order.
-    for entry in plan_walk(root).flatten() {
-        let path = entry.path();
-        // Case-insensitive: `.MD`/`.Md` (a Windows editor, a careless rename) is
-        // still a task file, not something to silently drop.
-        let relative = path.strip_prefix(root).unwrap_or(path);
-        if !path.is_file() || !is_plan_file_path(relative) {
-            continue;
-        }
+    for path in plan_candidate_paths(root) {
+        let path = path.as_path();
         stats.candidate_files += 1;
         // Pre-filter: a task candidate is a file whose first line is a bare
         // `---` fence (after any leading BOMs). A `----` rule or a `---foo`

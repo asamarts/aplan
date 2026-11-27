@@ -40,12 +40,23 @@ std::thread_local! {
             markdown_parses: 0,
             structured_parses: 0,
         }) };
+    static VALIDATION_RUNS: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
 }
 
 /// Cumulative traced-document work on the current thread.
 #[must_use]
 pub fn trace_document_work() -> TraceDocumentWork {
     TRACE_DOCUMENT_WORK.get()
+}
+
+/// Cumulative structural validation report computations on the current thread
+/// (`A2-134`).
+///
+/// Reused cached structural reports do not increment this counter, allowing
+/// `--timings` and regression tests to ratchet report builds deterministically.
+#[must_use]
+pub fn validation_runs() -> usize {
+    VALIDATION_RUNS.get()
 }
 
 fn record_trace_document(text: &str, format: Option<crate::structured::Format>) {
@@ -842,6 +853,7 @@ fn run_validate(
     graph: &Graph<'_>,
     observe_vacuity: bool,
 ) -> (Report, ValidationObservations) {
+    VALIDATION_RUNS.set(VALIDATION_RUNS.get().saturating_add(1));
     let mut report = Report {
         diagnostics: plan.load_diagnostics.clone(),
         tasks_checked: plan.tasks.len(),

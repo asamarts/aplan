@@ -5,6 +5,10 @@
       "what": "output-dominated CLI read surfaces stream preflighted human, Markdown, graph, and machine JSON/SARIF output through a bounded 16 KiB buffer with deterministic byte parity, clean BrokenPipe shutdown, output-work timing counters, an exhaustive CLI+MCP read-surface disposition inventory, and orphan-free MCP disconnect cleanup"
     },
     {
+      "name": "read.reports_latency_classes_and_work_counters",
+      "what": "`--timings` separates repository Git work (`repo_ms`) from plan overhead and reports deterministic `files_hashed`, `report_builds` and `provider_spawns` counters, while the derived CLI+MCP+TUI read-surface inventory assigns every read surface one explicit latency class and preserves CLI/MCP/TUI semantic parity across all cache and observation states"
+    },
+    {
       "name": "config.test_runner_reports_all_missing_and_misplaced_fields",
       "what": "test-runner configuration errors report every missing required field with its full key path (for example `test.schedule`, `test.runners[0].list`, `test.runners[0].run`) in one refusal and name where misplaced keys belong"
     },
@@ -1532,7 +1536,7 @@
     "version.require_impact"
   ],
   "counts": {
-    "behaviours": 248,
+    "behaviours": 249,
     "build_capabilities": 1,
     "commands": 51,
     "config_keys": 136,

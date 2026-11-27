@@ -9,6 +9,9 @@ use std::collections::{BTreeMap, BTreeSet, BinaryHeap, VecDeque};
 
 use crate::task::{Status, Task};
 
+/// Dense-indexed topological sort result (`node_ids`, per-node blockers, Kahn order).
+type IndexedToposort<'a> = (Vec<&'a str>, Vec<Vec<usize>>, Vec<usize>);
+
 /// The critical path: the longest chain of dependent tasks weighted by
 /// `effort_days`, the plan's spine. Advisory, never a gate (a plan is not wrong
 /// for being long). Owned so it renders without borrowing the graph.
@@ -408,26 +411,35 @@ impl<'a> Graph<'a> {
     /// edge is blocked by it once and the order never depends on how a plan
     /// happened to be written.
     pub fn blockers_of(&self, id: &str) -> Vec<&'a str> {
-        let mut all: BTreeSet<&'a str> = self
-            .get(id)
-            .into_iter()
-            .flat_map(|t| t.blocked_by.iter().map(String::as_str))
-            .filter_map(|b| self.by_id.get_key_value(b).map(|(k, _)| *k))
-            .collect();
-        // A declared edge to an id that does not exist is `APLAN003`'s finding,
-        // and `direct_unknown_blockers` reports it; it must still count as
-        // unmet, or a task blocked solely by a ghost would look ready.
-        if let Some(t) = self.get(id) {
-            for b in &t.blocked_by {
-                if !self.by_id.contains_key(b.as_str()) {
-                    all.insert(b.as_str());
+        let Some(t) = self.get(id) else {
+            return Vec::new();
+        };
+        let extra = self.sequenced.get(id).map_or(&[][..], Vec::as_slice);
+        if extra.is_empty() {
+            match t.blocked_by.as_slice() {
+                [] => return Vec::new(),
+                [only] => {
+                    let resolved = self
+                        .by_id
+                        .get_key_value(only.as_str())
+                        .map_or(only.as_str(), |(k, _)| *k);
+                    return vec![resolved];
                 }
+                _ => {}
             }
         }
-        if let Some(extra) = self.sequenced.get(id) {
-            all.extend(extra.iter().copied());
+        let mut all = Vec::with_capacity(t.blocked_by.len() + extra.len());
+        for b in &t.blocked_by {
+            let resolved = self
+                .by_id
+                .get_key_value(b.as_str())
+                .map_or(b.as_str(), |(k, _)| *k);
+            all.push(resolved);
         }
-        all.into_iter().collect()
+        all.extend(extra.iter().copied());
+        all.sort_unstable();
+        all.dedup();
+        all
     }
 
     pub fn get(&self, id: &str) -> Option<&'a Task> {
@@ -628,10 +640,14 @@ impl<'a> Graph<'a> {
         self.get(id).is_some_and(|task| {
             !task.is_milestone()
                 && task.status.is_workable()
-                && self
-                    .blockers_of(id)
+                && task
+                    .blocked_by
                     .iter()
                     .all(|blocker| !self.blocks(task, blocker))
+                && self
+                    .sequenced
+                    .get(id)
+                    .is_none_or(|extra| extra.iter().all(|blocker| !self.blocks(task, blocker)))
         })
     }
 
@@ -643,36 +659,43 @@ impl<'a> Graph<'a> {
     /// learn to distrust, which is the standard `why` already sets for blocking.
     #[must_use]
     pub fn ready_ranked(&self) -> Vec<(&'a Task, Rank)> {
-        let workable: Vec<&'a Task> = self
-            .by_id
-            .values()
-            .copied()
-            .filter(|task| self.is_ready(&task.id))
+        let len = self.by_id.len();
+        let node_ids: Vec<&'a str> = self.by_id.keys().copied().collect();
+        let tasks: Vec<&'a Task> = self.by_id.values().copied().collect();
+        let index_of: std::collections::HashMap<&'a str, usize> = node_ids
+            .iter()
+            .enumerate()
+            .map(|(idx, &id)| (id, idx))
             .collect();
 
-        let spine: BTreeSet<String> = self
-            .critical_path()
-            // A spine of no days is not a spine. With no estimates in the plan
-            // every chain weighs zero, the endpoint is whichever id sorts first,
-            // and calling that task "critical" would be precisely the arbitrary
-            // answer dressed as a real one that this rank exists to replace
-            // (`A1-125`, found while auditing it).
-            .filter(|p| p.total_effort_days > 0.0)
-            .map(|p| p.tasks.into_iter().map(|t| t.id).collect())
-            .unwrap_or_default();
+        let workable: Vec<(usize, &'a Task)> = tasks
+            .iter()
+            .copied()
+            .enumerate()
+            .filter(|(_, task)| self.is_ready(&task.id))
+            .collect();
+
+        let mut on_spine = vec![false; len];
+        if let Some(path) = self.critical_path().filter(|p| p.total_effort_days > 0.0) {
+            for t in path.tasks {
+                if let Some(&idx) = index_of.get(t.id.as_str()) {
+                    on_spine[idx] = true;
+                }
+            }
+        }
 
         // Both indexes are built once for the whole answer, not per task: asking
         // either question per ready task is what made `ready` quadratic once
         // already (`A1-125`).
-        let releases = self.releases_all();
-        let downstream = self.downstream_depth_all();
+        let releases = self.releases_dense(&tasks, &index_of);
+        let downstream = Self::downstream_depth_dense(&tasks, &index_of);
         let mut out: Vec<(&'a Task, Rank)> = workable
             .into_iter()
-            .map(|t| {
+            .map(|(idx, t)| {
                 let rank = Rank {
-                    releases: releases.get(t.id.as_str()).copied().unwrap_or(0),
-                    downstream_depth: downstream.get(t.id.as_str()).copied().unwrap_or(0),
-                    critical: spine.contains(&t.id),
+                    releases: releases[idx],
+                    downstream_depth: downstream[idx],
+                    critical: on_spine[idx],
                     effort_days: t.effort_days.unwrap_or(0.0),
                 };
                 (t, rank)
@@ -714,6 +737,9 @@ impl<'a> Graph<'a> {
     /// graph's id index; with a repeated id the positions found by name would
     /// differ from the tasks the definition treats as placed.
     fn honour_preferences(ranked: &mut Vec<(&Task, Rank)>) {
+        if ranked.iter().all(|(task, _)| task.prefer_after.is_empty()) {
+            return;
+        }
         let position: BTreeMap<&str, usize> = ranked
             .iter()
             .enumerate()
@@ -828,6 +854,22 @@ impl<'a> Graph<'a> {
             .copied()
             .filter(|d| !d.is_milestone() && d.status.is_workable())
         {
+            if !self.sequenced.contains_key(d.id.as_str()) {
+                match d.blocked_by.as_slice() {
+                    [] => continue,
+                    [only] => {
+                        if only != &d.id && self.blocks(d, only) {
+                            let resolved = self
+                                .by_id
+                                .get_key_value(only.as_str())
+                                .map_or(only.as_str(), |(k, _)| *k);
+                            *out.entry(resolved).or_default() += 1;
+                        }
+                        continue;
+                    }
+                    _ => {}
+                }
+            }
             let mut blocking = self
                 .blockers_of(&d.id)
                 .into_iter()
@@ -872,62 +914,111 @@ impl<'a> Graph<'a> {
     /// a plan whose tasks form a long chain would otherwise recurse as deep as it
     /// is long. A cycle is `APLAN004`'s finding; here it simply stops, so this
     /// answers on a plan `check` would refuse.
-    #[must_use]
-    pub fn downstream_depth_all(&self) -> BTreeMap<&'a str, usize> {
-        // Reverse *dependency* edges: blocker -> the live work waiting on it.
-        let mut waiting: BTreeMap<&'a str, Vec<&'a str>> = BTreeMap::new();
-        for d in self
-            .by_id
-            .values()
-            .copied()
-            .filter(|d| !d.is_milestone() && d.status.is_workable())
-        {
+    fn releases_dense(
+        &self,
+        tasks: &[&'a Task],
+        index_of: &std::collections::HashMap<&'a str, usize>,
+    ) -> Vec<usize> {
+        let mut out = vec![0_usize; tasks.len()];
+        for &d in tasks {
+            if d.is_milestone() || !d.status.is_workable() {
+                continue;
+            }
+            if !self.sequenced.contains_key(d.id.as_str()) {
+                match d.blocked_by.as_slice() {
+                    [] => continue,
+                    [only] => {
+                        if only != &d.id
+                            && self.blocks(d, only)
+                            && let Some(&idx) = index_of.get(only.as_str())
+                        {
+                            out[idx] += 1;
+                        }
+                        continue;
+                    }
+                    _ => {}
+                }
+            }
+            let mut blocking = self
+                .blockers_of(&d.id)
+                .into_iter()
+                .filter(|b| self.blocks(d, b));
+            if let (Some(only), None) = (blocking.next(), blocking.next())
+                && only != d.id
+                && let Some(&idx) = index_of.get(only)
+            {
+                out[idx] += 1;
+            }
+        }
+        out
+    }
+
+    fn downstream_depth_dense(
+        tasks: &[&'a Task],
+        index_of: &std::collections::HashMap<&'a str, usize>,
+    ) -> Vec<usize> {
+        let len = tasks.len();
+        let mut waiting: Vec<Vec<usize>> = vec![Vec::new(); len];
+        for (d_idx, &d) in tasks.iter().enumerate() {
+            if d.is_milestone() || !d.status.is_workable() {
+                continue;
+            }
             for b in &d.blocked_by {
-                if let Some((k, tail)) = self.by_id.get_key_value(b.as_str())
-                    && !tail.is_milestone()
-                    && tail.status.is_workable()
-                {
-                    waiting.entry(*k).or_default().push(
-                        self.by_id
-                            .get_key_value(d.id.as_str())
-                            .map_or(d.id.as_str(), |(k, _)| *k),
-                    );
+                if let Some(&b_idx) = index_of.get(b.as_str()) {
+                    let tail = tasks[b_idx];
+                    if !tail.is_milestone() && tail.status.is_workable() {
+                        waiting[b_idx].push(d_idx);
+                    }
                 }
             }
         }
 
-        let mut depth: BTreeMap<&'a str, usize> = BTreeMap::new();
-        let mut open: BTreeSet<&str> = BTreeSet::new();
-        for start in self.by_id.keys().copied() {
-            if depth.contains_key(start) {
+        // 0 = unvisited, 1 = open on stack, 2 = completed
+        let mut state = vec![0_u8; len];
+        let mut depth = vec![0_usize; len];
+        let mut work: Vec<(usize, usize)> = Vec::new();
+        for start in 0..len {
+            if state[start] == 2 {
                 continue;
             }
-            let mut work: Vec<(&'a str, usize)> = vec![(start, 0)];
+            work.push((start, 0));
             while let Some((node, idx)) = work.pop() {
-                let kids: &[&'a str] = waiting.get(node).map_or(&[], Vec::as_slice);
                 if idx == 0 {
-                    open.insert(node);
+                    state[node] = 1;
                 }
+                let kids = &waiting[node];
                 if idx < kids.len() {
                     work.push((node, idx + 1));
                     let next = kids[idx];
-                    // `open` is the cycle guard: a plan `check` refuses can still
-                    // be asked this question, and it must answer rather than spin.
-                    if !depth.contains_key(next) && !open.contains(next) {
+                    if state[next] == 0 {
                         work.push((next, 0));
                     }
                 } else {
-                    let d = kids
-                        .iter()
-                        .map(|k| depth.get(k).map_or(0, |v| v + 1))
-                        .max()
-                        .unwrap_or(0);
-                    depth.insert(node, d);
-                    open.remove(node);
+                    let mut best = 0_usize;
+                    for &k in kids {
+                        if state[k] == 2 {
+                            best = best.max(depth[k] + 1);
+                        }
+                    }
+                    depth[node] = best;
+                    state[node] = 2;
                 }
             }
         }
         depth
+    }
+
+    #[must_use]
+    pub fn downstream_depth_all(&self) -> BTreeMap<&'a str, usize> {
+        let node_ids: Vec<&'a str> = self.by_id.keys().copied().collect();
+        let tasks: Vec<&'a Task> = self.by_id.values().copied().collect();
+        let index_of: std::collections::HashMap<&'a str, usize> = node_ids
+            .iter()
+            .enumerate()
+            .map(|(idx, &id)| (id, idx))
+            .collect();
+        let depth = Self::downstream_depth_dense(&tasks, &index_of);
+        node_ids.into_iter().zip(depth).collect()
     }
 
     /// The unmet blockers of `id`, nearest first, as far as `walk` goes.
@@ -1123,61 +1214,89 @@ impl<'a> Graph<'a> {
     /// in-degree-0 nodes in id order, so the result is deterministic; returns
     /// `None` when a cycle leaves some node unprocessed.
     fn toposort_nodes(&self, nodes: &BTreeSet<&'a str>) -> Option<Vec<&'a str>> {
-        let mut indegree: BTreeMap<&str, usize> = nodes.iter().map(|n| (*n, 0)).collect();
-        let mut dependents: BTreeMap<&str, Vec<&'a str>> =
-            nodes.iter().map(|n| (*n, Vec::new())).collect();
-        for &v in nodes {
-            for b in self.blockers_within(v, nodes) {
-                *indegree.get_mut(v).unwrap() += 1;
-                dependents.get_mut(b).unwrap().push(v);
+        let (node_ids, _blockers, order) = self.indexed_toposort(nodes)?;
+        Some(order.into_iter().map(|idx| node_ids[idx]).collect())
+    }
+
+    /// Dense-indexed topological sort returning sorted `node_ids`, per-node
+    /// deduplicated in-set blocker indices, and the deterministic Kahn order
+    /// (`A2-134`).
+    ///
+    /// `HashMap` is used strictly for O(1) id-to-index lookup and is never
+    /// iterated; `node_ids` inherits `nodes`'s `BTreeSet` id order, per-node
+    /// blockers are sorted by index (id order), and the Kahn frontier is a
+    /// `BTreeSet<usize>`, preserving byte-identical tie-breaks.
+    fn indexed_toposort(&self, nodes: &BTreeSet<&'a str>) -> Option<IndexedToposort<'a>> {
+        let len = nodes.len();
+        let node_ids: Vec<&'a str> = nodes.iter().copied().collect();
+        let index_of: std::collections::HashMap<&'a str, usize> = node_ids
+            .iter()
+            .enumerate()
+            .map(|(idx, &id)| (id, idx))
+            .collect();
+        let mut blockers: Vec<Vec<usize>> = Vec::with_capacity(len);
+        let mut indegree = vec![0_usize; len];
+        let mut dependents: Vec<Vec<usize>> = vec![Vec::new(); len];
+
+        for (v_idx, &v) in node_ids.iter().enumerate() {
+            let mut v_blockers = Vec::new();
+            if let Some(task) = self.get(v) {
+                for b in &task.blocked_by {
+                    if let Some(&b_idx) = index_of.get(b.as_str())
+                        && b_idx != v_idx
+                    {
+                        v_blockers.push(b_idx);
+                    }
+                }
+                for c in &task.contains {
+                    if let Some(&c_idx) = index_of.get(c.as_str())
+                        && c_idx != v_idx
+                    {
+                        v_blockers.push(c_idx);
+                    }
+                }
             }
+            if let Some(extra) = self.sequenced.get(v) {
+                for &b in extra {
+                    if let Some(&b_idx) = index_of.get(b)
+                        && b_idx != v_idx
+                    {
+                        v_blockers.push(b_idx);
+                    }
+                }
+            }
+            if v_blockers.len() > 1 {
+                v_blockers.sort_unstable();
+                v_blockers.dedup();
+            }
+            indegree[v_idx] = v_blockers.len();
+            for &b_idx in &v_blockers {
+                dependents[b_idx].push(v_idx);
+            }
+            blockers.push(v_blockers);
         }
 
-        // A `BTreeSet` frontier makes the pop order deterministic (smallest id).
-        let mut ready: BTreeSet<&str> = indegree
+        // A `BTreeSet<usize>` frontier pops the smallest id first because
+        // `node_ids` is in ascending id order.
+        let mut ready: BTreeSet<usize> = indegree
             .iter()
-            .filter(|(_, d)| **d == 0)
-            .map(|(&n, _)| n)
+            .enumerate()
+            .filter_map(|(idx, &deg)| (deg == 0).then_some(idx))
             .collect();
-        let mut order = Vec::with_capacity(nodes.len());
-        while let Some(&n) = ready.iter().next() {
-            ready.remove(n);
+        let mut order = Vec::with_capacity(len);
+        while let Some(n) = ready.pop_first() {
             order.push(n);
             for &d in &dependents[n] {
-                let e = indegree.get_mut(d).unwrap();
-                *e -= 1;
-                if *e == 0 {
+                indegree[d] -= 1;
+                if indegree[d] == 0 {
                     ready.insert(d);
                 }
             }
         }
-        (order.len() == nodes.len()).then_some(order)
+        (order.len() == len).then_some((node_ids, blockers, order))
     }
 
-    /// The unique known blockers of `v` that lie within `nodes` (self-edges and
-    /// unknown/outside ids dropped), **plus what `v` contains**. Sorted, so
-    /// downstream tie-breaks are stable.
-    ///
-    /// **Containment is read as an ordering edge, and on a valid plan it is
-    /// already there** (`A1-345`, audit). A container is not finished until
-    /// everything beneath it is, and `APLAN047` enforces exactly that: a
-    /// `contains` entry must also appear in `blocked_by`, or the checkpoint
-    /// "does not wait for what it holds". So on a plan `check` accepts this adds
-    /// nothing, and the set dedupes it.
-    ///
-    /// It earns its place on a plan `check` does *not* accept. `critical-path`
-    /// and `roadmap` are reports, not gates, so they render a plan mid-migration
-    /// to `contains` -- and the rollup descends `contains` whether or not
-    /// `blocked_by` agrees. Reading only `blocked_by` there put `crit 0.0d`
-    /// beside the held work's real effort: two quantities on one page, which is
-    /// the defect `A1-345` exists to remove, on the page of the author least
-    /// able to explain it.
-    ///
-    /// This is not `contains` becoming a dependency (ADR-0042 is deliberate that
-    /// it is not): `ready` never offers a checkpoint, `why` still answers about
-    /// declared edges, and no rule reads this. It is the longest-path DP's edge
-    /// set, and a walk that must not skip work cannot skip the work a checkpoint
-    /// holds.
+    #[cfg(test)]
     fn blockers_within(&self, v: &str, nodes: &BTreeSet<&'a str>) -> BTreeSet<&'a str> {
         let held = self
             .get(v)
@@ -1406,21 +1525,29 @@ impl<'a> Graph<'a> {
     /// *which chain ends here*. A second copy would be two answers to one
     /// question, and the pair could drift (`A1-345`).
     fn longest_paths(&self, nodes: &BTreeSet<&'a str>, w: Weigh) -> Option<LongestPaths<'a>> {
-        let order = self.toposort_nodes(nodes)?;
-        let mut dp = LongestPaths::default();
-        for &v in &order {
+        let (node_ids, blockers, order) = self.indexed_toposort(nodes)?;
+        let len = node_ids.len();
+        let mut finish_arr = vec![0.0_f64; len];
+        let mut pred_arr: Vec<Option<usize>> = vec![None; len];
+        for v_idx in order {
+            let v = node_ids[v_idx];
             let effort = self.get(v).map_or(0.0, |t| w.of(t));
-            let mut best: Option<&str> = None;
+            let mut best: Option<usize> = None;
             let mut best_finish = 0.0_f64;
-            for b in self.blockers_within(v, nodes) {
-                let f = dp.finish[b];
+            for &b_idx in &blockers[v_idx] {
+                let f = finish_arr[b_idx];
                 if best.is_none() || f > best_finish {
-                    best = Some(b);
+                    best = Some(b_idx);
                     best_finish = f;
                 }
             }
-            dp.finish.insert(v, effort + best_finish);
-            dp.pred.insert(v, best);
+            finish_arr[v_idx] = effort + best_finish;
+            pred_arr[v_idx] = best;
+        }
+        let mut dp = LongestPaths::default();
+        for (idx, &id) in node_ids.iter().enumerate() {
+            dp.finish.insert(id, finish_arr[idx]);
+            dp.pred.insert(id, pred_arr[idx].map(|p| node_ids[p]));
         }
         Some(dp)
     }

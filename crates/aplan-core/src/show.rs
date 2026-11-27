@@ -435,8 +435,71 @@ impl Show {
             unloadable,
             claims,
         } = sources;
-        let task: &Task = graph.get(id)?;
         let row = task_row(rows, id);
+        let cut = row.and_then(|r| r.cut.clone());
+        let milestone = row.and_then(|r| r.milestone.clone());
+        let ready = row.is_some_and(|r| r.ready);
+        Self::assemble_with_row_facts(
+            graph,
+            diagnostics,
+            unloadable,
+            claims,
+            id,
+            cut,
+            milestone,
+            ready,
+            resolved,
+            body,
+        )
+    }
+
+    /// Build a single-task view directly from the graph without allocating a
+    /// whole-plan `TaskExport` (`A2-134`).
+    ///
+    /// Computes the target task's owning cut, milestone, and readiness directly
+    /// from [`Graph::cut_owner`] and [`Graph::is_ready`], producing output
+    /// identical to [`Self::assemble`] with `graph.task_rows()`.
+    #[must_use]
+    pub fn assemble_for_task(
+        graph: &Graph<'_>,
+        diagnostics: &[Diagnostic],
+        unloadable: &BTreeMap<String, std::path::PathBuf>,
+        claims: &ClaimSnapshot,
+        id: &str,
+        resolved: bool,
+        body: Option<String>,
+    ) -> Option<Self> {
+        let _ = graph.get(id)?;
+        let (cut, milestone) = graph.cut_owner(id);
+        let ready = graph.is_ready(id);
+        Self::assemble_with_row_facts(
+            graph,
+            diagnostics,
+            unloadable,
+            claims,
+            id,
+            cut,
+            milestone,
+            ready,
+            resolved,
+            body,
+        )
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn assemble_with_row_facts(
+        graph: &Graph<'_>,
+        diagnostics: &[Diagnostic],
+        unloadable: &BTreeMap<String, std::path::PathBuf>,
+        claims: &ClaimSnapshot,
+        id: &str,
+        cut: Option<String>,
+        milestone: Option<String>,
+        ready: bool,
+        resolved: bool,
+        body: Option<String>,
+    ) -> Option<Self> {
+        let task: &Task = graph.get(id)?;
         let related = |other: &str| related_task(graph, unloadable, other);
         Some(Self {
             schema: "aplan/show/v3".to_string(),
@@ -456,9 +519,9 @@ impl Show {
             coordination: claims.scope.clone(),
             effort_days: task.effort_days,
             tags: task.tags.clone(),
-            cut: row.and_then(|r| r.cut.clone()),
-            milestone: row.and_then(|r| r.milestone.clone()),
-            ready: row.is_some_and(|r| r.ready),
+            cut,
+            milestone,
+            ready,
             workable: task.status.is_workable() && !task.is_milestone(),
             revisit_at: task.revisit_at.clone(),
             closed_at: task.closed_at.clone(),
@@ -589,5 +652,122 @@ mod tests {
         for (state, expected) in labels {
             assert_eq!(state.label(), expected);
         }
+    }
+
+    fn test_task(
+        id: &str,
+        status: crate::task::Status,
+        blocked_by: &[&str],
+        contains: &[&str],
+        tags: &[&str],
+    ) -> crate::task::Task {
+        crate::task::Task {
+            id: id.to_string(),
+            title: format!("Title {id}"),
+            phase: 1,
+            status,
+            owner: None,
+            effort_days: Some(1.0),
+            blocked_by: blocked_by.iter().map(|s| (*s).to_string()).collect(),
+            prefer_after: Vec::new(),
+            ratified_by: Vec::new(),
+            contains: contains.iter().map(|s| (*s).to_string()).collect(),
+            evidence: Vec::new(),
+            paths: Vec::new(),
+            traces: Vec::new(),
+            trace_fingerprints: std::collections::BTreeMap::new(),
+            evidence_fingerprints: std::collections::BTreeMap::new(),
+            tags: tags.iter().map(|s| (*s).to_string()).collect(),
+            revisit_at: None,
+            version_impact: None,
+            version_impact_reason: None,
+            version: None,
+            closed_at: None,
+            closed_at_source: None,
+        }
+    }
+
+    #[test]
+    fn assemble_for_task_matches_assemble_with_full_task_rows_across_cuts_and_releases() {
+        use crate::claim::{ClaimScope, ClaimSnapshot};
+        use crate::graph::Graph;
+        use crate::show::{Show, ShowSources};
+        use crate::task::Status;
+        use std::collections::BTreeMap;
+
+        let tasks = vec![
+            test_task("T-1", Status::Done, &[], &[], &[]),
+            test_task("T-2", Status::Todo, &["T-1"], &[], &[]),
+            test_task("T-3", Status::Todo, &["T-2"], &[], &[]),
+            test_task("T-4", Status::Dropped, &[], &[], &[]),
+            test_task("T-5", Status::Todo, &[], &[], &["cross-cutting"]),
+            test_task(
+                "M-1",
+                Status::Todo,
+                &["T-1", "T-2"],
+                &[],
+                &["milestone", "v0.2"],
+            ),
+            test_task(
+                "M-2",
+                Status::Todo,
+                &["T-2", "T-3", "T-4"],
+                &[],
+                &["milestone", "v0.10"],
+            ),
+            test_task(
+                "M-CONT",
+                Status::Todo,
+                &[],
+                &["M-1", "M-2"],
+                &["milestone", "container"],
+            ),
+            test_task(
+                "R-1",
+                Status::Todo,
+                &["M-1", "M-2"],
+                &[],
+                &["milestone", "release", "v1.0"],
+            ),
+        ];
+        let graph = Graph::new(tasks.iter());
+        let rows = graph.task_rows();
+        let unloadable = BTreeMap::new();
+        let claims = ClaimSnapshot {
+            scope: ClaimScope::unavailable("test"),
+            observed_at_epoch_seconds: 1_700_000_000,
+            claims: BTreeMap::new(),
+        };
+
+        for task in &tasks {
+            let full = Show::assemble(
+                ShowSources {
+                    graph: &graph,
+                    rows: &rows,
+                    diagnostics: &[],
+                    unloadable: &unloadable,
+                    claims: &claims,
+                },
+                &task.id,
+                false,
+                Some("body".to_string()),
+            )
+            .expect("full show");
+            let single = Show::assemble_for_task(
+                &graph,
+                &[],
+                &unloadable,
+                &claims,
+                &task.id,
+                false,
+                Some("body".to_string()),
+            )
+            .expect("single show");
+            assert_eq!(single, full, "mismatch on task {}", task.id);
+        }
+        assert!(
+            Show::assemble_for_task(&graph, &[], &unloadable, &claims, "MISSING", false, None)
+                .is_none()
+        );
     }
 }

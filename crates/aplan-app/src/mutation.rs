@@ -1490,11 +1490,20 @@ fn snapshot_observes_text(context: &PlanContext, path: &Path, expected: Option<&
     }
     let plan_root = absolute(&context.identity.plan_root);
     if path.starts_with(&plan_root) {
-        let captured = context
-            .source_inputs
-            .iter()
-            .find(|(candidate, _)| absolute(candidate) == path)
-            .map(|(_, content)| content);
+        let captured = if context.has_retained_bytes {
+            context
+                .source_inputs
+                .iter()
+                .find(|(candidate, _)| absolute(candidate) == path)
+                .map(|(_, content)| content)
+        } else {
+            context
+                .loaded
+                .inputs
+                .iter()
+                .find(|input| absolute(&input.path) == path)
+                .map(|input| &input.content)
+        };
         return match (captured, expected) {
             (Some(aplan_core::load::PlanFileContent::Bytes(actual)), Some(expected)) => {
                 actual == expected.as_bytes()
@@ -2378,6 +2387,47 @@ mod tests {
             &semantic_only,
             &config_change
         ));
+    }
+
+    #[test]
+    fn snapshot_reconciliation_refuses_sha_only_unretained_plan_context() {
+        let dir = tempfile::Builder::new()
+            .tempdir_in(aplan_core::fixture::fixture_root())
+            .expect("tempdir");
+        let plan_root = dir.path().join("aplan");
+        let tasks = plan_root.join("tasks");
+        std::fs::create_dir_all(&tasks).expect("tasks");
+        std::fs::write(
+            tasks.join("T-1.md"),
+            "---\nid: T-1\ntitle: first\nphase: 1\nstatus: todo\n---\n",
+        )
+        .expect("task");
+
+        // A read-only context without retained source bytes falls back to checking
+        // loaded inputs and refuses to pretend a SHA-only entry matched raw bytes.
+        let mut sha_only_loaded = aplan_core::load_plan_identified(&plan_root);
+        for input in &mut sha_only_loaded.inputs {
+            input.content = aplan_core::load::PlanFileContent::Sha256("a".repeat(64));
+        }
+        let sha_only = PlanContext::new(
+            sha_only_loaded,
+            super::super::ContextInputs {
+                repository_root: dir.path().to_path_buf(),
+                configuration_file: None,
+                trust: super::super::Trust::Hermetic,
+                options: aplan_core::Options::default(),
+                verdict: aplan_core::Verdict::default(),
+            },
+        );
+        let task_change = change_set(
+            &sha_only,
+            vec![FileChange::replacement(
+                plan_root.join("tasks/T-1.md"),
+                "before\n".to_string(),
+                "after\n".to_string(),
+            )],
+        );
+        assert!(!snapshot_observes_publication(&sha_only, &task_change));
     }
 
     fn repository_head(identity: &super::super::InputIdentity) -> Option<&str> {

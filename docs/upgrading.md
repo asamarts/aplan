@@ -1232,6 +1232,20 @@ now stream preflighted human, Markdown, graph, and machine JSON/SARIF output thr
   alongside the existing loader, graph, cache, and trace counters. Scripts parsing `aplan: timings`
   with an exact field-set assertion should allow those two fields.
 
+## Cross-surface read latency audit, binary cache format, and work counters (`A2-134`, `--require read.reports_latency_classes_and_work_counters`)
+
+`A2-134` audits every CLI, MCP and TUI read surface against explicit latency classes and upgrades
+the private disposable `PlanStore` cache from JSON (`FORMAT_EPOCH = 4`) to a zero-dependency,
+BLAKE3-checksummed binary format (`FORMAT_EPOCH = 5`, `.bin` files under `<cache>/aplan/plan-v1/`):
+
+- **Automatic private cache rebuild**: older `.json` generations are ignored safely and replaced on
+  the first read with `.bin` generations; no user migration or `--cache=refresh` action is needed,
+  and `--cache=off` continues to write nothing while producing identical output and exit codes.
+- **Additive `--timings` fields**: `aplan: timings` now includes `repo_ms=` (separating Git work
+  from plan load/projection on `paths`, `paths match`, `stale`, `summary --at`, `version`, and
+  `completed`), `files_hashed=`, `report_builds=`, and `provider_spawns=`. Scripts asserting an
+  exact `--timings` field set should allow those four fields alongside the existing keys.
+
 ## The full list
 
 [`CHANGELOG.md`](../CHANGELOG.md) is the complete record, including everything with no adoption
