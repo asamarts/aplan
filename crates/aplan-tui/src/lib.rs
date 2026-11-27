@@ -88,6 +88,131 @@ pub fn tui_read_surface_inventory() -> Vec<aplan_output::stream::ReadSurfaceEntr
     entries
 }
 
+/// Execute one real in-process representative for every TUI read surface
+/// (`EffectKind::ALL` read effects via [`SnapshotExecutor`] and every
+/// `Route::ALL` terminal frame via `ratatui::backend::TestBackend`), returning
+/// the exact list of driven surface IDs for the cross-channel audit (`A2-134`).
+#[doc(hidden)]
+pub fn audit_drive_tui_read_surfaces(
+    initial_load: InitialLoad,
+    session: Session,
+) -> Result<Vec<String>, String> {
+    let Session {
+        appearance: appearance_options,
+        observe,
+        reload,
+        retry,
+        verify,
+    } = session;
+    let executor = SnapshotExecutor {
+        initial_load: std::sync::Mutex::new(Some(initial_load)),
+        observe,
+        reload,
+        retry,
+        verify,
+        runtime_build: std::sync::OnceLock::new(),
+    };
+
+    let mut driven = Vec::with_capacity(EffectKind::ALL.len() + model::Route::ALL.len());
+    let mut startup_ready: Option<model::StartupReady> = None;
+    let mut input_sha256 = String::new();
+    let mut verify_input_sha256 = String::new();
+    let mut next_id = 1_u64;
+
+    for kind in EffectKind::ALL {
+        let Some(entry) = tui_effect_read_surface(kind) else {
+            continue;
+        };
+        let request = EffectRequest {
+            id: model::EffectId(next_id),
+            generation: 1,
+            focus_epoch: 1,
+            input: if kind == EffectKind::Verify {
+                verify_input_sha256.clone()
+            } else {
+                input_sha256.clone()
+            },
+            kind,
+            check_overrides: aplan_app::CheckOverrides::default(),
+            execute: false,
+            mutation: None,
+        };
+        next_id += 1;
+        let output = executor
+            .execute(&request, &mut |_| {})
+            .map_err(|err| format!("TUI read effect `{}` failed: {err:?}", entry.surface))?;
+        match (kind, output) {
+            (EffectKind::Startup, EffectOutput::Startup(ready)) => {
+                input_sha256.clone_from(&ready.snapshot.overview.input.sha256);
+                verify_input_sha256.clone_from(&ready.snapshot.verification_sheet.input_sha256);
+                startup_ready = Some(*ready);
+            }
+            (EffectKind::Probe, EffectOutput::Identity(identity)) => {
+                if identity.sha256 != input_sha256 {
+                    return Err(format!("probe identity mismatch for `{}`", entry.surface));
+                }
+            }
+            (EffectKind::Refresh, EffectOutput::Snapshot(_))
+            | (
+                EffectKind::Retry,
+                EffectOutput::LaunchSnapshot { .. } | EffectOutput::Onboarding(_),
+            )
+            | (EffectKind::Verify, EffectOutput::Verification(_))
+            | (EffectKind::TestCatalogue, EffectOutput::TestCatalogue(_)) => {}
+            (other, unexpected) => {
+                return Err(format!(
+                    "unexpected TUI effect output for `{other:?}`: {unexpected:?}"
+                ));
+            }
+        }
+        driven.push(entry.surface);
+    }
+
+    let ready = startup_ready.ok_or_else(|| "startup effect did not run".to_string())?;
+    let appearance = resolve_appearance(appearance_options, true, 0);
+    audit_render_tui_routes(ready, appearance, &mut driven)?;
+    Ok(driven)
+}
+
+fn audit_render_tui_routes(
+    ready: model::StartupReady,
+    appearance: Appearance,
+    driven: &mut Vec<String>,
+) -> Result<(), String> {
+    let mut model = Model::with_launch(
+        ready.snapshot,
+        ready.onboarding,
+        ready.capabilities,
+        ready.resolution,
+        appearance,
+    );
+    let backend = ratatui::backend::TestBackend::new(100, 30);
+    let mut terminal =
+        ratatui::Terminal::new(backend).map_err(|err| format!("creating test terminal: {err}"))?;
+    for route in model::Route::ALL {
+        let entry = tui_route_read_surface(route);
+        model.update(Action::Route(route));
+        terminal
+            .draw(|frame| render(frame, &model))
+            .map_err(|err| format!("rendering `{}`: {err}", entry.surface))?;
+        let rendered: String = terminal
+            .backend()
+            .buffer()
+            .content()
+            .iter()
+            .map(ratatui::buffer::Cell::symbol)
+            .collect();
+        if rendered.trim().is_empty() || rendered.contains('\u{1b}') {
+            return Err(format!(
+                "rendered frame for `{}` was empty or contained raw escape bytes",
+                entry.surface
+            ));
+        }
+        driven.push(entry.surface);
+    }
+    Ok(())
+}
+
 fn tui_effect_read_surface(kind: EffectKind) -> Option<aplan_output::stream::ReadSurfaceEntry> {
     use aplan_output::stream::{
         OutputDisposition, ReadChannel, ReadLatencyClass, ReadSurfaceEntry,
