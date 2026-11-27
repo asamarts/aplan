@@ -1,6 +1,10 @@
 {
   "behaviours": [
     {
+      "name": "effort.exempts_decomposed_parents",
+      "what": "`APLAN009` exempts a live non-milestone parent task whose `integrates` list names at least one valid non-dropped child increment from declaring `effort_days`, while still counting every task's own effort exactly once across cuts and rollups"
+    },
+    {
       "name": "read.streams_large_outputs_with_bounded_memory",
       "what": "output-dominated CLI read surfaces stream preflighted human, Markdown, graph, and machine JSON/SARIF output through a bounded 16 KiB buffer with deterministic byte parity, clean BrokenPipe shutdown, output-work timing counters, an exhaustive CLI+MCP read-surface disposition inventory, and orphan-free MCP disconnect cleanup"
     },
@@ -1536,14 +1540,14 @@
     "version.require_impact"
   ],
   "counts": {
-    "behaviours": 249,
+    "behaviours": 250,
     "build_capabilities": 1,
     "commands": 51,
     "config_keys": 136,
     "evidence_kinds": 5,
     "formats": 9,
     "mcp_tools": 14,
-    "rules": 65
+    "rules": 66
   },
   "evidence_kinds": [
     "commit",
@@ -1953,6 +1957,11 @@
       "code": "APLAN065",
       "severity": "error",
       "title": "a `closed_at` record is valid canonical UTC and only appears on a `done` task"
+    },
+    {
+      "code": "APLAN066",
+      "severity": "error",
+      "title": "an `integrates` relation forms a same-cut single-parent acyclic decomposition paired with `blocked_by`"
     }
   ],
   "schema_version": "v1",

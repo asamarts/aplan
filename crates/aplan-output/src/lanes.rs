@@ -698,6 +698,8 @@ mod tests {
                     title: format!("task {id}"),
                     status: Status::Todo,
                     done: false,
+                    parent: None,
+                    decomposition: None,
                 })
                 .collect(),
             edges: spec
@@ -707,6 +709,7 @@ mod tests {
                         from: (*d).to_string(),
                         to: (*id).to_string(),
                         kind: aplan_core::EdgeKind::Dependency,
+                        integrates: false,
                     })
                 })
                 .collect(),
@@ -1108,6 +1111,7 @@ mod tests {
             from: "A".to_string(),
             to: "B".to_string(),
             kind: aplan_core::EdgeKind::Membership,
+            integrates: false,
         });
         let rendered = plain(
             &text_of_presented_view(&repeated, Glyphs::ASCII, 72, presentation)
@@ -1127,6 +1131,7 @@ mod tests {
                 from: "A".to_string(),
                 to: "B".to_string(),
                 kind: aplan_core::EdgeKind::Dependency,
+                integrates: false,
             }],
             hidden_edges: 0,
             grouping: crate::Grouping::default(),

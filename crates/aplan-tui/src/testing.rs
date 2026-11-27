@@ -70,6 +70,9 @@ pub(crate) fn task_inspector(row: &TaskBrowserRow) -> aplan_app::Show {
         prefer_after: Vec::new(),
         ratified_by: Vec::new(),
         contains: Vec::new(),
+        integrates: Vec::new(),
+        parent: None,
+        decomposition: None,
         findings: Vec::new(),
         resolved: false,
         evidence_observation: aplan_core::show::EvidenceObservation::not_observed(
@@ -116,6 +119,7 @@ pub(crate) fn graph_task(id: &str, title: &str, blocked_by: &[&str]) -> Task {
         prefer_after: Vec::new(),
         ratified_by: Vec::new(),
         contains: Vec::new(),
+        integrates: Vec::new(),
         evidence: Vec::new(),
         paths: Vec::new(),
         traces: Vec::new(),

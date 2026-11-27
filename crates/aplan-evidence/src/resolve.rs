@@ -7216,6 +7216,7 @@ mod tests {
             prefer_after: Vec::new(),
             ratified_by: Vec::new(),
             contains: Vec::new(),
+            integrates: Vec::new(),
             // A citation, because the rule is scoped to tasks that make one
             // (`A1-138`). A `test` rather than a `file` or a `commit`: those bind
             // *through* a glob, and a citation that binds silences the rule
@@ -7952,6 +7953,7 @@ mod tests {
             prefer_after: Vec::new(),
             ratified_by: Vec::new(),
             contains: Vec::new(),
+            integrates: Vec::new(),
             evidence: vec![a_citation()],
             paths: Vec::new(),
             traces: Vec::new(),
@@ -8749,6 +8751,7 @@ mod tests {
             effort_days: None,
             blocked_by: Vec::new(),
             contains: Vec::new(),
+            integrates: Vec::new(),
             ratified_by: Vec::new(),
             prefer_after: Vec::new(),
             paths: Vec::new(),
@@ -8842,6 +8845,7 @@ mod tests {
             effort_days: None,
             blocked_by: Vec::new(),
             contains: Vec::new(),
+            integrates: Vec::new(),
             ratified_by: Vec::new(),
             prefer_after: Vec::new(),
             paths: Vec::new(),
@@ -8890,6 +8894,7 @@ mod tests {
             effort_days: None,
             blocked_by: Vec::new(),
             contains: Vec::new(),
+            integrates: Vec::new(),
             ratified_by: Vec::new(),
             prefer_after: Vec::new(),
             paths: vec!["src/removed.rs".into()],
@@ -8968,6 +8973,7 @@ mod tests {
             effort_days: None,
             blocked_by: Vec::new(),
             contains: Vec::new(),
+            integrates: Vec::new(),
             ratified_by: Vec::new(),
             prefer_after: Vec::new(),
             paths: vec!["src/removed.rs".into()],
@@ -9035,29 +9041,24 @@ mod tests {
         );
     }
 
-    #[test]
-    fn batch_breach_unproven_selection_unscheduled_runner_and_skipped_output_limit_are_reported() {
-        use crate::batch::{BatchWorkspace, ReportedOutcome, TestBatchOutcome};
-        use crate::resolve::{Breach, Cost, Executed, Outcome, TestResolver};
-        use aplan_core::task::{Evidence, EvidenceKind, Status, Task};
-        use std::collections::{BTreeMap, BTreeSet};
-
-        let task = Task {
+    fn batch_edge_task() -> aplan_core::task::Task {
+        aplan_core::task::Task {
             id: "T-BAT".into(),
             title: "Batch edges".into(),
             phase: 1,
-            status: Status::Done,
+            status: aplan_core::task::Status::Done,
             owner: None,
             effort_days: None,
             blocked_by: Vec::new(),
             contains: Vec::new(),
+            integrates: Vec::new(),
             ratified_by: Vec::new(),
             prefer_after: Vec::new(),
             paths: Vec::new(),
             traces: Vec::new(),
-            trace_fingerprints: BTreeMap::new(),
+            trace_fingerprints: std::collections::BTreeMap::new(),
             evidence: Vec::new(),
-            evidence_fingerprints: BTreeMap::new(),
+            evidence_fingerprints: std::collections::BTreeMap::new(),
             tags: Vec::new(),
             revisit_at: None,
             version_impact: None,
@@ -9065,7 +9066,17 @@ mod tests {
             version: None,
             closed_at: None,
             closed_at_source: None,
-        };
+        }
+    }
+
+    #[test]
+    fn batch_breach_unproven_selection_unscheduled_runner_and_skipped_output_limit_are_reported() {
+        use crate::batch::{BatchWorkspace, ReportedOutcome, TestBatchOutcome};
+        use crate::resolve::{Breach, Cost, Executed, Outcome, TestResolver};
+        use aplan_core::task::{Evidence, EvidenceKind};
+        use std::collections::BTreeSet;
+
+        let task = batch_edge_task();
         let ev = Evidence {
             kind: EvidenceKind::Test,
             reference: "unit::case".into(),

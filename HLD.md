@@ -159,6 +159,20 @@ and `critical-path`, `why` and `APLAN007` do not read it at all -- a reader aski
 start this" must never be shown an opinion. `APLAN033` refuses a preference that cannot be
 honoured: an unknown id, the task itself, a pair that is already a `blocked_by` edge, or a cycle.
 
+**New field: `integrates`.** A list of child work-task ids decomposed beneath a parent work task
+(ADR-0076, `A2-148`). It models multi-increment work converging on an explicit, evidence-gated
+integration boundary without introducing a second grouping hierarchy or duplicating cut membership:
+every task still belongs to at most one cut via its cut milestone's `blocked_by` (ADR-0014,
+ADR-0030). Each parent's own `status` remains the sole source of status truth, its own
+`effort_days` is counted once across cut, roadmap and summary rollups (with a narrow `APLAN009`
+exemption when a live non-milestone parent has at least one valid non-dropped integrated child and
+carries no separate integration effort), and derived subtree progress (`current_increment`,
+`remaining_children`, `integration_ready` and `own`/`children`/`total` effort) is projected across
+`show`, `why`, `tree`, `ready`, `graph`, `roadmap`, `summary`, `tasks`, MCP and TUI. `APLAN066`
+unconditionally enforces work-task-only endpoints, explicit `blocked_by` pairing, same-cut
+membership, single-parent rooted-forest acyclicity, and terminal-parent invariants. Existing flat
+plans require no migration until they opt in.
+
 **And no second declared signal, for now** (ADR-0031, `A1-231`). `prefer_after` is pairwise, so
 "this one matters" against many peers can require many edges; the question was whether an ordered
 declared family should rank instead. Existing dependency structure remains sparse enough that a
@@ -210,7 +224,7 @@ own convention either way.
 
 `aplan rekey OLD NEW` is the bounded recovery operation when a collision has already happened.
 It treats the id and all structured references to it as one graph migration: `blocked_by`,
-`prefer_after`, `ratified_by`, `contains`, a conventional filename, and an id-based
+`prefer_after`, `ratified_by`, `contains`, `integrates`, a conventional filename, and an id-based
 `policy[].when.cut` move together behind compare-and-swap locks and a post-state check. A custom
 filename stays custom because identity is frontmatter, not path (ADR-0010). Prose is deliberately
 outside the rewrite: exact-token occurrences are reported with locations for adjudication, since
@@ -742,6 +756,7 @@ empty cut must be surfaced, not swallowed.
 | `APLAN063` | A live task's literal `paths` name neither a bare tracked directory nor a target renamed or removed in Git history | warning | L1 | done (`A2-101`) |
 | `APLAN064` | A task's id matches the id family declared for its cut | warning | L0 | done (`A2-097`, opt-in) |
 | `APLAN065` | A `closed_at` record is valid canonical UTC and only appears on a `done` task | error | L0 | done (`A2-109`, ADR-0074) |
+| `APLAN066` | Every `integrates` edge forms a valid same-cut single-parent acyclic decomposition of work tasks paired with `blocked_by` | error | L0 | done (`A2-148`, ADR-0076) |
 | `APLAN044` | A closed task claims less of the released version than its level implies, without saying why | warning | L0 | done (`A1-312`) |
 
 Every diagnostic carries a stable code, a severity, an optional task id, an optional

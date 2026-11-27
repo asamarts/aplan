@@ -9,6 +9,17 @@ use std::collections::BTreeMap;
 use crate::graph::Graph;
 use crate::task::Status;
 
+/// Summary row for one parent work task declaring `integrates` (`A2-148`, ADR-0076).
+#[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
+pub struct ParentSummary {
+    pub id: String,
+    pub title: String,
+    pub status: Status,
+    pub parent: Option<String>,
+    pub own_effort_days: Option<f64>,
+    pub progress: crate::graph::DecompositionProgress,
+}
+
 /// A per-phase rollup plus the overall count of ready tasks.
 #[derive(Debug, Clone, PartialEq)]
 pub struct Summary {
@@ -20,6 +31,9 @@ pub struct Summary {
     /// ADR-0023). `None` means it did not, and nothing about duration is
     /// reported.
     pub effort_days_per_week: Option<f64>,
+    /// Decomposed parent integration boundaries within this summary's selection,
+    /// in deterministic id order. Empty when no selected task declares `integrates`.
+    pub decompositions: Vec<ParentSummary>,
 }
 
 /// The rollup for a single phase.
@@ -217,6 +231,10 @@ impl GroupedSummary {
         self.overall.remaining_weeks()
     }
 
+    pub fn decompositions(&self) -> &[ParentSummary] {
+        &self.overall.decompositions
+    }
+
     /// Whether at least one selected task appears in more than one group row.
     ///
     /// Every selected task appears in one or more rows: unmatched tasks land in
@@ -279,12 +297,42 @@ impl Graph<'_> {
                 }
             }
         }
+        let ready_tasks = self.ready();
+        let ready_rank: Option<std::collections::HashMap<&str, usize>> =
+            self.has_decomposition().then(|| {
+                ready_tasks
+                    .iter()
+                    .enumerate()
+                    .map(|(idx, t)| (t.id.as_str(), idx + 1))
+                    .collect()
+            });
+        let decompositions = if self.has_decomposition() {
+            self.by_id
+                .values()
+                .copied()
+                .filter(|t| keep(t.id.as_str()) && !t.is_milestone() && !t.integrates.is_empty())
+                .filter_map(|t| {
+                    let progress = self.decomposition_with_ranks(&t.id, ready_rank.as_ref())?;
+                    Some(ParentSummary {
+                        id: t.id.clone(),
+                        title: t.title.clone(),
+                        status: t.status,
+                        parent: self.parent_of(&t.id).map(str::to_string),
+                        own_effort_days: t.effort_days,
+                        progress,
+                    })
+                })
+                .collect()
+        } else {
+            Vec::new()
+        };
         Summary {
             phases: by_phase.into_values().collect(),
-            ready: self.ready().iter().filter(|t| keep(t.id.as_str())).count(),
+            ready: ready_tasks.iter().filter(|t| keep(t.id.as_str())).count(),
             // Filled in by `with_throughput`: the graph knows the plan, not the
             // repository's configuration.
             effort_days_per_week: None,
+            decompositions,
         }
     }
 
@@ -406,6 +454,7 @@ mod tests {
             prefer_after: Vec::new(),
             ratified_by: Vec::new(),
             contains: Vec::new(),
+            integrates: Vec::new(),
             evidence: Vec::new(),
             paths: Vec::new(),
             traces: Vec::new(),
@@ -635,6 +684,7 @@ mod duration_tests {
             prefer_after: Vec::new(),
             ratified_by: Vec::new(),
             contains: Vec::new(),
+            integrates: Vec::new(),
             evidence: Vec::new(),
             paths: Vec::new(),
             traces: Vec::new(),

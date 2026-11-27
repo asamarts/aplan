@@ -316,6 +316,7 @@ fn resolution_capabilities_drive_both_unopened_reports() {
         prefer_after: Vec::new(),
         ratified_by: Vec::new(),
         contains: Vec::new(),
+        integrates: Vec::new(),
         evidence,
         paths: Vec::new(),
         traces: Vec::new(),

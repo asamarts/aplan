@@ -31,7 +31,7 @@ use crate::{
 mod codec;
 
 const MAGIC: &str = "aplan-plan-cache";
-const FORMAT_EPOCH: u32 = 5;
+const FORMAT_EPOCH: u32 = 6;
 const SEMANTIC_EPOCH: u32 = 1;
 const MAX_CACHE_BYTES: u64 = 64 * 1024 * 1024;
 const MAX_CANDIDATES: usize = 100_000;

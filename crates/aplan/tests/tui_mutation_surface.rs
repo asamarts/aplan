@@ -672,6 +672,7 @@ const CLI: &[CliMapping] = &[
             ("prefer_after", ModeDisposition::Native),
             ("ratified_by", ModeDisposition::Native),
             ("contains", ModeDisposition::Native),
+            ("integrates", ModeDisposition::Native),
             ("members", ModeDisposition::Native),
             ("tags", ModeDisposition::Native),
             ("effort", ModeDisposition::Native),

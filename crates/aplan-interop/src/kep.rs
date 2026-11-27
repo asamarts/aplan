@@ -280,6 +280,7 @@ impl ProposalSource for Kep {
             prefer_after: Vec::new(),
             ratified_by: Vec::new(),
             contains: Vec::new(),
+            integrates: Vec::new(),
             evidence,
             paths: Vec::new(),
             traces: Vec::new(),

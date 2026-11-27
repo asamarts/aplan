@@ -2007,6 +2007,42 @@ pub fn render_grouped_summary(summary: &GroupedSummary, format: Format) -> std::
     }
 }
 
+fn render_decompositions_human(
+    out: &mut impl std::io::Write,
+    decompositions: &[aplan_core::ParentSummary],
+) -> std::io::Result<()> {
+    if decompositions.is_empty() {
+        return Ok(());
+    }
+    writeln!(out, "\ndecompositions:")?;
+    for parent in decompositions {
+        let p = &parent.progress;
+        let state = if p.integration_ready {
+            "integration boundary ready".to_string()
+        } else if let Some(cur) = &p.current_increment {
+            format!("current {cur}")
+        } else if p.remaining_children.is_empty() {
+            "all children done".to_string()
+        } else {
+            format!("{} remaining", p.remaining_children.len())
+        };
+        let own = parent
+            .own_effort_days
+            .map_or_else(|| "none".to_string(), |d| format!("{d:.1}d"));
+        writeln!(
+            out,
+            "  {} [{}]  {}/{} children done ({state}, own {own}, total {:.1}d)  {}",
+            parent.id,
+            parent.status,
+            p.children_done,
+            p.children_total,
+            p.total_effort_days,
+            sanitize::visible(&parent.title)
+        )?;
+    }
+    Ok(())
+}
+
 fn render_grouped_summary_human(summary: &GroupedSummary) -> std::io::Result<()> {
     let mut out = crate::write::anstream_stdout();
     let bold = crate::style::HEADING;
@@ -2079,6 +2115,7 @@ fn render_grouped_summary_human(summary: &GroupedSummary) -> std::io::Result<()>
             summary.total_dropped_effort_days()
         )?;
     }
+    render_decompositions_human(&mut out, summary.decompositions())?;
     Ok(())
 }
 
@@ -2175,7 +2212,8 @@ fn render_summary_human(summary: &Summary) -> std::io::Result<()> {
             summary.total_dropped_effort_days()
         )?;
     }
-    writeln!(out, "ready: {}", summary.ready)
+    writeln!(out, "ready: {}", summary.ready)?;
+    render_decompositions_human(&mut out, &summary.decompositions)
 }
 
 /// `aplan tasks`: the plan as data.
@@ -2382,11 +2420,30 @@ pub fn write_tasks_human(
                     id = crate::style::ID,
                     st = crate::style::status(t.status.as_str()),
                 ),
-                // A title carrying a newline or tab would break the row, and a
-                // table that data can corrupt is not a table. The JSON escapes
-                // it; `roadmap --format markdown` already guards the same
-                // thing.
-                &one_line(&t.title)
+                &format!(
+                    "{}{}",
+                    one_line(&t.title),
+                    match (&t.decomposition, &t.parent) {
+                        (Some(d), Some(p)) => format!(
+                            " [part of {p}; integrates {}/{}]",
+                            d.children_done, d.children_total
+                        ),
+                        (Some(d), None) if d.integration_ready => format!(
+                            " [integration boundary: {}/{} done]",
+                            d.children_done, d.children_total
+                        ),
+                        (Some(d), None) => match &d.current_increment {
+                            Some(cur) => format!(
+                                " [integrates {}/{}; current {cur}]",
+                                d.children_done, d.children_total
+                            ),
+                            None =>
+                                format!(" [integrates {}/{}]", d.children_done, d.children_total),
+                        },
+                        (None, Some(p)) => format!(" [part of {p}]"),
+                        (None, None) => String::new(),
+                    }
+                )
             )
         )?;
     }
@@ -2424,7 +2481,7 @@ fn render_summary_json(summary: &Summary) -> std::io::Result<()> {
             })
         })
         .collect();
-    let doc = serde_json::json!({
+    let mut doc = serde_json::json!({
         // v2: `total_tasks` and `total_effort_days` changed meaning, from every
         // task to every task that can still happen. Field names that keep their
         // spelling while changing their number are how a consumer reads a wrong
@@ -2445,6 +2502,14 @@ fn render_summary_json(summary: &Summary) -> std::io::Result<()> {
         "total_weeks": summary.total_weeks(),
         "remaining_weeks": summary.remaining_weeks(),
     });
+    if !summary.decompositions.is_empty()
+        && let Some(obj) = doc.as_object_mut()
+    {
+        obj.insert(
+            "decompositions".to_string(),
+            serde_json::to_value(&summary.decompositions)?,
+        );
+    }
     let mut out = crate::write::stdout();
     serde_json::to_writer_pretty(&mut out, &doc)?;
     writeln!(out)
@@ -2467,7 +2532,7 @@ fn render_grouped_summary_json(summary: &GroupedSummary) -> std::io::Result<()> 
             })
         })
         .collect();
-    let doc = serde_json::json!({
+    let mut doc = serde_json::json!({
         "schema": "aplan/summary-grouped/v1",
         "group_by": summary.family,
         "groups": groups,
@@ -2483,6 +2548,14 @@ fn render_grouped_summary_json(summary: &GroupedSummary) -> std::io::Result<()> 
         "total_weeks": summary.total_weeks(),
         "remaining_weeks": summary.remaining_weeks(),
     });
+    if !summary.decompositions().is_empty()
+        && let Some(obj) = doc.as_object_mut()
+    {
+        obj.insert(
+            "decompositions".to_string(),
+            serde_json::to_value(summary.decompositions())?,
+        );
+    }
     let mut out = crate::write::stdout();
     serde_json::to_writer_pretty(&mut out, &doc)?;
     writeln!(out)
@@ -2844,13 +2917,67 @@ fn show_lists(s: &mut String, show: &Show) {
     }
 }
 
+fn show_decomposition(s: &mut String, show: &Show) {
+    let Some(d) = &show.decomposition else {
+        return;
+    };
+    let nested = if d.descendants_total > d.children_total {
+        format!(
+            " ({}/{} total increments)",
+            d.descendants_done, d.descendants_total
+        )
+    } else {
+        String::new()
+    };
+    let boundary = if d.integration_ready {
+        "ready to integrate"
+    } else if d.remaining_children.is_empty() {
+        "all children done"
+    } else {
+        "waiting on children"
+    };
+    let _ = writeln!(
+        s,
+        "  {hd}decomposition:{hd:#} {}/{} children done{nested}; integration boundary: {boundary}",
+        d.children_done,
+        d.children_total,
+        hd = crate::style::HEADING
+    );
+    if let Some(current) = &d.current_increment {
+        let _ = writeln!(
+            s,
+            "    current increment: {id}{}{id:#}",
+            sanitize::visible(current),
+            id = crate::style::ID
+        );
+    }
+    if !d.remaining_children.is_empty() {
+        let _ = writeln!(
+            s,
+            "    remaining children: {}",
+            sanitize::visible(&d.remaining_children.join(", "))
+        );
+    }
+    let own = show
+        .effort_days
+        .map_or_else(|| "none".to_string(), |days| format!("{days:.1}d"));
+    let _ = writeln!(
+        s,
+        "    effort: own {own}, children {:.1}d ({:.1}d done), total {:.1}d",
+        d.children_effort_days, d.children_done_effort_days, d.total_effort_days
+    );
+}
+
 fn show_relationships(s: &mut String, show: &Show) {
+    let parent_slice: Vec<aplan_core::show::Related> = show.parent.iter().cloned().collect();
     for (heading, items) in [
-        ("waits on", &show.waits_on),
-        ("releases", &show.releases),
-        ("prefers after", &show.prefer_after),
-        ("ratified by", &show.ratified_by),
-        ("contains", &show.contains),
+        ("parent", parent_slice.as_slice()),
+        ("integrates", show.integrates.as_slice()),
+        ("waits on", show.waits_on.as_slice()),
+        ("releases", show.releases.as_slice()),
+        ("prefers after", show.prefer_after.as_slice()),
+        ("ratified by", show.ratified_by.as_slice()),
+        ("contains", show.contains.as_slice()),
     ] {
         if items.is_empty() {
             continue;
@@ -3083,6 +3210,7 @@ pub fn render_show_with_capabilities(show: &Show, caps: &markdown::RenderCapabil
     {
         let _ = writeln!(s, "    reason: {}", sanitize::visible(detail));
     }
+    show_decomposition(&mut s, show);
     show_relationships(&mut s, show);
     show_findings(&mut s, show);
 
@@ -3180,6 +3308,12 @@ pub struct GraphNode {
     /// Whether this status satisfies a dependency: what the Mermaid rounds the
     /// box for, said as a field rather than left to be inferred from a shape.
     pub done: bool,
+    /// Parent work task integrating this task, if any (`A2-148`, ADR-0076).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub parent: Option<String>,
+    /// Derived decomposition progress when this task integrates child increments.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub decomposition: Option<aplan_core::DecompositionProgress>,
 }
 
 /// One edge: `from` must finish before `to` can start.
@@ -3193,6 +3327,9 @@ pub struct GraphEdge {
     /// and carried here so every shape reads the same answer instead of each
     /// re-deriving it from the ids.
     pub kind: EdgeKind,
+    /// True when `to` declares `from` in `integrates` (integration boundary edge).
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub integrates: bool,
 }
 
 /// The scoped graph as data, which every rendering of it is built from.
@@ -3404,6 +3541,8 @@ impl GraphView {
                 title: t.title.clone(),
                 status: t.status,
                 done: t.status.satisfies_dependency(),
+                parent: graph.parent_of(id).map(str::to_string),
+                decomposition: graph.decomposition_of(id),
             })
             .collect();
 
@@ -3422,6 +3561,7 @@ impl GraphView {
                         kind: graph
                             .get(b.as_str())
                             .map_or(EdgeKind::Dependency, |tail| aplan_core::edge_kind(tail, t)),
+                        integrates: t.integrates.iter().any(|c| c == b),
                     }),
                     (true, false) | (false, true) => hidden_edges += 1,
                     (false, false) => {}
@@ -3505,12 +3645,15 @@ pub fn write_mermaid_of_view(
         }
     }
     for e in &view.edges {
-        // Dotted for grouping, solid for constraint: when both are drawn they
-        // must not read as the same relationship, which is the confusion that
-        // made this diagram unreadable in the first place (`A1-216`).
-        let arrow = match e.kind {
-            EdgeKind::Dependency => "-->",
-            EdgeKind::Membership => "-.->",
+        // Dotted for grouping, thick labelled arrow for integration boundary,
+        // solid for ordinary dependency (`A1-216`, `A2-148`).
+        let arrow = if e.integrates {
+            "==>|integrates|"
+        } else {
+            match e.kind {
+                EdgeKind::Dependency => "-->",
+                EdgeKind::Membership => "-.->",
+            }
         };
         writeln!(out, "    {} {arrow} {}", node_key(&e.from), node_key(&e.to))?;
     }
@@ -3549,9 +3692,13 @@ pub fn write_dot_of_view(out: &mut impl std::io::Write, view: &GraphView) -> std
         )?;
     }
     for e in &view.edges {
-        let style = match e.kind {
-            EdgeKind::Dependency => "",
-            EdgeKind::Membership => " [style=dashed]",
+        let style = if e.integrates {
+            " [penwidth=2, label=\"integrates\"]"
+        } else {
+            match e.kind {
+                EdgeKind::Dependency => "",
+                EdgeKind::Membership => " [style=dashed]",
+            }
         };
         writeln!(
             out,
@@ -3587,6 +3734,8 @@ pub fn write_graph_json(out: &mut impl std::io::Write, view: &GraphView) -> std:
     #[derive(serde::Serialize)]
     struct EdgeJson<'a> {
         from: &'a str,
+        #[serde(skip_serializing_if = "std::ops::Not::not")]
+        integrates: bool,
         kind: EdgeKind,
         to: &'a str,
     }
@@ -3597,8 +3746,12 @@ pub fn write_graph_json(out: &mut impl std::io::Write, view: &GraphView) -> std:
     }
     #[derive(serde::Serialize)]
     struct NodeJson<'a> {
+        #[serde(skip_serializing_if = "Option::is_none")]
+        decomposition: Option<&'a aplan_core::DecompositionProgress>,
         done: bool,
         id: &'a str,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        parent: Option<&'a str>,
         status: Status,
         title: &'a str,
     }
@@ -3616,6 +3769,7 @@ pub fn write_graph_json(out: &mut impl std::io::Write, view: &GraphView) -> std:
         edges: SeqIter(|| {
             view.edges.iter().map(|e| EdgeJson {
                 from: &e.from,
+                integrates: e.integrates,
                 kind: e.kind,
                 to: &e.to,
             })
@@ -3627,8 +3781,10 @@ pub fn write_graph_json(out: &mut impl std::io::Write, view: &GraphView) -> std:
         hidden_edges: view.hidden_edges,
         nodes: SeqIter(|| {
             view.nodes.iter().map(|n| NodeJson {
+                decomposition: n.decomposition.as_ref(),
                 done: n.done,
                 id: &n.id,
+                parent: n.parent.as_deref(),
                 status: n.status,
                 title: &n.title,
             })
@@ -3729,6 +3885,7 @@ pub fn tree<'a>(graph: &Graph<'a>, id: &str, depth: Option<usize>, live: bool) -
             hd = crate::style::HEADING
         );
     }
+    write_tree_decomposition_header(&mut s, graph, id);
 
     for (heading, up) in [("waits on", true), ("releases", false)] {
         let mut lines = Vec::new();
@@ -3859,11 +4016,63 @@ struct Bounds {
 /// The title is the trailing column, so it folds under itself rather than under
 /// the id, and the indent is part of the prefix, so a deep row folds under its
 /// own depth (`A1-206`).
-fn node_row(indent: &str, task: &Task, membership: bool) -> String {
-    let note = if membership {
-        format!("{dim}  (the cut it is in){dim:#}", dim = crate::style::DIM)
+fn write_tree_decomposition_header(s: &mut String, graph: &Graph<'_>, id: &str) {
+    if let Some(parent_id) = graph.parent_of(id) {
+        let _ = writeln!(
+            s,
+            "  {hd}part of:{hd:#} {id}{parent_id}{id:#} (integration boundary)",
+            hd = crate::style::HEADING,
+            id = crate::style::ID
+        );
+    }
+    if let Some(d) = graph.decomposition_of(id) {
+        let current = d
+            .current_increment
+            .as_deref()
+            .map_or_else(String::new, |cur| format!("; current increment: {cur}"));
+        let remaining = if d.remaining_children.is_empty() {
+            if d.integration_ready {
+                "; integration boundary ready".to_string()
+            } else {
+                "; all children done".to_string()
+            }
+        } else {
+            format!("; remaining: {}", d.remaining_children.join(", "))
+        };
+        let _ = writeln!(
+            s,
+            "  {hd}decomposition:{hd:#} {}/{} children done{current}{remaining} (total {:.1}d)",
+            d.children_done,
+            d.children_total,
+            d.total_effort_days,
+            hd = crate::style::HEADING
+        );
+    }
+}
+
+fn tree_edge_role(graph: &Graph<'_>, parent: &str, task: &Task, up: bool) -> Option<&'static str> {
+    let membership = graph
+        .get(parent)
+        .is_some_and(|p| aplan_core::edge_kind(p, task) == EdgeKind::Membership);
+    if !up && membership {
+        Some("the cut it is in")
+    } else if up
+        && graph
+            .get(parent)
+            .is_some_and(|p| p.integrates.iter().any(|c| c == &task.id))
+    {
+        Some("integrated child")
+    } else if !up && task.integrates.iter().any(|c| c == parent) {
+        Some("integration boundary")
     } else {
-        String::new()
+        None
+    }
+}
+
+fn node_row(indent: &str, task: &Task, role: Option<&str>) -> String {
+    let note = match role {
+        Some(label) => format!("{dim}  ({label}){dim:#}", dim = crate::style::DIM),
+        None => String::new(),
     };
     fold::row(
         &format!(
@@ -3955,10 +4164,8 @@ fn walk<'a>(
                 // reason. Unlabelled it would read as a dependent the rank forgot
                 // to count, and a reader checking the order against this view
                 // would conclude the order is wrong (`A1-126`).
-                let membership = graph
-                    .get(parent)
-                    .is_some_and(|p| aplan_core::edge_kind(p, task) == EdgeKind::Membership);
-                out.push(node_row(&indent, task, !up && membership));
+                let role = tree_edge_role(graph, parent, task, up);
+                out.push(node_row(&indent, task, role));
                 if expanded.insert(key) {
                     stack.push(Step::Expand(key, level + 1));
                 }
@@ -4168,8 +4375,42 @@ fn write_roadmap_header(out: &mut impl std::io::Write, r: &Roadmap) -> std::io::
     Ok(())
 }
 
+fn roadmap_decomposition_tag(m: &aplan_core::roadmap::RoadmapTask) -> String {
+    match (&m.decomposition, &m.parent) {
+        (Some(d), parent) => {
+            let mut parts = Vec::new();
+            if let Some(p) = parent {
+                parts.push(format!("part of {p}"));
+            }
+            if d.integration_ready {
+                parts.push(format!(
+                    "integration boundary: {}/{} done",
+                    d.children_done, d.children_total
+                ));
+            } else {
+                parts.push(format!(
+                    "integrates {}/{}",
+                    d.children_done, d.children_total
+                ));
+                if let Some(cur) = &d.current_increment {
+                    parts.push(format!("current {cur}"));
+                }
+            }
+            format!(" [{}]", parts.join("; "))
+        }
+        (None, Some(p)) => format!(" [part of {p}]"),
+        (None, None) => String::new(),
+    }
+}
+
 /// One member row: id, status, then the title as the trailing column.
 fn member_row(indent: &str, id_w: usize, m: &aplan_core::roadmap::RoadmapTask) -> String {
+    let tag = roadmap_decomposition_tag(m);
+    let suffix = if tag.is_empty() {
+        String::new()
+    } else {
+        format!("{dim}{tag}{dim:#}", dim = crate::style::DIM)
+    };
     fold::row(
         &format!(
             "{indent}{id}{:<id_w$}{id:#}  {st}{:<12}{st:#}  ",
@@ -4178,7 +4419,7 @@ fn member_row(indent: &str, id_w: usize, m: &aplan_core::roadmap::RoadmapTask) -
             id = crate::style::ID,
             st = crate::style::status(m.status.as_str()),
         ),
-        &sanitize::visible(&m.title),
+        &format!("{}{suffix}", sanitize::visible(&m.title)),
     )
 }
 
@@ -4304,8 +4545,14 @@ pub fn write_roadmap_json(out: &mut impl std::io::Write, r: &Roadmap) -> std::io
     #[derive(serde::Serialize)]
     struct TaskJson<'a> {
         blocked_by: &'a [String],
+        #[serde(skip_serializing_if = "Option::is_none")]
+        decomposition: Option<&'a aplan_core::DecompositionProgress>,
         evidence: &'a [String],
         id: &'a str,
+        #[serde(skip_serializing_if = "slice_is_empty")]
+        integrates: &'a [String],
+        #[serde(skip_serializing_if = "Option::is_none")]
+        parent: Option<&'a str>,
         status: String,
         title: &'a str,
     }
@@ -4349,11 +4596,18 @@ pub fn write_roadmap_json(out: &mut impl std::io::Write, r: &Roadmap) -> std::io
         total_effort_days: f64,
     }
 
+    fn slice_is_empty(values: &&[String]) -> bool {
+        values.is_empty()
+    }
+
     fn task_ref(t: &RoadmapTask) -> TaskJson<'_> {
         TaskJson {
             blocked_by: &t.blocked_by,
+            decomposition: t.decomposition.as_ref(),
             evidence: &t.evidence,
             id: &t.id,
+            integrates: &t.integrates,
+            parent: t.parent.as_deref(),
             status: t.status.to_string(),
             title: &t.title,
         }
@@ -4657,11 +4911,12 @@ fn write_roadmap_member_table(
         } else {
             md_cell(&m.evidence.join(", "))
         };
+        let title = format!("{}{}", m.title, roadmap_decomposition_tag(m));
         writeln!(
             out,
             "| {} | {} | {} | {blocked_by} | {evidence} |",
             md_cell(&m.id),
-            md_cell(&m.title),
+            md_cell(&title),
             m.status
         )?;
     }
@@ -4813,6 +5068,9 @@ mod tests {
             prefer_after: vec![related("A-4", RelatedAvailability::Unloadable, None)],
             ratified_by: vec![related("A-5", RelatedAvailability::Loaded, None)],
             contains: vec![related("A-6", RelatedAvailability::Missing, None)],
+            integrates: Vec::new(),
+            parent: None,
+            decomposition: None,
             findings: vec![Finding {
                 code: "APLAN009".into(),
                 severity: "warning".into(),
@@ -5629,6 +5887,7 @@ mod tests {
             prefer_after: Vec::new(),
             ratified_by: Vec::new(),
             contains: Vec::new(),
+            integrates: Vec::new(),
             evidence: Vec::new(),
             paths: Vec::new(),
             traces: Vec::new(),
@@ -5909,6 +6168,7 @@ mod tests {
             prefer_after: Vec::new(),
             ratified_by: Vec::new(),
             contains: Vec::new(),
+            integrates: Vec::new(),
             evidence: Vec::new(),
             paths: Vec::new(),
             traces: Vec::new(),
@@ -5939,6 +6199,9 @@ mod tests {
             status: aplan_core::Status::Todo,
             blocked_by: vec![],
             evidence: vec![],
+            parent: None,
+            integrates: Vec::new(),
+            decomposition: None,
         }
     }
 
@@ -6294,6 +6557,7 @@ mod tests {
             }],
             ready: 1,
             effort_days_per_week: None,
+            decompositions: Vec::new(),
         }
     }
 
@@ -6449,6 +6713,9 @@ mod tests {
                     prefer_after: Vec::new(),
                     ratified_by: Vec::new(),
                     contains: Vec::new(),
+                    integrates: Vec::new(),
+                    parent: None,
+                    decomposition: None,
                     trace_fingerprints: std::collections::BTreeMap::new(),
                     evidence_fingerprints: std::collections::BTreeMap::new(),
                     revisit_at: None,
@@ -6480,6 +6747,9 @@ mod tests {
                     prefer_after: Vec::new(),
                     ratified_by: Vec::new(),
                     contains: Vec::new(),
+                    integrates: Vec::new(),
+                    parent: None,
+                    decomposition: None,
                     trace_fingerprints: std::collections::BTreeMap::new(),
                     evidence_fingerprints: std::collections::BTreeMap::new(),
                     revisit_at: None,
@@ -6511,6 +6781,9 @@ mod tests {
                     prefer_after: Vec::new(),
                     ratified_by: Vec::new(),
                     contains: Vec::new(),
+                    integrates: Vec::new(),
+                    parent: None,
+                    decomposition: None,
                     trace_fingerprints: std::collections::BTreeMap::new(),
                     evidence_fingerprints: std::collections::BTreeMap::new(),
                     revisit_at: None,
@@ -6548,6 +6821,9 @@ mod tests {
             status: aplan_core::Status::Done,
             blocked_by: vec![],
             evidence: vec!["file:a|b.md".into()],
+            parent: None,
+            integrates: Vec::new(),
+            decomposition: None,
         };
         let md = render_roadmap_markdown(&one_cut("v0.1", "Core", vec![m]), None, None);
         assert!(
@@ -7739,11 +8015,22 @@ fn rule_lines(c: &AgentContract, cmd: &str) -> String {
             s,
             "{}",
             bullet(
-                "Every live task that is not a milestone carries `effort_days`; one without it \
-                 is reported (`APLAN009`)."
+                "Every live task that is not a milestone carries `effort_days` (except a live \
+                 parent whose `integrates` list names non-dropped child increments); one without \
+                 it is reported (`APLAN009`)."
             )
         );
     }
+    let _ = writeln!(
+        s,
+        "{}",
+        bullet(
+            "Multi-increment work decomposes through parent-side `integrates`: each integrated \
+             child must also appear in `blocked_by`, belong to the same cut (or both \
+             `cross-cutting`), have at most one parent, stay acyclic, and finish before its \
+             parent closes (`APLAN066`)."
+        )
+    );
     if c.switches.contains(&Switch::RequireCutMembership) {
         let _ = writeln!(
             s,
@@ -9862,18 +10149,23 @@ mod format_table_tests {
                     title: "First".into(),
                     status: Status::Done,
                     done: true,
+                    parent: None,
+                    decomposition: None,
                 },
                 GraphNode {
                     id: "T-2".into(),
                     title: "Second".into(),
                     status: Status::Todo,
                     done: false,
+                    parent: None,
+                    decomposition: None,
                 },
             ],
             edges: vec![GraphEdge {
                 from: "T-1".into(),
                 to: "T-2".into(),
                 kind: EdgeKind::Dependency,
+                integrates: false,
             }],
             hidden_edges: 1,
             grouping: Grouping { edges: 2, tasks: 1 },
@@ -9925,6 +10217,9 @@ mod format_table_tests {
                 prefer_after: Vec::new(),
                 ratified_by: Vec::new(),
                 contains: Vec::new(),
+                integrates: Vec::new(),
+                parent: None,
+                decomposition: None,
                 trace_fingerprints: std::collections::BTreeMap::new(),
                 evidence_fingerprints: std::collections::BTreeMap::new(),
                 revisit_at: None,
@@ -10092,12 +10387,16 @@ mod format_table_tests {
                     title: "Done \"quoted\" \\line1\nline2".into(),
                     status: Status::Done,
                     done: true,
+                    parent: None,
+                    decomposition: None,
                 },
                 GraphNode {
                     id: "T-2".into(),
                     title: "Pending".into(),
                     status: Status::Todo,
                     done: false,
+                    parent: None,
+                    decomposition: None,
                 },
             ],
             edges: vec![
@@ -10105,11 +10404,13 @@ mod format_table_tests {
                     from: "T-1".into(),
                     to: "T-2".into(),
                     kind: EdgeKind::Dependency,
+                    integrates: false,
                 },
                 GraphEdge {
                     from: "T-2".into(),
                     to: "M-1".into(),
                     kind: EdgeKind::Membership,
+                    integrates: false,
                 },
             ],
             hidden_edges: 1,
@@ -10385,5 +10686,113 @@ mod format_table_tests {
                     .contains("aplan/stale/v2")
             );
         }
+    }
+
+    #[test]
+    fn decomposition_renders_across_show_tree_graph_roadmap_summary_and_tasks() {
+        use aplan_core::task::{Status, Task};
+        let tsk = |id: &str, status: Status, blocked: &[&str], tags: &[&str]| Task {
+            id: id.into(),
+            title: format!("task {id}"),
+            phase: 0,
+            status,
+            owner: None,
+            effort_days: Some(1.0),
+            blocked_by: blocked.iter().map(|s| (*s).to_string()).collect(),
+            prefer_after: Vec::new(),
+            ratified_by: Vec::new(),
+            contains: Vec::new(),
+            integrates: Vec::new(),
+            evidence: Vec::new(),
+            paths: Vec::new(),
+            traces: Vec::new(),
+            trace_fingerprints: std::collections::BTreeMap::new(),
+            evidence_fingerprints: std::collections::BTreeMap::new(),
+            tags: tags.iter().map(|s| (*s).to_string()).collect(),
+            revisit_at: None,
+            version_impact: None,
+            version_impact_reason: None,
+            version: None,
+            closed_at: None,
+            closed_at_source: None,
+        };
+        let strip = |s: &str| anstream::adapter::strip_str(s).to_string();
+
+        let mut cut = tsk("M-1", Status::Todo, &["P-1", "C-1", "C-2"], &["milestone"]);
+        cut.effort_days = None;
+        let mut parent = tsk("P-1", Status::Todo, &["C-1", "C-2"], &["kind-a"]);
+        parent.effort_days = Some(1.0);
+        parent.integrates = vec!["C-1".into(), "C-2".into()];
+        let mut c1 = tsk("C-1", Status::Done, &[], &["kind-a"]);
+        c1.effort_days = Some(2.0);
+        let mut c2 = tsk("C-2", Status::Todo, &["C-1"], &["kind-a"]);
+        c2.effort_days = Some(3.0);
+
+        let graph = Graph::new([&cut, &parent, &c1, &c2]);
+        let claims = aplan_core::ClaimSnapshot::unavailable(0, "unit");
+        let show = aplan_core::Show::assemble_for_task(
+            &graph,
+            &[],
+            &std::collections::BTreeMap::new(),
+            &claims,
+            "P-1",
+            false,
+            None,
+        )
+        .expect("show parent");
+        let show_text = strip(&render_show(&show));
+        assert!(show_text.contains("decomposition:"), "{show_text}");
+        assert!(show_text.contains("current increment: C-2"), "{show_text}");
+        assert!(show_text.contains("integrates:"), "{show_text}");
+
+        let tree_parent = strip(&tree(&graph, "P-1", Some(4), false).expect("tree parent"));
+        assert!(tree_parent.contains("decomposition:"), "{tree_parent}");
+        assert!(tree_parent.contains("(integrated child)"), "{tree_parent}");
+        let tree_child = strip(&tree(&graph, "C-2", Some(4), false).expect("tree child"));
+        assert!(tree_child.contains("part of: P-1"), "{tree_child}");
+
+        let view = GraphView::of(&graph, &["P-1", "C-1", "C-2"].into_iter().collect());
+        let mmd = mermaid_of_view(&view);
+        assert!(mmd.contains("==>|integrates|"), "{mmd}");
+        let dot = dot_of_view(&view);
+        assert!(dot.contains("label=\"integrates\""), "{dot}");
+        let mut gj = Vec::new();
+        write_graph_json(&mut gj, &view).expect("graph json");
+        let gj_str = String::from_utf8(gj).expect("utf8");
+        assert!(gj_str.contains("\"integrates\": true"), "{gj_str}");
+
+        let roadmap = graph.roadmap();
+        let rm_human = strip(&roadmap_human(&roadmap));
+        assert!(
+            rm_human.contains("[integrates 1/2; current C-2]"),
+            "{rm_human}"
+        );
+        let rm_md = render_roadmap_markdown(&roadmap, None, None);
+        assert!(rm_md.contains("[integrates 1/2; current C-2]"), "{rm_md}");
+        let rm_json = render_roadmap(&roadmap, Format::Json);
+        assert!(rm_json.contains("\"decomposition\""), "{rm_json}");
+
+        let summary = graph.summary();
+        let mut sum_buf = Vec::new();
+        render_decompositions_human(&mut sum_buf, &summary.decompositions)
+            .expect("decompositions human");
+        let sum_human = String::from_utf8(sum_buf).expect("utf8");
+        assert!(sum_human.contains("decompositions:"), "{sum_human}");
+        assert!(sum_human.contains("current C-2"), "{sum_human}");
+        render_summary(&summary, Format::Human).expect("summary human");
+        render_summary(&summary, Format::Json).expect("summary json");
+
+        let members = ["kind-a".to_string()];
+        let grouped = graph.summary_grouped_by("kind", &members);
+        render_grouped_summary(&grouped, Format::Human).expect("grp human");
+        render_grouped_summary(&grouped, Format::Json).expect("grp json");
+
+        let export = graph.task_rows();
+        let mut tasks_j = Vec::new();
+        write_tasks_json(&mut tasks_j, &export).expect("tasks json");
+        let tasks_str = String::from_utf8(tasks_j).expect("utf8");
+        assert!(tasks_str.contains("\"integrates\""), "{tasks_str}");
+        assert!(tasks_str.contains("\"parent\": \"P-1\""), "{tasks_str}");
+        render_tasks(&export, Format::Human).expect("tasks human");
     }
 }

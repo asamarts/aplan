@@ -43,6 +43,8 @@ the dependency graph is acyclic
 
 - **says:** dependency cycle: A-1 → A-2 → A-1
   - **fix:** Break the cycle by removing one `blocked_by` edge; a plan with a cycle has no valid execution order.
+- **says:** dependency cycle: P-1 → P-2 → P-1
+  - **fix:** Break the cycle by removing one `blocked_by` edge; a plan with a cycle has no valid execution order.
 
 ## APLAN005 (error)
 
@@ -64,6 +66,8 @@ a done task does not depend on an unfinished one
 
 - **says:** is `done` but blocker `A-2` is `todo`
   - **fix:** Either close `A-2` with evidence, or `A-1` was not actually done.
+- **says:** is `done` but blocker `C-1` is `todo`
+  - **fix:** Either close `C-1` with evidence, or `P-1` was not actually done.
 - **says:** is `done` but its cut follows `M-s0`, which is `todo`
   - **fix:** Either close `M-s0` first, or drop the cut-sequencing edge if this task does not really wait for it.
 
@@ -568,4 +572,21 @@ a `closed_at` record is valid canonical UTC and only appears on a `done` task
   - **fix:** Write `closed_at` as canonical UTC whole seconds (`YYYY-MM-DDTHH:MM:SSZ`, without fractional seconds or non-UTC offsets), or omit it on legacy `done` tasks.
 - **says:** carries `closed_at` while status is `todo`: `closed_at` is valid only on `done` tasks
   - **fix:** Remove `closed_at` (and any `closed_at_source`) from non-`done` tasks; dropping or reopening work does not carry a completion timestamp.
+
+## APLAN066 (error)
+
+an `integrates` relation forms a same-cut single-parent acyclic decomposition paired with `blocked_by`
+
+- **says:** `integrates: C-1` is not also in `blocked_by`, so `P-1` would not wait for its integrated child increment
+  - **fix:** Add `C-1` to `P-1`'s `blocked_by` (`aplan dep add P-1 --after C-1`), or remove `C-1` from `integrates`.
+- **says:** declares `integrates` but is tagged `milestone`: milestones roll up cuts via `contains` and group work via `blocked_by`
+  - **fix:** Remove `integrates` from this milestone; use `contains` for child checkpoints or `blocked_by` for cut members.
+- **says:** decomposition cycle through `integrates`: P-1 → P-2 → P-1
+  - **fix:** Break the cycle by removing one `integrates` edge so decomposed increments form an acyclic tree.
+- **says:** integrated by 2 parents (`P-1`, `P-2`): a work task belongs to at most one decomposition parent
+  - **fix:** Keep `C-1` in `integrates` on at most one parent task and remove it from the other parent(s) (`P-1`, `P-2`).
+- **says:** integrates `C-1` across cuts: `P-1` is in `M-1` while `C-1` is in `M-2`
+  - **fix:** Keep `P-1` and `C-1` in the same cut (move them together with `aplan mv`), or remove `C-1` from `integrates` if it belongs to a different cut.
+- **says:** terminal parent `P-1` is `done` while integrated child `C-1` is `todo`
+  - **fix:** Complete `C-1` before closing `P-1`, or remove `C-1` from `integrates` and `blocked_by` if it is no longer part of `P-1`.
 

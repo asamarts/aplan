@@ -21,6 +21,8 @@ fn large_view() -> GraphView {
             title: format!("representative task {index}"),
             status: Status::Todo,
             done: false,
+            parent: None,
+            decomposition: None,
         })
         .collect();
     let edges = (LANES..NODES)
@@ -28,6 +30,7 @@ fn large_view() -> GraphView {
             from: format!("T-{:05}", index - LANES),
             to: format!("T-{index:05}"),
             kind: EdgeKind::Dependency,
+            integrates: false,
         })
         .collect();
     GraphView {
@@ -52,18 +55,22 @@ fn fan_in_view() -> GraphView {
                 title: format!("fan-in root {group}/{lane}"),
                 status: Status::Todo,
                 done: false,
+                parent: None,
+                decomposition: None,
             });
             if group > 0 {
                 edges.push(GraphEdge {
                     from: format!("F-{:04}-S", group - 1),
                     to: root.clone(),
                     kind: EdgeKind::Dependency,
+                    integrates: false,
                 });
             }
             edges.push(GraphEdge {
                 from: root,
                 to: sink.clone(),
                 kind: EdgeKind::Dependency,
+                integrates: false,
             });
         }
         nodes.push(GraphNode {
@@ -71,6 +78,8 @@ fn fan_in_view() -> GraphView {
             title: format!("fan-in sink {group}"),
             status: Status::Todo,
             done: false,
+            parent: None,
+            decomposition: None,
         });
     }
     GraphView {
@@ -93,6 +102,8 @@ fn crossing_view() -> GraphView {
                 title: format!("crossing task {group}/{name}"),
                 status: Status::Todo,
                 done: false,
+                parent: None,
+                decomposition: None,
             });
         }
         if group > 0 {
@@ -101,6 +112,7 @@ fn crossing_view() -> GraphView {
                     from: format!("X-{:04}-E", group - 1),
                     to: format!("X-{group:04}-{name}"),
                     kind: EdgeKind::Dependency,
+                    integrates: false,
                 });
             }
         }
@@ -109,6 +121,7 @@ fn crossing_view() -> GraphView {
                 from: format!("X-{group:04}-{from}"),
                 to: format!("X-{group:04}-{to}"),
                 kind: EdgeKind::Dependency,
+                integrates: false,
             });
         }
     }

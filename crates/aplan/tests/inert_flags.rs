@@ -1234,6 +1234,12 @@ const PROBES: &[Probe] = &[
             "milestone",
         ],
     ),
+    p(
+        "add",
+        "--integrates",
+        Some("D-1"),
+        &["New parent", "--cut", "M-a", "--blocked-by", "D-1"],
+    ),
     p("add", "--status", Some("in_progress"), &["Newtask"]),
     p("add", "--tag", Some("docs"), &["Newtask"]),
     p("add", "--effort", Some("4"), &["Newtask"]),

@@ -8180,9 +8180,9 @@ pub struct AddArgs {
     /// arguments. The file is a YAML list whose entries carry `title` and any
     /// of `id`, `phase`, `cut`, `effort`, `owner`, `status`, `tags`, `paths`,
     /// `traces`, `blocked_by`, `blocks`, `prefer_after`, `ratified_by`, `contains`,
-    /// `revisit_at`, `version_impact`, `version_impact_reason`, `evidence`, and
-    /// `body`. Nothing is written unless every task and every cut it joins can
-    /// be.
+    /// `integrates`, `revisit_at`, `version_impact`, `version_impact_reason`,
+    /// `evidence`, and `body`. Nothing is written unless every task and every cut
+    /// it joins can be.
     ///
     /// `todo`, `in_progress`, and `blocked` are ordinary creation states;
     /// `revisit_at` belongs only to `blocked`. `done` is ledger correction and
@@ -8250,6 +8250,10 @@ pub struct AddArgs {
     /// Work this checkpoint borrows for rollups. Repeatable.
     #[arg(long, value_name = "ID")]
     contains: Vec<String>,
+    /// Child work-task increment integrated by this task (must also appear in
+    /// `--blocked-by` and belong to the same cut). Repeatable.
+    #[arg(long, value_name = "ID")]
+    integrates: Vec<String>,
     /// Existing live task to move from its current cut into the new milestone
     /// this add creates. Repeatable. Requires `--tag milestone`; each task must
     /// belong to exactly one cut, and every source must retain live work.
@@ -8807,6 +8811,7 @@ fn refuse_bad_add_relations(plan: &aplan_core::Plan, args: &AddArgs) -> Result<(
         &args.prefer_after,
         &args.ratified_by,
         &args.contains,
+        &args.integrates,
     ];
     if relations
         .into_iter()
@@ -9227,6 +9232,7 @@ fn cmd_add(root: &std::path::Path, args: &AddArgs) -> Result<u8> {
             prefer_after: emit::deduped(&args.prefer_after),
             ratified_by: emit::deduped(&args.ratified_by),
             contains: emit::deduped(&args.contains),
+            integrates: emit::deduped(&args.integrates),
             evidence: Vec::new(),
             // Repeats removed on both surfaces, in one place (`A1-116`).
             paths: emit::deduped(
@@ -9644,6 +9650,7 @@ fn task_from_entry(
         prefer_after: aplan_interop::emit::deduped(&entry.prefer_after),
         ratified_by: aplan_interop::emit::deduped(&entry.ratified_by),
         contains: aplan_interop::emit::deduped(&entry.contains),
+        integrates: aplan_interop::emit::deduped(&entry.integrates),
         evidence: entry.evidence.clone(),
         paths: aplan_interop::emit::deduped(&entry.paths),
         traces: aplan_interop::emit::deduped(&entry.traces),
@@ -9828,6 +9835,7 @@ fn plan_the_batch(
             &entry.prefer_after,
             &entry.ratified_by,
             &entry.contains,
+            &entry.integrates,
         ];
         if relations
             .into_iter()
@@ -12032,6 +12040,8 @@ fn write_ready_json(
         #[serde(skip_serializing_if = "Option::is_none")]
         coordination_warning: Option<&'a str>,
         critical: bool,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        decomposition: Option<&'a aplan_core::DecompositionProgress>,
         downstream_depth: usize,
         effort_days: Option<f64>,
         #[serde(skip_serializing_if = "Option::is_none")]
@@ -12039,6 +12049,8 @@ fn write_ready_json(
         id: &'a str,
         #[serde(skip_serializing_if = "Option::is_none")]
         owner: Option<&'a str>,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        parent: Option<&'a str>,
         prefers_to_follow: &'a [String],
         releases: usize,
         #[serde(skip_serializing_if = "str::is_empty")]
@@ -12064,11 +12076,13 @@ fn write_ready_json(
             claim_state: t.claim_state,
             coordination_warning: t.coordination_warning.as_deref(),
             critical: t.critical,
+            decomposition: t.decomposition.as_ref(),
             downstream_depth: t.downstream_depth,
             effort_days: t.effort_days,
             held_by: t.held_by.as_deref(),
             id: &t.id,
             owner: t.owner.as_deref(),
+            parent: t.parent.as_deref(),
             prefers_to_follow: &t.prefers_to_follow,
             releases: t.releases,
             status: &t.status,
@@ -12127,17 +12141,30 @@ fn write_ready_human(
                 format!(" [claim {}]", aplan_output::sanitize::visible(who))
             })
         };
+        let decomp = match (&t.decomposition, &t.parent) {
+            (Some(d), Some(p)) => format!(
+                " [part of {p}; integration boundary: {}/{} children done]",
+                d.children_done, d.children_total
+            ),
+            (Some(d), None) => format!(
+                " [integration boundary: {}/{} children done]",
+                d.children_done, d.children_total
+            ),
+            (None, Some(p)) => format!(" [part of {p}]"),
+            (None, None) => String::new(),
+        };
         writeln!(
             out,
             "{}",
             aplan_output::fold::row(
                 &format!("{id}{}{id:#}  ", t.id, id = aplan_output::style::ID),
                 &format!(
-                    "{}{dim}{}{}{}{dim:#}",
+                    "{}{dim}{}{}{}{}{dim:#}",
                     aplan_output::sanitize::visible(&t.title),
                     effort,
                     owner,
                     held,
+                    decomp,
                     dim = aplan_output::style::DIM
                 ),
             )
@@ -12995,6 +13022,7 @@ fn successor_task(
         prefer_after: Vec::new(),
         ratified_by: Vec::new(),
         contains: Vec::new(),
+        integrates: Vec::new(),
         evidence: Vec::new(),
         // Omission inherits. Clear and replacement are distinct explicit
         // choices, so a successor need not carry predecessor scope that no
@@ -14543,6 +14571,9 @@ fn canonical_artifacts() -> String {
         blocked_by: vec!["X1-02".to_string()],
         evidence: vec!["commit:abcdef123456".to_string()],
         tags: vec!["a-tag".to_string()],
+        parent: None,
+        integrates: Vec::new(),
+        decomposition: None,
     };
     let roadmap = Roadmap {
         cuts: vec![Cut {
@@ -16538,6 +16569,100 @@ fn describe_window(
     Ok((next.owed.clone(), next.said(), json))
 }
 
+fn write_why_decomposition_context(out: &mut String, graph: &aplan_core::Graph<'_>, id: &str) {
+    if let Some(parent_id) = graph.parent_of(id) {
+        let _ = writeln!(out, "part of: {parent_id} (integration boundary)");
+    }
+    if let Some(d) = graph.decomposition_of(id) {
+        let current = d
+            .current_increment
+            .as_deref()
+            .map_or_else(String::new, |cur| format!("; current increment: {cur}"));
+        let boundary = if d.integration_ready {
+            "; integration boundary ready".to_string()
+        } else if d.remaining_children.is_empty() {
+            "; all children done".to_string()
+        } else {
+            format!("; remaining children: {}", d.remaining_children.join(", "))
+        };
+        let _ = writeln!(
+            out,
+            "decomposition: {}/{} children done{current}{boundary}",
+            d.children_done, d.children_total
+        );
+    }
+}
+
+fn write_why_blockers(
+    out: &mut String,
+    graph: &aplan_core::Graph<'_>,
+    task: &aplan_core::Task,
+    blockers: &[&aplan_core::Task],
+    unknown: &[&str],
+    walk: aplan_core::graph::Walk,
+) {
+    let _ = writeln!(
+        out,
+        "{i}{}{i:#} {hd}is blocked by:{hd:#}",
+        task.id,
+        i = aplan_output::style::ID,
+        hd = aplan_output::style::HEADING
+    );
+    let mut folded = false;
+    for b in blockers {
+        let child_note = if task.integrates.iter().any(|c| c == &b.id) {
+            format!(
+                "{dim}  (integrated child){dim:#}",
+                dim = aplan_output::style::DIM
+            )
+        } else {
+            String::new()
+        };
+        let _ = writeln!(
+            out,
+            "{}",
+            aplan_output::fold::row(
+                &format!(
+                    "  {id}{}{id:#} [{st}{}{st:#}]  ",
+                    b.id,
+                    b.status,
+                    id = aplan_output::style::ID,
+                    st = aplan_output::style::status(b.status.as_str()),
+                ),
+                &format!("{}{child_note}", aplan_output::sanitize::visible(&b.title)),
+            )
+        );
+        if walk == aplan_core::graph::Walk::CutBounded && b.is_milestone() {
+            let behind = graph.folded_behind(&b.id);
+            if behind > 0 {
+                folded = true;
+                let _ = writeln!(
+                    out,
+                    "      {dim}(a cut: {behind} unmet behind it, `--all` lists them){dim:#}",
+                    dim = aplan_output::style::DIM
+                );
+            }
+        }
+    }
+    for u in unknown {
+        let _ = writeln!(
+            out,
+            "{}",
+            aplan_output::fold::row(
+                &format!(
+                    "  {id}{u}{id:#} [{w}unknown{w:#}]  ",
+                    id = aplan_output::style::ID,
+                    w = aplan_output::style::WARNING,
+                ),
+                "referenced but not defined",
+            )
+        );
+    }
+    if folded {
+        let _ = writeln!(out, "traversal: cut-bounded");
+    }
+}
+
 fn cmd_why(root: &std::path::Path, id: &str, all: bool, format: &str) -> Result<u8> {
     let format = format_for("why", format)?;
     let plan = load_checked(root)?;
@@ -16591,73 +16716,9 @@ fn cmd_why(root: &std::path::Path, id: &str, all: bool, format: &str) -> Result<
     } else if blockers.is_empty() && unknown.is_empty() {
         out.push_str(&unblocked_verdict(task, closeable));
     }
+    write_why_decomposition_context(&mut out, &graph, id);
     if !blockers.is_empty() || !unknown.is_empty() {
-        // The id takes the id role and the label takes the heading role, as
-        // everywhere else (`A1-296`, audit: this line carried neither).
-        let _ = writeln!(
-            out,
-            "{i}{id}{i:#} {hd}is blocked by:{hd:#}",
-            i = aplan_output::style::ID,
-            hd = aplan_output::style::HEADING
-        );
-        let mut folded = false;
-        for b in blockers {
-            // The title is the trailing column and folds under itself. It did
-            // not until `A1-291`: at eighty columns a blocker row ran to 138 and
-            // the terminal broke it at column zero, under the id.
-            let _ = writeln!(
-                out,
-                "{}",
-                aplan_output::fold::row(
-                    &format!(
-                        "  {id}{}{id:#} [{st}{}{st:#}]  ",
-                        b.id,
-                        b.status,
-                        id = aplan_output::style::ID,
-                        st = aplan_output::style::status(b.status.as_str()),
-                    ),
-                    &aplan_output::sanitize::visible(&b.title),
-                )
-            );
-            // What the reader is not being shown, and how to see it. A fold that
-            // did not say its own size would be a truncation reading as the
-            // whole answer (`A1-263`).
-            if walk == aplan_core::graph::Walk::CutBounded && b.is_milestone() {
-                let behind = graph.folded_behind(&b.id);
-                if behind > 0 {
-                    folded = true;
-                    let _ = writeln!(
-                        out,
-                        "      {dim}(a cut: {behind} unmet behind it, `--all` lists them){dim:#}",
-                        dim = aplan_output::style::DIM
-                    );
-                }
-            }
-        }
-        for u in unknown {
-            let _ = writeln!(
-                out,
-                "{}",
-                aplan_output::fold::row(
-                    &format!(
-                        "  {id}{u}{id:#} [{w}unknown{w:#}]  ",
-                        id = aplan_output::style::ID,
-                        w = aplan_output::style::WARNING,
-                    ),
-                    "referenced but not defined",
-                )
-            );
-        }
-        // Exactly when the answer is partial, which is the only time the word
-        // changes what the reader should believe. A bounded walk that folded
-        // nothing *is* the complete answer, and labelling it would put a caveat
-        // on two lines that have none -- noise on the common case, and the
-        // shape a reader learns to skip. The JSON carries `traversal`
-        // unconditionally, because a consumer diffs fields rather than reading
-        // for emphasis (`A1-263`).
-        if folded {
-            let _ = writeln!(out, "traversal: cut-bounded");
-        }
+        write_why_blockers(&mut out, &graph, task, &blockers, &unknown, walk);
     }
     timed("render", || write_stdout(&out))?;
     Ok(EXIT_OK)
@@ -18757,6 +18818,10 @@ fn rekey_task_file(
         updated = aplan_core::close::set_contains(&updated, &rekeyed(&task.contains, old, new))
             .map_err(|e| close_err("rekey", &task.id, &e))?;
     }
+    if task.integrates.iter().any(|id| id == old) {
+        updated = aplan_core::close::set_integrates(&updated, &rekeyed(&task.integrates, old, new))
+            .map_err(|e| close_err("rekey", &task.id, &e))?;
+    }
     Ok(updated)
 }
 
@@ -18772,6 +18837,7 @@ fn rekey_plan_model(
         loaded.task.prefer_after = rekeyed(&loaded.task.prefer_after, old, new);
         loaded.task.ratified_by = rekeyed(&loaded.task.ratified_by, old, new);
         loaded.task.contains = rekeyed(&loaded.task.contains, old, new);
+        loaded.task.integrates = rekeyed(&loaded.task.integrates, old, new);
         if loaded.task.id == old {
             loaded.task.id = new.to_string();
             loaded.path = destination.to_path_buf();
@@ -20953,6 +21019,8 @@ mod tests {
                 title: "A".to_string(),
                 status: aplan_core::Status::Todo,
                 done: false,
+                parent: None,
+                decomposition: None,
             }],
             edges: Vec::new(),
             hidden_edges: 0,
@@ -20999,6 +21067,8 @@ mod tests {
             title: "B".to_string(),
             status: aplan_core::Status::Todo,
             done: false,
+            parent: None,
+            decomposition: None,
         });
         validate_graph_focus(&graph, &include, &view, &[], Some("B"))
             .expect("visible in-scope focus");
@@ -24892,6 +24962,8 @@ mod id_race {
                 held_by: None,
                 claim: None,
                 coordination_warning: None,
+                parent: None,
+                decomposition: None,
             }],
             closeable_cuts: Vec::new(),
         };

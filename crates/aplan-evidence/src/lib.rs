@@ -2497,6 +2497,7 @@ mod tests {
             prefer_after: Vec::new(),
             ratified_by: Vec::new(),
             contains: Vec::new(),
+            integrates: Vec::new(),
             evidence,
             paths,
             traces: Vec::new(),
@@ -10294,6 +10295,7 @@ mod version_behind_tests {
             prefer_after: Vec::new(),
             ratified_by: Vec::new(),
             contains: Vec::new(),
+            integrates: Vec::new(),
             evidence: vec![Evidence {
                 kind: EvidenceKind::Commit,
                 reference: sha.to_string(),
@@ -11047,6 +11049,7 @@ mod coverage_audit_tests {
             effort_days: None,
             blocked_by: Vec::new(),
             contains: Vec::new(),
+            integrates: Vec::new(),
             ratified_by: Vec::new(),
             prefer_after: Vec::new(),
             paths,

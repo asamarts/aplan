@@ -724,6 +724,14 @@ pub struct Task {
     /// release.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub contains: Vec<String>,
+    /// Work task IDs whose bounded delivery increments this task integrates.
+    ///
+    /// Declares an integration-boundary work task with its own explicit status,
+    /// evidence-gated closure, and optional own integration effort. Every ID
+    /// listed here must also appear in `blocked_by` and belong to the same cut
+    /// (or both belong to no cut), forming a single-parent acyclic forest.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub integrates: Vec<String>,
     /// Proof of completion. Must be non-empty when `status: done`.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub evidence: Vec<Evidence>,
@@ -1040,6 +1048,13 @@ impl Task {
         self.status.is_workable() && self.blocked_by.iter().all(|b| is_done(b))
     }
 
+    /// Whether this task declares `integrates` children and acts as an
+    /// integration boundary for decomposed increments (`A2-148`, ADR-0076).
+    #[must_use]
+    pub fn is_integrator(&self) -> bool {
+        !self.integrates.is_empty()
+    }
+
     /// Whether anything this task cites is judged against its `paths`.
     ///
     /// `APLAN012` binds a `commit` by asking whether its diff touched them,
@@ -1321,6 +1336,7 @@ mod tests {
             prefer_after: Vec::new(),
             ratified_by: Vec::new(),
             contains: Vec::new(),
+            integrates: Vec::new(),
             evidence: Vec::new(),
             paths: Vec::new(),
             traces: Vec::new(),
@@ -1403,6 +1419,7 @@ mod tests {
             prefer_after: Vec::new(),
             ratified_by: Vec::new(),
             contains: Vec::new(),
+            integrates: Vec::new(),
             evidence: Vec::new(),
             paths: Vec::new(),
             traces: Vec::new(),
@@ -1443,6 +1460,7 @@ mod tests {
             prefer_after: Vec::new(),
             ratified_by: Vec::new(),
             contains: Vec::new(),
+            integrates: Vec::new(),
             evidence: Vec::new(),
             paths: Vec::new(),
             traces: Vec::new(),
@@ -1493,6 +1511,7 @@ mod tests {
                 prefer_after: Vec::new(),
                 ratified_by: Vec::new(),
                 contains: Vec::new(),
+                integrates: Vec::new(),
                 evidence: Vec::new(),
                 paths: vec!["src/**".into()],
                 traces: Vec::new(),
@@ -1553,6 +1572,7 @@ mod tests {
             prefer_after: Vec::new(),
             ratified_by: Vec::new(),
             contains: Vec::new(),
+            integrates: Vec::new(),
             evidence: Vec::new(),
             paths: Vec::new(),
             traces: Vec::new(),

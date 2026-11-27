@@ -136,6 +136,87 @@
         }
       ]
     },
+    "DecompositionProgress": {
+      "description": "Derived decomposition progress and effort rollup for a work task declaring\n`integrates`.\n\nComputed from the graph rather than persisted in task files so child counts,\nactive increment selection, integration-boundary readiness, and effort totals\nstay derived and single-counted.",
+      "properties": {
+        "children_done": {
+          "description": "Count of direct integrated children currently `done`.",
+          "format": "uint",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "children_done_effort_days": {
+          "description": "Sum of `effort_days` over `done` descendants.",
+          "format": "double",
+          "type": "number"
+        },
+        "children_effort_days": {
+          "description": "Sum of `effort_days` over all live descendants (excluding the parent's\nown integration effort).",
+          "format": "double",
+          "type": "number"
+        },
+        "children_total": {
+          "description": "Count of direct live (non-dropped) integrated children.",
+          "format": "uint",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "current_increment": {
+          "description": "Active (`in_progress`) or next ready increment in this subtree, if any.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "descendants_done": {
+          "description": "Completed (`done`) descendants across all nesting depths.",
+          "format": "uint",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "descendants_remaining": {
+          "description": "Unfinished live descendants across all nesting depths.",
+          "format": "uint",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "descendants_total": {
+          "description": "Total live (non-dropped) descendants across all nesting depths.",
+          "format": "uint",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "integration_ready": {
+          "description": "Whether all integrated children are `done` and this parent is ready at\nits integration boundary.",
+          "type": "boolean"
+        },
+        "remaining_children": {
+          "description": "Direct unfinished live integrated child IDs, in declaration order.",
+          "items": {
+            "type": "string"
+          },
+          "type": "array"
+        },
+        "total_effort_days": {
+          "description": "Parent's own `effort_days` (0 when omitted) plus `children_effort_days`.",
+          "format": "double",
+          "type": "number"
+        }
+      },
+      "required": [
+        "children_total",
+        "children_done",
+        "remaining_children",
+        "descendants_total",
+        "descendants_done",
+        "descendants_remaining",
+        "integration_ready",
+        "children_effort_days",
+        "children_done_effort_days",
+        "total_effort_days"
+      ],
+      "type": "object"
+    },
     "EvidenceKind": {
       "description": "What kind of proof closes a task.\n\nThe point of typing this is that \"I finished it\" is not evidence. A commit,\na URL, a committed artefact, a named test, or a dated note is.",
       "oneOf": [
@@ -279,6 +360,17 @@
             "null"
           ]
         },
+        "decomposition": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/DecompositionProgress"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "description": "Derived decomposition progress and subtree effort rollup when this task\ndeclares `integrates`, or `null` otherwise."
+        },
         "effort_days": {
           "description": "`null` when the task carries no estimate, which `APLAN009` reports\nseparately. Distinguished from `0` on purpose: an unestimated task is not\na free one.",
           "format": "double",
@@ -304,6 +396,13 @@
         "id": {
           "type": "string"
         },
+        "integrates": {
+          "description": "Work-task increments this task integrates.",
+          "items": {
+            "type": "string"
+          },
+          "type": "array"
+        },
         "milestone": {
           "description": "The id of the milestone that owns it, since two cuts may share a label.",
           "type": [
@@ -316,6 +415,13 @@
           "type": "boolean"
         },
         "owner": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "parent": {
+          "description": "The parent work task integrating this task, or `null` when top-level.",
           "type": [
             "string",
             "null"
@@ -441,6 +547,9 @@
         "prefer_after",
         "ratified_by",
         "contains",
+        "integrates",
+        "parent",
+        "decomposition",
         "trace_fingerprints",
         "evidence_fingerprints",
         "revisit_at",

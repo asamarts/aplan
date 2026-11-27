@@ -909,6 +909,7 @@ fn run_validate(
         report_ratification_cycle(plan, &file_of, &mut report.diagnostics);
         check_contains(plan, &file_of, &mut report.diagnostics);
     }
+    check_integrates(plan, graph, &file_of, &mut report.diagnostics);
     if let Some(cycle) = graph.find_cycle() {
         let path = cycle.join(" → ");
         let anchor = cycle.first().cloned().unwrap_or_default();
@@ -1159,7 +1160,7 @@ fn check_task(
     check_scaffold_leftover(lt, out);
     check_version_impact(lt, context, out);
     check_version_record(lt, out);
-    check_effort(lt, context, out);
+    check_effort(lt, graph, context, out);
     check_milestone_shape(lt, graph, out);
     check_task_traces(lt, context, out);
 }
@@ -1168,10 +1169,17 @@ fn check_task(
 ///
 /// Milestones are checkpoints, not work: they carry no effort by design (and
 /// are excluded from every rollup), so asking one for an estimate would be
-/// noise.
-fn check_effort(lt: &LoadedTask, context: &mut ValidationContext<'_>, out: &mut Vec<Diagnostic>) {
+/// noise. A live parent task whose `integrates` list names at least one valid
+/// non-dropped child increment is likewise exempt so pure integration
+/// boundaries are not forced into zero-effort fiction (`A2-148`, ADR-0076).
+fn check_effort(
+    lt: &LoadedTask,
+    graph: &Graph<'_>,
+    context: &mut ValidationContext<'_>,
+    out: &mut Vec<Diagnostic>,
+) {
     let t = &lt.task;
-    if t.status.is_terminal() || t.is_milestone() {
+    if t.status.is_terminal() || t.is_milestone() || graph.is_effort_exempt_integrator(t) {
         return;
     }
     let opts = context.opts;
@@ -2794,6 +2802,366 @@ fn check_contains(plan: &Plan, file_of: &BTreeMap<&str, &Path>, out: &mut Vec<Di
         }
         out.push(d);
     }
+}
+
+/// `APLAN066`: every `integrates` edge forms a valid same-cut single-parent
+/// acyclic decomposition of work tasks paired with `blocked_by` (`A2-148`,
+/// ADR-0076).
+fn check_integrates(
+    plan: &Plan,
+    graph: &Graph<'_>,
+    file_of: &BTreeMap<&str, &Path>,
+    out: &mut Vec<Diagnostic>,
+) {
+    if !graph.has_decomposition() {
+        return;
+    }
+    let cuts_by_task = non_borrowing_cuts_by_task(plan);
+    let mut parents_by_child: BTreeMap<&str, Vec<&str>> = BTreeMap::new();
+    for lt in &plan.tasks {
+        check_task_integrates(lt, plan, graph, &cuts_by_task, &mut parents_by_child, out);
+    }
+    for (child, mut parents) in parents_by_child {
+        parents.sort_unstable();
+        parents.dedup();
+        if parents.len() > 1 {
+            let named = parents
+                .iter()
+                .map(|p| format!("`{p}`"))
+                .collect::<Vec<_>>()
+                .join(", ");
+            let mut d = Diagnostic::error(
+                code::INTEGRATES_UNUSABLE,
+                format!(
+                    "integrated by {} parents ({named}): a work task belongs to at most one \
+                     decomposition parent",
+                    parents.len()
+                ),
+            )
+            .with_task(child)
+            .with_agent_instruction(format!(
+                "Keep `{child}` in `integrates` on at most one parent task and remove it from \
+                 the other parent(s) ({named})."
+            ));
+            if let Some(p) = file_of.get(child) {
+                d = d.with_file(*p);
+            }
+            out.push(d);
+        }
+    }
+    if let Some(cycle) = integrates_cycle(plan) {
+        let path = cycle.join(" \u{2192} ");
+        let anchor = cycle.first().cloned().unwrap_or_default();
+        let mut d = Diagnostic::error(
+            code::INTEGRATES_UNUSABLE,
+            format!("decomposition cycle through `integrates`: {path}"),
+        )
+        .with_task(&anchor)
+        .with_agent_instruction(
+            "Break the cycle by removing one `integrates` edge so decomposed increments form an \
+             acyclic tree.",
+        );
+        if let Some(p) = file_of.get(anchor.as_str()) {
+            d = d.with_file(*p);
+        }
+        out.push(d);
+    }
+}
+
+fn non_borrowing_cuts_by_task(plan: &Plan) -> BTreeMap<&str, BTreeSet<&str>> {
+    let mut cuts: BTreeMap<&str, BTreeSet<&str>> = BTreeMap::new();
+    for lt in &plan.tasks {
+        let m = &lt.task;
+        if !m.is_milestone() || m.is_release() || !m.contains.is_empty() {
+            continue;
+        }
+        for b in &m.blocked_by {
+            cuts.entry(b.as_str()).or_default().insert(m.id.as_str());
+        }
+    }
+    cuts
+}
+
+fn format_cut_set(cuts: Option<&BTreeSet<&str>>) -> String {
+    match cuts {
+        None => "no cut".to_string(),
+        Some(set) if set.is_empty() => "no cut".to_string(),
+        Some(set) => set
+            .iter()
+            .map(|c| format!("`{c}`"))
+            .collect::<Vec<_>>()
+            .join(", "),
+    }
+}
+
+fn check_task_integrates<'a>(
+    lt: &'a LoadedTask,
+    plan: &Plan,
+    graph: &Graph<'_>,
+    cuts_by_task: &BTreeMap<&str, BTreeSet<&str>>,
+    parents_by_child: &mut BTreeMap<&'a str, Vec<&'a str>>,
+    out: &mut Vec<Diagnostic>,
+) {
+    let t = &lt.task;
+    if t.integrates.is_empty() {
+        return;
+    }
+    if t.is_milestone() {
+        out.push(
+            Diagnostic::error(
+                code::INTEGRATES_UNUSABLE,
+                "declares `integrates` but is tagged `milestone`: milestones roll up cuts via \
+                 `contains` and group work via `blocked_by`",
+            )
+            .with_task(&t.id)
+            .with_file(&lt.path)
+            .with_agent_instruction(
+                "Remove `integrates` from this milestone; use `contains` for child checkpoints or \
+                 `blocked_by` for cut members.",
+            ),
+        );
+        return;
+    }
+    let mut seen = BTreeSet::new();
+    let parent_cuts = cuts_by_task.get(t.id.as_str());
+    for child in &t.integrates {
+        check_integrates_child(
+            lt,
+            child,
+            plan,
+            graph,
+            parent_cuts,
+            cuts_by_task,
+            &mut seen,
+            parents_by_child,
+            out,
+        );
+    }
+}
+
+#[allow(clippy::too_many_arguments)]
+fn check_integrates_child<'a>(
+    lt: &'a LoadedTask,
+    child: &'a String,
+    plan: &Plan,
+    graph: &Graph<'_>,
+    parent_cuts: Option<&BTreeSet<&str>>,
+    cuts_by_task: &BTreeMap<&str, BTreeSet<&str>>,
+    seen: &mut BTreeSet<&'a str>,
+    parents_by_child: &mut BTreeMap<&'a str, Vec<&'a str>>,
+    out: &mut Vec<Diagnostic>,
+) {
+    let t = &lt.task;
+    if !seen.insert(child.as_str()) {
+        out.push(
+            Diagnostic::error(
+                code::INTEGRATES_UNUSABLE,
+                format!("repeats `{child}` in `integrates`: list each integrated child once"),
+            )
+            .with_task(&t.id)
+            .with_file(&lt.path)
+            .with_agent_instruction(format!(
+                "Remove the duplicate `{child}` entry from `{}`'s `integrates`.",
+                t.id
+            )),
+        );
+        return;
+    }
+    if child == &t.id {
+        out.push(
+            Diagnostic::error(
+                code::INTEGRATES_UNUSABLE,
+                format!(
+                    "`integrates` lists `{}` itself: a task cannot integrate itself",
+                    t.id
+                ),
+            )
+            .with_task(&t.id)
+            .with_file(&lt.path)
+            .with_agent_instruction(format!("Remove `{}` from its own `integrates`.", t.id)),
+        );
+        return;
+    }
+    let Some(target) = graph.get(child) else {
+        if !plan.unloadable.contains_key(child.as_str()) {
+            out.push(
+                Diagnostic::error(
+                    code::INTEGRATES_UNUSABLE,
+                    format!("`integrates: {child}` names no task in this plan"),
+                )
+                .with_task(&t.id)
+                .with_file(&lt.path)
+                .with_agent_instruction(format!(
+                    "Either create work task `{child}` or remove it from `{}`'s `integrates`.",
+                    t.id
+                )),
+            );
+        }
+        return;
+    };
+    if target.is_milestone() {
+        out.push(
+            Diagnostic::error(
+                code::INTEGRATES_UNUSABLE,
+                format!(
+                    "`integrates: {child}` names a milestone rather than a work task: \
+                     `integrates` decomposes work tasks only"
+                ),
+            )
+            .with_task(&t.id)
+            .with_file(&lt.path)
+            .with_agent_instruction(format!(
+                "Remove `{child}` from `{}`'s `integrates`; keep `{child}` in `blocked_by` \
+                 alone if this task waits on that milestone.",
+                t.id
+            )),
+        );
+        return;
+    }
+    parents_by_child
+        .entry(child.as_str())
+        .or_default()
+        .push(t.id.as_str());
+    check_integrates_semantics(lt, target, parent_cuts, cuts_by_task, out);
+}
+
+fn check_integrates_semantics(
+    lt: &LoadedTask,
+    target: &crate::task::Task,
+    parent_cuts: Option<&BTreeSet<&str>>,
+    cuts_by_task: &BTreeMap<&str, BTreeSet<&str>>,
+    out: &mut Vec<Diagnostic>,
+) {
+    let t = &lt.task;
+    let child = target.id.as_str();
+    if !t.blocked_by.iter().any(|b| b == child) {
+        out.push(
+            Diagnostic::error(
+                code::INTEGRATES_UNUSABLE,
+                format!(
+                    "`integrates: {child}` is not also in `blocked_by`, so `{}` would not wait \
+                     for its integrated child increment",
+                    t.id
+                ),
+            )
+            .with_task(&t.id)
+            .with_file(&lt.path)
+            .with_agent_instruction(format!(
+                "Add `{child}` to `{}`'s `blocked_by` (`aplan dep add {} --after {child}`), \
+                 or remove `{child}` from `integrates`.",
+                t.id, t.id
+            )),
+        );
+    }
+    let child_cuts = cuts_by_task.get(child);
+    if parent_cuts != child_cuts {
+        out.push(
+            Diagnostic::error(
+                code::INTEGRATES_UNUSABLE,
+                format!(
+                    "integrates `{child}` across cuts: `{}` is in {} while `{child}` is in {}",
+                    t.id,
+                    format_cut_set(parent_cuts),
+                    format_cut_set(child_cuts),
+                ),
+            )
+            .with_task(&t.id)
+            .with_file(&lt.path)
+            .with_agent_instruction(format!(
+                "Keep `{}` and `{child}` in the same cut (move them together with `aplan mv`), \
+                 or remove `{child}` from `integrates` if it belongs to a different cut.",
+                t.id
+            )),
+        );
+    }
+    if t.status == Status::Done && target.status != Status::Done {
+        out.push(
+            Diagnostic::error(
+                code::INTEGRATES_UNUSABLE,
+                format!(
+                    "terminal parent `{}` is `done` while integrated child `{child}` is `{}`",
+                    t.id, target.status
+                ),
+            )
+            .with_task(&t.id)
+            .with_file(&lt.path)
+            .with_agent_instruction(format!(
+                "Complete `{child}` before closing `{}`, or remove `{child}` from `integrates` \
+                 and `blocked_by` if it is no longer part of `{}`.",
+                t.id, t.id
+            )),
+        );
+    } else if t.status == Status::Dropped && !target.status.is_terminal() {
+        out.push(
+            Diagnostic::error(
+                code::INTEGRATES_UNUSABLE,
+                format!(
+                    "terminal parent `{}` is `dropped` while integrated child `{child}` is \
+                     still live (`{}`)",
+                    t.id, target.status
+                ),
+            )
+            .with_task(&t.id)
+            .with_file(&lt.path)
+            .with_agent_instruction(format!(
+                "Drop `{child}` alongside `{}` (`aplan drop {child}`), or remove `{child}` \
+                 from `{}`'s `integrates` if it continues independently.",
+                t.id, t.id
+            )),
+        );
+    }
+}
+
+/// A loop in `integrates`, as the ids on it (`A2-148`, ADR-0076).
+fn integrates_cycle(plan: &Plan) -> Option<Vec<String>> {
+    let mut edges: BTreeMap<&str, Vec<&str>> = BTreeMap::new();
+    for lt in &plan.tasks {
+        let id = lt.task.id.as_str();
+        edges.entry(id).or_default().extend(
+            lt.task
+                .integrates
+                .iter()
+                .map(String::as_str)
+                .filter(|d| *d != id),
+        );
+    }
+    let mut mark: BTreeMap<&str, Mark> = BTreeMap::new();
+    for start in edges.keys().copied() {
+        if mark.contains_key(start) {
+            continue;
+        }
+        let mut path: Vec<&str> = vec![start];
+        let mut at: Vec<(usize, &str)> = vec![(0, start)];
+        mark.insert(start, Mark::Open);
+        while let Some((i, node)) = at.pop() {
+            let nexts = edges.get(node).map_or(&[][..], Vec::as_slice);
+            if i >= nexts.len() {
+                mark.insert(node, Mark::Done);
+                path.pop();
+                continue;
+            }
+            at.push((i + 1, node));
+            let next = nexts[i];
+            match mark.get(next) {
+                Some(Mark::Open) => {
+                    let from = path.iter().position(|p| *p == next).unwrap_or(0);
+                    let mut cycle: Vec<String> =
+                        path[from..].iter().map(|s| (*s).to_string()).collect();
+                    cycle.push(next.to_string());
+                    return Some(cycle);
+                }
+                Some(Mark::Done) => {}
+                None => {
+                    if edges.contains_key(next) {
+                        mark.insert(next, Mark::Open);
+                        path.push(next);
+                        at.push((0, next));
+                    }
+                }
+            }
+        }
+    }
+    None
 }
 
 /// A loop in `contains`, as the ids on it (`A1-333`).
@@ -4578,6 +4946,7 @@ mod tests {
             prefer_after: Vec::new(),
             ratified_by: Vec::new(),
             contains: Vec::new(),
+            integrates: Vec::new(),
             evidence: Vec::new(),
             paths: Vec::new(),
             traces: Vec::new(),
@@ -10436,5 +10805,99 @@ mod tests {
                 .any(|d| d.message.contains("matches 2 milestones")),
             "expected ambiguous label id_families.cuts diagnostic: {a62:#?}"
         );
+    }
+
+    #[test]
+    fn integrates_unusable_reports_every_structural_and_lifecycle_refusal_with_subjects() {
+        let mut milestone_parent = t("M-bad", Status::Todo);
+        milestone_parent.tags = vec!["milestone".to_string()];
+        milestone_parent.blocked_by = vec!["W-1".to_string()];
+        milestone_parent.integrates = vec!["W-1".to_string()];
+
+        let mut self_and_dup = t("P-bad", Status::Todo);
+        self_and_dup.blocked_by = vec!["W-1".to_string(), "M-child".to_string()];
+        self_and_dup.integrates = vec![
+            "P-bad".to_string(),
+            "W-1".to_string(),
+            "W-1".to_string(),
+            "GHOST".to_string(),
+            "M-child".to_string(),
+            "W-unpaired".to_string(),
+        ];
+
+        let mut second_parent = t("P-two", Status::Todo);
+        second_parent.blocked_by = vec!["W-1".to_string()];
+        second_parent.integrates = vec!["W-1".to_string()];
+
+        let mut m_child = t("M-child", Status::Todo);
+        m_child.tags = vec!["milestone".to_string()];
+
+        let mut m1 = t("M-cut1", Status::Todo);
+        m1.tags = vec!["milestone".to_string()];
+        m1.blocked_by = vec!["P-cross".to_string()];
+        let mut m2 = t("M-cut2", Status::Todo);
+        m2.tags = vec!["milestone".to_string()];
+        m2.blocked_by = vec!["C-cross".to_string()];
+        let mut p_cross = t("P-cross", Status::Todo);
+        p_cross.blocked_by = vec!["C-cross".to_string()];
+        p_cross.integrates = vec!["C-cross".to_string()];
+
+        let mut cyc1 = t("CYC-1", Status::Todo);
+        cyc1.blocked_by = vec!["CYC-2".to_string()];
+        cyc1.integrates = vec!["CYC-2".to_string()];
+        let mut cyc2 = t("CYC-2", Status::Todo);
+        cyc2.blocked_by = vec!["CYC-1".to_string()];
+        cyc2.integrates = vec!["CYC-1".to_string()];
+
+        let mut done_parent = t("P-done", Status::Done);
+        done_parent.blocked_by = vec!["C-open".to_string()];
+        done_parent.integrates = vec!["C-open".to_string()];
+        let mut dropped_parent = t("P-drop", Status::Dropped);
+        dropped_parent.blocked_by = vec!["C-live".to_string()];
+        dropped_parent.integrates = vec!["C-live".to_string()];
+
+        let plan = plan_of(vec![
+            milestone_parent,
+            self_and_dup,
+            second_parent,
+            m_child,
+            t("W-1", Status::Todo),
+            t("W-unpaired", Status::Todo),
+            m1,
+            m2,
+            p_cross,
+            t("C-cross", Status::Todo),
+            cyc1,
+            cyc2,
+            done_parent,
+            t("C-open", Status::Todo),
+            dropped_parent,
+            t("C-live", Status::InProgress),
+        ]);
+        let report = validate(&plan, &Options::default());
+        let messages: Vec<&str> = report
+            .diagnostics
+            .iter()
+            .filter(|d| d.code == code::INTEGRATES_UNUSABLE)
+            .map(|d| d.message.as_str())
+            .collect();
+        for needle in [
+            "tagged `milestone`",
+            "lists `P-bad` itself",
+            "repeats `W-1`",
+            "`integrates: GHOST` names no task",
+            "`integrates: M-child` names a milestone",
+            "`integrates: W-unpaired` is not also in `blocked_by`",
+            "integrated by 2 parents",
+            "integrates `C-cross` across cuts",
+            "decomposition cycle through `integrates`",
+            "terminal parent `P-done` is `done` while integrated child `C-open` is `todo`",
+            "terminal parent `P-drop` is `dropped` while integrated child `C-live` is still live",
+        ] {
+            assert!(
+                messages.iter().any(|m| m.contains(needle)),
+                "expected APLAN066 message containing `{needle}`, got:\n{messages:#?}"
+            );
+        }
     }
 }

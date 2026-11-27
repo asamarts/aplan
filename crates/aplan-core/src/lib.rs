@@ -102,7 +102,7 @@ pub use claim::{
 pub use close::trace_fingerprints;
 pub use close::{
     CloseError, add_evidence, apply_repair, close, close_at, remove_evidence, replace_evidence,
-    restamp, retarget_path, review, set_evidence_fingerprints, set_paths,
+    restamp, retarget_path, review, set_evidence_fingerprints, set_integrates, set_paths,
 };
 pub use completion::{
     AppliedCompletedRequest, AppliedCompletedSelector, CompletedResponse, CompletedTaskRow,
@@ -116,8 +116,8 @@ pub use diagnostic::{
 pub use explain::{RuleExplanation, explain_rule};
 pub use export::{TaskExport, TaskRow};
 pub use graph::{
-    CriticalPath, CriticalRoute, CriticalStep, CriticalTask, EdgeKind, Graph, Rank, Weigh,
-    edge_kind, graph_constructions,
+    CriticalPath, CriticalRoute, CriticalStep, CriticalTask, DecompositionProgress, EdgeKind,
+    Graph, Rank, Weigh, edge_kind, graph_constructions,
 };
 pub use id::{IdFamilyPolicy, IdFamilyRule, IdStrategy, validate_id_family_prefix};
 pub use load::{
@@ -128,7 +128,7 @@ pub use load::{
 pub use load::{Unopened, Unresolved, unresolved_by_check};
 pub use roadmap::{Cut, Roadmap, RoadmapTask, cut_label, parse_cut_version};
 pub use show::{Show, ShowSources};
-pub use summary::{GroupSummary, GroupedSummary, PhaseSummary, Summary};
+pub use summary::{GroupSummary, GroupedSummary, ParentSummary, PhaseSummary, Summary};
 pub use task::{
     ClosedAtSource, Evidence, EvidenceKind, MAX_CLOSED_AT_EPOCH, MIN_CLOSED_AT_EPOCH, Status,
     SubstantiveContent, Task, canonical_evidence_key, format_closed_at, is_universal_path_glob,

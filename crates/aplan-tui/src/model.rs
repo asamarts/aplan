@@ -897,6 +897,7 @@ fn synthetic_tasks(rows: &[aplan_app::TaskBrowserRow]) -> Vec<aplan_core::task::
             prefer_after: Vec::new(),
             ratified_by: Vec::new(),
             contains: Vec::new(),
+            integrates: Vec::new(),
             evidence: Vec::new(),
             paths: Vec::new(),
             traces: Vec::new(),
@@ -7628,6 +7629,71 @@ fn summary_planning(show: &aplan_app::Show) -> Vec<InspectorItem> {
             InspectorTone::Accent,
         ));
     }
+    if let Some(parent) = &show.parent {
+        let label = format!("{} ({})", parent.id, parent.status);
+        items.push(InspectorItem::task(
+            "DECOMPOSITION",
+            "Parent",
+            label,
+            &parent.id,
+        ));
+    }
+    if let Some(d) = &show.decomposition {
+        let nested = if d.descendants_total > d.children_total {
+            format!(
+                " ({}/{} total increments)",
+                d.descendants_done, d.descendants_total
+            )
+        } else {
+            String::new()
+        };
+        items.push(InspectorItem::metric(
+            "DECOMPOSITION",
+            "Integration progress",
+            format!(
+                "{}/{} children done{nested}",
+                d.children_done, d.children_total
+            ),
+            Some(format!(
+                "children {:.1}d ({:.1}d done), total {:.1}d",
+                d.children_effort_days, d.children_done_effort_days, d.total_effort_days
+            )),
+        ));
+        items.push(InspectorItem::badge(
+            "DECOMPOSITION",
+            "Integration boundary",
+            if d.integration_ready {
+                "ready to integrate".to_string()
+            } else if d.remaining_children.is_empty() {
+                "all children done".to_string()
+            } else {
+                format!(
+                    "waiting on {} remaining child(ren)",
+                    d.remaining_children.len()
+                )
+            },
+            if d.integration_ready {
+                InspectorTone::Good
+            } else {
+                InspectorTone::Warning
+            },
+        ));
+        if let Some(cur) = &d.current_increment {
+            items.push(InspectorItem::task(
+                "DECOMPOSITION",
+                "Current increment",
+                cur.clone(),
+                cur,
+            ));
+        }
+        if !d.remaining_children.is_empty() {
+            items.push(InspectorItem::labelled(
+                "DECOMPOSITION",
+                "Remaining children",
+                d.remaining_children.join(", "),
+            ));
+        }
+    }
     items
 }
 
@@ -7658,15 +7724,18 @@ fn summary_detail_links(show: &aplan_app::Show) -> [InspectorItem; 7] {
                 + show.releases.len()
                 + show.prefer_after.len()
                 + show.ratified_by.len()
-                + show.contains.len())
+                + show.contains.len()
+                + show.integrates.len()
+                + usize::from(show.parent.is_some()))
             .to_string(),
             Some(format!(
-                "{} blocker(s), {} release(s), {} preference(s), {} ratifier(s), {} member(s)",
+                "{} blocker(s), {} release(s), {} preference(s), {} ratifier(s), {} member(s), {} integrated",
                 show.waits_on.len(),
                 show.releases.len(),
                 show.prefer_after.len(),
                 show.ratified_by.len(),
-                show.contains.len()
+                show.contains.len(),
+                show.integrates.len()
             )),
             InspectorSection::Relationships,
         ),
@@ -8026,6 +8095,7 @@ fn relationship_item(kind: &str, related: &aplan_app::Related) -> InspectorItem 
         ),
     };
     let group = match kind {
+        "Parent" | "Integrates" => "DECOMPOSITION",
         "Blocked by" => "BLOCKERS",
         "Releases" => "DEPENDENTS",
         "Prefers after" => "PREFERENCES",
@@ -8044,7 +8114,11 @@ fn relationship_item(kind: &str, related: &aplan_app::Related) -> InspectorItem 
 
 fn inspector_relationships(show: &aplan_app::Show) -> Vec<InspectorItem> {
     let mut items = Vec::new();
+    if let Some(parent) = &show.parent {
+        items.push(relationship_item("Parent", parent));
+    }
     for (kind, relations) in [
+        ("Integrates", &show.integrates),
         ("Blocked by", &show.waits_on),
         ("Releases", &show.releases),
         ("Prefers after", &show.prefer_after),
@@ -12729,5 +12803,78 @@ mod tests {
         model.update(Action::SearchClear);
         assert_eq!(model.report_selected_row, 1);
         assert_eq!(model.report_rows()[model.report_selected_row].key, "beta");
+    }
+
+    #[test]
+    fn inspector_surfaces_parent_progress_boundary_and_integrated_relationships() {
+        let mut parent = crate::testing::task_inspector(&crate::testing::task_row("P-1", "Parent"));
+        parent.integrates = vec![aplan_core::show::Related {
+            id: "C-1".to_string(),
+            status: "todo".to_string(),
+            availability: aplan_core::show::RelatedAvailability::Loaded,
+            source: None,
+        }];
+        parent.decomposition = Some(aplan_core::DecompositionProgress {
+            children_total: 1,
+            children_done: 0,
+            remaining_children: vec!["C-1".to_string()],
+            descendants_total: 1,
+            descendants_done: 0,
+            descendants_remaining: 1,
+            current_increment: Some("C-1".to_string()),
+            integration_ready: false,
+            children_effort_days: 2.0,
+            children_done_effort_days: 0.0,
+            total_effort_days: 3.0,
+        });
+        let has = |items: &[InspectorItem], a: &str, b: &str| {
+            items.iter().any(|item| {
+                let text = format!("{:?}", item.presentation);
+                text.contains(a) && text.contains(b)
+            })
+        };
+        let planning = summary_planning(&parent);
+        assert!(
+            has(&planning, "Integration progress", "0/1"),
+            "{planning:?}"
+        );
+        assert!(has(&planning, "Current increment", "C-1"), "{planning:?}");
+        assert!(has(&planning, "Remaining children", "C-1"), "{planning:?}");
+        let rels = inspector_relationships(&parent);
+        assert!(has(&rels, "Integrates", "C-1"), "{rels:?}");
+
+        let mut ready_parent = parent.clone();
+        ready_parent.decomposition = Some(aplan_core::DecompositionProgress {
+            children_total: 1,
+            children_done: 1,
+            remaining_children: Vec::new(),
+            descendants_total: 1,
+            descendants_done: 1,
+            descendants_remaining: 0,
+            current_increment: None,
+            integration_ready: true,
+            children_effort_days: 2.0,
+            children_done_effort_days: 2.0,
+            total_effort_days: 2.0,
+        });
+        let ready_planning = summary_planning(&ready_parent);
+        assert!(
+            has(&ready_planning, "Integration boundary", "ready"),
+            "{ready_planning:?}"
+        );
+
+        let mut child = crate::testing::task_inspector(&crate::testing::task_row("C-1", "Child"));
+        child.parent = Some(aplan_core::show::Related {
+            id: "P-1".to_string(),
+            status: "todo".to_string(),
+            availability: aplan_core::show::RelatedAvailability::Loaded,
+            source: None,
+        });
+        let child_planning = summary_planning(&child);
+        assert!(has(&child_planning, "Parent", "P-1"), "{child_planning:?}");
+        let child_rels = inspector_relationships(&child);
+        assert!(has(&child_rels, "Parent", "P-1"), "{child_rels:?}");
+        let links = summary_detail_links(&child);
+        assert!(has(&links, "Relationships", "1"), "{links:?}");
     }
 }

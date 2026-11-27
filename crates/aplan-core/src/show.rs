@@ -78,6 +78,14 @@ pub struct Show {
     pub prefer_after: Vec<Related>,
     pub ratified_by: Vec<Related>,
     pub contains: Vec<Related>,
+    /// Direct work-task increments integrated by this task (`A2-148`, ADR-0076).
+    pub integrates: Vec<Related>,
+    /// The parent work task integrating this task, if any.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub parent: Option<Related>,
+    /// Derived decomposition progress when this task integrates child increments.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub decomposition: Option<crate::graph::DecompositionProgress>,
     /// Every finding currently attached to this id.
     pub findings: Vec<Finding>,
     /// Whether the evidence ladder ran. `false` under `--no-resolve`, and the
@@ -558,6 +566,9 @@ impl Show {
                 .map(|other| related(other))
                 .collect(),
             contains: task.contains.iter().map(|other| related(other)).collect(),
+            integrates: task.integrates.iter().map(|other| related(other)).collect(),
+            parent: graph.parent_of(id).map(related),
+            decomposition: graph.decomposition_of(id),
             findings: diagnostics
                 .iter()
                 .filter(|d| d.task.as_deref() == Some(id))
@@ -672,6 +683,7 @@ mod tests {
             prefer_after: Vec::new(),
             ratified_by: Vec::new(),
             contains: contains.iter().map(|s| (*s).to_string()).collect(),
+            integrates: Vec::new(),
             evidence: Vec::new(),
             paths: Vec::new(),
             traces: Vec::new(),

@@ -114,6 +114,9 @@ mod criteria;
 #[path = "../critical_path_to.rs"]
 mod critical_path_to;
 #[cfg(unix)]
+#[path = "../decomposition.rs"]
+mod decomposition;
+#[cfg(unix)]
 #[path = "../dep.rs"]
 mod dep;
 #[cfg(unix)]

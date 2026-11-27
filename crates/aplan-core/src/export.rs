@@ -176,6 +176,15 @@ pub struct TaskRow {
     /// *sequences* two cuts (ADR-0013), and the two meanings are what this
     /// separates.
     pub contains: Vec<String>,
+    /// Work-task increments this task integrates.
+    pub integrates: Vec<String>,
+    /// The parent work task integrating this task, or `null` when top-level.
+    #[schemars(with = "RequiredNullable<String>")]
+    pub parent: Option<String>,
+    /// Derived decomposition progress and subtree effort rollup when this task
+    /// declares `integrates`, or `null` otherwise.
+    #[schemars(with = "RequiredNullable<crate::graph::DecompositionProgress>")]
+    pub decomposition: Option<crate::graph::DecompositionProgress>,
     /// The anchor fingerprints a closed task stamped, which is what `APLAN018`
     /// compares against to find a traced section that moved.
     pub trace_fingerprints: std::collections::BTreeMap<String, String>,
@@ -304,6 +313,9 @@ impl Graph<'_> {
                     prefer_after: t.prefer_after.clone(),
                     ratified_by: t.ratified_by.clone(),
                     contains: t.contains.clone(),
+                    integrates: t.integrates.clone(),
+                    parent: self.parent_of(&t.id).map(str::to_string),
+                    decomposition: self.decomposition_with_ranks(&t.id, Some(&rank)),
                     trace_fingerprints: t.trace_fingerprints.clone(),
                     evidence_fingerprints: t.evidence_fingerprints.clone(),
                     revisit_at: t.revisit_at.clone(),
@@ -419,6 +431,7 @@ mod tests {
             prefer_after: Vec::new(),
             ratified_by: Vec::new(),
             contains: Vec::new(),
+            integrates: Vec::new(),
             evidence: Vec::new(),
             paths: Vec::new(),
             traces: Vec::new(),

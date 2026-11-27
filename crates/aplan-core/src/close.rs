@@ -830,6 +830,24 @@ pub fn set_contains(file: &str, contains: &[String]) -> Result<String, CloseErro
     })
 }
 
+/// The same surgical list edit for work-task decomposition (`integrates`).
+///
+/// Preserves surrounding source trivia across both one-for-one rekeys and
+/// membership cardinality changes.
+///
+/// # Errors
+///
+/// Whatever [`set_blocked_by`] returns, for the same reasons.
+pub fn set_integrates(file: &str, integrates: &[String]) -> Result<String, CloseError> {
+    set_id_list(
+        file,
+        "integrates",
+        integrates,
+        SequenceEdit::Preserve,
+        |t| &t.integrates,
+    )
+}
+
 /// The same for `tags`, the vocabulary (`A1-213`).
 ///
 /// Through `set_id_list` despite the name: what that function does is replace a
@@ -5703,5 +5721,25 @@ body
             set_revisit_at("---\nid: [bad\n---\n", Some("2026-12-01T00:00:00Z")),
             Err(CloseError::Frontmatter(_))
         ));
+    }
+
+    #[test]
+    fn set_integrates_adds_replaces_preserves_and_clears_children() {
+        let base = "---\nid: P-1\ntitle: parent\nphase: 1\nstatus: todo\n---\n\nbody\n";
+        let added =
+            set_integrates(base, &["C-1".to_string(), "C-2".to_string()]).expect("add integrates");
+        assert!(added.contains("integrates:"), "{added}");
+        assert!(added.contains("C-1") && added.contains("C-2"), "{added}");
+
+        let rekeyed = set_integrates(&added, &["C-10".to_string(), "C-2".to_string()])
+            .expect("replace integrates");
+        assert!(
+            rekeyed.contains("C-10") && rekeyed.contains("C-2"),
+            "{rekeyed}"
+        );
+        assert!(!rekeyed.contains("- C-1\n"), "{rekeyed}");
+
+        let cleared = set_integrates(&rekeyed, &[]).expect("clear integrates");
+        assert!(!cleared.contains("integrates:"), "{cleared}");
     }
 }

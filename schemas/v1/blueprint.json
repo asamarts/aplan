@@ -77,6 +77,14 @@
             "null"
           ]
         },
+        "integrates": {
+          "default": [],
+          "description": "Work-task increments integrated by this task (must also appear in\n`blocked_by` and belong to the same cut).",
+          "items": {
+            "type": "string"
+          },
+          "type": "array"
+        },
         "key": {
           "description": "The unique local name later entries use to refer to this task before it has a minted id.",
           "type": "string"

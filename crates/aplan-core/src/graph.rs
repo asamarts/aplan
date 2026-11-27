@@ -111,6 +111,40 @@ pub fn edge_kind(from: &Task, to: &Task) -> EdgeKind {
     }
 }
 
+/// Derived decomposition progress and effort rollup for a work task declaring
+/// `integrates`.
+///
+/// Computed from the graph rather than persisted in task files so child counts,
+/// active increment selection, integration-boundary readiness, and effort totals
+/// stay derived and single-counted.
+#[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize, schemars::JsonSchema)]
+pub struct DecompositionProgress {
+    /// Count of direct live (non-dropped) integrated children.
+    pub children_total: usize,
+    /// Count of direct integrated children currently `done`.
+    pub children_done: usize,
+    /// Direct unfinished live integrated child IDs, in declaration order.
+    pub remaining_children: Vec<String>,
+    /// Total live (non-dropped) descendants across all nesting depths.
+    pub descendants_total: usize,
+    /// Completed (`done`) descendants across all nesting depths.
+    pub descendants_done: usize,
+    /// Unfinished live descendants across all nesting depths.
+    pub descendants_remaining: usize,
+    /// Active (`in_progress`) or next ready increment in this subtree, if any.
+    pub current_increment: Option<String>,
+    /// Whether all integrated children are `done` and this parent is ready at
+    /// its integration boundary.
+    pub integration_ready: bool,
+    /// Sum of `effort_days` over all live descendants (excluding the parent's
+    /// own integration effort).
+    pub children_effort_days: f64,
+    /// Sum of `effort_days` over `done` descendants.
+    pub children_done_effort_days: f64,
+    /// Parent's own `effort_days` (0 when omitted) plus `children_effort_days`.
+    pub total_effort_days: f64,
+}
+
 /// Why a ready task is where it is in the answer (`A1-125`, ADR-0017).
 ///
 /// Every field is *derived* from what the plan already records, so the order
@@ -310,6 +344,12 @@ pub struct Graph<'a> {
     // interior mutable storage would make ordinary shorter graph borrows fail
     // to type-check in roadmap and critical-path projections.
     dependents: std::sync::OnceLock<BTreeMap<String, Vec<String>>>,
+    /// Reverse `integrates` map (child id -> smallest parent id), built lazily
+    /// on first query only when at least one task declares `integrates`.
+    parents: std::sync::OnceLock<BTreeMap<String, String>>,
+    /// Whether any loaded task declares a non-empty `integrates` list, letting
+    /// flat plans skip decomposition lookups in O(1).
+    has_integrates: bool,
 }
 
 std::thread_local! {
@@ -339,9 +379,13 @@ impl<'a> Graph<'a> {
     pub fn new(tasks: impl IntoIterator<Item = &'a Task>) -> Self {
         GRAPH_CONSTRUCTIONS.set(GRAPH_CONSTRUCTIONS.get().saturating_add(1));
         let mut by_id = BTreeMap::new();
+        let mut has_integrates = false;
         for t in tasks {
             // First writer wins; duplicate ids are reported separately by the
             // validator, and clobbering here would hide the second one.
+            if !t.integrates.is_empty() {
+                has_integrates = true;
+            }
             by_id.entry(t.id.as_str()).or_insert(t);
         }
         let sequenced = Self::sequenced_edges(&by_id);
@@ -349,7 +393,242 @@ impl<'a> Graph<'a> {
             by_id,
             sequenced,
             dependents: std::sync::OnceLock::new(),
+            parents: std::sync::OnceLock::new(),
+            has_integrates,
         }
+    }
+
+    /// Whether any task in this graph declares `integrates`.
+    #[must_use]
+    pub const fn has_decomposition(&self) -> bool {
+        self.has_integrates
+    }
+
+    /// The parent work task integrating `id`, if any (`A2-148`, ADR-0076).
+    ///
+    /// Deterministic even on an invalid multi-parent plan: `by_id` iterates in
+    /// ascending id order, so the smallest parent id wins while `APLAN066`
+    /// reports the conflict.
+    #[must_use]
+    pub fn parent_of(&self, id: &str) -> Option<&'a str> {
+        if !self.has_integrates {
+            return None;
+        }
+        let parent = self.parents_index().get(id)?;
+        self.by_id.get_key_value(parent.as_str()).map(|(k, _)| *k)
+    }
+
+    fn parents_index(&self) -> &BTreeMap<String, String> {
+        self.parents.get_or_init(|| {
+            let mut out = BTreeMap::new();
+            for task in self.by_id.values().copied() {
+                if task.is_milestone() || task.integrates.is_empty() {
+                    continue;
+                }
+                for child in &task.integrates {
+                    if child != &task.id
+                        && self.get(child).is_some_and(|target| !target.is_milestone())
+                    {
+                        out.entry(child.clone()).or_insert_with(|| task.id.clone());
+                    }
+                }
+            }
+            out
+        })
+    }
+
+    /// Whether `task` is a live parent whose `integrates` list names at least
+    /// one valid non-dropped child increment, qualifying for the narrow
+    /// `APLAN009` effort exemption (`A2-148`, ADR-0076).
+    #[must_use]
+    pub fn is_effort_exempt_integrator(&self, task: &Task) -> bool {
+        !task.is_milestone()
+            && !task.status.is_terminal()
+            && task.integrates.iter().any(|child| {
+                child != &task.id
+                    && self
+                        .get(child)
+                        .is_some_and(|c| !c.is_milestone() && c.status != Status::Dropped)
+            })
+    }
+
+    /// Derived decomposition progress for `id`, or `None` when `id` is not a
+    /// work task declaring `integrates`.
+    #[must_use]
+    pub fn decomposition_of(&self, id: &str) -> Option<DecompositionProgress> {
+        self.decomposition_with_ranks(id, None)
+    }
+
+    pub(crate) fn decomposition_with_ranks(
+        &self,
+        id: &str,
+        ready_rank: Option<&std::collections::HashMap<&str, usize>>,
+    ) -> Option<DecompositionProgress> {
+        if !self.has_integrates {
+            return None;
+        }
+        let task = self.get(id)?;
+        if task.is_milestone() || task.integrates.is_empty() {
+            return None;
+        }
+        let (children_total, children_done, remaining_children) =
+            self.direct_decomposition_counts(task);
+        let descendants = self.live_decomposition_descendants(task);
+        let descendants_total = descendants.len();
+        let mut descendants_done = 0usize;
+        let mut children_effort_days = 0.0_f64;
+        let mut children_done_effort_days = 0.0_f64;
+        let mut unfinished: Vec<&'a Task> = Vec::new();
+        for &desc in &descendants {
+            let days = desc.effort_days.unwrap_or(0.0);
+            children_effort_days += days;
+            if desc.status == Status::Done {
+                descendants_done += 1;
+                children_done_effort_days += days;
+            } else {
+                unfinished.push(desc);
+            }
+        }
+        let descendants_remaining = descendants_total.saturating_sub(descendants_done);
+        let current_increment = self.select_current_increment(&unfinished, ready_rank);
+        let integration_ready =
+            children_total > 0 && remaining_children.is_empty() && self.is_ready(id);
+        let own_effort = if task.status == Status::Dropped {
+            0.0
+        } else {
+            task.effort_days.unwrap_or(0.0)
+        };
+        Some(DecompositionProgress {
+            children_total,
+            children_done,
+            remaining_children,
+            descendants_total,
+            descendants_done,
+            descendants_remaining,
+            current_increment,
+            integration_ready,
+            children_effort_days: children_effort_days + 0.0,
+            children_done_effort_days: children_done_effort_days + 0.0,
+            total_effort_days: own_effort + children_effort_days + 0.0,
+        })
+    }
+
+    fn direct_decomposition_counts(&self, task: &Task) -> (usize, usize, Vec<String>) {
+        let mut seen = BTreeSet::new();
+        let mut total = 0usize;
+        let mut done = 0usize;
+        let mut remaining = Vec::new();
+        for child_id in &task.integrates {
+            if child_id == &task.id || !seen.insert(child_id.as_str()) {
+                continue;
+            }
+            let Some(child) = self.get(child_id) else {
+                continue;
+            };
+            if child.is_milestone() || child.status == Status::Dropped {
+                continue;
+            }
+            total += 1;
+            if child.status == Status::Done {
+                done += 1;
+            } else {
+                remaining.push(child.id.clone());
+            }
+        }
+        (total, done, remaining)
+    }
+
+    fn live_decomposition_descendants(&self, root: &'a Task) -> Vec<&'a Task> {
+        let mut seen = BTreeSet::from([root.id.as_str()]);
+        let mut queue = VecDeque::new();
+        let mut out = Vec::new();
+        for child_id in &root.integrates {
+            queue.push_back(child_id.as_str());
+        }
+        while let Some(next_id) = queue.pop_front() {
+            if !seen.insert(next_id) {
+                continue;
+            }
+            let Some(child) = self.get(next_id) else {
+                continue;
+            };
+            if child.is_milestone() || child.status == Status::Dropped {
+                continue;
+            }
+            out.push(child);
+            for grandchild in &child.integrates {
+                queue.push_back(grandchild.as_str());
+            }
+        }
+        out
+    }
+
+    fn select_current_increment(
+        &self,
+        unfinished: &[&'a Task],
+        ready_rank: Option<&std::collections::HashMap<&str, usize>>,
+    ) -> Option<String> {
+        if unfinished.is_empty() {
+            return None;
+        }
+        let unfinished_ids: BTreeSet<&str> = unfinished.iter().map(|t| t.id.as_str()).collect();
+        let has_unfinished_child = |t: &Task| {
+            t.integrates
+                .iter()
+                .any(|c| c != &t.id && unfinished_ids.contains(c.as_str()))
+        };
+        let in_progress: Vec<&'a Task> = unfinished
+            .iter()
+            .copied()
+            .filter(|t| t.status == Status::InProgress)
+            .collect();
+        let leaf_in_progress: Vec<&'a Task> = in_progress
+            .iter()
+            .copied()
+            .filter(|t| !has_unfinished_child(t))
+            .collect();
+        let ready_candidates: Vec<&'a Task> = unfinished
+            .iter()
+            .copied()
+            .filter(|t| self.is_ready(&t.id))
+            .collect();
+
+        let owned_ranks: Option<std::collections::HashMap<&str, usize>> = if ready_rank.is_none()
+            && (!leaf_in_progress.is_empty()
+                || !in_progress.is_empty()
+                || !ready_candidates.is_empty())
+        {
+            Some(
+                self.ready()
+                    .iter()
+                    .enumerate()
+                    .map(|(idx, t)| (t.id.as_str(), idx + 1))
+                    .collect(),
+            )
+        } else {
+            None
+        };
+        let ranks = ready_rank.or(owned_ranks.as_ref());
+        let pick = |pool: &[&'a Task]| -> Option<String> {
+            pool.iter()
+                .min_by(|a, b| {
+                    let ra = ranks
+                        .and_then(|r| r.get(a.id.as_str()).copied())
+                        .unwrap_or(usize::MAX);
+                    let rb = ranks
+                        .and_then(|r| r.get(b.id.as_str()).copied())
+                        .unwrap_or(usize::MAX);
+                    ra.cmp(&rb).then_with(|| a.id.cmp(&b.id))
+                })
+                .map(|t| t.id.clone())
+        };
+        if !leaf_in_progress.is_empty() {
+            return pick(&leaf_in_progress);
+        }
+        if !in_progress.is_empty() {
+            return pick(&in_progress);
+        }
+        pick(&ready_candidates)
     }
 
     /// Cut sequencing, derived rather than hand-maintained (`A1-073`).
@@ -1633,6 +1912,7 @@ mod tests {
             prefer_after: Vec::new(),
             ratified_by: Vec::new(),
             contains: Vec::new(),
+            integrates: Vec::new(),
             evidence: Vec::new(),
             paths: Vec::new(),
             traces: Vec::new(),
@@ -3039,6 +3319,7 @@ mod closeable {
             prefer_after: Vec::new(),
             ratified_by: Vec::new(),
             contains: Vec::new(),
+            integrates: Vec::new(),
             evidence: Vec::new(),
             paths: Vec::new(),
             traces: Vec::new(),
@@ -3293,6 +3574,7 @@ mod ranking {
             prefer_after: Vec::new(),
             ratified_by: Vec::new(),
             contains: Vec::new(),
+            integrates: Vec::new(),
             evidence: Vec::new(),
             paths: Vec::new(),
             traces: Vec::new(),
@@ -3825,5 +4107,44 @@ mod ranking {
         let g = Graph::new(tasks.iter());
         let ready: Vec<&str> = g.ready().iter().map(|t| t.id.as_str()).collect();
         assert_eq!(ready, vec!["B-1"]);
+    }
+
+    #[test]
+    fn decomposition_progress_tracks_in_progress_next_ready_and_integration_boundary() {
+        let mut parent = task_e("P-1", &["C-1", "C-2"], 1.0);
+        parent.integrates = vec!["C-1".into(), "C-2".into()];
+        let mut c1 = task_e("C-1", &[], 2.0);
+        c1.status = Status::InProgress;
+        let c2 = task_e("C-2", &[], 3.0);
+
+        let g = Graph::new([&parent, &c1, &c2]);
+        assert!(g.has_decomposition());
+        assert_eq!(g.parent_of("C-1"), Some("P-1"));
+        assert_eq!(g.parent_of("P-1"), None);
+        assert!(g.is_effort_exempt_integrator(&parent));
+        assert!(!g.is_effort_exempt_integrator(&c1));
+
+        let prog = g.decomposition_of("P-1").expect("progress");
+        assert_eq!(prog.children_total, 2);
+        assert_eq!(prog.children_done, 0);
+        assert_eq!(prog.remaining_children, vec!["C-1", "C-2"]);
+        assert_eq!(prog.current_increment.as_deref(), Some("C-1"));
+        assert!(!prog.integration_ready);
+        assert_eq!(prog.children_effort_days, 5.0);
+        assert_eq!(prog.total_effort_days, 6.0);
+
+        // When both children are done, parent reaches its integration boundary.
+        let c1_done = done("C-1", &[], 2.0);
+        let c2_done = done("C-2", &[], 3.0);
+        let mut parent_no_own = task_e("P-1", &["C-1", "C-2"], 0.0);
+        parent_no_own.effort_days = None;
+        parent_no_own.integrates = vec!["C-1".into(), "C-2".into()];
+        let g2 = Graph::new([&parent_no_own, &c1_done, &c2_done]);
+        assert!(g2.is_effort_exempt_integrator(&parent_no_own));
+        let prog2 = g2.decomposition_of("P-1").expect("boundary progress");
+        assert!(prog2.integration_ready);
+        assert_eq!(prog2.current_increment, None);
+        assert_eq!(prog2.children_done_effort_days, 5.0);
+        assert_eq!(prog2.total_effort_days, 5.0);
     }
 }

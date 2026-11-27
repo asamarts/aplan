@@ -115,6 +115,12 @@ pub(crate) fn add_fields() -> Vec<FieldSpec> {
         FieldSpec::new("ratified_by", "Ratified by", "Decision-record task ids").repeated(),
         FieldSpec::new("contains", "Contains", "Release/container member ids").repeated(),
         FieldSpec::new(
+            "integrates",
+            "Integrates",
+            "Child increment task ids integrated by this task",
+        )
+        .repeated(),
+        FieldSpec::new(
             "members",
             "Move members",
             "Existing live task ids moved into a new milestone",
@@ -339,6 +345,7 @@ fn decode_add(
         prefer_after: repeated(submission, "prefer_after"),
         ratified_by: repeated(submission, "ratified_by"),
         contains: repeated(submission, "contains"),
+        integrates: repeated(submission, "integrates"),
         members: repeated(submission, "members"),
         tags: repeated(submission, "tags"),
         paths: repeated(submission, "paths"),
@@ -767,7 +774,7 @@ mod tests {
             .expect("tempdir");
         let context = context(dir.path());
         let cases = [
-            (AuthoringWorkflow::Add, 19, true),
+            (AuthoringWorkflow::Add, 20, true),
             (AuthoringWorkflow::Manifest, 1, true),
             (AuthoringWorkflow::Import, 8, true),
             (AuthoringWorkflow::Supersede, 11, false),
@@ -796,6 +803,7 @@ mod tests {
             "prefer_after",
             "ratified_by",
             "contains",
+            "integrates",
             "members",
             "tags",
             "paths",
@@ -1340,5 +1348,45 @@ mod tests {
                 "a regular replacement must not survive a refused handoff"
             );
         }
+    }
+
+    #[test]
+    fn add_form_decodes_and_previews_integrates_relation() {
+        let dir = tempfile::Builder::new()
+            .tempdir_in(aplan_core::fixture::fixture_root())
+            .expect("tempdir");
+        let tasks = dir.path().join("aplan/tasks");
+        std::fs::create_dir_all(&tasks).expect("tasks");
+        std::fs::write(
+            tasks.join("A-1.md"),
+            "---\nid: A-1\ntitle: child increment\nphase: 1\nstatus: todo\neffort_days: 1\n---\n",
+        )
+        .expect("child");
+        std::fs::write(
+            tasks.join("M-v1.md"),
+            "---\nid: M-v1\ntitle: first cut\nphase: 1\nstatus: todo\n\
+             blocked_by: [A-1]\ntags: [milestone, v1]\n---\n",
+        )
+        .expect("cut");
+        let context = context(dir.path());
+        let add_form = form(&context, AuthoringWorkflow::Add, None).expect("add form");
+        let submission = submission(
+            add_form,
+            &[
+                ("title", "integrated parent"),
+                ("id", "A-2"),
+                ("cut", "M-v1"),
+                ("blocked_by", "A-1"),
+                ("integrates", "A-1"),
+            ],
+        );
+        let decoded = request(
+            AuthoringWorkflow::Add,
+            &submission,
+            AuthoringAssets::default(),
+        )
+        .expect("decoded add request");
+        let preview = decoded.preview(&context).expect("preview with integrates");
+        assert_eq!(preview.created(), ["A-2"]);
     }
 }
