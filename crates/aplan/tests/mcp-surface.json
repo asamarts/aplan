@@ -989,6 +989,17 @@
             "null"
           ]
         },
+        "integrates": {
+          "default": null,
+          "description": "Work-task increment ids integrated by this task (must also appear in\n`blocked_by` and belong to the same cut).",
+          "items": {
+            "type": "string"
+          },
+          "type": [
+            "array",
+            "null"
+          ]
+        },
         "members": {
           "default": null,
           "description": "Existing live task ids moved from exactly one source cut each into the\nnew milestone this add creates. A non-empty list requires `id`, `phase`,\nand a `tags` entry equal to `milestone`, forbids `cut`, and reserves\n`blocked_by` for milestone predecessors.",

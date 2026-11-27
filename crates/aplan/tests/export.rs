@@ -562,7 +562,7 @@ fn every_field_the_schema_declares_is_carried_or_named() {
          revisit_at: '2026-12-01T00:00:00Z'\ntrace_fingerprints:\n  docs/x.md#y: abc\n\
          evidence_fingerprints:\n  'file:docs/proof.md': def\n\
          version_impact: fix\nversion_impact_reason: a note, not a release\n\
-         ratified_by:\n- T-003\n\
+         ratified_by:\n- T-003\nintegrates:\n- T-003\n\
          ---\n\n## Why\n\nBecause.\n",
     );
     // A closed release carrying the number it produced, so the field that only a

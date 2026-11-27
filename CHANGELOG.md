@@ -8,6 +8,24 @@ to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Added
 
+- **First-class work-task decomposition relation `integrates` (`A2-148`, `ADR-0076`, `APLAN066`,
+  `--require effort.exempts_decomposed_parents`)**. Added optional parent-side `integrates`
+  frontmatter on non-milestone work tasks to model multi-increment work converging on an explicit,
+  evidence-gated integration boundary without introducing a second grouping hierarchy or
+  double-counting cut effort. Enforced unconditionally by `APLAN066` (work-task-only endpoints,
+  explicit pairing with `blocked_by`, same-cut membership, single-parent rooted forest, acyclicity,
+  and terminal-parent invariants) while exempting live non-milestone parents with at least one
+  valid non-dropped integrated child from `APLAN009` when they carry no separate integration effort
+  (`effort.exempts_decomposed_parents`). Exposed `parent`, `integrates`, and derived
+  `decomposition` rollups (`children_done`, `children_total`, `remaining_children`,
+  `descendants_done`, `descendants_total`, `descendants_remaining`, `current_increment`,
+  `integration_ready`, and `children_effort_days`/`children_done_effort_days`/`total_effort_days`)
+  across `show`, `why`, `tree`, `ready`, `graph`
+  (Mermaid/DOT/JSON), `roadmap` (human/JSON/Markdown), `summary` (human/JSON/grouped), `tasks`,
+  `aplan mcp`, and `aplan tui`. Supported `integrates` in `aplan add --integrates`, `add --from`,
+  `blueprint apply` (`local:`/`task:` bindings), `rekey` atomic rewrites, `export --format checklist`
+  conversion reporting, and `PlanStore` binary codec epoch 6; existing plans require zero migration
+  until they opt in.
 - **Cross-channel read-surface latency audit, zero-dependency binary `PlanStore` codec, and
   deterministic work counters (`A2-134`, `--require read.reports_latency_classes_and_work_counters`)**.
   Extended `aplan::read_surface_inventory()` to derive and audit every CLI command/format, MCP

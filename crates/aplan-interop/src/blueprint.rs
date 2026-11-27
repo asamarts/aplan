@@ -590,23 +590,25 @@ fn valid_local_key(key: &str) -> bool {
     valid_parameter_name(key)
 }
 
-fn relationship_fields(entry: &manifest::Entry) -> [(&'static str, &[String]); 5] {
+fn relationship_fields(entry: &manifest::Entry) -> [(&'static str, &[String]); 6] {
     [
         ("blocked_by", &entry.blocked_by),
         ("blocks", &entry.blocks),
         ("prefer_after", &entry.prefer_after),
         ("ratified_by", &entry.ratified_by),
         ("contains", &entry.contains),
+        ("integrates", &entry.integrates),
     ]
 }
 
-fn relationship_fields_mut(entry: &mut manifest::Entry) -> [(&'static str, &mut Vec<String>); 5] {
+fn relationship_fields_mut(entry: &mut manifest::Entry) -> [(&'static str, &mut Vec<String>); 6] {
     [
         ("blocked_by", &mut entry.blocked_by),
         ("blocks", &mut entry.blocks),
         ("prefer_after", &mut entry.prefer_after),
         ("ratified_by", &mut entry.ratified_by),
         ("contains", &mut entry.contains),
+        ("integrates", &mut entry.integrates),
     ]
 }
 
@@ -721,6 +723,7 @@ fn bind_entry(
         prefer_after: bind_list(binder, &at("prefer_after"), &entry.prefer_after)?,
         ratified_by: bind_list(binder, &at("ratified_by"), &entry.ratified_by)?,
         contains: bind_list(binder, &at("contains"), &entry.contains)?,
+        integrates: bind_list(binder, &at("integrates"), &entry.integrates)?,
         revisit_at: bind_optional(binder, &at("revisit_at"), entry.revisit_at.as_deref())?,
         closed_at: bind_optional(binder, &at("closed_at"), entry.closed_at.as_deref())?,
         version_impact: entry.version_impact,

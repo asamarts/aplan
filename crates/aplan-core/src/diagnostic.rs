@@ -1686,6 +1686,14 @@ define_rules! {
         "a `closed_at` record is valid canonical UTC and only appears on a `done` task",
         points_at: Some("closed_at"),
         switch: SwitchDisposition::Unconditional;
+    /// An `integrates` declaration is unusable: on a milestone, naming a missing,
+    /// duplicate, self, or milestone target, missing from `blocked_by`, claimed
+    /// by multiple parents, cyclic, crossing a cut boundary, or contradicting a
+    /// terminal parent's lifecycle (`A2-148`, ADR-0076).
+    IntegratesUnusable => INTEGRATES_UNUSABLE = "APLAN066", Error,
+        "an `integrates` relation forms a same-cut single-parent acyclic decomposition paired with `blocked_by`",
+        points_at: Some("integrates"),
+        switch: SwitchDisposition::Unconditional;
 }
 
 /// A repository's verdict policy: what makes a report fail its build.
@@ -2113,7 +2121,7 @@ mod tests {
         // Every rule's `code()` is one of the module constants and vice versa is
         // structurally guaranteed by the macro; this pins the count so dropping
         // a row is a visible change.
-        assert_eq!(Rule::ALL.len(), 65);
+        assert_eq!(Rule::ALL.len(), 66);
     }
 
     /// Severity is declared per rule in the macro. Pin the warnings so a

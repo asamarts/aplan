@@ -1027,6 +1027,8 @@ mod tests {
             title: format!("task {id}"),
             status: Status::Todo,
             done: false,
+            parent: None,
+            decomposition: None,
         }
     }
 
@@ -1035,6 +1037,7 @@ mod tests {
             from: from.to_string(),
             to: to.to_string(),
             kind: EdgeKind::Dependency,
+            integrates: false,
         }
     }
 
@@ -1186,6 +1189,7 @@ mod tests {
             from: "G".into(),
             to: "M".into(),
             kind: EdgeKind::Membership,
+            integrates: false,
         });
         let scene = GraphScene::layout(&graph, 95).expect("the graph fits");
 

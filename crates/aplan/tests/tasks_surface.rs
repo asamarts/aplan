@@ -319,10 +319,16 @@ fn every_row_field_is_declared_or_a_named_derivation() {
         "claim_state",
         // The label of the cut that lists it, from the roadmap.
         "cut",
+        // Derived subtree progress for a parent work task declaring `integrates`
+        // (`ADR-0076`, `A2-148`).
+        "decomposition",
         // The id of that cut, since two may share a label.
         "milestone",
         // Whether this task *is* a cut, so a rollup can exclude checkpoints.
         "milestone_task",
+        // The owning parent work task when another task declares this task in
+        // `integrates` (`ADR-0076`, `A2-148`).
+        "parent",
         // Whether every blocker is done: the same answer `ready` gives.
         "ready",
         // Where `ready` puts it, `null` when it is not offered (`A1-125`).

@@ -31,6 +31,7 @@ pub struct AddRequest {
     pub prefer_after: Vec<String>,
     pub ratified_by: Vec<String>,
     pub contains: Vec<String>,
+    pub integrates: Vec<String>,
     /// Existing live work to move from its current cut into the new milestone
     /// this request creates. Empty keeps ordinary single-task add semantics.
     pub members: Vec<String>,
@@ -210,6 +211,7 @@ pub fn preview_add(
         ("prefer_after", &request.prefer_after),
         ("ratified_by", &request.ratified_by),
         ("contains", &request.contains),
+        ("integrates", &request.integrates),
     ] {
         validate_relations(what, context.plan(), relations, &BTreeSet::new())?;
     }
@@ -232,6 +234,7 @@ pub fn preview_add(
         prefer_after: request.prefer_after.clone(),
         ratified_by: request.ratified_by.clone(),
         contains: request.contains.clone(),
+        integrates: request.integrates.clone(),
         evidence: request.evidence.clone(),
         paths: normalized_paths,
         traces: request.traces.clone(),
@@ -658,6 +661,7 @@ fn successor_task(predecessor: &Task, request: &SupersedeRequest, id: &str) -> T
         prefer_after: Vec::new(),
         ratified_by: Vec::new(),
         contains: Vec::new(),
+        integrates: Vec::new(),
         evidence: Vec::new(),
         paths: request
             .paths
@@ -1182,6 +1186,7 @@ fn prepare_manifest(
             ("prefer_after", &entry.prefer_after),
             ("ratified_by", &entry.ratified_by),
             ("contains", &entry.contains),
+            ("integrates", &entry.integrates),
         ] {
             validate_relations(what, &after, relations, &declared_ids)
                 .map_err(|error| at(error.to_string()))?;
@@ -1308,6 +1313,7 @@ fn manifest_task(entry: &aplan_interop::manifest::Entry, id: &str, phase: u32) -
         prefer_after: entry.prefer_after.clone(),
         ratified_by: entry.ratified_by.clone(),
         contains: entry.contains.clone(),
+        integrates: entry.integrates.clone(),
         evidence: entry.evidence.clone(),
         paths: entry.paths.clone(),
         traces: entry.traces.clone(),
@@ -1633,6 +1639,7 @@ struct NewTask {
     prefer_after: Vec<String>,
     ratified_by: Vec<String>,
     contains: Vec<String>,
+    integrates: Vec<String>,
     evidence: Vec<Evidence>,
     paths: Vec<String>,
     traces: Vec<String>,
@@ -1654,6 +1661,7 @@ fn new_task(spec: NewTask) -> Task {
         prefer_after,
         ratified_by,
         contains,
+        integrates,
         evidence,
         paths,
         traces,
@@ -1673,6 +1681,7 @@ fn new_task(spec: NewTask) -> Task {
         prefer_after: aplan_interop::emit::deduped(&prefer_after),
         ratified_by: aplan_interop::emit::deduped(&ratified_by),
         contains: aplan_interop::emit::deduped(&contains),
+        integrates: aplan_interop::emit::deduped(&integrates),
         evidence,
         paths: aplan_interop::emit::deduped(&paths),
         traces: aplan_interop::emit::deduped(&traces),
@@ -1972,6 +1981,10 @@ fn rekey_task_file(
         updated = aplan_core::close::set_contains(&updated, &rekeyed(&task.contains, old, new))
             .map_err(rewrite)?;
     }
+    if task.integrates.iter().any(|id| id == old) {
+        updated = aplan_core::close::set_integrates(&updated, &rekeyed(&task.integrates, old, new))
+            .map_err(rewrite)?;
+    }
     Ok(updated)
 }
 
@@ -1982,6 +1995,7 @@ fn rekey_plan_model(plan: &Plan, old: &str, new: &str, destination: &Path) -> Pl
         loaded.task.prefer_after = rekeyed(&loaded.task.prefer_after, old, new);
         loaded.task.ratified_by = rekeyed(&loaded.task.ratified_by, old, new);
         loaded.task.contains = rekeyed(&loaded.task.contains, old, new);
+        loaded.task.integrates = rekeyed(&loaded.task.integrates, old, new);
         if loaded.task.id == old {
             loaded.task.id = new.to_string();
             loaded.path = destination.to_path_buf();
@@ -2158,6 +2172,7 @@ mod tests {
             prefer_after: Vec::new(),
             ratified_by: Vec::new(),
             contains: Vec::new(),
+            integrates: Vec::new(),
             members: Vec::new(),
             tags: Vec::new(),
             paths: vec!["src/three.rs".to_string()],
@@ -2206,6 +2221,7 @@ mod tests {
             prefer_after: Vec::new(),
             ratified_by: Vec::new(),
             contains: Vec::new(),
+            integrates: Vec::new(),
             members: Vec::new(),
             tags: vec!["kind-build".to_string(), "kind-build".to_string()],
             paths: vec!["src/three.rs".to_string(), "src/three.rs".to_string()],
@@ -2262,6 +2278,7 @@ mod tests {
             prefer_after: vec!["A-1".to_string()],
             ratified_by: vec!["A-2".to_string()],
             contains: vec!["M-v1".to_string()],
+            integrates: Vec::new(),
             members: Vec::new(),
             tags: vec!["milestone".to_string()],
             paths: Vec::new(),
@@ -2398,6 +2415,7 @@ mod tests {
             prefer_after: Vec::new(),
             ratified_by: Vec::new(),
             contains: Vec::new(),
+            integrates: Vec::new(),
             members: vec!["A-2".to_string()],
             tags: vec!["milestone".to_string(), "v2".to_string()],
             paths: Vec::new(),
@@ -2701,6 +2719,7 @@ mod tests {
             prefer_after: Vec::new(),
             ratified_by: Vec::new(),
             contains: Vec::new(),
+            integrates: Vec::new(),
             evidence: Vec::new(),
             paths: vec!["src/imported.rs".to_string()],
             traces: Vec::new(),
@@ -3764,6 +3783,7 @@ mod tests {
             prefer_after: Vec::new(),
             ratified_by: Vec::new(),
             contains: Vec::new(),
+            integrates: Vec::new(),
             members: Vec::new(),
             tags: Vec::new(),
             paths: vec!["src/race.rs".to_string()],
@@ -3789,5 +3809,75 @@ mod tests {
         let refreshed = context(dir.path(), aplan_core::Options::default());
         let reminted = preview_add(&refreshed, &request).expect("recomputed preview");
         assert_eq!(reminted.created(), ["A-4"]);
+    }
+
+    #[test]
+    fn add_manifest_and_rekey_preserve_and_rewrite_integrates() {
+        let dir = fixture();
+        let initial = context(dir.path(), aplan_core::Options::default());
+
+        // Unknown `integrates` target fails closed before writing.
+        let bad = AddRequest {
+            title: "bad parent".to_string(),
+            id: Some("A-9".to_string()),
+            phase: Some(1),
+            cut: Some("M-v1".to_string()),
+            effort_days: None,
+            owner: None,
+            status: None,
+            blocked_by: vec!["GHOST".to_string()],
+            prefer_after: Vec::new(),
+            ratified_by: Vec::new(),
+            contains: Vec::new(),
+            integrates: vec!["GHOST".to_string()],
+            members: Vec::new(),
+            tags: Vec::new(),
+            paths: vec!["src/parent.rs".to_string()],
+            traces: Vec::new(),
+            revisit_at: None,
+            version_impact: None,
+            version_impact_reason: None,
+            evidence: Vec::new(),
+            body: None,
+        };
+        assert!(preview_add(&initial, &bad).is_err());
+
+        // Valid `add` with `integrates` commits cleanly.
+        let good = AddRequest {
+            id: Some("A-3".to_string()),
+            title: "parent boundary".to_string(),
+            blocked_by: vec!["A-1".to_string()],
+            integrates: vec!["A-1".to_string()],
+            ..bad
+        };
+        let preview = preview_add(&initial, &good).expect("preview add with integrates");
+        assert!(matches!(
+            commit_change_set(&initial, preview.into_change_set()),
+            CommitOutcome::Applied { .. }
+        ));
+
+        // `rekey` of the integrated child rewrites `integrates` on the parent file.
+        let after_add = context(dir.path(), aplan_core::Options::default());
+        let rekey = preview_rekey(
+            &after_add,
+            &RekeyRequest {
+                old: "A-1".to_string(),
+                new: "A-10".to_string(),
+                allow_terminal: false,
+            },
+        )
+        .expect("preview rekey child");
+        assert!(matches!(
+            commit_change_set(&after_add, rekey.into_change_set()),
+            CommitOutcome::Applied { .. }
+        ));
+        let parent_md =
+            std::fs::read_to_string(dir.path().join("aplan/tasks/A-3.md")).expect("parent md");
+        assert!(
+            parent_md.contains("integrates:")
+                && parent_md.contains("A-10")
+                && !parent_md.contains("A-1\n"),
+            "{parent_md}"
+        );
     }
 }

@@ -1214,14 +1214,25 @@ impl GraphWorkspace {
             .iter()
             .map(|row| (row.id.as_str(), row))
             .collect();
+        let whole_nodes: BTreeMap<&str, &GraphNode> = self
+            .whole
+            .nodes
+            .iter()
+            .map(|node| (node.id.as_str(), node))
+            .collect();
         let nodes = include
             .iter()
             .filter_map(|id| rows.get(id.as_str()).copied())
-            .map(|row| GraphNode {
-                id: row.id.clone(),
-                title: row.title.clone(),
-                status: row.status,
-                done: row.status.satisfies_dependency(),
+            .map(|row| {
+                let whole = whole_nodes.get(row.id.as_str()).copied();
+                GraphNode {
+                    id: row.id.clone(),
+                    title: row.title.clone(),
+                    status: row.status,
+                    done: row.status.satisfies_dependency(),
+                    parent: whole.and_then(|node| node.parent.clone()),
+                    decomposition: whole.and_then(|node| node.decomposition.clone()),
+                }
             })
             .collect();
         let mut hidden_edges = 0;
@@ -1346,6 +1357,8 @@ impl GraphWorkspace {
                 title: node.title.clone(),
                 status: node.status,
                 done: node.status.satisfies_dependency(),
+                parent: None,
+                decomposition: None,
             })
             .collect::<Vec<_>>();
         let edges = graph
@@ -1355,6 +1368,7 @@ impl GraphWorkspace {
                 from: edge.from.id().to_string(),
                 to: edge.to.id().to_string(),
                 kind: EdgeKind::Dependency,
+                integrates: false,
             })
             .collect::<Vec<_>>();
         let admitted = nodes.iter().map(|node| node.id.clone()).collect();

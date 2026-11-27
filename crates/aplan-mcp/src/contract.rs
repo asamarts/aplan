@@ -330,6 +330,10 @@ pub struct AddInput {
     /// Release or container member ids.
     #[serde(default)]
     pub contains: Option<Vec<String>>,
+    /// Work-task increment ids integrated by this task (must also appear in
+    /// `blocked_by` and belong to the same cut).
+    #[serde(default)]
+    pub integrates: Option<Vec<String>>,
     /// RFC 3339 instant for an initially blocked task.
     #[serde(default)]
     pub revisit_at: Option<String>,

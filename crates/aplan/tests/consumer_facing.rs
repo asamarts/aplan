@@ -213,6 +213,7 @@ fn no_generated_roadmap_cites_this_projects_adrs() {
         prefer_after: Vec::new(),
         ratified_by: Vec::new(),
         contains: Vec::new(),
+        integrates: Vec::new(),
         evidence: Vec::new(),
         paths: Vec::new(),
         traces: Vec::new(),

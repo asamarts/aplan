@@ -5943,6 +5943,8 @@ mod tests {
                     title: node.title.clone(),
                     status: node.status,
                     done: node.status.satisfies_dependency(),
+                    parent: None,
+                    decomposition: None,
                 })
                 .collect(),
             edges: projection
@@ -5953,6 +5955,7 @@ mod tests {
                     from: edge.from.id().to_string(),
                     to: edge.to.id().to_string(),
                     kind: EdgeKind::Dependency,
+                    integrates: false,
                 })
                 .collect(),
             hidden_edges: 0,

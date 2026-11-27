@@ -118,10 +118,20 @@ pub struct RoadmapTask {
     /// The task's tags, so the view can group by a declared family without a
     /// second pass over the plan (`A1-078`).
     pub tags: Vec<String>,
+    /// Parent work task integrating this task, if any (`A2-148`, ADR-0076).
+    pub parent: Option<String>,
+    /// Direct child increments this task integrates.
+    pub integrates: Vec<String>,
+    /// Derived decomposition rollup when this task integrates child increments.
+    pub decomposition: Option<crate::graph::DecompositionProgress>,
 }
 
 impl RoadmapTask {
-    fn of(t: &Task) -> Self {
+    fn of(
+        t: &Task,
+        graph: &Graph<'_>,
+        ready_rank: Option<&std::collections::HashMap<&str, usize>>,
+    ) -> Self {
         let evidence = t
             .evidence
             .iter()
@@ -149,6 +159,9 @@ impl RoadmapTask {
             blocked_by: t.blocked_by.clone(),
             evidence,
             tags: t.tags.clone(),
+            parent: graph.parent_of(&t.id).map(str::to_string),
+            integrates: t.integrates.clone(),
+            decomposition: graph.decomposition_with_ranks(&t.id, ready_rank),
         }
     }
 }
@@ -453,6 +466,15 @@ impl<'a> Graph<'a> {
             self.chains_to(&borrowing).unwrap_or_default()
         };
 
+        let ready_rank: Option<std::collections::HashMap<&str, usize>> =
+            self.has_decomposition().then(|| {
+                self.ready()
+                    .iter()
+                    .enumerate()
+                    .map(|(idx, t)| (t.id.as_str(), idx + 1))
+                    .collect()
+            });
+
         for (&id, &m) in &self.by_id {
             if !m.is_milestone() {
                 continue;
@@ -498,7 +520,7 @@ impl<'a> Graph<'a> {
                         blocked += 1;
                     }
                 }
-                members.push(RoadmapTask::of(t));
+                members.push(RoadmapTask::of(t, self, ready_rank.as_ref()));
             }
             let (effort_days, done_effort_days) = live_effort(&member_tasks);
 
@@ -563,7 +585,10 @@ impl<'a> Graph<'a> {
             .map(|(_, t)| *t)
             .collect();
         let (cross_cutting_effort_days, cross_cutting_done_effort_days) = live_effort(&loose);
-        let cross_cutting = loose.iter().map(|t| RoadmapTask::of(t)).collect();
+        let cross_cutting = loose
+            .iter()
+            .map(|t| RoadmapTask::of(t, self, ready_rank.as_ref()))
+            .collect();
 
         Roadmap {
             cuts,
@@ -679,6 +704,7 @@ mod tests {
             prefer_after: Vec::new(),
             ratified_by: Vec::new(),
             contains: Vec::new(),
+            integrates: Vec::new(),
             evidence: Vec::new(),
             paths: Vec::new(),
             traces: Vec::new(),
@@ -1121,8 +1147,9 @@ mod tests {
                 captured: Some("2026-07-01".into()),
             },
         ];
+        let g = Graph::new([&t]);
         assert_eq!(
-            RoadmapTask::of(&t).evidence,
+            RoadmapTask::of(&t, &g, None).evidence,
             vec!["commit:0123456789ab".to_string(), "note".to_string()]
         );
     }
@@ -1138,8 +1165,9 @@ mod tests {
             reference: "12345678901\u{e9}234".into(),
             captured: None,
         }];
+        let g = Graph::new([&t]);
         assert_eq!(
-            RoadmapTask::of(&t).evidence,
+            RoadmapTask::of(&t, &g, None).evidence,
             vec!["commit:12345678901\u{e9}".to_string()]
         );
     }
@@ -1193,6 +1221,7 @@ mod release_tests {
             prefer_after: Vec::new(),
             ratified_by: Vec::new(),
             contains: Vec::new(),
+            integrates: Vec::new(),
             evidence: Vec::new(),
             paths: Vec::new(),
             traces: Vec::new(),
@@ -1477,6 +1506,7 @@ mod label_tests {
             prefer_after: Vec::new(),
             ratified_by: Vec::new(),
             contains: Vec::new(),
+            integrates: Vec::new(),
             evidence: Vec::new(),
             paths: Vec::new(),
             traces: Vec::new(),

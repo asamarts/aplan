@@ -60,6 +60,18 @@ pub struct Behaviour {
 
 /// Every named behaviour this build has.
 pub const ALL: &[Behaviour] = &[
+    // `A2-148` (`ADR-0076`). Previously, `APLAN009` warned on every live
+    // non-milestone task without `effort_days`. A live integration-boundary
+    // parent task whose `integrates` list names at least one valid non-dropped
+    // child increment may now omit `effort_days` cleanly without zero-effort
+    // fiction while cut and summary totals count every task's own effort once.
+    Behaviour {
+        name: "effort.exempts_decomposed_parents",
+        what: "`APLAN009` exempts a live non-milestone parent task whose `integrates` list names \
+               at least one valid non-dropped child increment from declaring `effort_days`, while \
+               still counting every task's own effort exactly once across cuts and rollups",
+        proof: &["decomposition::parent_effort_exemption_and_single_counted_cut_rollups"],
+    },
     // `A2-136`. Previously, large read outputs (`tasks`, `ready`, `roadmap`,
     // `graph`, `check`, `verify`, `paths`, `stale`, `due`, `deprecations`,
     // `test list`) either materialized complete `String`/`serde_json::Value`

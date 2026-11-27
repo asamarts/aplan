@@ -28,7 +28,7 @@ use super::{
     TimeValue,
 };
 
-const MAGIC_BYTES: [u8; 16] = *b"aplan-plan-v5\0\0\0";
+const MAGIC_BYTES: [u8; 16] = *b"aplan-plan-v6\0\0\0";
 const HEADER_LEN: usize = 16 + 4 + 4 + 32;
 const MAX_STRING_BYTES: usize = MAX_DIAGNOSTIC_TEXT_BYTES;
 const MAX_TASK_LIST_ITEMS: usize = 100_000;
@@ -409,6 +409,7 @@ impl Encoder<'_> {
             prefer_after,
             ratified_by,
             contains,
+            integrates,
             evidence,
             paths,
             traces,
@@ -439,6 +440,7 @@ impl Encoder<'_> {
         self.write_str_vec(prefer_after);
         self.write_str_vec(ratified_by);
         self.write_str_vec(contains);
+        self.write_str_vec(integrates);
 
         self.write_varint(evidence.len() as u64);
         for item in evidence {
@@ -788,6 +790,7 @@ impl<'a> Decoder<'a> {
         let prefer_after = self.read_str_vec(MAX_TASK_LIST_ITEMS, MAX_STRING_BYTES)?;
         let ratified_by = self.read_str_vec(MAX_TASK_LIST_ITEMS, MAX_STRING_BYTES)?;
         let contains = self.read_str_vec(MAX_TASK_LIST_ITEMS, MAX_STRING_BYTES)?;
+        let integrates = self.read_str_vec(MAX_TASK_LIST_ITEMS, MAX_STRING_BYTES)?;
 
         let evidence_count = self.read_count(MAX_TASK_LIST_ITEMS)?;
         let mut evidence = Vec::with_capacity(evidence_count);
@@ -833,6 +836,7 @@ impl<'a> Decoder<'a> {
             prefer_after,
             ratified_by,
             contains,
+            integrates,
             evidence,
             paths,
             traces,
@@ -1113,6 +1117,7 @@ mod tests {
             prefer_after: vec!["A-1".to_string()],
             ratified_by: vec!["ADR-0001".to_string()],
             contains: vec![],
+            integrates: vec!["T-000".to_string()],
             evidence: vec![Evidence {
                 kind: EvidenceKind::Test,
                 reference: "suite::ok".to_string(),

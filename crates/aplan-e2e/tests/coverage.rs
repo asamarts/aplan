@@ -552,6 +552,7 @@ fn corpus() -> Vec<Scenario> {
     all.extend(graph_edge_rules());
     all.extend(evidence_and_trace_rules());
     all.extend(ratification_rules());
+    all.extend(decomposition_rules());
     all.extend(structured_trace_rules());
     all.extend(effort_note_and_deadlock_rules());
     all.extend(external_trace_rules());
@@ -1451,6 +1452,173 @@ fn ratification_rules() -> Vec<Scenario> {
                 ),
             ],
         ),
+    ]
+}
+
+/// `APLAN066` and the `APLAN009` decomposed-parent exemption (`A2-148`, ADR-0076).
+#[allow(clippy::too_many_lines)]
+fn decomposition_rules() -> Vec<Scenario> {
+    vec![
+        // APLAN066, work-task decomposition through `integrates` (`A2-148`, ADR-0076).
+        scen(
+            "integrates-unusable-missing-blocked-by-fires",
+            Rule::IntegratesUnusable,
+            Fires,
+            vec![
+                tf(
+                    "p",
+                    "id: P-1\ntitle: Parent\nphase: 1\nstatus: todo\n\
+                     integrates:\n  - C-1",
+                ),
+                tf(
+                    "c",
+                    "id: C-1\ntitle: Child\nphase: 1\nstatus: todo\neffort_days: 1",
+                ),
+            ],
+        ),
+        scen(
+            "integrates-unusable-cycle-fires",
+            Rule::IntegratesUnusable,
+            Fires,
+            vec![
+                tf(
+                    "p1",
+                    "id: P-1\ntitle: P-1\nphase: 1\nstatus: todo\n\
+                     blocked_by:\n  - P-2\nintegrates:\n  - P-2",
+                ),
+                tf(
+                    "p2",
+                    "id: P-2\ntitle: P-2\nphase: 1\nstatus: todo\n\
+                     blocked_by:\n  - P-1\nintegrates:\n  - P-1",
+                ),
+            ],
+        ),
+        scen(
+            "integrates-unusable-cross-cut-fires",
+            Rule::IntegratesUnusable,
+            Fires,
+            vec![
+                tf(
+                    "m1",
+                    "id: M-1\ntitle: Cut 1\nphase: 1\nstatus: todo\n\
+                     tags:\n  - milestone\nblocked_by:\n  - P-1",
+                ),
+                tf(
+                    "m2",
+                    "id: M-2\ntitle: Cut 2\nphase: 1\nstatus: todo\n\
+                     tags:\n  - milestone\nblocked_by:\n  - C-1",
+                ),
+                tf(
+                    "p",
+                    "id: P-1\ntitle: Parent\nphase: 1\nstatus: todo\n\
+                     blocked_by:\n  - C-1\nintegrates:\n  - C-1",
+                ),
+                tf(
+                    "c",
+                    "id: C-1\ntitle: Child\nphase: 1\nstatus: todo\neffort_days: 1",
+                ),
+            ],
+        ),
+        scen(
+            "integrates-unusable-multi-parent-fires",
+            Rule::IntegratesUnusable,
+            Fires,
+            vec![
+                tf(
+                    "p1",
+                    "id: P-1\ntitle: Parent 1\nphase: 1\nstatus: todo\n\
+                     blocked_by:\n  - C-1\nintegrates:\n  - C-1",
+                ),
+                tf(
+                    "p2",
+                    "id: P-2\ntitle: Parent 2\nphase: 1\nstatus: todo\n\
+                     blocked_by:\n  - C-1\nintegrates:\n  - C-1",
+                ),
+                tf(
+                    "c",
+                    "id: C-1\ntitle: Shared child\nphase: 1\nstatus: todo\neffort_days: 1",
+                ),
+            ],
+        ),
+        scen(
+            "integrates-unusable-terminal-parent-fires",
+            Rule::IntegratesUnusable,
+            Fires,
+            vec![
+                tf(
+                    "p",
+                    "id: P-1\ntitle: Parent\nphase: 1\nstatus: done\n\
+                     blocked_by:\n  - C-1\nintegrates:\n  - C-1\n\
+                     evidence:\n  - kind: note\n    ref: closed early",
+                ),
+                tf(
+                    "c",
+                    "id: C-1\ntitle: Open child\nphase: 1\nstatus: todo\neffort_days: 1",
+                ),
+            ],
+        ),
+        scen(
+            "integrates-unusable-milestone-parent-fires",
+            Rule::IntegratesUnusable,
+            Fires,
+            vec![
+                tf(
+                    "m",
+                    "id: M-1\ntitle: Cut\nphase: 1\nstatus: todo\n\
+                     tags:\n  - milestone\nblocked_by:\n  - C-1\nintegrates:\n  - C-1",
+                ),
+                tf(
+                    "c",
+                    "id: C-1\ntitle: Work\nphase: 1\nstatus: todo\neffort_days: 1",
+                ),
+            ],
+        ),
+        scen(
+            "integrates-unusable-silent",
+            Rule::IntegratesUnusable,
+            Silent,
+            vec![
+                tf(
+                    "m",
+                    "id: M-1\ntitle: Cut 1\nphase: 1\nstatus: todo\n\
+                     tags:\n  - milestone\nblocked_by:\n  - P-1\n  - C-1\n  - G-1",
+                ),
+                tf(
+                    "p",
+                    "id: P-1\ntitle: Parent\nphase: 1\nstatus: todo\n\
+                     blocked_by:\n  - C-1\nintegrates:\n  - C-1",
+                ),
+                tf(
+                    "c",
+                    "id: C-1\ntitle: Mid increment\nphase: 1\nstatus: todo\n\
+                     blocked_by:\n  - G-1\nintegrates:\n  - G-1",
+                ),
+                tf(
+                    "g",
+                    "id: G-1\ntitle: Leaf increment\nphase: 1\nstatus: todo\neffort_days: 2",
+                ),
+            ],
+        ),
+        // `APLAN009` parent exemption (`effort.exempts_decomposed_parents`):
+        // a live non-milestone parent with a valid non-dropped integrated child
+        // may omit `effort_days` instead of carrying zero-effort fiction.
+        scen(
+            "effort-missing-decomposed-parent-silent",
+            Rule::MissingEffort,
+            Silent,
+            vec![
+                tf(
+                    "p",
+                    "id: P-1\ntitle: Parent without own effort\nphase: 1\nstatus: todo\n\
+                     blocked_by:\n  - C-1\nintegrates:\n  - C-1",
+                ),
+                tf(
+                    "c",
+                    "id: C-1\ntitle: Child with effort\nphase: 1\nstatus: todo\neffort_days: 2",
+                ),
+            ],
+        )
+        .effort(),
     ]
 }
 
@@ -3889,6 +4057,7 @@ fn done(id: &str, evidence: Vec<Evidence>, paths: Vec<String>) -> Task {
         prefer_after: Vec::new(),
         ratified_by: Vec::new(),
         contains: Vec::new(),
+        integrates: Vec::new(),
         evidence,
         paths,
         traces: Vec::new(),

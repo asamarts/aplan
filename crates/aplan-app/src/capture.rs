@@ -832,6 +832,7 @@ fn effective_promotion(
             prefer_after: Vec::new(),
             ratified_by: Vec::new(),
             contains: Vec::new(),
+            integrates: Vec::new(),
             members: Vec::new(),
             tags,
             paths,

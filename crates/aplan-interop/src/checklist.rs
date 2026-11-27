@@ -813,6 +813,7 @@ impl ProposalSource for Checklist {
                 prefer_after: Vec::new(),
                 ratified_by: Vec::new(),
                 contains: Vec::new(),
+                integrates: Vec::new(),
                 evidence,
                 paths: Vec::new(),
                 traces: Vec::new(),
@@ -896,6 +897,11 @@ const NOT_CARRIED: &[NotCarried] = &[
         "ratified_by",
         |t| !t.ratified_by.is_empty(),
         "who has to bless this before it counts as finished, which a tick cannot record",
+    ),
+    NotCarried(
+        "integrates",
+        |t| !t.integrates.is_empty(),
+        "which child increments this work task integrates, which a flat checklist cannot represent",
     ),
     NotCarried(
         "tags",
@@ -1953,6 +1959,7 @@ mod tests {
             prefer_after: Vec::new(),
             ratified_by: Vec::new(),
             contains: Vec::new(),
+            integrates: Vec::new(),
             evidence: Vec::new(),
             paths: Vec::new(),
             traces: Vec::new(),

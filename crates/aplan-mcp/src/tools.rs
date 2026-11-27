@@ -515,6 +515,13 @@ pub struct ReadyTask {
     /// disagree (for example `in_progress` with no active claim).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub coordination_warning: Option<String>,
+    /// Parent work task integrating this task, if any (`A2-148`, ADR-0076).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub parent: Option<String>,
+    /// Derived decomposition progress when this ready task is an integration
+    /// boundary declaring `integrates`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub decomposition: Option<aplan_core::DecompositionProgress>,
 }
 
 const fn default_unclaimed_state() -> aplan_core::ClaimCoordinationState {
@@ -543,6 +550,9 @@ pub struct Blocker {
     /// nothing (`A1-263`).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub behind: Option<usize>,
+    /// True when this blocker is also directly integrated by the queried task.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub integrated_child: bool,
 }
 
 /// Tasks that can be started now.
@@ -603,6 +613,8 @@ pub fn ready_of(plan: &aplan_core::load::Plan, claims: &aplan_core::ClaimSnapsho
             status: t.status.to_string(),
             claim_state,
             coordination_warning,
+            parent: graph.parent_of(&t.id).map(str::to_string),
+            decomposition: graph.decomposition_of(&t.id),
         }
     };
     let releases = graph.releases_all();
@@ -685,6 +697,12 @@ pub struct Blocked {
     /// A cut whose members are all done. Not blocked; waiting to be closed.
     #[serde(default)]
     pub closeable: bool,
+    /// Parent work task integrating this task, if any (`A2-148`, ADR-0076).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub parent: Option<String>,
+    /// Derived decomposition progress when this task declares `integrates`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub decomposition: Option<aplan_core::DecompositionProgress>,
 }
 
 /// What a task is waiting on: the cuts and tasks it is behind.
@@ -768,6 +786,7 @@ pub fn why_of(
                 behind: (walk == aplan_core::graph::Walk::CutBounded && t.is_milestone())
                     .then(|| graph.folded_behind(&t.id))
                     .filter(|n| *n > 0),
+                integrated_child: task.integrates.iter().any(|c| c == &t.id),
             })
             .collect(),
         unknown: graph
@@ -778,6 +797,8 @@ pub fn why_of(
         parked: !task.status.is_workable() && !task.status.is_terminal(),
         revisit_at: task.revisit_at.clone(),
         closeable: graph.closeable_milestones().iter().any(|m| m.id == task.id),
+        parent: graph.parent_of(id).map(str::to_string),
+        decomposition: graph.decomposition_of(id),
     })
 }
 
@@ -3423,6 +3444,8 @@ pub struct AddArgs {
     #[serde(default)]
     pub contains: Vec<String>,
     #[serde(default)]
+    pub integrates: Vec<String>,
+    #[serde(default)]
     pub revisit_at: Option<String>,
     #[serde(default)]
     pub version_impact: Option<aplan_core::task::VersionImpact>,
@@ -3498,6 +3521,7 @@ fn add_preview(
         prefer_after: args.prefer_after.clone(),
         ratified_by: args.ratified_by.clone(),
         contains: args.contains.clone(),
+        integrates: args.integrates.clone(),
         members: args.members.clone(),
         tags: args.tags.clone(),
         paths: args.paths.clone(),

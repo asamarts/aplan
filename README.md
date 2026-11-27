@@ -52,7 +52,12 @@ glob semantics, and run `aplan paths` to inspect bounded commit history; neither
 relevance. `aplan show <id> --body` pretty-renders task Markdown for the terminal (`--width`, `--ascii`), while
 `aplan show <id> --raw-body` emits the verbatim stored Markdown bytes for pipes and editors.
 `aplan completed` lists finished work in deterministic chronological order (`recorded` timestamps
-first, with optional bounded Git history inference for legacy `done` tasks). Whole-plan read tables,
+first, with optional bounded Git history inference for legacy `done` tasks). Multi-increment work
+tasks can declare child increments explicitly via `integrates` (paired with `blocked_by` in the
+same cut, validated under `APLAN066`), exposing subtree progress, current increment, remaining
+children, and the integration boundary across `show`, `why`, `tree`, `ready`, `graph`, `roadmap`,
+`summary`, `tasks`, MCP, and TUI without double-counting effort or adding a second grouping
+hierarchy. Whole-plan read tables,
 graphs, roadmaps, and diagnostic reports stream with bounded 16 KiB output buffering and stop
 promptly when downstream pipes close. Use the built-in command help and `aplan facts` for the
 complete current surface.

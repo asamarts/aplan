@@ -44,6 +44,7 @@ pub const ENTRY_FIELDS: &[&str] = &[
     "prefer_after",
     "ratified_by",
     "contains",
+    "integrates",
     "revisit_at",
     "closed_at",
     "version_impact",
@@ -115,6 +116,10 @@ pub struct Entry {
     /// Cuts or tasks whose work this checkpoint borrows for rollups.
     #[serde(default)]
     pub contains: Vec<String>,
+    /// Work-task increments integrated by this task (must also appear in
+    /// `blocked_by` and belong to the same cut).
+    #[serde(default)]
+    pub integrates: Vec<String>,
     /// RFC 3339 instant at which an initially parked task is worth reviewing.
     #[serde(default)]
     pub revisit_at: Option<String>,
@@ -298,6 +303,7 @@ mod tests {
                 prefer_after: Vec::new(),
                 ratified_by: Vec::new(),
                 contains: Vec::new(),
+                integrates: Vec::new(),
                 revisit_at: None,
                 closed_at: None,
                 version_impact: None,

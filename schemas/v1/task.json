@@ -190,6 +190,13 @@
       "description": "Stable identifier, unique across the plan. Convention: `P<phase>-<nnn>`.",
       "type": "string"
     },
+    "integrates": {
+      "description": "Work task IDs whose bounded delivery increments this task integrates.\n\nDeclares an integration-boundary work task with its own explicit status,\nevidence-gated closure, and optional own integration effort. Every ID\nlisted here must also appear in `blocked_by` and belong to the same cut\n(or both belong to no cut), forming a single-parent acyclic forest.",
+      "items": {
+        "type": "string"
+      },
+      "type": "array"
+    },
     "owner": {
       "description": "Who owns it. Absent means unassigned.",
       "type": [

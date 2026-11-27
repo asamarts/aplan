@@ -56,6 +56,29 @@ binary accepts.
 So: stage the new binary, confirm `aplan check` still passes on your existing config, and only then
 add the new keys.
 
+## Work-task decomposition via `integrates` and `APLAN009` parent exemption (`A2-148`)
+
+Multi-increment work tasks can now declare child work tasks explicitly with `integrates` (paired
+with `blocked_by` in the same cut) to model bounded delivery increments converging on an explicit,
+evidence-gated integration boundary (`ADR-0076`). Plans that never write `integrates` require no
+migration and see no change in validation or output.
+
+- **New unconditional rule `APLAN066` (error).** Enforces work-task-only endpoints (never
+  milestones), no self-edges or duplicates, explicit `blocked_by` pairing, same-cut membership,
+  single-parent rooted-forest nesting, acyclicity, and terminal-parent invariants (`done` requires
+  all integrated children `done`; `dropped` forbids live integrated children).
+- **Narrow `APLAN009` exemption (`effort.exempts_decomposed_parents`).** Under
+  `require_effort: true`, a live non-milestone task that declares `integrates` with at least one
+  valid non-dropped child may omit `effort_days` when it has no separate integration effort of its
+  own, avoiding zero-effort fiction while keeping cut, roadmap, and summary totals strictly
+  single-counted. Leaf tasks, milestones, and tasks whose `integrates` list is empty or names only
+  dropped/missing entries continue to follow `APLAN009`. Check capability availability with
+  `aplan facts --require APLAN066 --require effort.exempts_decomposed_parents`.
+- **Upgrading pinned binaries.** Stage the new binary before authoring `integrates:` in task
+  frontmatter, because older builds reject `integrates` as an unknown frontmatter field under
+  `APLAN001`, and regenerate `AGENTS.md` with `aplan export-agents-md --write AGENTS.md` once the
+  pin moves.
+
 ## Test-runner configuration diagnostics report full paths and expected shapes (`A2-037`, `A2-038`)
 
 `.aplan.yml` `test` runner configuration errors now report every missing required field at once

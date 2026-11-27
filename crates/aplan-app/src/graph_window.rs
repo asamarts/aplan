@@ -1049,6 +1049,8 @@ mod tests {
                 id,
                 status: Status::Todo,
                 done: false,
+                parent: None,
+                decomposition: None,
             })
             .collect();
         let admitted = nodes.iter().map(|node| node.id.clone()).collect();
@@ -1059,7 +1061,12 @@ mod tests {
                 nodes,
                 edges: edges
                     .into_iter()
-                    .map(|(from, to, kind)| GraphEdge { from, to, kind })
+                    .map(|(from, to, kind)| GraphEdge {
+                        from,
+                        to,
+                        kind,
+                        integrates: false,
+                    })
                     .collect(),
                 hidden_edges: 0,
                 grouping: Grouping::default(),
