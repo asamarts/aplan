@@ -3554,7 +3554,11 @@ mod tests {
     #[test]
     fn plan_input_digest_matches_context_digest_across_hits_spellings_and_edits() {
         let (_temporary, root, cache) = fixture();
+        fs::create_dir_all(root.join("a")).expect("subdir a");
         fs::create_dir_all(root.join("nested")).expect("nested dir");
+        fs::write(root.join("a/z.md"), task("A-3", "Subdir a")).expect("write a/z");
+        fs::write(root.join("a-dash.md"), task("A-4", "Sibling dash")).expect("write a-dash");
+        fs::write(root.join("a.md"), task("A-5", "Sibling dot")).expect("write a.md");
         fs::write(root.join("nested/A-2.md"), task("A-2", "Nested")).expect("write nested");
 
         let mut opts = options(&cache);
@@ -3572,7 +3576,7 @@ mod tests {
         assert!(hit.stats().cache_generation_hit);
         assert_eq!(hit.stats().artifacts_parsed, 0);
         assert!(hit.has_cached_plan_input_digest());
-        assert_eq!(hit.snapshot_arc().plan.tasks.len(), 2);
+        assert_eq!(hit.snapshot_arc().plan.tasks.len(), 5);
         assert_eq!(hit.plan_input_digest(), expected);
         for ft in [FileType::File, FileType::Directory, FileType::Other] {
             assert_eq!(FileType::from_tag(ft.to_tag()), Some(ft));

@@ -19819,6 +19819,19 @@ fn parse_history_policy(raw: &str) -> Result<aplan_core::HistoryPolicy> {
 
 #[allow(clippy::too_many_lines)]
 fn cmd_completed(cli_root: Option<&std::path::Path>, args: CompletedCliArgs) -> Result<u8> {
+    enum CompletedPlan {
+        Owned(aplan_core::load::Plan),
+        Shared(std::sync::Arc<aplan_core::IdentifiedPlan>),
+    }
+    impl CompletedPlan {
+        fn as_plan(&self) -> &aplan_core::load::Plan {
+            match self {
+                Self::Owned(plan) => plan,
+                Self::Shared(identified) => &identified.plan,
+            }
+        }
+    }
+
     let format = format_for("completed", &args.format)?;
     let history = parse_history_policy(&args.history)?;
     let selector = args.select.selector()?;
@@ -19830,55 +19843,58 @@ fn cmd_completed(cli_root: Option<&std::path::Path>, args: CompletedCliArgs) -> 
             .get()
             .cloned()
             .unwrap_or(aplan_config::ConfigSource::Discover);
-        let (repo, commit, root) = match source {
-            aplan_config::ConfigSource::Discover => {
-                let probe = cli_root.unwrap_or_else(|| std::path::Path::new("."));
-                let repo_probe = revision_plan_repository(probe);
-                let repo = aplan_evidence::Repo::discover(&repo_probe)?;
-                let workdir = repo
-                    .effective_workdir(&repo_probe)
-                    .ok_or_else(|| anyhow::anyhow!("a historical plan needs a Git worktree"))?;
-                let commit = repo.resolve_revision(revision).ok_or_else(|| {
-                    anyhow::anyhow!("revision `{revision}` does not resolve to a commit")
+        let (root, workdir, relative_root, snapshot) = timed("repo", || -> Result<_> {
+            let (repo, commit, root) = match source {
+                aplan_config::ConfigSource::Discover => {
+                    let probe = cli_root.unwrap_or_else(|| std::path::Path::new("."));
+                    let repo_probe = revision_plan_repository(probe);
+                    let repo = aplan_evidence::Repo::discover(&repo_probe)?;
+                    let workdir = repo
+                        .effective_workdir(&repo_probe)
+                        .ok_or_else(|| anyhow::anyhow!("a historical plan needs a Git worktree"))?;
+                    let commit = repo.resolve_revision(revision).ok_or_else(|| {
+                        anyhow::anyhow!("revision `{revision}` does not resolve to a commit")
+                    })?;
+                    let (config, config_dir) =
+                        config_at_revision(&repo, &commit, &workdir).map_err(config_err)?;
+                    let root = cli_root.map_or_else(
+                        || root_from_config(config.root.clone(), config_dir.as_deref()),
+                        std::path::Path::to_path_buf,
+                    );
+                    (repo, commit, root)
+                }
+                aplan_config::ConfigSource::File(_) | aplan_config::ConfigSource::None => {
+                    let (config, config_dir) = config_at(std::path::Path::new("."))?;
+                    let root = cli_root.map_or_else(
+                        || root_from_config(config.root.clone(), config_dir.as_deref()),
+                        std::path::Path::to_path_buf,
+                    );
+                    let repo = aplan_evidence::Repo::discover(&revision_plan_repository(&root))?;
+                    let commit = repo.resolve_revision(revision).ok_or_else(|| {
+                        anyhow::anyhow!("revision `{revision}` does not resolve to a commit")
+                    })?;
+                    (repo, commit, root)
+                }
+            };
+            let workdir = repo
+                .effective_workdir(&revision_plan_repository(&root))
+                .ok_or_else(|| anyhow::anyhow!("a historical plan needs a Git worktree"))?;
+            let relative_root = repository_relative(&workdir, &root, "plan root")?;
+            let snapshot = repo
+                .plan_files_at(&commit, &relative_root)?
+                .ok_or_else(|| {
+                    anyhow::anyhow!("resolved commit `{commit}` disappeared while reading it")
                 })?;
-                let (config, config_dir) =
-                    config_at_revision(&repo, &commit, &workdir).map_err(config_err)?;
-                let root = cli_root.map_or_else(
-                    || root_from_config(config.root.clone(), config_dir.as_deref()),
-                    std::path::Path::to_path_buf,
+            if !snapshot.root_found {
+                anyhow::bail!(
+                    "revision `{}` does not contain plan root `{}`",
+                    snapshot.commit,
+                    relative_root.display()
                 );
-                (repo, commit, root)
             }
-            aplan_config::ConfigSource::File(_) | aplan_config::ConfigSource::None => {
-                let (config, config_dir) = config_at(std::path::Path::new("."))?;
-                let root = cli_root.map_or_else(
-                    || root_from_config(config.root.clone(), config_dir.as_deref()),
-                    std::path::Path::to_path_buf,
-                );
-                let repo = aplan_evidence::Repo::discover(&revision_plan_repository(&root))?;
-                let commit = repo.resolve_revision(revision).ok_or_else(|| {
-                    anyhow::anyhow!("revision `{revision}` does not resolve to a commit")
-                })?;
-                (repo, commit, root)
-            }
-        };
-        let workdir = repo
-            .effective_workdir(&revision_plan_repository(&root))
-            .ok_or_else(|| anyhow::anyhow!("a historical plan needs a Git worktree"))?;
-        let relative_root = repository_relative(&workdir, &root, "plan root")?;
-        let snapshot = repo
-            .plan_files_at(&commit, &relative_root)?
-            .ok_or_else(|| {
-                anyhow::anyhow!("resolved commit `{commit}` disappeared while reading it")
-            })?;
-        if !snapshot.root_found {
-            anyhow::bail!(
-                "revision `{}` does not contain plan root `{}`",
-                snapshot.commit,
-                relative_root.display()
-            );
-        }
-        let plan = load_plan_files(&root, snapshot.files);
+            Ok((root, workdir, relative_root, snapshot))
+        })?;
+        let plan = timed("load", || load_plan_files(&root, snapshot.files));
         errln!(
             "aplan: completed reads committed plan at {} (resolved from `{revision}`).",
             snapshot.commit
@@ -19888,7 +19904,7 @@ fn cmd_completed(cli_root: Option<&std::path::Path>, args: CompletedCliArgs) -> 
         }
         let identity = format!("commit:{}", snapshot.commit);
         (
-            plan,
+            CompletedPlan::Owned(plan),
             identity,
             workdir,
             relative_root,
@@ -19919,7 +19935,7 @@ fn cmd_completed(cli_root: Option<&std::path::Path>, args: CompletedCliArgs) -> 
             }
         });
         (
-            identified.plan.clone(),
+            CompletedPlan::Shared(identified),
             identity,
             repo_root,
             plan_root_rel,
@@ -19944,7 +19960,13 @@ fn cmd_completed(cli_root: Option<&std::path::Path>, args: CompletedCliArgs) -> 
         "repo"
     };
     let response = timed(phase, || {
-        aplan_app::completed_tasks(&plan, &input_identity, &repo_root, &plan_root_rel, &request)
+        aplan_app::completed_tasks(
+            plan.as_plan(),
+            &input_identity,
+            &repo_root,
+            &plan_root_rel,
+            &request,
+        )
     })
     .map_err(|err| anyhow::anyhow!("{err}"))?;
     timed("render", || {

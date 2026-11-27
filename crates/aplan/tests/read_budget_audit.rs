@@ -364,6 +364,151 @@ fn derived_inventory_assigns_every_cli_mcp_and_tui_surface_one_latency_class() {
 
     // Spot-check critical latency class boundaries and live registries.
     assert_inventory_boundaries_and_live_registries(&inventory);
+
+    // Execute a real in-process representative for every TUI read surface
+    // (`EffectKind::ALL` read effects + `Route::ALL` terminal frames).
+    #[cfg(feature = "tui")]
+    drive_tui_inventory_representatives(&inventory);
+}
+
+#[cfg(feature = "tui")]
+fn open_audit_tui_context(
+    repo_root: &Path,
+    cache_dir: &Path,
+    mode: aplan_app::CacheMode,
+) -> (aplan_app::PlanContext, aplan_app::VerificationRunSheet) {
+    let config_path = repo_root.join(".aplan.yml");
+    let config_bytes = std::fs::read(&config_path).expect("read config");
+    let config =
+        aplan_config::parse_config_bytes(&config_bytes, &config_path).expect("parse config");
+    let plan_root = repo_root.join("aplan");
+    let store = aplan_app::PlanStore::open(
+        &plan_root,
+        &aplan_app::PlanStoreOptions {
+            mode,
+            configuration_file: Some(config_path.clone()),
+            cache_root: Some(cache_dir.to_path_buf()),
+            writer_identity: Some("audit-tui-test".to_string()),
+            retain_inputs: true,
+            include_input_digests: true,
+            defer_publication: false,
+        },
+    )
+    .expect("open plan store");
+    let options = aplan_core::Options {
+        require_effort: config.require_effort.unwrap_or(false),
+        detect_drift: config.detect_drift.unwrap_or(false),
+        traces_root: Some(repo_root.to_path_buf()),
+        ..aplan_core::Options::default()
+    };
+    let context = aplan_app::PlanContext::from_shared(
+        store.snapshot_arc(),
+        aplan_app::ContextInputs {
+            repository_root: repo_root.to_path_buf(),
+            configuration_file: Some(config_path),
+            trust: aplan_app::Trust::Hermetic,
+            options,
+            verdict: aplan_core::Verdict::default(),
+        },
+    )
+    .with_captured_report_config(config)
+    .expect("captured config");
+    let sheet =
+        aplan_app::verification_run_sheet(&context, &aplan_evidence::VerifyOptions::default());
+    (context, sheet)
+}
+
+#[cfg(feature = "tui")]
+fn drive_tui_inventory_representatives(inventory: &[aplan_output::stream::ReadSurfaceEntry]) {
+    let repo = make_traced_repo();
+    let cache = tmp("tui-drive-cache");
+    let repo_root = repo.path().to_path_buf();
+    let cache_root = cache.path().to_path_buf();
+    let plan_root = repo_root.join("aplan");
+    let make_loaded = {
+        let repo_root = repo_root.clone();
+        let cache_root = cache_root.clone();
+        let plan_root = plan_root.clone();
+        move || {
+            let (context, verification_sheet) =
+                open_audit_tui_context(&repo_root, &cache_root, aplan_app::CacheMode::Auto);
+            aplan_tui::Launch::Loaded(Box::new(aplan_tui::LoadedLaunch {
+                context,
+                verification_sheet,
+                resolution: aplan_app::LaunchResolution {
+                    plan_root: plan_root.clone(),
+                    root_selection: aplan_app::RootSelection::Default,
+                    configuration: aplan_app::ConfigurationSelection::None,
+                },
+            }))
+        }
+    };
+    let build = aplan_app::BuildIdentity {
+        version: env!("CARGO_PKG_VERSION").to_string(),
+        source: "audit-tui-test".to_string(),
+        facts_sha256: "audit-facts".to_string(),
+        binary_sha256: "audit-binary".to_string(),
+    };
+    let initial_load: aplan_tui::InitialLoad = Box::new({
+        let make_loaded = make_loaded.clone();
+        let build = build.clone();
+        move |_, _| {
+            Ok(aplan_tui::InitialLaunch {
+                launch: make_loaded(),
+                build,
+                facts: aplan_app::BuildFacts::default(),
+            })
+        }
+    });
+    let session = aplan_tui::Session {
+        appearance: aplan_tui::AppearanceOptions::default(),
+        observe: Box::new({
+            let repo_root = repo_root.clone();
+            let cache_root = cache_root.clone();
+            move |_| {
+                Ok(open_audit_tui_context(&repo_root, &cache_root, aplan_app::CacheMode::Auto).0)
+            }
+        }),
+        reload: Box::new({
+            let repo_root = repo_root.clone();
+            let cache_root = cache_root.clone();
+            move || {
+                Ok(open_audit_tui_context(
+                    &repo_root,
+                    &cache_root,
+                    aplan_app::CacheMode::Auto,
+                ))
+            }
+        }),
+        retry: Box::new(move || Ok(make_loaded())),
+        verify: Box::new({
+            let repo_root = repo_root.clone();
+            let cache_root = cache_root.clone();
+            move |_, _, _, _| {
+                let (context, _) =
+                    open_audit_tui_context(&repo_root, &cache_root, aplan_app::CacheMode::Auto);
+                let mut opts = aplan_evidence::VerifyOptions::default();
+                if let Some(cfg) = context.report_config() {
+                    opts.test_runner.clone_from(&cfg.test);
+                }
+                aplan_app::verify_context(&context, &opts)
+            }
+        }),
+    };
+
+    let driven: BTreeSet<String> = aplan_tui::audit_drive_tui_read_surfaces(initial_load, session)
+        .expect("all TUI read surfaces must execute and render")
+        .into_iter()
+        .collect();
+    let expected: BTreeSet<String> = inventory
+        .iter()
+        .filter(|e| e.channel == ReadChannel::TuiOperation)
+        .map(|e| e.surface.clone())
+        .collect();
+    assert_eq!(
+        driven, expected,
+        "every TUI read surface in the derived inventory must be executed"
+    );
 }
 
 fn assert_inventory_boundaries_and_live_registries(
@@ -504,6 +649,10 @@ fn assert_clean_hit_and_one_edit_states(root: &Path, cache_dir: &Path) {
     assert_eq!(timing_u64(&t_hit_check, "markdown_parses"), 0);
     assert_eq!(timing_u64(&t_hit_check, "report_builds"), 0);
     assert_eq!(timing_u64(&t_hit_check, "provider_spawns"), 0);
+    let (mcp_hit_codes, _) = mcp_check_and_show_codes(root, cache_dir, "auto");
+    let (_, tui_hit_codes) = tui_check_diagnostics(root, cache_dir, aplan_app::CacheMode::Auto);
+    assert_eq!(cli_check_codes(&hit_check.stdout), mcp_hit_codes);
+    assert_eq!(cli_check_codes(&hit_check.stdout), tui_hit_codes);
 
     // 3. One-edit state: title-only keeps report_builds == 0; semantic edit rebuilds report.
     let task_path = root.join("aplan/tasks/T-003.md");
@@ -526,7 +675,12 @@ fn assert_clean_hit_and_one_edit_states(root: &Path, cache_dir: &Path) {
     assert_eq!(timing_u64(&t_sem, "tasks_parsed"), 1);
     assert_eq!(timing_u64(&t_sem, "report_builds"), 1);
     assert_eq!(timing_u64(&t_sem, "provider_spawns"), 0);
-    assert!(cli_check_codes(&one_edit_sem.stdout).contains(&"APLAN009".to_string()));
+    let sem_cli_codes = cli_check_codes(&one_edit_sem.stdout);
+    let (sem_mcp_codes, _) = mcp_check_and_show_codes(root, cache_dir, "auto");
+    let (_, sem_tui_codes) = tui_check_diagnostics(root, cache_dir, aplan_app::CacheMode::Auto);
+    assert!(sem_cli_codes.contains(&"APLAN009".to_string()));
+    assert_eq!(sem_cli_codes, sem_mcp_codes, "CLI vs MCP one-edit parity");
+    assert_eq!(sem_cli_codes, sem_tui_codes, "CLI vs TUI one-edit parity");
     std::fs::write(&task_path, orig_task).expect("restore T-003");
 }
 
@@ -611,6 +765,12 @@ fn assert_corrupt_off_and_stale_states(root: &Path, cache_dir: &Path) {
     assert_eq!(timing_u64(&t_corrupt, "cache_hits"), 0);
     assert_eq!(timing_u64(&t_corrupt, "tasks_parsed"), 4);
     assert_eq!(timing_u64(&t_corrupt, "provider_spawns"), 0);
+    assert!(corrupt_plan_cache_files(cache_dir) >= 1);
+    let (mcp_corrupt_codes, _) = mcp_check_and_show_codes(root, cache_dir, "auto");
+    assert!(corrupt_plan_cache_files(cache_dir) >= 1);
+    let (_, tui_corrupt_codes) = tui_check_diagnostics(root, cache_dir, aplan_app::CacheMode::Auto);
+    assert_eq!(cli_check_codes(&corrupt_check.stdout), mcp_corrupt_codes);
+    assert_eq!(cli_check_codes(&corrupt_check.stdout), tui_corrupt_codes);
 
     // 7. Stale-observation state on default `show` across CLI and MCP (zero provider spawns).
     let refresh = run_with_cache(
@@ -715,6 +875,25 @@ fn repository_reads_separate_plan_overhead_and_external_refresh_reports_provider
             vec!["--timings", "completed", "--format", "json"],
             true,
         ),
+        (
+            "completed --at HEAD",
+            vec![
+                "--timings",
+                "completed",
+                "--at",
+                "HEAD",
+                "--history",
+                "never",
+                "--format",
+                "json",
+            ],
+            false,
+        ),
+        (
+            "version M-01",
+            vec!["--timings", "version", "M-01", "--format", "json"],
+            true,
+        ),
     ] {
         let run = run_with_cache(repo.path(), cache.path(), &argv);
         assert_eq!(
@@ -725,6 +904,12 @@ fn repository_reads_separate_plan_overhead_and_external_refresh_reports_provider
         let timings = parse_timings(&run.stderr);
         assert!(timing_f64(&timings, "load_ms") >= 0.0);
         assert!(timing_f64(&timings, "repo_ms") >= 0.0);
+        if label == "completed --at HEAD" {
+            assert!(
+                timing_f64(&timings, "repo_ms") > 0.0,
+                "historical completed --at HEAD must attribute Git read time to repo_ms: {timings:?}"
+            );
+        }
         assert_eq!(
             timing_u64(&timings, "provider_spawns"),
             0,
@@ -739,10 +924,37 @@ fn repository_reads_separate_plan_overhead_and_external_refresh_reports_provider
         }
     }
 
+    assert_version_next_and_verify_provider_spawns(repo.path(), cache.path());
+}
+
+fn assert_version_next_and_verify_provider_spawns(repo_root: &Path, cache_dir: &Path) {
+    // `version` with configured `version.current.command` separates Git/command work into
+    // `repo_ms` and counts the configured command spawn in `provider_spawns`.
+    let cfg_path = repo_root.join(".aplan.yml");
+    let orig_cfg = std::fs::read_to_string(&cfg_path).expect("read config");
+    std::fs::write(
+        &cfg_path,
+        format!("{orig_cfg}version:\n  current:\n    command: ['printf', '0.1.0\\n']\n"),
+    )
+    .expect("add version.current");
+    let ver_next = run_with_cache(
+        repo_root,
+        cache_dir,
+        &["--timings", "version", "--format", "json"],
+    );
+    std::fs::write(&cfg_path, orig_cfg).expect("restore config");
+    assert_eq!(ver_next.code, 0, "version failed: {}", ver_next.stderr);
+    let t_ver = parse_timings(&ver_next.stderr);
+    assert!(timing_f64(&t_ver, "repo_ms") > 0.0, "{t_ver:?}");
+    assert!(
+        timing_u64(&t_ver, "provider_spawns") >= 1,
+        "version.current.command spawn must be counted in provider_spawns: {t_ver:?}"
+    );
+
     // Explicit external refresh MUST record provider spawns > 0.
     let verify = run_with_cache(
-        repo.path(),
-        cache.path(),
+        repo_root,
+        cache_dir,
         &["--timings", "verify", "--format", "json"],
     );
     assert_eq!(verify.code, 0, "verify failed: {}", verify.stderr);

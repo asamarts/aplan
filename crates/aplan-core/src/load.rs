@@ -1569,6 +1569,95 @@ mod tests {
         }
     }
 
+    #[test]
+    fn plan_candidate_paths_matches_walk_exclusions_symlinks_and_path_order() {
+        let dir = tempfile::Builder::new()
+            .tempdir_in(crate::fixture::fixture_root())
+            .expect("tempdir");
+        let root = dir.path();
+        for rel in [
+            "a/z.md",
+            "a-1.md",
+            "a.md",
+            "UPPER.MD",
+            "ignored.txt",
+            "sub/target/deep.md",
+            "sub/node_modules/deep.md",
+            "target/excluded.md",
+            "node_modules/excluded.md",
+            ".inbox/excluded.md",
+            ".git/excluded.md",
+            "sub/.svn/excluded.md",
+        ] {
+            let full = root.join(rel);
+            if let Some(parent) = full.parent() {
+                std::fs::create_dir_all(parent).expect("mkdir");
+            }
+            std::fs::write(&full, "prose\n").expect("write");
+        }
+        #[cfg(unix)]
+        {
+            let ext = tempfile::Builder::new()
+                .tempdir_in(crate::fixture::fixture_root())
+                .expect("ext tempdir");
+            let ext_file = ext.path().join("linked-target.md");
+            std::fs::write(&ext_file, "prose\n").expect("write ext file");
+            let ext_dir = ext.path().join("linked-dir");
+            std::fs::create_dir_all(&ext_dir).expect("mkdir ext dir");
+            std::fs::write(ext_dir.join("never-followed.md"), "prose\n").expect("write ext dir");
+            std::os::unix::fs::symlink(&ext_file, root.join("linked.md")).expect("symlink file");
+            std::os::unix::fs::symlink(&ext_dir, root.join("linked_dir")).expect("symlink dir");
+
+            let found = super::plan_candidate_paths(root);
+            let mut sorted = found.clone();
+            sorted.sort();
+            assert_eq!(found, sorted, "candidates must be in exact Path::cmp order");
+            let rels: Vec<String> = found
+                .iter()
+                .map(|p| p.strip_prefix(root).expect("prefix").display().to_string())
+                .collect();
+            assert_eq!(
+                rels,
+                vec![
+                    "UPPER.MD",
+                    "a/z.md",
+                    "a-1.md",
+                    "a.md",
+                    "linked.md",
+                    "sub/node_modules/deep.md",
+                    "sub/target/deep.md",
+                ]
+            );
+        }
+        #[cfg(not(unix))]
+        {
+            let found = super::plan_candidate_paths(root);
+            let mut sorted = found.clone();
+            sorted.sort();
+            assert_eq!(found, sorted, "candidates must be in exact Path::cmp order");
+            let rels: Vec<String> = found
+                .iter()
+                .map(|p| {
+                    p.strip_prefix(root)
+                        .expect("prefix")
+                        .to_string_lossy()
+                        .replace('\\', "/")
+                })
+                .collect();
+            assert_eq!(
+                rels,
+                vec![
+                    "UPPER.MD",
+                    "a/z.md",
+                    "a-1.md",
+                    "a.md",
+                    "sub/node_modules/deep.md",
+                    "sub/target/deep.md",
+                ]
+            );
+        }
+    }
+
     /// A repository tree supplies bytes rather than filesystem entries. The
     /// alternate seam still has to make the loader's two easy-to-lose
     /// distinctions: prose markdown is not a task, and invalid UTF-8 in a task
