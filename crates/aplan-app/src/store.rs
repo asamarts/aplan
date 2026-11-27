@@ -3557,7 +3557,7 @@ mod tests {
         fs::create_dir_all(root.join("a")).expect("subdir a");
         fs::create_dir_all(root.join("nested")).expect("nested dir");
         fs::write(root.join("a/z.md"), task("A-3", "Subdir a")).expect("write a/z");
-        fs::write(root.join("a-1.md"), task("A-4", "Sibling dash")).expect("write a-1");
+        fs::write(root.join("a-dash.md"), task("A-4", "Sibling dash")).expect("write a-dash");
         fs::write(root.join("a.md"), task("A-5", "Sibling dot")).expect("write a.md");
         fs::write(root.join("nested/A-2.md"), task("A-2", "Nested")).expect("write nested");
 
