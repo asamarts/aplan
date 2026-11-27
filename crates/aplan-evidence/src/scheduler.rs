@@ -122,9 +122,11 @@ where
                 let index = job.index;
                 let tx = finished_tx.clone();
                 let work = &work;
+                let inherited_scope = crate::resolve::current_command_scope();
                 scope.spawn(move || {
-                    let outcome =
-                        catch_unwind(AssertUnwindSafe(|| work(job.index))).map_err(|_| ());
+                    let outcome = crate::resolve::with_command_scope(inherited_scope, || {
+                        catch_unwind(AssertUnwindSafe(|| work(job.index))).map_err(|_| ())
+                    });
                     let _ = tx.send(Completed { job, outcome });
                 });
                 // The worker must exist before an observer is allowed to wait

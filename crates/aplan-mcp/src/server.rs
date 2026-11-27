@@ -965,13 +965,18 @@ where
             None,
         ));
     }
-    let handle = tokio::task::spawn_blocking(work);
+    let scope = aplan_evidence::CommandCancellationScope::new();
+    let worker_scope = scope.clone();
+    let handle = tokio::task::spawn_blocking(move || worker_scope.run(work));
     tokio::select! {
         biased;
-        () = cancelled => Err(McpError::internal_error(
-            format!("request cancelled by client during {phase}"),
-            None,
-        )),
+        () = cancelled => {
+            scope.cancel();
+            Err(McpError::internal_error(
+                format!("request cancelled by client during {phase}"),
+                None,
+            ))
+        }
         joined = handle => joined.map_err(|err| {
             McpError::internal_error(format!("{phase} worker failed: {err}"), None)
         }),

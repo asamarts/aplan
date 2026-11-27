@@ -1965,7 +1965,6 @@ fn classify_unformatted_cli_read(
     })
 }
 
-/// Derived read-surface output-disposition inventory across CLI commands and
 /// Exhaustive CLI read-surface output-disposition inventory derived directly
 /// from the live `clap` command tree, [`COMMAND_SURFACES`], and
 /// [`Format::ALL`] (`A2-136`).
@@ -5445,6 +5444,10 @@ fn inspect_verify_evidence(
 
 /// `aplan verify`, resolve evidence against the repository (rungs L1/L2, and L3
 /// with `--execute`).
+fn timed_render(render: impl FnOnce() -> std::io::Result<()>) -> Result<()> {
+    timed("render", || render_tolerant(render))
+}
+
 fn cmd_verify(root: &std::path::Path, args: &VerifyArgs) -> Result<u8> {
     refuse_selection_on_a_gate("verify", &args.select)?;
     let format = format_for("verify", &args.format)?;
@@ -5556,7 +5559,7 @@ fn cmd_verify(root: &std::path::Path, args: &VerifyArgs) -> Result<u8> {
             "aplan: {unloadable} task file(s) failed to load; below is what did, and no \
              evidence was resolved."
         );
-        render_tolerant(|| render_verified_partial(&report, format, &policy, unloadable))?;
+        timed_render(|| render_verified_partial(&report, format, &policy, unloadable))?;
         return Ok(EXIT_VIOLATIONS);
     }
     // A malformed inbox is not partial task evidence, but it is still a failed
@@ -5568,9 +5571,7 @@ fn cmd_verify(root: &std::path::Path, args: &VerifyArgs) -> Result<u8> {
         .filter(|diagnostic| diagnostic.code == aplan_core::code::CAPTURE_INVALID)
         .count();
     if invalid_captures > 0 {
-        render_tolerant(|| {
-            render_verified_inbox_invalid(&report, format, &policy, invalid_captures)
-        })?;
+        timed_render(|| render_verified_inbox_invalid(&report, format, &policy, invalid_captures))?;
         note_denied_warnings(&report, &policy, format);
         return Ok(EXIT_VIOLATIONS);
     }
@@ -5603,7 +5604,7 @@ fn cmd_verify(root: &std::path::Path, args: &VerifyArgs) -> Result<u8> {
     // What this configuration had no resolver for, computed from the same list
     // `verify` ran, so the summary and the note cannot disagree with the run.
     let unopened = aplan_evidence::unresolved_by_verify(&plan, repo, &opts);
-    render_tolerant(|| {
+    timed_render(|| {
         render_verified_observed(&report, format, &policy, &unopened, &evidence.observation)
     })?;
     note_unopened_evidence(&unopened, format);
@@ -16569,7 +16570,7 @@ fn cmd_why(root: &std::path::Path, id: &str, all: bool, format: &str) -> Result<
             let _ = writeln!(out, "traversal: cut-bounded");
         }
     }
-    write_stdout(&out)?;
+    timed("render", || write_stdout(&out))?;
     Ok(EXIT_OK)
 }
 
@@ -17718,15 +17719,23 @@ fn render_summary_answer(
                 .map(|members| (family, members))
         })
     {
-        let summary = graph
-            .summary_grouped_by_of(family, members.members(), &|id| keep.contains(id))
-            .with_throughput(config.effort_days_per_week);
-        render_tolerant(|| render_grouped_summary(&summary, format))?;
+        let summary = timed("project", || {
+            graph
+                .summary_grouped_by_of(family, members.members(), &|id| keep.contains(id))
+                .with_throughput(config.effort_days_per_week)
+        });
+        timed("render", || {
+            render_tolerant(|| render_grouped_summary(&summary, format))
+        })?;
     } else {
-        let summary = graph
-            .summary_of(&|id| keep.contains(id))
-            .with_throughput(config.effort_days_per_week);
-        render_tolerant(|| render_summary(&summary, format))?;
+        let summary = timed("project", || {
+            graph
+                .summary_of(&|id| keep.contains(id))
+                .with_throughput(config.effort_days_per_week)
+        });
+        timed("render", || {
+            render_tolerant(|| render_summary(&summary, format))
+        })?;
     }
     Ok(EXIT_OK)
 }
@@ -19934,7 +19943,9 @@ fn cmd_critical_path(root: &std::path::Path, args: &CriticalPathArgs) -> Result<
              loop in its containment (run `aplan check`, which reports each by name)"
         );
     };
-    render_tolerant(|| render_critical_path(&path, remaining.as_ref(), to, format))?;
+    timed("render", || {
+        render_tolerant(|| render_critical_path(&path, remaining.as_ref(), to, format))
+    })?;
     Ok(EXIT_OK)
 }
 

@@ -641,6 +641,10 @@ fn large_read_outputs_stream_with_bounded_buffer_and_byte_parity() {
         }
     }
 
+    assert_library_stream_parity_and_preflight(root);
+}
+
+fn assert_library_stream_parity_and_preflight(root: &Path) {
     // Verify exact byte-for-byte parity between buffered and streaming library
     // helpers on the same real plan snapshot, plus preflight zero-byte refusal.
     let loaded = aplan_core::load_plan(&root.join("aplan"));
@@ -654,6 +658,42 @@ fn large_read_outputs_stream_with_bounded_buffer_and_byte_parity() {
         String::from_utf8(streamed_md).expect("utf8"),
         buffered_md,
         "streamed roadmap markdown diverged from buffered renderer"
+    );
+    let buffered_roadmap_human =
+        aplan_output::render_roadmap(&roadmap, aplan_output::Format::Human);
+    let mut streamed_roadmap_human = Vec::new();
+    aplan_output::write_roadmap_human(&mut streamed_roadmap_human, &roadmap)
+        .expect("stream roadmap human");
+    assert_eq!(
+        String::from_utf8(streamed_roadmap_human).expect("utf8"),
+        buffered_roadmap_human,
+        "streamed roadmap human diverged from buffered renderer"
+    );
+    let buffered_roadmap_json = aplan_output::render_roadmap(&roadmap, aplan_output::Format::Json);
+    let mut streamed_roadmap_json = Vec::new();
+    aplan_output::write_roadmap_json(&mut streamed_roadmap_json, &roadmap)
+        .expect("stream roadmap json");
+    assert_eq!(
+        String::from_utf8(streamed_roadmap_json).expect("utf8"),
+        buffered_roadmap_json,
+        "streamed roadmap json diverged from buffered renderer"
+    );
+    let all_ids: BTreeSet<&str> = loaded.tasks.iter().map(|lt| lt.task.id.as_str()).collect();
+    let graph_view = aplan_output::GraphView::of(&graph, &all_ids);
+    let mut streamed_mermaid = Vec::new();
+    aplan_output::write_mermaid_of_view(&mut streamed_mermaid, &graph_view)
+        .expect("stream mermaid");
+    assert_eq!(
+        String::from_utf8(streamed_mermaid).expect("utf8"),
+        aplan_output::mermaid_of_view(&graph_view),
+        "streamed mermaid diverged from buffered renderer"
+    );
+    let mut streamed_dot = Vec::new();
+    aplan_output::write_dot_of_view(&mut streamed_dot, &graph_view).expect("stream dot");
+    assert_eq!(
+        String::from_utf8(streamed_dot).expect("utf8"),
+        aplan_output::dot_of_view(&graph_view),
+        "streamed dot diverged from buffered renderer"
     );
 
     let mut bad_roadmap = roadmap;
@@ -879,6 +919,48 @@ fn make_blocking_mcp_fixture() -> tempfile::TempDir {
 }
 
 #[cfg(target_os = "linux")]
+fn wait_for_blocking_provider_pids(broot: &Path) -> (u32, u32) {
+    let started_marker = broot.join("provider.started");
+    let wait_deadline = Instant::now() + Duration::from_secs(10);
+    while !started_marker.exists() && Instant::now() < wait_deadline {
+        std::thread::sleep(Duration::from_millis(10));
+    }
+    assert!(
+        started_marker.exists(),
+        "blocking MCP provider never started"
+    );
+    let provider_pid: u32 = std::fs::read_to_string(broot.join("provider.pid"))
+        .expect("provider.pid")
+        .trim()
+        .parse()
+        .expect("provider pid");
+    let descendant_pid: u32 = std::fs::read_to_string(broot.join("provider.descendant.pid"))
+        .expect("provider.descendant.pid")
+        .trim()
+        .parse()
+        .expect("descendant pid");
+    (provider_pid, descendant_pid)
+}
+
+#[cfg(target_os = "linux")]
+fn assert_pids_reaped(provider_pid: u32, descendant_pid: u32, context: &str) {
+    let reap_deadline = Instant::now() + Duration::from_secs(5);
+    while (process_alive(provider_pid) || process_alive(descendant_pid))
+        && Instant::now() < reap_deadline
+    {
+        std::thread::sleep(Duration::from_millis(15));
+    }
+    assert!(
+        !process_alive(provider_pid),
+        "MCP provider {provider_pid} remained alive after {context}"
+    );
+    assert!(
+        !process_alive(descendant_pid),
+        "MCP provider descendant {descendant_pid} remained alive after {context}"
+    );
+}
+
+#[cfg(target_os = "linux")]
 fn assert_interrupted_mcp_kills_blocking_provider() {
     let block_dir = make_blocking_mcp_fixture();
     let broot = block_dir.path();
@@ -919,26 +1001,7 @@ fn assert_interrupted_mcp_kills_blocking_provider() {
     }
     stdin.flush().expect("flush");
 
-    let started_marker = broot.join("provider.started");
-    let wait_deadline = Instant::now() + Duration::from_secs(10);
-    while !started_marker.exists() && Instant::now() < wait_deadline {
-        std::thread::sleep(Duration::from_millis(10));
-    }
-    assert!(
-        started_marker.exists(),
-        "blocking MCP provider never started"
-    );
-    let provider_pid: u32 = std::fs::read_to_string(broot.join("provider.pid"))
-        .expect("provider.pid")
-        .trim()
-        .parse()
-        .expect("provider pid");
-    let descendant_pid: u32 = std::fs::read_to_string(broot.join("provider.descendant.pid"))
-        .expect("provider.descendant.pid")
-        .trim()
-        .parse()
-        .expect("descendant pid");
-
+    let (provider_pid, descendant_pid) = wait_for_blocking_provider_pids(broot);
     drop(stdin);
     drop(stdout);
 
@@ -965,21 +1028,103 @@ fn assert_interrupted_mcp_kills_blocking_provider() {
         !stderr_buf.contains("panicked"),
         "interrupted `aplan mcp` panicked:\n{stderr_buf}"
     );
+    assert_pids_reaped(provider_pid, descendant_pid, "client disconnect");
+}
 
-    let reap_deadline = Instant::now() + Duration::from_secs(3);
-    while (process_alive(provider_pid) || process_alive(descendant_pid))
-        && Instant::now() < reap_deadline
-    {
-        std::thread::sleep(Duration::from_millis(15));
+#[cfg(target_os = "linux")]
+fn assert_cancelled_mcp_request_kills_blocking_provider_and_keeps_session_alive() {
+    use std::io::BufRead as _;
+
+    let block_dir = make_blocking_mcp_fixture();
+    let broot = block_dir.path();
+
+    let mut child = common::command(broot, &["mcp"])
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .expect("spawn blocking mcp for cancellation test");
+    let mut stdin = child.stdin.take().expect("stdin");
+    let mut reader = std::io::BufReader::new(child.stdout.take().expect("stdout"));
+
+    for msg in [
+        serde_json::json!({
+            "jsonrpc": "2.0",
+            "id": 1,
+            "method": "initialize",
+            "params": {
+                "protocolVersion": "2025-06-18",
+                "capabilities": {},
+                "clientInfo": {"name": "cancel-test", "version": "1"}
+            }
+        }),
+        serde_json::json!({
+            "jsonrpc": "2.0",
+            "method": "notifications/initialized"
+        }),
+        serde_json::json!({
+            "jsonrpc": "2.0",
+            "id": 2,
+            "method": "tools/call",
+            "params": {"name": "aplan_verify", "arguments": {}}
+        }),
+    ] {
+        writeln!(stdin, "{msg}").expect("write mcp msg");
+    }
+    stdin.flush().expect("flush");
+
+    let mut init_line = String::new();
+    reader.read_line(&mut init_line).expect("read init reply");
+    assert_eq!(
+        serde_json::from_str::<serde_json::Value>(&init_line).expect("init json")["id"],
+        1
+    );
+
+    let (provider_pid, descendant_pid) = wait_for_blocking_provider_pids(broot);
+    for msg in [
+        serde_json::json!({
+            "jsonrpc": "2.0",
+            "method": "notifications/cancelled",
+            "params": {"requestId": 2, "reason": "client stopped waiting"}
+        }),
+        serde_json::json!({
+            "jsonrpc": "2.0",
+            "id": 3,
+            "method": "tools/call",
+            "params": {"name": "aplan_identity", "arguments": {}}
+        }),
+    ] {
+        writeln!(stdin, "{msg}").expect("write cancel/follow-up");
+    }
+    stdin.flush().expect("flush after cancel");
+
+    assert_pids_reaped(provider_pid, descendant_pid, "notifications/cancelled");
+
+    let mut saw_identity = false;
+    for _ in 0..4 {
+        let mut line = String::new();
+        if reader.read_line(&mut line).expect("read reply") == 0 {
+            break;
+        }
+        let reply: serde_json::Value = serde_json::from_str(&line).expect("reply json");
+        if reply["id"] == 3 {
+            assert!(
+                reply.get("error").is_none(),
+                "session broke after request cancellation: {reply}"
+            );
+            assert_eq!(reply["result"]["isError"], false);
+            saw_identity = true;
+            break;
+        }
     }
     assert!(
-        !process_alive(provider_pid),
-        "MCP provider {provider_pid} remained alive after client disconnect"
+        saw_identity,
+        "follow-up aplan_identity did not succeed on the live session after request cancellation"
     );
-    assert!(
-        !process_alive(descendant_pid),
-        "MCP provider descendant {descendant_pid} remained alive after client disconnect"
-    );
+
+    drop(stdin);
+    let status = child.wait().expect("wait cancelled mcp child");
+    assert!(status.success(), "cancelled MCP child exited {status}");
 }
 
 /// Proof for `read.streams_large_outputs_with_bounded_memory`: closing a CLI
@@ -1017,5 +1162,8 @@ fn broken_pipe_and_interrupted_mcp_consumers_stop_cleanly_without_orphans() {
 
     assert_mcp_oversized_refusal_and_pagination();
     #[cfg(target_os = "linux")]
-    assert_interrupted_mcp_kills_blocking_provider();
+    {
+        assert_interrupted_mcp_kills_blocking_provider();
+        assert_cancelled_mcp_request_kills_blocking_provider_and_keeps_session_alive();
+    }
 }
