@@ -14686,6 +14686,7 @@ fn canonical_artifacts() -> String {
         exempt_tags: vec!["untestable".to_string()],
         scoped_evidence: vec![("tag:spike".to_string(), "note".to_string())],
         advisory: vec!["APLAN009".to_string()],
+        max_effort_days: Some(3.0),
         runners: vec!["cargo test".to_string()],
         runner_count: 1,
         tools: vec![("ready".to_string(), "what to work on".to_string())],
