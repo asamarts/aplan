@@ -1227,12 +1227,13 @@ fn check_max_effort(lt: &LoadedTask, opts: &Options, out: &mut Vec<Diagnostic>) 
     let Some(days) = t.effort_days else {
         return;
     };
-    if days <= 0.0 {
+    if !days.is_finite() || days <= 0.0 {
+        let shown = if days == 0.0 { 0.0 } else { days };
         out.push(
             Diagnostic::error(
                 code::EFFORT_EXCEEDS_MAX,
                 format!(
-                    "`effort_days` is {days}d under configured `max_effort_days` ({limit}d): a \
+                    "`effort_days` is {shown}d under configured `max_effort_days` ({limit}d): a \
                      live task must declare a positive estimate rather than zero-effort fiction"
                 ),
             )
@@ -10974,7 +10975,7 @@ mod tests {
         let mut over = t("T-over", Status::Todo);
         over.effort_days = Some(3.5);
         let mut zero = t("T-zero", Status::InProgress);
-        zero.effort_days = Some(0.0);
+        zero.effort_days = Some(-0.0);
         let mut exact = t("T-exact", Status::Todo);
         exact.effort_days = Some(2.5);
         let mut frac = t("T-frac", Status::Blocked);
@@ -11052,7 +11053,9 @@ mod tests {
             .find(|d| d.task.as_deref() == Some("T-zero"))
             .expect("T-zero");
         assert!(
-            zero_diag.message.contains("0d") && zero_diag.message.contains("positive estimate"),
+            zero_diag.message.contains("0d")
+                && !zero_diag.message.contains("-0d")
+                && zero_diag.message.contains("positive estimate"),
             "{}",
             zero_diag.message
         );

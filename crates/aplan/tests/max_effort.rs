@@ -1,7 +1,9 @@
 //! End-to-end integration tests for repository-declared maximum live task
 //! effort (`max_effort_days`, `APLAN067`, `A2-149`).
 
+use std::io::Write;
 use std::path::Path;
+use std::process::Stdio;
 
 use aplan_core::validate;
 
@@ -136,10 +138,104 @@ fn boundary_fractional_exemptions_and_decomposition_rollups() {
         .collect();
     assert_eq!(a067.len(), 2, "{a067:?}");
     assert_eq!(a067[0]["task"], "A1-07");
+    assert_eq!(
+        a067[0]["line"], 6,
+        "points_at effort_days line: {:?}",
+        a067[0]
+    );
     assert!(a067[0]["message"].as_str().unwrap_or("").contains("2.51d"));
     assert!(a067[0]["message"].as_str().unwrap_or("").contains("2.5d"));
     assert_eq!(a067[1]["task"], "A1-08");
+    assert_eq!(
+        a067[1]["line"], 6,
+        "points_at effort_days line: {:?}",
+        a067[1]
+    );
     assert_a067_human_agent_and_agents_md_outputs(dir.path());
+    assert_live_statuses_milestones_neg_zero_and_parent_own_effort(dir.path());
+}
+
+fn assert_live_statuses_milestones_neg_zero_and_parent_own_effort(dir: &Path) {
+    // 1. Live `blocked` task over limit, `-0.0` formatting (no `-0d`), and decomposed parent with
+    //    own over-limit effort all fire APLAN067; decomposed parent with own in-limit effort and a
+    //    milestone with oversized effort remain silent on APLAN067.
+    write(
+        &dir.join("aplan/tasks/A1-07.md"),
+        &task_md(
+            "id: A1-07\ntitle: Blocked over limit\nphase: 1\nstatus: blocked\n\
+             revisit_at: 2026-12-31T00:00:00Z\neffort_days: 4.0\npaths: [src/blocked.rs]",
+        ),
+    );
+    write(
+        &dir.join("aplan/tasks/A1-08.md"),
+        &task_md(
+            "id: A1-08\ntitle: Negative zero effort\nphase: 1\nstatus: todo\n\
+             effort_days: -0.0\npaths: [src/negzero.rs]",
+        ),
+    );
+    write(
+        &dir.join("aplan/tasks/A1-03.md"),
+        &task_md(
+            "id: A1-03\ntitle: Decomposed parent with own in-limit effort\nphase: 1\nstatus: todo\n\
+             effort_days: 1.5\npaths: [src/parent.rs]\nblocked_by: [A1-04, A1-05]\n\
+             integrates: [A1-04, A1-05]",
+        ),
+    );
+    write(
+        &dir.join("aplan/tasks/A1-09.md"),
+        &task_md(
+            "id: A1-09\ntitle: Decomposed parent over limit\nphase: 1\nstatus: todo\n\
+             effort_days: 3.0\npaths: [src/big_parent.rs]\nblocked_by: [A1-01]\n\
+             integrates: [A1-01]",
+        ),
+    );
+    write(
+        &dir.join("aplan/tasks/M-1.md"),
+        &task_md(
+            "id: M-1\ntitle: Core cut\nphase: 1\nstatus: todo\neffort_days: 10.0\n\
+             tags: [milestone, v1]\nblocked_by: [A1-01, A1-02, A1-03, A1-04, A1-05, A1-06, A1-07, A1-08, A1-09]",
+        ),
+    );
+    let out = common::run(dir, &["check", "--format", "json"]);
+    assert_eq!(out.code, 1);
+    let doc: serde_json::Value = serde_json::from_str(&out.stdout).expect("check json");
+    let a067: Vec<&serde_json::Value> = doc["diagnostics"]
+        .as_array()
+        .expect("diags")
+        .iter()
+        .filter(|d| d["code"] == "APLAN067")
+        .collect();
+    let tasks: Vec<&str> = a067.iter().filter_map(|d| d["task"].as_str()).collect();
+    assert_eq!(tasks, vec!["A1-07", "A1-08", "A1-09"], "{a067:?}");
+    let neg_zero_msg = a067[1]["message"].as_str().unwrap_or("");
+    assert!(
+        neg_zero_msg.contains("0d") && !neg_zero_msg.contains("-0d"),
+        "must normalize -0.0: {neg_zero_msg}"
+    );
+    // `--no-require-effort` suppresses APLAN009 on missing effort while keeping APLAN067 active.
+    write(
+        &dir.join("aplan/tasks/A1-08.md"),
+        &task_md(
+            "id: A1-08\ntitle: Missing effort\nphase: 1\nstatus: todo\npaths: [src/no_effort.rs]",
+        ),
+    );
+    let ortho = common::run(dir, &["check", "--no-require-effort", "--format", "json"]);
+    assert_eq!(ortho.code, 1);
+    let ortho_doc: serde_json::Value = serde_json::from_str(&ortho.stdout).expect("ortho json");
+    let codes: Vec<(&str, &str)> = ortho_doc["diagnostics"]
+        .as_array()
+        .expect("diags")
+        .iter()
+        .map(|d| {
+            (
+                d["code"].as_str().unwrap_or(""),
+                d["task"].as_str().unwrap_or(""),
+            )
+        })
+        .collect();
+    assert!(!codes.iter().any(|(c, _)| *c == "APLAN009"), "{codes:?}");
+    assert!(codes.contains(&("APLAN067", "A1-07")), "{codes:?}");
+    assert!(codes.contains(&("APLAN067", "A1-09")), "{codes:?}");
 }
 
 fn assert_a067_human_agent_and_agents_md_outputs(dir: &Path) {
@@ -540,4 +636,393 @@ fn assert_tui_add_form_denies_over_limit(dir: &Path) {
             .iter()
             .any(|d| d.code == aplan_core::code::EFFORT_EXCEEDS_MAX)
     );
+    assert_tui_supersede_and_manifest_deny_over_limit(&ctx);
+}
+
+#[cfg(feature = "tui")]
+fn assert_tui_supersede_and_manifest_deny_over_limit(ctx: &aplan_app::PlanContext) {
+    let mut sup_form = aplan_tui::authoring::form(
+        ctx,
+        aplan_tui::authoring::AuthoringWorkflow::Supersede,
+        Some("A1-02"),
+    )
+    .expect("tui supersede form");
+    for (key, value) in [
+        ("title", "TUI oversized successor"),
+        ("cut", "M-1"),
+        ("effort", "4.0"),
+    ] {
+        let index = sup_form
+            .fields()
+            .iter()
+            .position(|field| field.spec().key() == key)
+            .expect("field exists");
+        while sup_form.focus() != aplan_tui::form::FormFocus::Field(index) {
+            let _ = sup_form.reduce(aplan_tui::form::FormAction::NextFocus);
+        }
+        let _ = sup_form.reduce(aplan_tui::form::FormAction::Insert(value.to_string()));
+    }
+    let aplan_tui::form::FormTransition::PreviewRequested(sub) =
+        sup_form.reduce(aplan_tui::form::FormAction::Review)
+    else {
+        panic!("complete TUI supersede form did not yield submission");
+    };
+    let sup_req = aplan_tui::authoring::request(
+        aplan_tui::authoring::AuthoringWorkflow::Supersede,
+        &sub,
+        aplan_tui::authoring::AuthoringAssets::default(),
+    )
+    .expect("decode tui supersede");
+    let sup_preview = sup_req.preview(ctx).expect("preview tui supersede");
+    assert_eq!(
+        sup_preview.change_set().disposition(),
+        aplan_app::ChangeDisposition::Denied
+    );
+    assert!(
+        sup_preview
+            .change_set()
+            .diagnostics()
+            .added
+            .iter()
+            .any(|d| d.code == aplan_core::code::EFFORT_EXCEEDS_MAX)
+    );
+
+    let mut man_form =
+        aplan_tui::authoring::form(ctx, aplan_tui::authoring::AuthoringWorkflow::Manifest, None)
+            .expect("tui manifest form");
+    let _ = man_form.reduce(aplan_tui::form::FormAction::Insert(
+        "oversized.yml".to_string(),
+    ));
+    let aplan_tui::form::FormTransition::PreviewRequested(man_sub) =
+        man_form.reduce(aplan_tui::form::FormAction::Review)
+    else {
+        panic!("complete TUI manifest form did not yield submission");
+    };
+    let man_req = aplan_tui::authoring::request(
+        aplan_tui::authoring::AuthoringWorkflow::Manifest,
+        &man_sub,
+        aplan_tui::authoring::AuthoringAssets {
+            source: Some(aplan_tui::authoring::CapturedSource {
+                name: "oversized.yml".to_string(),
+                contents: "- id: A1-22\n  title: TUI batch oversized\n  cut: M-1\n  effort: 4.5\n  paths: [src/m.rs]\n"
+                    .to_string(),
+            }),
+            edited_body: None,
+        },
+    )
+    .expect("decode tui manifest");
+    let man_preview = man_req.preview(ctx).expect("preview tui manifest");
+    assert_eq!(
+        man_preview.change_set().disposition(),
+        aplan_app::ChangeDisposition::Denied
+    );
+    assert!(
+        man_preview
+            .change_set()
+            .diagnostics()
+            .added
+            .iter()
+            .any(|d| d.code == aplan_core::code::EFFORT_EXCEEDS_MAX)
+    );
+}
+
+fn run_mcp_stdio(dir: &Path, requests: &[serde_json::Value]) -> Vec<serde_json::Value> {
+    let mut child = common::command(dir, &["mcp"])
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .expect("spawn aplan mcp");
+    {
+        let mut stdin = child.stdin.take().expect("stdin");
+        for req in requests {
+            writeln!(stdin, "{req}").expect("write mcp request");
+        }
+        stdin.flush().ok();
+    }
+    let output = child.wait_with_output().expect("wait for aplan mcp");
+    assert!(
+        output.status.success(),
+        "aplan mcp exited {:?}: {}",
+        output.status.code(),
+        String::from_utf8_lossy(&output.stderr)
+    );
+    String::from_utf8(output.stdout)
+        .expect("utf8 stdout")
+        .lines()
+        .filter(|l| !l.trim().is_empty())
+        .map(|l| serde_json::from_str(l).expect("jsonrpc reply"))
+        .collect()
+}
+
+fn mcp_handshake() -> [serde_json::Value; 2] {
+    [
+        serde_json::json!({
+            "jsonrpc": "2.0", "id": 1, "method": "initialize",
+            "params": {
+                "protocolVersion": "2024-11-05",
+                "capabilities": {},
+                "clientInfo": { "name": "max-effort-test", "version": "1" }
+            }
+        }),
+        serde_json::json!({ "jsonrpc": "2.0", "method": "notifications/initialized" }),
+    ]
+}
+
+fn mcp_reply(replies: &[serde_json::Value], id: i64) -> &serde_json::Value {
+    replies
+        .iter()
+        .find(|r| r["id"] == id)
+        .unwrap_or_else(|| panic!("no reply with id {id} in {replies:#?}"))
+}
+
+#[test]
+fn mcp_stdio_discovers_max_effort_from_config_and_keeps_agents_md_clean() {
+    let dir = tempdir("max-effort-mcp-stdio-");
+    init_base_plan(dir.path(), "max_effort_days: 2.5\ndeny_warnings: true\n");
+    let agents = common::run(dir.path(), &["export-agents-md", "--write", "AGENTS.md"]);
+    assert_eq!(agents.code, 0, "export-agents-md: {}", agents.stderr);
+
+    let [init, initialized] = mcp_handshake();
+    let replies = run_mcp_stdio(
+        dir.path(),
+        &[
+            init,
+            initialized,
+            serde_json::json!({
+                "jsonrpc": "2.0", "id": 2, "method": "tools/call",
+                "params": { "name": "aplan_check", "arguments": {} }
+            }),
+            serde_json::json!({
+                "jsonrpc": "2.0", "id": 3, "method": "tools/call",
+                "params": {
+                    "name": "aplan_add",
+                    "arguments": {
+                        "id": "A1-30", "title": "MCP stdio oversized",
+                        "cut": "M-1", "effort_days": 3.0, "paths": ["src/big.rs"]
+                    }
+                }
+            }),
+            serde_json::json!({
+                "jsonrpc": "2.0", "id": 4, "method": "tools/call",
+                "params": {
+                    "name": "aplan_add",
+                    "arguments": {
+                        "id": "A1-31", "title": "MCP stdio zero",
+                        "cut": "M-1", "effort_days": 0.0, "paths": ["src/zero.rs"]
+                    }
+                }
+            }),
+            serde_json::json!({
+                "jsonrpc": "2.0", "id": 5, "method": "tools/call",
+                "params": {
+                    "name": "aplan_add",
+                    "arguments": {
+                        "id": "A1-32", "title": "MCP stdio exact",
+                        "cut": "M-1", "effort_days": 2.5, "paths": ["src/exact.rs"]
+                    }
+                }
+            }),
+        ],
+    );
+    assert_eq!(replies.len(), 5, "{replies:?}");
+    let check_reply = mcp_reply(&replies, 2);
+    assert_ne!(
+        check_reply["result"]["isError"],
+        serde_json::json!(true),
+        "initial aplan_check failed: {check_reply:#?}"
+    );
+    let check_payload: serde_json::Value = serde_json::from_str(
+        check_reply["result"]["content"][0]["text"]
+            .as_str()
+            .expect("check json text"),
+    )
+    .expect("parse check json");
+    assert_eq!(
+        check_payload["diagnostics"],
+        serde_json::json!([]),
+        "expected clean check + AGENTS.md: {check_payload:#?}"
+    );
+    for (req_id, task_id) in [(3, "A1-30"), (4, "A1-31")] {
+        let rep = mcp_reply(&replies, req_id);
+        assert_eq!(
+            rep["result"]["isError"],
+            serde_json::json!(true),
+            "reply {req_id}: {rep:#?}"
+        );
+        let text = rep["result"]["content"][0]["text"].as_str().unwrap_or("");
+        assert!(text.contains("APLAN067"), "reply {req_id}: {text}");
+        assert!(
+            !dir.path()
+                .join(format!("aplan/tasks/{task_id}.md"))
+                .exists()
+        );
+    }
+    let ok_reply = mcp_reply(&replies, 5);
+    assert_ne!(
+        ok_reply["result"]["isError"],
+        serde_json::json!(true),
+        "exact at-limit failed: {ok_reply:#?}"
+    );
+    assert!(dir.path().join("aplan/tasks/A1-32.md").exists());
+    assert_mcp_stdio_detects_disk_oversized_task(dir.path());
+}
+
+fn assert_mcp_stdio_detects_disk_oversized_task(dir: &Path) {
+    write(
+        &dir.join("aplan/tasks/A1-32.md"),
+        &task_md(
+            "id: A1-32\ntitle: Edited oversized\nphase: 1\nstatus: todo\n\
+             effort_days: 6.0\npaths: [src/exact.rs]",
+        ),
+    );
+    let [init, initialized] = mcp_handshake();
+    let after = run_mcp_stdio(
+        dir,
+        &[
+            init,
+            initialized,
+            serde_json::json!({
+                "jsonrpc": "2.0", "id": 2, "method": "tools/call",
+                "params": { "name": "aplan_check", "arguments": {} }
+            }),
+        ],
+    );
+    let check_after = mcp_reply(&after, 2);
+    let after_payload: serde_json::Value = serde_json::from_str(
+        check_after["result"]["content"][0]["text"]
+            .as_str()
+            .expect("check after json text"),
+    )
+    .expect("parse check after json");
+    let diags = after_payload["diagnostics"].as_array().expect("diags");
+    assert!(
+        diags
+            .iter()
+            .any(|d| d["code"] == "APLAN067" && d["task"] == "A1-32"),
+        "{diags:?}"
+    );
+}
+
+fn assert_zero_effort_refused_across_cli_authoring(dir: &Path) {
+    let zero_add = common::run(
+        dir,
+        &[
+            "add", "Zero add", "--id", "A1-40", "--cut", "M-1", "--effort", "0", "--paths",
+            "src/z.rs",
+        ],
+    );
+    assert_ne!(zero_add.code, 0);
+    assert!(zero_add.stderr.contains("APLAN067"), "{}", zero_add.stderr);
+    assert!(!dir.join("aplan/tasks/A1-40.md").exists());
+
+    let manifest = dir.join("zero_batch.yml");
+    write(
+        &manifest,
+        "- id: A1-41\n  title: Zero batch\n  cut: M-1\n  effort: 0\n  paths: [src/zb.rs]\n",
+    );
+    let zero_batch = common::run(dir, &["add", "--from", manifest.to_str().expect("utf8")]);
+    assert_ne!(zero_batch.code, 0);
+    assert!(
+        zero_batch.stderr.contains("APLAN067"),
+        "{}",
+        zero_batch.stderr
+    );
+
+    let zero_sup = common::run(
+        dir,
+        &[
+            "supersede",
+            "A1-02",
+            "Zero successor",
+            "--cut",
+            "M-1",
+            "--effort",
+            "0",
+        ],
+    );
+    assert_ne!(zero_sup.code, 0);
+    assert!(zero_sup.stderr.contains("APLAN067"), "{}", zero_sup.stderr);
+
+    let cap = common::run(dir, &["capture", "Zero inbox", "--format", "json"]);
+    assert_eq!(cap.code, 0, "{}", cap.stderr);
+    let cap_doc: serde_json::Value = serde_json::from_str(&cap.stdout).expect("cap json");
+    let cap_id = cap_doc["capture"]["id"].as_str().expect("cap id");
+    let zero_prom = common::run(
+        dir,
+        &[
+            "inbox",
+            "promote",
+            cap_id,
+            "--task-id",
+            "A1-42",
+            "--cut",
+            "M-1",
+            "--effort",
+            "0",
+            "--path",
+            "src/zp.rs",
+        ],
+    );
+    assert_ne!(zero_prom.code, 0);
+    assert!(
+        zero_prom.stderr.contains("APLAN067") || zero_prom.stdout.contains("APLAN067"),
+        "stderr={} stdout={}",
+        zero_prom.stderr,
+        zero_prom.stdout
+    );
+}
+
+#[test]
+fn zero_effort_advisory_migration_and_warm_cache_invalidation() {
+    let dir = tempdir("max-effort-zero-cache-");
+    init_base_plan(dir.path(), "max_effort_days: 2.5\n");
+    assert_zero_effort_refused_across_cli_authoring(dir.path());
+
+    // Under `advisory: [APLAN067]`, `add` allows oversized work with a note during migration.
+    write(
+        &dir.path().join(".aplan.yml"),
+        "root: aplan\nrequire_effort: true\nrequire_cut_membership: true\n\
+         max_effort_days: 2.5\nadvisory: [APLAN067]\ndeny_warnings: true\n",
+    );
+    let adv_add = common::run(
+        dir.path(),
+        &[
+            "add",
+            "Migrating oversized",
+            "--id",
+            "A1-43",
+            "--cut",
+            "M-1",
+            "--effort",
+            "5.0",
+            "--paths",
+            "src/mig.rs",
+        ],
+    );
+    assert_eq!(
+        adv_add.code, 0,
+        "advisory APLAN067 add must succeed: {}",
+        adv_add.stderr
+    );
+    assert!(adv_add.stdout.contains("APLAN067"), "{}", adv_add.stdout);
+
+    // Warm on-disk structural cache invalidates cleanly across `max_effort_days` edits.
+    for (cfg_line, expect_code) in [
+        ("", 0),
+        ("max_effort_days: 6.0\n", 0),
+        ("max_effort_days: 2.5\n", 1),
+        ("max_effort_days: null\n", 0),
+    ] {
+        write(
+            &dir.path().join(".aplan.yml"),
+            &format!("root: aplan\nrequire_effort: true\nrequire_cut_membership: true\n{cfg_line}"),
+        );
+        let out = common::run(dir.path(), &["check", "--format", "json"]);
+        assert_eq!(
+            out.code, expect_code,
+            "warm cache posture `{cfg_line:?}`: stdout={} stderr={}",
+            out.stdout, out.stderr
+        );
+    }
 }
