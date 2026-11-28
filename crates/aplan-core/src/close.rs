@@ -507,10 +507,82 @@ pub fn set_revisit_at(file: &str, to: Option<&str>) -> Result<String, CloseError
     Ok(format!("{bom}---{nl}{new_frontmatter}---{nl}{body}"))
 }
 
+/// Change or clear a task's `effort_days`, leaving every other field, comment,
+/// and the Markdown body verbatim (`A2-150`).
+///
+/// Passing `None` removes the `effort_days` line cleanly (used when a split
+/// parent relies on `A2-148`'s `APLAN009` exemption for decomposed parents).
+/// Passing `Some(days)` writes an unquoted finite non-negative YAML number
+/// (inserting after `status` when absent) and verifies exact round-trip parse.
+///
+/// # Errors
+///
+/// [`CloseError::NotATask`] or [`CloseError::Frontmatter`] for unreadable input,
+/// [`CloseError::NoScalar`] for a top-level shape that cannot be edited safely,
+/// and [`CloseError::Produced`] when `to` is negative/non-finite or does not
+/// round-trip cleanly.
+pub fn set_effort_days(file: &str, to: Option<f64>) -> Result<String, CloseError> {
+    let normalized = match to {
+        Some(days) if !days.is_finite() || days < 0.0 => {
+            return Err(CloseError::Produced(format!(
+                "`effort_days` must be a finite non-negative number, not `{days}`"
+            )));
+        }
+        Some(0.0) => Some(0.0),
+        other => other,
+    };
+    let bom = leading_bom(file);
+    let (frontmatter, body) = split_frontmatter(file).ok_or(CloseError::NotATask)?;
+    let task: Task =
+        crate::yaml::from_str(frontmatter).map_err(|e| CloseError::Frontmatter(e.to_string()))?;
+    let nl = newline(file, bom);
+    let encoded = normalized.map(|days| format!("{days}"));
+    let new_frontmatter = set_optional_encoded_scalar_in(
+        frontmatter,
+        "effort_days",
+        encoded.as_deref(),
+        "status",
+        task.effort_days.is_some(),
+        nl,
+    )?;
+    let parsed = reparse(&new_frontmatter)?;
+    let matches = match (parsed.effort_days, normalized) {
+        (None, None) => true,
+        (Some(got), Some(want)) => (got - want).abs() <= f64::EPSILON,
+        _ => false,
+    };
+    if !matches {
+        return Err(CloseError::Produced(format!(
+            "`effort_days` did not round-trip: asked for {normalized:?} and read back {:?}",
+            parsed.effort_days
+        )));
+    }
+    Ok(format!("{bom}---{nl}{new_frontmatter}---{nl}{body}"))
+}
+
 fn set_optional_scalar_in(
     frontmatter: &str,
     key: &'static str,
     to: Option<&str>,
+    insert_after: &str,
+    loaded_present: bool,
+    nl: &str,
+) -> Result<String, CloseError> {
+    let encoded = to.map(yaml_scalar);
+    set_optional_encoded_scalar_in(
+        frontmatter,
+        key,
+        encoded.as_deref(),
+        insert_after,
+        loaded_present,
+        nl,
+    )
+}
+
+fn set_optional_encoded_scalar_in(
+    frontmatter: &str,
+    key: &'static str,
+    encoded: Option<&str>,
     insert_after: &str,
     loaded_present: bool,
     nl: &str,
@@ -529,18 +601,17 @@ fn set_optional_scalar_in(
     if line_to_change.is_some() && !has_single_source_local_scalar_line(frontmatter, key) {
         return Err(CloseError::NoScalar(key));
     }
-    let Some(value) = to else {
+    let Some(value) = encoded else {
         return Ok(frontmatter
             .split_inclusive('\n')
             .filter(|line| !is_ordinary_scalar_key_line(line, key))
             .collect());
     };
-    let value = yaml_scalar(value);
     let mut out = String::with_capacity(frontmatter.len() + value.len() + key.len() + 4);
     let mut done = false;
     for line in frontmatter.split_inclusive('\n') {
         if !done && is_ordinary_scalar_key_line(line, key) {
-            if let Some(rewritten) = rewrite_scalar_line(line, key, &value) {
+            if let Some(rewritten) = rewrite_scalar_line(line, key, value) {
                 out.push_str(&rewritten);
             } else {
                 let _ = std::fmt::Write::write_fmt(&mut out, format_args!("{key}: {value}{nl}"));
@@ -5741,5 +5812,45 @@ body
 
         let cleared = set_integrates(&rekeyed, &[]).expect("clear integrates");
         assert!(!cleared.contains("integrates:"), "{cleared}");
+    }
+
+    #[test]
+    fn set_effort_days_updates_clears_inserts_and_preserves_trivia() {
+        let base = "\u{feff}---\r\n# keep comment\r\nid: P-1\r\ntitle: oversized\r\nphase: 1\r\nstatus: in_progress\r\neffort_days: 8.0 # trailing note\r\n---\r\n\r\n- [x] kept criterion\r\n";
+        let updated = set_effort_days(base, Some(0.5)).expect("replace effort_days");
+        assert!(updated.starts_with('\u{feff}'), "BOM preserved");
+        assert!(
+            updated.contains("# keep comment\r\n")
+                && updated.contains("effort_days: 0.5 # trailing note\r\n")
+                && updated.contains("- [x] kept criterion\r\n"),
+            "{updated:?}"
+        );
+
+        let cleared = set_effort_days(&updated, None).expect("clear effort_days");
+        assert!(!cleared.contains("effort_days:"), "{cleared:?}");
+        assert!(
+            cleared.contains("# keep comment\r\n") && cleared.contains("- [x] kept criterion\r\n"),
+            "{cleared:?}"
+        );
+
+        let inserted = set_effort_days(&cleared, Some(1.25)).expect("insert effort_days");
+        assert!(
+            inserted.contains("status: in_progress\r\neffort_days: 1.25\r\n"),
+            "{inserted:?}"
+        );
+
+        assert!(matches!(
+            set_effort_days(base, Some(-1.0)),
+            Err(CloseError::Produced(_))
+        ));
+        assert!(matches!(
+            set_effort_days(base, Some(f64::NAN)),
+            Err(CloseError::Produced(_))
+        ));
+        let quoted_key = "---\nid: P-1\ntitle: q\nphase: 1\nstatus: todo\n'effort_days': 4\n---\n";
+        assert!(matches!(
+            set_effort_days(quoted_key, None),
+            Err(CloseError::NoScalar("effort_days"))
+        ));
     }
 }

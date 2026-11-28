@@ -260,8 +260,29 @@ fn every_authoring_action_matches_the_complete_cli_post_state() {
     std::fs::write(&checklist, "- [ ] Imported work\n").expect("checklist");
     let manifest_name = manifest.to_string_lossy().into_owned();
     let checklist_name = checklist.to_string_lossy().into_owned();
+    let cases = authoring_parity_cases(&manifest_name, &checklist_name);
+    for (action, selected, owned_values, arguments) in cases {
+        let cli = Fixture::new("authoring-parity-cli");
+        let tui = Fixture::new("authoring-parity-tui");
+        let values = owned_values
+            .iter()
+            .map(|(key, values)| (*key, values.as_slice()))
+            .collect::<Vec<_>>();
+        run_cli(&cli, &arguments);
+        apply_tui(&tui, action, selected, &values);
+        assert_eq!(
+            cli.observed_state(),
+            tui.observed_state(),
+            "{action:?} complete post-state diverged"
+        );
+    }
+}
 
-    let cases: Vec<AuthoringCase<'_>> = vec![
+fn authoring_parity_cases<'a>(
+    manifest_name: &'a str,
+    checklist_name: &'a str,
+) -> Vec<AuthoringCase<'a>> {
+    vec![
         (
             MutationAction::Add,
             None,
@@ -278,24 +299,24 @@ fn every_authoring_action_matches_the_complete_cli_post_state() {
         (
             MutationAction::Manifest,
             None,
-            vec![("source", vec![manifest_name.as_str()])],
+            vec![("source", vec![manifest_name])],
             vec![
                 "add".to_string(),
                 "--from".to_string(),
-                manifest_name.clone(),
+                manifest_name.to_string(),
             ],
         ),
         (
             MutationAction::Import,
             None,
             vec![
-                ("source", vec![checklist_name.as_str()]),
+                ("source", vec![checklist_name]),
                 ("format", vec!["checklist"]),
                 ("id_prefix", vec!["I"]),
             ],
             vec![
                 "import".to_string(),
-                checklist_name.clone(),
+                checklist_name.to_string(),
                 "--format".to_string(),
                 "checklist".to_string(),
                 "--phase".to_string(),
@@ -322,21 +343,25 @@ fn every_authoring_action_matches_the_complete_cli_post_state() {
                 .map(str::to_string)
                 .collect(),
         ),
-    ];
-
-    for (action, selected, owned_values, arguments) in cases {
-        let cli = Fixture::new("authoring-parity-cli");
-        let tui = Fixture::new("authoring-parity-tui");
-        let values = owned_values
-            .iter()
-            .map(|(key, values)| (*key, values.as_slice()))
-            .collect::<Vec<_>>();
-        run_cli(&cli, &arguments);
-        apply_tui(&tui, action, selected, &values);
-        assert_eq!(
-            cli.observed_state(),
-            tui.observed_state(),
-            "{action:?} complete post-state diverged"
-        );
-    }
+        (
+            MutationAction::Split,
+            Some("A-2"),
+            vec![
+                ("children", vec!["Split part A=0.5", "Split part B=0.5"]),
+                ("reestimate", vec!["yes"]),
+            ],
+            vec![
+                "split",
+                "A-2",
+                "--child",
+                "Split part A=0.5",
+                "--child",
+                "Split part B=0.5",
+                "--reestimate",
+            ]
+            .into_iter()
+            .map(str::to_string)
+            .collect(),
+        ),
+    ]
 }

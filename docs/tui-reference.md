@@ -113,6 +113,7 @@ nothing is published until the guarded confirmation step succeeds.
 | Import proposal tasks | `aplan import` |
 | Supersede completed outcome | `aplan supersede` |
 | Rekey task | `aplan rekey` |
+| Split task into increments | `aplan split` |
 | Close task with evidence | `aplan close` |
 | Add evidence to closed task | `aplan amend --add-evidence` |
 | Replace evidence on closed task | `aplan amend --replace-evidence` |

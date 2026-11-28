@@ -100,6 +100,10 @@ const PARITY: &[(&str, Option<(Parity, Comparison)>)] = &[
     ),
     ("aplan_add", Some((Parity::File, add_leaves_the_same_files))),
     (
+        "aplan_split",
+        Some((Parity::File, split_leaves_the_same_files)),
+    ),
+    (
         "aplan_show",
         Some((Parity::Payload, show_returns_what_the_command_prints)),
     ),
@@ -132,6 +136,112 @@ const PARITY: &[(&str, Option<(Parity, Comparison)>)] = &[
         Some((Parity::File, review_leaves_the_same_file)),
     ),
 ];
+
+/// The two surfaces leave byte-identical parent, child, and cut files for `split`
+/// (`A2-150`).
+fn split_leaves_the_same_files() -> Result<(), String> {
+    let cli_dir = tempfile::Builder::new()
+        .tempdir_in(aplan_core::fixture::fixture_root())
+        .expect("tempdir");
+    let mcp_dir = tempfile::Builder::new()
+        .tempdir_in(aplan_core::fixture::fixture_root())
+        .expect("tempdir");
+    for d in [cli_dir.path(), mcp_dir.path()] {
+        fixture(d);
+        std::fs::write(
+            d.join("aplan/tasks/M-s0.md"),
+            "---\nid: M-s0\ntitle: Cut 0\nphase: 0\nstatus: todo\n\
+             tags: [milestone, s0]\nblocked_by: [A-1]\n---\n\nbody\n",
+        )
+        .expect("milestone");
+        std::fs::write(
+            d.join("aplan/tasks/A-1.md"),
+            "---\n# keep comment\nid: A-1\ntitle: Oversized task\nphase: 0\nstatus: in_progress\n\
+             effort_days: 4\npaths: [src/a.rs]\n---\n\n## Why\n\nWork.\n",
+        )
+        .expect("parent");
+    }
+
+    let out = common::output(
+        cli_dir.path(),
+        &[
+            "split",
+            "A-1",
+            "--child",
+            "Part one=1.5",
+            "--child",
+            "Part two=2",
+            "--keep-effort",
+            "0.5",
+            "--sequential",
+        ],
+    );
+    if !out.status.success() {
+        return Err(format!(
+            "the CLI split failed: {}",
+            String::from_utf8_lossy(&out.stderr)
+        ));
+    }
+    let mcp_val = tools::split(
+        &mcp_dir.path().join("aplan"),
+        &tools::SplitArgs {
+            target: "A-1".into(),
+            children: vec![
+                tools::SplitChildArgs {
+                    title: "Part one".into(),
+                    id: None,
+                    key: Some("step-1".into()),
+                    effort_days: Some(1.5),
+                    owner: None,
+                    tags: None,
+                    paths: None,
+                    traces: None,
+                    blocked_by: Vec::new(),
+                    prefer_after: Vec::new(),
+                    body: None,
+                },
+                tools::SplitChildArgs {
+                    title: "Part two".into(),
+                    id: None,
+                    key: Some("step-2".into()),
+                    effort_days: Some(2.0),
+                    owner: None,
+                    tags: None,
+                    paths: None,
+                    traces: None,
+                    blocked_by: vec!["local:step-1".into()],
+                    prefer_after: Vec::new(),
+                    body: None,
+                },
+            ],
+            parent_effort_days: Some(0.5),
+            reestimate: false,
+            cut: None,
+            expected_identity: None,
+            dry_run: false,
+        },
+        &policy(mcp_dir.path(), false),
+    )
+    .map_err(|e| format!("the MCP split failed: {e}"))?;
+    if mcp_val["applied"] != serde_json::json!(true) {
+        return Err(format!("expected applied=true from MCP split: {mcp_val}"));
+    }
+    for rel in [
+        "aplan/tasks/A-1.md",
+        "aplan/tasks/A-2.md",
+        "aplan/tasks/A-3.md",
+        "aplan/tasks/M-s0.md",
+    ] {
+        let a = std::fs::read_to_string(cli_dir.path().join(rel)).map_err(|e| e.to_string())?;
+        let b = std::fs::read_to_string(mcp_dir.path().join(rel)).map_err(|e| e.to_string())?;
+        if a != b {
+            return Err(format!(
+                "`{rel}` diverged between CLI split and MCP aplan_split:\n--- cli ---\n{a}\n--- mcp ---\n{b}"
+            ));
+        }
+    }
+    Ok(())
+}
 
 /// The two surfaces write the same claim, and refuse the same takeover
 /// (`A1-359`).

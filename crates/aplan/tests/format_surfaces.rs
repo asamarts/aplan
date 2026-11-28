@@ -87,6 +87,14 @@ fn extra_args(dir: &Path, command: &str) -> Vec<&'static str> {
             vec!["T-001", "T-900"]
         }
         "rekey" => vec!["T-900", "T-001"],
+        "split" => vec![
+            "T-002",
+            "--child",
+            "Split part A=0.5",
+            "--child",
+            "Split part B=0.5",
+            "--dry-run",
+        ],
         _ => Vec::new(),
     }
 }

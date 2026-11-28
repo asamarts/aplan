@@ -21,6 +21,7 @@ fn the_wire_surface_is_exactly_its_tools() {
             "aplan_check",
             "aplan_verify",
             "aplan_add",
+            "aplan_split",
             "aplan_show",
             "aplan_dep",
             "aplan_close",

@@ -1469,6 +1469,14 @@ enum Command {
     // The reasoning is ADR-0020's. The number stays in this comment: help is read
     // beside the consumer's own `docs/adr/`, where ours do not resolve (`A1-044`).
     Supersede(SupersedeArgs),
+    /// Atomically decompose one live non-milestone work task into bounded child
+    /// increments wired through `integrates` and `blocked_by` in the same cut.
+    ///
+    /// Use `--dry-run` to preview every child, parent edit, effort reconciliation,
+    /// cut membership update, and `preview_identity` without reserving ids or
+    /// modifying files; pass `--if-match <SHA256>` to ensure a stale preview
+    /// cannot apply to a newer plan.
+    Split(SplitArgs),
     /// Add or remove dependency edges: repeat `--after`, or use `dep apply` for
     /// mixed multi-target additions and removals against one final graph.
     ///
@@ -1520,7 +1528,7 @@ enum Command {
     /// them. `--from <file>` adds every task a file names instead, as one change.
     Add(AddArgs),
     /// Run an MCP server over stdio, exposing a deliberately small tool set
-    /// (`identity`, `ready`, `why`, `check`, `verify`, `add`, `show`, `dep`,
+    /// (`identity`, `ready`, `why`, `check`, `verify`, `add`, `split`, `show`, `dep`,
     /// `close`, `claim`, `release`, `start`, `stop`, `review`) to an agent. `close` goes through the
     /// same evidence gate as the CLI, in both directions: an agent cannot close
     /// through MCP what it could not close here, and is not refused what this
@@ -1701,6 +1709,7 @@ fn command_progress_profile(command: &Command) -> CommandProgressProfile {
         Command::CriticalPath(args) => progress_profile(&args.format, ProgressSource::PlanLoad),
         Command::Roadmap(args) => progress_profile(&args.format, ProgressSource::PlanLoad),
         Command::Rekey(args) => progress_profile(&args.format, ProgressSource::PlanLoad),
+        Command::Split(args) => progress_profile(&args.format, ProgressSource::PlanLoad),
         Command::Attest { .. } => CommandProgressProfile {
             surface: Machine,
             source: ProgressSource::PlanAndProviders,
@@ -1764,6 +1773,7 @@ const fn command_is_read_surface(command: &Command) -> bool {
         | Command::Init { .. }
         | Command::Add(_)
         | Command::Supersede(_)
+        | Command::Split(_)
         | Command::Import(_)
         | Command::Capture(_)
         | Command::Drop { .. }
@@ -2034,7 +2044,7 @@ pub fn cli_read_surface_inventory() -> Vec<aplan_output::stream::ReadSurfaceEntr
             // Non-read commands (mutations, interactive TUI, long-lived MCP protocol).
             "add" | "amend" | "blueprint" | "capture" | "claim" | "close" | "dep" | "drop"
             | "import" | "init" | "mcp" | "mv" | "park" | "rekey" | "release" | "retarget-path"
-            | "review" | "start" | "stop" | "supersede" | "tag" | "tui" | "unpark" => {}
+            | "review" | "split" | "start" | "stop" | "supersede" | "tag" | "tui" | "unpark" => {}
             other => {
                 if let Some((format, unbounded, latency_class, disposition, boundary, rationale)) =
                     classify_unformatted_cli_read(other)
@@ -6849,6 +6859,7 @@ fn dispatch(command: Command, cli_root: Option<PathBuf>) -> Result<u8> {
         Command::Add(_)
         | Command::Amend(_)
         | Command::Supersede(_)
+        | Command::Split(_)
         | Command::Dep { .. }
         | Command::Tag(_)
         | Command::Rekey(_)
@@ -6894,6 +6905,7 @@ fn dispatch_authoring(command: Command, cli_root: Option<PathBuf>) -> Result<u8>
         Command::Add(args) => cmd_add(&root, &args),
         Command::Amend(args) => cmd_amend(&root, &args),
         Command::Supersede(args) => cmd_supersede(&root, &args),
+        Command::Split(args) => cmd_split(&root, &args),
         Command::Dep { command, format } => cmd_dep(&root, &command, &format),
         Command::Tag(args) => cmd_tag(&root, &args),
         Command::Rekey(args) => cmd_rekey(&root, &args),
@@ -7932,6 +7944,47 @@ pub struct DepApplyArgs {
     /// Review the complete post-state without changing any file.
     #[arg(long)]
     dry_run: bool,
+    /// Whether a warning blocks this write, as `check` and `verify` take it.
+    #[command(flatten)]
+    verdict: VerdictFlags,
+}
+
+#[derive(clap::Args, Debug)]
+pub struct SplitArgs {
+    /// Live work task id to split into bounded child increments.
+    /// May be omitted only when `--from` supplies `target`.
+    target: Option<String>,
+    /// Child increment as `TITLE=EFFORT` or `TITLE`. Repeat at least twice
+    /// (mutually exclusive with `--from`).
+    #[arg(long = "child", value_name = "TITLE[=EFFORT]", conflicts_with = "from")]
+    children: Vec<String>,
+    /// YAML or JSON split specification file (`-` reads stdin).
+    #[arg(long, value_name = "FILE", conflicts_with = "children")]
+    from: Option<PathBuf>,
+    /// Chain inline `--child` increments sequentially (`C1 -> C2 -> ...`).
+    #[arg(long, conflicts_with = "from")]
+    sequential: bool,
+    /// Retain an explicit positive integration effort (in days) on the parent
+    /// task instead of clearing parent `effort_days`.
+    #[arg(long = "keep-effort", alias = "parent-effort", value_name = "DAYS")]
+    keep_effort: Option<f64>,
+    /// Allow post-split total effort to differ from the parent's prior estimate.
+    #[arg(long)]
+    reestimate: bool,
+    /// Assert the owning cut id or label (refuses cross-cut splits).
+    #[arg(long)]
+    cut: Option<String>,
+    /// Require the plan snapshot digest (`preview_identity` from `--dry-run`)
+    /// to match before applying; refuses stale previews.
+    #[arg(long = "if-match", value_name = "SHA256")]
+    if_match: Option<String>,
+    /// Preview every child, parent edit, effort reconciliation and finding
+    /// without reserving ids or modifying files.
+    #[arg(long)]
+    dry_run: bool,
+    /// Output format: human, json, or agent.
+    #[arg(long, default_value = "human")]
+    format: String,
     /// Whether a warning blocks this write, as `check` and `verify` take it.
     #[command(flatten)]
     verdict: VerdictFlags,
@@ -13132,6 +13185,255 @@ fn successor_task(
     }
 }
 
+fn build_split_request(args: &SplitArgs) -> Result<aplan_app::SplitRequest> {
+    if let Some(path) = &args.from {
+        let (source_name, contents) = if path == std::path::Path::new("-") {
+            let mut buf = String::new();
+            std::io::Read::read_to_string(&mut std::io::stdin(), &mut buf)
+                .context("reading split specification from stdin")?;
+            ("stdin".to_string(), buf)
+        } else {
+            let text = std::fs::read_to_string(path)
+                .with_context(|| format!("reading split specification `{}`", path.display()))?;
+            (path.display().to_string(), text)
+        };
+        let doc = aplan_app::parse_split_spec(&source_name, &contents)?;
+        let target = match (&args.target, doc.target) {
+            (Some(cli_t), Some(doc_t)) if cli_t != &doc_t => {
+                anyhow::bail!(
+                    "conflicting split target: CLI named `{cli_t}`, while `{source_name}` named `{doc_t}`"
+                );
+            }
+            (Some(cli_t), _) => cli_t.clone(),
+            (None, Some(doc_t)) => doc_t,
+            (None, None) => {
+                anyhow::bail!(
+                    "split target task id is required (pass `<TARGET>` or set `target:` in `{source_name}`)"
+                );
+            }
+        };
+        let parent_effort = args
+            .keep_effort
+            .map(aplan_app::SplitParentEffort::Keep)
+            .or(doc.parent_effort)
+            .unwrap_or(aplan_app::SplitParentEffort::Omit);
+        return Ok(aplan_app::SplitRequest {
+            target,
+            children: doc.children,
+            parent_effort,
+            reestimate: args.reestimate || doc.reestimate.unwrap_or(false),
+            cut: args.cut.clone().or(doc.cut),
+            expected_identity: args.if_match.clone(),
+        });
+    }
+
+    let target = args
+        .target
+        .clone()
+        .ok_or_else(|| anyhow::anyhow!("split target task id is required"))?;
+    let mut children = Vec::with_capacity(args.children.len());
+    for (idx, raw) in args.children.iter().enumerate() {
+        let mut child = aplan_app::parse_inline_child(raw)?;
+        if args.sequential {
+            let key = format!("step-{}", idx + 1);
+            if idx > 0 {
+                child.blocked_by.push(format!("local:step-{idx}"));
+            }
+            child.key = Some(key);
+        }
+        children.push(child);
+    }
+    Ok(aplan_app::SplitRequest {
+        target,
+        children,
+        parent_effort: args.keep_effort.map_or(
+            aplan_app::SplitParentEffort::Omit,
+            aplan_app::SplitParentEffort::Keep,
+        ),
+        reestimate: args.reestimate,
+        cut: args.cut.clone(),
+        expected_identity: args.if_match.clone(),
+    })
+}
+
+fn render_split_human(result: &aplan_app::SplitMachineResult) -> String {
+    let vis = aplan_output::sanitize::visible;
+    let mut lines = Vec::new();
+    let heading = if result.applied {
+        format!(
+            "split `{}` into {} child increment(s)",
+            vis(&result.target),
+            result.children.len()
+        )
+    } else {
+        format!(
+            "dry-run: would split `{}` into {} child increment(s) (nothing written)",
+            vis(&result.target),
+            result.children.len()
+        )
+    };
+    lines.push(heading);
+    lines.push(format!(
+        "cut: {}",
+        vis(result.cut.as_deref().unwrap_or("cross-cutting"))
+    ));
+    let fmt_opt = |d: Option<f64>| d.map_or_else(|| "omitted".to_string(), |v| format!("{v}d"));
+    lines.push(format!(
+        "parent `{}`: {} -> {}, effort {} -> {} (body & {} checked criteria retained)",
+        vis(&result.parent.id),
+        result.parent.before_status,
+        result.parent.after_status,
+        fmt_opt(result.parent.before_effort_days),
+        fmt_opt(result.parent.after_effort_days),
+        result.parent.checked_criteria_retained
+    ));
+    lines.push(format!(
+        "effort: children={}d, parent={}, total={}d{}",
+        result.effort.children_total_days,
+        fmt_opt(result.effort.after_parent_days),
+        result.effort.after_total_days,
+        if result.effort.reestimated {
+            " (reestimated)"
+        } else {
+            " (reconciled)"
+        }
+    ));
+    lines.push(format!("preview_identity: {}", result.preview_identity));
+    for child in &result.children {
+        let deps = if child.blocked_by.is_empty() {
+            String::new()
+        } else {
+            format!(" [blocked_by: {}]", vis(&child.blocked_by.join(", ")))
+        };
+        lines.push(format!(
+            "  {}  {} ({}){deps}",
+            vis(&child.id),
+            vis(&child.title),
+            fmt_opt(child.effort_days)
+        ));
+    }
+    for note in &result.notes {
+        lines.push(format!("note: {}", vis(note)));
+    }
+    let body = format!("{}\n", lines.join("\n"));
+    aplan_output::fold::fold_block(&body, aplan_output::fold::out_width(), 2)
+}
+
+fn render_split_result(result: &aplan_app::SplitMachineResult, format: Format) -> Result<u8> {
+    match format {
+        Format::Human => write_stdout(&render_split_human(result))?,
+        Format::Json => {
+            let json = serde_json::to_string_pretty(result)?;
+            write_stdout(&format!("{json}\n"))?;
+        }
+        Format::Agent => {
+            let mut value = serde_json::to_value(result)?;
+            let instruction = if result.applied {
+                format!(
+                    "Split applied atomically for `{}`. Start the first ready child increment and run `aplan check`.",
+                    result.target
+                )
+            } else {
+                format!(
+                    "Nothing was written yet. Re-run `aplan split` with `--if-match {}` and without `--dry-run` to apply atomically.",
+                    result.preview_identity
+                )
+            };
+            if let Some(obj) = value.as_object_mut() {
+                obj.insert(
+                    "agent_instruction".to_string(),
+                    serde_json::Value::String(instruction),
+                );
+            }
+            let json = serde_json::to_string_pretty(&value)?;
+            write_stdout(&format!("{json}\n"))?;
+        }
+        other => unreachable!(
+            "format_for only admits Human, Json, or Agent for `split`, not `{}`",
+            other.as_str()
+        ),
+    }
+    Ok(EXIT_OK)
+}
+
+fn format_split_denial(target: &str, diagnostics: &aplan_core::mutation::Delta) -> String {
+    let lines = diagnostics
+        .lines()
+        .into_iter()
+        .map(|line| aplan_output::sanitize::visible(&line).into_owned())
+        .collect::<Vec<_>>();
+    format!(
+        "refusing to split `{}`: it would leave {} blocking finding(s):\n  {}",
+        aplan_output::sanitize::visible(target),
+        diagnostics.added.len(),
+        lines.join("\n  ")
+    )
+}
+
+fn cmd_split(root: &std::path::Path, args: &SplitArgs) -> Result<u8> {
+    let format = format_for("split", &args.format)?;
+    let request = build_split_request(args)?;
+    let started = std::time::Instant::now();
+    let mut attempts = 0_u32;
+
+    loop {
+        attempts += 1;
+        let context = match hermetic_application_context(
+            root,
+            HermeticContextOptions {
+                verdict: args.verdict,
+                trust: aplan_app::Trust::RepositoryRead,
+                ..HermeticContextOptions::default()
+            },
+        ) {
+            Ok(ctx) => ctx,
+            Err(error) if args.if_match.is_none() && plan_snapshot_changed(&error) => {
+                wait_for_blueprint_retry(started, attempts)?;
+                continue;
+            }
+            Err(error) => return Err(error),
+        };
+        let preview = aplan_app::preview_split(&context, &request)
+            .map_err(|e| anyhow::anyhow!("{}", aplan_output::sanitize::visible(&e.to_string())))?;
+        if preview.change_set().disposition() == aplan_app::ChangeDisposition::Denied {
+            anyhow::bail!(
+                "{}",
+                format_split_denial(&request.target, preview.change_set().diagnostics())
+            );
+        }
+        if args.dry_run {
+            let result = preview.machine_result(false);
+            return render_split_result(&result, format);
+        }
+        let applied_result = preview.machine_result(true);
+        match aplan_app::commit_split(&context, preview) {
+            aplan_app::CommitOutcome::Applied(_) | aplan_app::CommitOutcome::NoOp(_) => {
+                return render_split_result(&applied_result, format);
+            }
+            aplan_app::CommitOutcome::Denied(change) => {
+                anyhow::bail!(
+                    "{}",
+                    format_split_denial(&request.target, change.diagnostics())
+                );
+            }
+            aplan_app::CommitOutcome::Stale { .. } if args.if_match.is_some() => {
+                anyhow::bail!(
+                    "stale preview: the plan or configuration changed before `aplan split` could publish; re-run `--dry-run` and retry"
+                );
+            }
+            aplan_app::CommitOutcome::Stale { .. } => {
+                wait_for_blueprint_retry(started, attempts)?;
+            }
+            aplan_app::CommitOutcome::PublicationFailed { report, error, .. } => {
+                anyhow::bail!(
+                    "split publication failed with filesystem state {:?}: {error}",
+                    report.state()
+                );
+            }
+        }
+    }
+}
+
 fn cmd_supersede(root: &std::path::Path, args: &SupersedeArgs) -> Result<u8> {
     use aplan_interop::{cut, emit, ids};
 
@@ -15506,6 +15808,11 @@ pub const COMMAND_SURFACES: &[(&str, Surface, Option<&str>)] = &[
         "blueprint",
         Surface::Action,
         Some("one blueprint preview or application result"),
+    ),
+    (
+        "split",
+        Surface::Action,
+        Some("one task split preview or application result"),
     ),
     (
         "dep",

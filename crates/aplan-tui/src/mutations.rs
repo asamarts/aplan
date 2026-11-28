@@ -50,6 +50,7 @@ pub enum MutationAction {
     Import,
     Supersede,
     Rekey,
+    Split,
     Close,
     AmendAdd,
     AmendReplace,
@@ -59,7 +60,7 @@ pub enum MutationAction {
 }
 
 impl MutationAction {
-    pub const ALL: [Self; 30] = [
+    pub const ALL: [Self; 31] = [
         Self::CaptureCreate,
         Self::CaptureAmend,
         Self::CaptureDiscard,
@@ -84,6 +85,7 @@ impl MutationAction {
         Self::Import,
         Self::Supersede,
         Self::Rekey,
+        Self::Split,
         Self::Close,
         Self::AmendAdd,
         Self::AmendReplace,
@@ -119,6 +121,7 @@ impl MutationAction {
             Self::Import => "Import proposal tasks",
             Self::Supersede => "Supersede completed outcome",
             Self::Rekey => "Rekey task",
+            Self::Split => "Split task into increments",
             Self::Close => "Close task with evidence",
             Self::AmendAdd => "Add evidence to closed task",
             Self::AmendReplace => "Replace evidence on closed task",
@@ -156,6 +159,7 @@ impl MutationAction {
             Self::Import => "import",
             Self::Supersede => "supersede",
             Self::Rekey => "rekey",
+            Self::Split => "split",
             Self::Close => "close",
             Self::AmendAdd => "amend --add-evidence",
             Self::AmendReplace => "amend --replace-evidence",
@@ -191,6 +195,7 @@ impl MutationAction {
             Self::Import => &["import"],
             Self::Supersede => &["supersede"],
             Self::Rekey => &["rekey"],
+            Self::Split => &["split", "decompose", "integrates"],
             Self::Close => &["close", "evidence"],
             Self::AmendAdd | Self::AmendReplace | Self::AmendRemove => &["amend", "evidence"],
             Self::Restamp => &["close", "restamp", "trace"],
@@ -215,6 +220,7 @@ impl MutationAction {
                 | Self::DropTasks
                 | Self::Supersede
                 | Self::Rekey
+                | Self::Split
                 | Self::Close
                 | Self::AmendAdd
                 | Self::AmendReplace
@@ -272,6 +278,10 @@ impl MutationAction {
                 "Machine JSON output stays CLI-only; the TUI shows the same typed review interactively.",
                 POLICY,
             ],
+            Self::Split => &[
+                "Machine JSON output and stdin (`--from -`) stay CLI-only; the TUI reviews the same typed split preview interactively.",
+                POLICY,
+            ],
             Self::Close
             | Self::AmendAdd
             | Self::AmendReplace
@@ -324,6 +334,7 @@ impl MutationAction {
             Self::Import => Some(AuthoringWorkflow::Import),
             Self::Supersede => Some(AuthoringWorkflow::Supersede),
             Self::Rekey => Some(AuthoringWorkflow::Rekey),
+            Self::Split => Some(AuthoringWorkflow::Split),
             _ => None,
         }
     }
@@ -664,6 +675,20 @@ pub fn preview_with_external_body(
         let assets = capture_authoring_assets(workflow, submission, edited_body)?;
         let request = crate::authoring::request(workflow, submission, assets)
             .map_err(|error| error.to_string())?;
+        if matches!(request, crate::authoring::AuthoringRequest::Split(_)) {
+            let preview = request
+                .preview_split(context)
+                .map_err(|error| error.to_string())?;
+            let target = preview.machine_result(false).target;
+            let mut review_rows = preview.review_rows();
+            review_rows.extend(cli_review_rows(action));
+            return Ok(MutationCandidate::Plan {
+                action,
+                change: Box::new(preview.into_change_set()),
+                review_rows,
+                selection_after_commit: Some(target),
+            });
+        }
         let preview = request
             .preview(context)
             .map_err(|error| error.to_string())?;
@@ -718,6 +743,24 @@ fn capture_authoring_assets(
     }
     if edited_body.is_some() {
         return Err("an external body belongs only to the Add workflow".to_string());
+    }
+    if workflow == AuthoringWorkflow::Split {
+        let Some(source) = submission
+            .value("source")
+            .map(str::trim)
+            .filter(|value| !value.is_empty())
+        else {
+            return Ok(AuthoringAssets::default());
+        };
+        let contents = read_captured_source(Path::new(source))
+            .map_err(|error| format!("reading selected source `{source}`: {error}"))?;
+        return Ok(AuthoringAssets {
+            source: Some(CapturedSource {
+                name: source.to_string(),
+                contents,
+            }),
+            edited_body: None,
+        });
     }
     if !matches!(
         workflow,

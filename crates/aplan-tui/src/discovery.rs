@@ -110,6 +110,7 @@ const ADD: &[MutationAction] = &[MutationAction::Add, MutationAction::Manifest];
 const IMPORT: &[MutationAction] = &[MutationAction::Import];
 const SUPERSEDE: &[MutationAction] = &[MutationAction::Supersede];
 const REKEY: &[MutationAction] = &[MutationAction::Rekey];
+const SPLIT: &[MutationAction] = &[MutationAction::Split];
 const CLOSE: &[MutationAction] = &[MutationAction::Close, MutationAction::Restamp];
 const AMEND: &[MutationAction] = &[
     MutationAction::AmendAdd,
@@ -463,6 +464,7 @@ pub const COMMANDS: &[CommandDiscovery] = &[
     },
     mutation("mv", "Move tasks", MOVE),
     mutation("rekey", "Rekey a task", REKEY),
+    mutation("split", "Split a task into increments", SPLIT),
     native("tasks", "Browse tasks", &[NativeSurface::Tasks]),
     native_with_boundaries(
         "completed",

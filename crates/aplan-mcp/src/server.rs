@@ -461,6 +461,15 @@ impl AplanServer {
                     serde_json::from_value(fields).map_err(|e| format!("bad arguments: {e}"))?;
                 tools::add(root, &add, policy).map_err(|e| e.to_string())
             }
+            "aplan_split" => {
+                let mut fields = args.clone();
+                if let Some(obj) = fields.as_object_mut() {
+                    obj.remove("root");
+                }
+                let split: tools::SplitArgs =
+                    serde_json::from_value(fields).map_err(|e| format!("bad arguments: {e}"))?;
+                tools::split(root, &split, policy).map_err(|e| e.to_string())
+            }
             "aplan_show" => {
                 let id = str_arg("id").ok_or("`id` is required")?;
                 let plan = self.snapshot_for_call(root, policy, &mut prefetched)?;
@@ -1074,6 +1083,25 @@ fn classify_tool_outcome(
                 .unwrap_or(requested_subject)
                 .to_string();
             (id, false, ToolEffect::Mutated, "created".to_string())
+        }
+        "aplan_split" => {
+            let id = payload["target"]
+                .as_str()
+                .unwrap_or(requested_subject)
+                .to_string();
+            let applied = payload["applied"].as_bool().unwrap_or(false);
+            let count = payload["children"].as_array().map_or(0, Vec::len);
+            let effect = if applied {
+                ToolEffect::Mutated
+            } else {
+                ToolEffect::ReadOnly
+            };
+            let detail = if applied {
+                format!("split into {count} child increment(s)")
+            } else {
+                format!("previewed split into {count} child increment(s)")
+            };
+            (id, false, effect, detail)
         }
         "aplan_dep" => {
             let id = payload["id"]
