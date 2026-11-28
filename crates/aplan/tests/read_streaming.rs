@@ -317,6 +317,7 @@ fn assert_inventory_completeness(inventory: &[aplan_output::stream::ReadSurfaceE
         "release",
         "retarget-path",
         "review",
+        "split",
         "start",
         "stop",
         "supersede",
@@ -364,6 +365,7 @@ fn assert_inventory_completeness(inventory: &[aplan_output::stream::ReadSurfaceE
 fn assert_mcp_inventory_completeness(keys: &BTreeSet<(ReadChannel, String, String)>) {
     let mutating_mcp_tools: BTreeSet<&str> = [
         "aplan_add",
+        "aplan_split",
         "aplan_claim",
         "aplan_close",
         "aplan_dep",

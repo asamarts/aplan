@@ -127,6 +127,13 @@ const REKEY: StateProof = StateProof {
     noop_or_inapplicable: ADD.noop_or_inapplicable,
 };
 
+const SPLIT: StateProof = StateProof {
+    accepted: ADD.accepted,
+    denied_or_refused: "split::tests::split_refuses_empty_duplicate_cyclic_cross_cut_terminal_and_already_decomposed",
+    stale: "split::tests::split_preview_and_commit_reconcile_effort_preserve_yaml_and_detect_stale_preview",
+    noop_or_inapplicable: ADD.noop_or_inapplicable,
+};
+
 const CLOSE: StateProof = StateProof {
     accepted: "tui_evidence_parity::every_task_local_evidence_action_matches_the_complete_cli_post_state",
     denied_or_refused: "evidence_mutation::tests::close_refuses_ambiguous_tests_irrelevant_commits_and_terminal_tasks",
@@ -298,6 +305,11 @@ const DRIVERS: &[Driver] = &[
         states: REKEY,
     },
     Driver {
+        action: MutationAction::Split,
+        drive: drive_typed_workflow,
+        states: SPLIT,
+    },
+    Driver {
         action: MutationAction::Close,
         drive: drive_typed_workflow,
         states: CLOSE,
@@ -344,6 +356,7 @@ const PROOF_SOURCES: &[&str] = &[
     include_str!("capture_inbox.rs"),
     include_str!("../../aplan-app/src/capture.rs"),
     include_str!("../../aplan-app/src/authoring.rs"),
+    include_str!("../../aplan-app/src/split.rs"),
     include_str!("../../aplan-app/src/evidence_mutation.rs"),
     include_str!("../../aplan-app/src/planning.rs"),
     include_str!("../../aplan-app/src/work_action.rs"),
@@ -731,6 +744,24 @@ const CLI: &[CliMapping] = &[
             ("old", ModeDisposition::Native),
             ("new", ModeDisposition::Native),
             ("allow_terminal", ModeDisposition::Native),
+            ("format", ModeDisposition::OutputOnly),
+            ("deny_warnings", ModeDisposition::Unsupported),
+            ("no_deny_warnings", ModeDisposition::Unsupported),
+        ],
+    },
+    CliMapping {
+        path: "split",
+        actions: &[MutationAction::Split],
+        modes: &[
+            ("target", ModeDisposition::Native),
+            ("children", ModeDisposition::Native),
+            ("from", ModeDisposition::Native),
+            ("sequential", ModeDisposition::Native),
+            ("keep_effort", ModeDisposition::Native),
+            ("reestimate", ModeDisposition::Native),
+            ("cut", ModeDisposition::Native),
+            ("if_match", ModeDisposition::Session),
+            ("dry_run", ModeDisposition::Native),
             ("format", ModeDisposition::OutputOnly),
             ("deny_warnings", ModeDisposition::Unsupported),
             ("no_deny_warnings", ModeDisposition::Unsupported),

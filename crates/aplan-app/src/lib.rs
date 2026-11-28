@@ -58,6 +58,8 @@ mod evidence_mutation;
 pub use evidence_mutation::*;
 pub mod authoring;
 pub use authoring::*;
+pub mod split;
+pub use split::*;
 pub mod planning;
 pub use planning::*;
 mod portfolio;

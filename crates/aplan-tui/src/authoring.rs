@@ -20,6 +20,7 @@ pub enum AuthoringWorkflow {
     Import,
     Supersede,
     Rekey,
+    Split,
 }
 
 impl AuthoringWorkflow {
@@ -30,6 +31,7 @@ impl AuthoringWorkflow {
         Self::Import,
         Self::Supersede,
         Self::Rekey,
+        Self::Split,
     ];
 
     pub const fn title(self) -> &'static str {
@@ -39,11 +41,12 @@ impl AuthoringWorkflow {
             Self::Import => "Import proposal tasks",
             Self::Supersede => "Supersede completed outcome",
             Self::Rekey => "Rekey task",
+            Self::Split => "Split task into increments",
         }
     }
 
     pub const fn destructive(self) -> bool {
-        matches!(self, Self::Supersede | Self::Rekey)
+        matches!(self, Self::Supersede | Self::Rekey | Self::Split)
     }
 
     /// Explicit command boundaries displayed beside the native workflow.
@@ -58,6 +61,9 @@ impl AuthoringWorkflow {
             ],
             Self::Supersede => &[],
             Self::Rekey => &["Machine output stays CLI-only: aplan rekey OLD NEW --format json"],
+            Self::Split => &[
+                "Machine JSON output and stdin stay CLI-only: aplan split ID --from - --format json",
+            ],
         }
     }
 }
@@ -91,7 +97,51 @@ fn fields(workflow: AuthoringWorkflow, selected_task: Option<&str>) -> Vec<Field
                 "Explicitly type yes to migrate done or dropped history",
             ),
         ],
+        AuthoringWorkflow::Split => split_fields(selected_task),
     }
+}
+
+fn split_fields(selected_task: Option<&str>) -> Vec<FieldSpec> {
+    vec![
+        selected(
+            "target",
+            "Target ID",
+            "Live work task id to split into bounded child increments",
+            selected_task,
+        )
+        .required(),
+        FieldSpec::new(
+            "children",
+            "Child increments",
+            "Repeat as `Title=effort` or `Title` (leave blank when using a spec file)",
+        )
+        .repeated(),
+        FieldSpec::new(
+            "source",
+            "Spec file",
+            "Optional YAML/JSON split spec file (leave blank when listing Children above)",
+        ),
+        FieldSpec::new(
+            "parent_effort",
+            "Parent effort",
+            "Optional positive integration effort kept on parent; blank omits parent effort",
+        ),
+        FieldSpec::new(
+            "sequential",
+            "Sequential order",
+            "Type yes to chain inline children in listed order",
+        ),
+        FieldSpec::new(
+            "reestimate",
+            "Reestimate total",
+            "Type yes to allow total effort to differ from the parent's prior estimate",
+        ),
+        FieldSpec::new(
+            "cut",
+            "Cut assertion",
+            "Optional cut id or label (must match the target's owning cut)",
+        ),
+    ]
 }
 
 /// Shared task-creation vocabulary. Capture promotion selects the admitted
@@ -271,6 +321,7 @@ pub enum AuthoringRequest {
     Import(aplan_app::ImportRequest),
     Supersede(aplan_app::SupersedeRequest),
     Rekey(aplan_app::RekeyRequest),
+    Split(aplan_app::SplitRequest),
 }
 
 impl AuthoringRequest {
@@ -285,6 +336,22 @@ impl AuthoringRequest {
             Self::Import(request) => aplan_app::preview_import(context, request),
             Self::Supersede(request) => aplan_app::preview_supersede(context, request),
             Self::Rekey(request) => aplan_app::preview_rekey(context, request),
+            Self::Split(_) => Err(aplan_app::AuthoringError::Arguments(
+                "use `preview_split` for split authoring requests".to_string(),
+            )),
+        }
+    }
+
+    /// Run a typed split preview without writing (`A2-150`).
+    pub fn preview_split(
+        &self,
+        context: &PlanContext,
+    ) -> Result<aplan_app::SplitPreview, aplan_app::AuthoringError> {
+        match self {
+            Self::Split(request) => aplan_app::preview_split(context, request),
+            _ => Err(aplan_app::AuthoringError::Arguments(
+                "not a split authoring request".to_string(),
+            )),
         }
     }
 }
@@ -325,7 +392,74 @@ pub fn request(
             new: required(submission, "new")?,
             allow_terminal: yes_no(submission, "allow_terminal")?,
         })),
+        AuthoringWorkflow::Split => decode_split(submission, assets.source),
     }
+}
+
+fn decode_split(
+    submission: &FormSubmission,
+    source: Option<CapturedSource>,
+) -> Result<AuthoringRequest, InputError> {
+    let target = required(submission, "target")?;
+    let inline = repeated(submission, "children");
+    let parent_effort_input: Option<f64> = optional_number(submission, "parent_effort")?;
+    let sequential = yes_no(submission, "sequential")?;
+    let reestimate_flag = yes_no(submission, "reestimate")?;
+    let cut_input = optional(submission, "cut");
+
+    if !inline.is_empty() && source.is_some() {
+        return Err(InputError::Invalid {
+            field: "source",
+            message: "choose either inline Children or a Spec file, not both".to_string(),
+        });
+    }
+
+    let (children, parent_effort, reestimate, cut) = if let Some(src) = source {
+        let parsed = aplan_app::parse_split_spec(&src.name, &src.contents).map_err(|err| {
+            InputError::Invalid {
+                field: "source",
+                message: err.to_string(),
+            }
+        })?;
+        let effort = parent_effort_input
+            .map(aplan_app::SplitParentEffort::Keep)
+            .or(parsed.parent_effort)
+            .unwrap_or(aplan_app::SplitParentEffort::Omit);
+        let reestimate = reestimate_flag || parsed.reestimate.unwrap_or(false);
+        let cut = cut_input.or(parsed.cut);
+        (parsed.children, effort, reestimate, cut)
+    } else {
+        let mut children = Vec::with_capacity(inline.len());
+        for (idx, raw) in inline.iter().enumerate() {
+            let mut child =
+                aplan_app::parse_inline_child(raw).map_err(|err| InputError::Invalid {
+                    field: "children",
+                    message: err.to_string(),
+                })?;
+            if sequential {
+                let key = format!("step-{}", idx + 1);
+                if idx > 0 {
+                    child.blocked_by.push(format!("local:step-{idx}"));
+                }
+                child.key = Some(key);
+            }
+            children.push(child);
+        }
+        let effort = parent_effort_input.map_or(
+            aplan_app::SplitParentEffort::Omit,
+            aplan_app::SplitParentEffort::Keep,
+        );
+        (children, effort, reestimate_flag, cut_input)
+    };
+
+    Ok(AuthoringRequest::Split(aplan_app::SplitRequest {
+        target,
+        children,
+        parent_effort,
+        reestimate,
+        cut,
+        expected_identity: None,
+    }))
 }
 
 fn decode_add(
@@ -779,6 +913,7 @@ mod tests {
             (AuthoringWorkflow::Import, 8, true),
             (AuthoringWorkflow::Supersede, 11, false),
             (AuthoringWorkflow::Rekey, 3, false),
+            (AuthoringWorkflow::Split, 7, false),
         ];
         assert_eq!(
             cases.iter().map(|case| case.0).collect::<Vec<_>>(),
@@ -1388,5 +1523,155 @@ mod tests {
         .expect("decoded add request");
         let preview = decoded.preview(&context).expect("preview with integrates");
         assert_eq!(preview.created(), ["A-2"]);
+    }
+
+    fn split_fixture_context() -> (tempfile::TempDir, PlanContext) {
+        let dir = tempfile::Builder::new()
+            .tempdir_in(aplan_core::fixture::fixture_root())
+            .expect("tempdir");
+        let tasks = dir.path().join("aplan/tasks");
+        std::fs::create_dir_all(&tasks).expect("tasks");
+        std::fs::write(
+            tasks.join("A-2.md"),
+            "---\nid: A-2\ntitle: oversized work\nphase: 1\nstatus: in_progress\n\
+             effort_days: 5\npaths: [src/**]\n---\n\n## Why\n\nBig.\n",
+        )
+        .expect("parent");
+        std::fs::write(
+            tasks.join("M-v1.md"),
+            "---\nid: M-v1\ntitle: first cut\nphase: 1\nstatus: todo\n\
+             blocked_by: [A-1, A-2]\ntags: [milestone, v1]\n---\n",
+        )
+        .expect("cut");
+        let ctx = context(dir.path());
+        (dir, ctx)
+    }
+
+    #[test]
+    fn split_form_decodes_inline_sequential_and_rejects_bad_inline_or_conflict() {
+        let (_dir, context) = split_fixture_context();
+
+        let mut split_form =
+            form(&context, AuthoringWorkflow::Split, Some("A-2")).expect("split form");
+        let children_idx = split_form
+            .fields()
+            .iter()
+            .position(|f| f.spec().key() == "children")
+            .expect("children field");
+        while split_form.focus() != crate::form::FormFocus::Field(children_idx) {
+            let _ = split_form.reduce(FormAction::NextFocus);
+        }
+        let _ = split_form.reduce(FormAction::Insert("Slice one=2".to_string()));
+        let _ = split_form.reduce(FormAction::AddItem);
+        let _ = split_form.reduce(FormAction::Insert("Slice two=2.5".to_string()));
+        let inline_sub = submission(
+            split_form,
+            &[
+                ("parent_effort", "0.5"),
+                ("sequential", "yes"),
+                ("reestimate", "no"),
+                ("cut", "M-v1"),
+            ],
+        );
+        let decoded = request(
+            AuthoringWorkflow::Split,
+            &inline_sub,
+            AuthoringAssets::default(),
+        )
+        .expect("inline split");
+        assert!(decoded.preview(&context).is_err());
+        let preview = decoded
+            .preview_split(&context)
+            .expect("preview inline split");
+        assert_eq!(preview.machine_result(false).children.len(), 2);
+        assert!(preview.change_set().effects().iter().any(|e| matches!(
+            e,
+            aplan_app::SemanticEffect::TaskSplit { parent, children }
+                if parent == "A-2" && children.len() == 2
+        )));
+
+        // Inline + spec file conflict is refused on `source`.
+        assert!(matches!(
+            request(
+                AuthoringWorkflow::Split,
+                &inline_sub,
+                AuthoringAssets {
+                    source: Some(CapturedSource {
+                        name: "split.yml".to_string(),
+                        contents: "- title: A\n  effort: 2.5\n- title: B\n  effort: 2.5\n"
+                            .to_string(),
+                    }),
+                    ..AuthoringAssets::default()
+                }
+            ),
+            Err(InputError::Invalid {
+                field: "source",
+                ..
+            })
+        ));
+
+        // Invalid inline child reports `children`.
+        let bad_inline = submission(
+            form(&context, AuthoringWorkflow::Split, Some("A-2")).expect("split form"),
+            &[("children", "Bad=notanumber")],
+        );
+        assert!(matches!(
+            request(
+                AuthoringWorkflow::Split,
+                &bad_inline,
+                AuthoringAssets::default()
+            ),
+            Err(InputError::Invalid {
+                field: "children",
+                ..
+            })
+        ));
+    }
+
+    #[test]
+    fn split_form_decodes_spec_file_and_reports_parse_errors() {
+        let (_dir, context) = split_fixture_context();
+        let file_sub = submission(
+            form(&context, AuthoringWorkflow::Split, Some("A-2")).expect("split form"),
+            &[("source", "split.yml")],
+        );
+        let file_decoded = request(
+            AuthoringWorkflow::Split,
+            &file_sub,
+            AuthoringAssets {
+                source: Some(CapturedSource {
+                    name: "split.yml".to_string(),
+                    contents: "keep_effort: 1\nchildren:\n  - title: A\n    effort: 2\n  - title: B\n    effort: 2\n".to_string(),
+                }),
+                ..AuthoringAssets::default()
+            },
+        )
+        .expect("spec split");
+        let file_preview = file_decoded.preview_split(&context).expect("spec preview");
+        assert_eq!(file_preview.machine_result(false).children.len(), 2);
+        let add_sub = submission(
+            form(&context, AuthoringWorkflow::Add, None).expect("add form"),
+            &[("title", "ordinary task")],
+        );
+        let add_req = request(AuthoringWorkflow::Add, &add_sub, AuthoringAssets::default())
+            .expect("add request");
+        assert!(add_req.preview_split(&context).is_err());
+        assert!(matches!(
+            request(
+                AuthoringWorkflow::Split,
+                &file_sub,
+                AuthoringAssets {
+                    source: Some(CapturedSource {
+                        name: "bad.yml".to_string(),
+                        contents: "unknown: 1\n".to_string(),
+                    }),
+                    ..AuthoringAssets::default()
+                }
+            ),
+            Err(InputError::Invalid {
+                field: "source",
+                ..
+            })
+        ));
     }
 }

@@ -349,6 +349,77 @@ pub struct AddInput {
     pub root: Option<String>,
 }
 
+/// One child increment proposed to `aplan_split`.
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct SplitChildInput {
+    /// Required one-line title for this child increment.
+    pub title: String,
+    /// Explicit task id; omit to mint from the plan's configured id convention.
+    #[serde(default)]
+    pub id: Option<String>,
+    /// Optional local reference key (`local:<key>`) for sibling dependency wiring.
+    #[serde(default)]
+    pub key: Option<String>,
+    /// Positive finite effort estimate in days.
+    #[serde(default)]
+    pub effort_days: Option<f64>,
+    /// Optional owner override; omit to inherit the parent's `owner`.
+    #[serde(default)]
+    pub owner: Option<String>,
+    /// Optional replacement tags; omit to inherit the parent's `tags`. Required
+    /// tag families and `cross-cutting` posture remain inherited unless overridden.
+    #[serde(default)]
+    pub tags: Option<Vec<String>>,
+    /// Optional replacement `paths`; omit to inherit the parent's `paths`.
+    #[serde(default)]
+    pub paths: Option<Vec<String>>,
+    /// Optional replacement `traces`; omit to inherit, or pass `[]` to clear.
+    #[serde(default)]
+    pub traces: Option<Vec<String>>,
+    /// Hard prerequisite ids (existing task ids, sibling ids, or `local:<key>`).
+    #[serde(default)]
+    pub blocked_by: Option<Vec<String>>,
+    /// Advisory preference ids (existing task ids, sibling ids, or `local:<key>`).
+    #[serde(default)]
+    pub prefer_after: Option<Vec<String>>,
+    /// Optional Markdown body for the child; omit for a clean scaffold noting the parent.
+    #[serde(default)]
+    pub body: Option<String>,
+}
+
+/// Input for `aplan_split`.
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct SplitInput {
+    /// Live non-milestone work task id to decompose into bounded child increments.
+    pub target: String,
+    /// Two or more bounded child increments to create under `target`'s `integrates`.
+    pub children: Vec<SplitChildInput>,
+    /// Optional positive finite integration effort retained on the parent task;
+    /// omit to clear parent `effort_days` via the decomposed-parent `APLAN009` exemption.
+    #[serde(default)]
+    pub parent_effort_days: Option<f64>,
+    /// Allow post-split total effort to differ from the parent's prior `effort_days`.
+    #[serde(default)]
+    pub reestimate: Option<bool>,
+    /// Optional cut id or label assertion (must match the parent's owning cut).
+    #[serde(default)]
+    pub cut: Option<String>,
+    /// Optional snapshot digest (`preview_identity` from a prior `dry_run: true`
+    /// call) required to match before applying; refuses stale previews.
+    #[serde(default)]
+    pub expected_identity: Option<String>,
+    /// When `true`, preview every child, parent edit, effort reconciliation, and
+    /// `preview_identity` without reserving ids or modifying files.
+    #[serde(default)]
+    pub dry_run: Option<bool>,
+    /// Repository root containing `.aplan.yml`, or that repository's configured
+    /// plan directory. Omit to use the server's launch context.
+    #[serde(default)]
+    pub root: Option<String>,
+}
+
 // ---------------------------------------------------------------------------
 // Concrete typed tool output payloads (schema-derived for outputSchema)
 // ---------------------------------------------------------------------------
@@ -431,6 +502,37 @@ pub struct AddPayload {
     /// Additional authoring fields (e.g. moved members).
     #[serde(flatten)]
     pub extra: BTreeMap<String, Value>,
+}
+
+/// Structured payload for `aplan_split`.
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
+pub struct SplitPayload {
+    /// Machine schema identifier (`aplan/split/v1`).
+    pub schema: String,
+    /// `false` for dry-run previews; `true` after atomic publication.
+    pub applied: bool,
+    /// Snapshot digest bound to this preview; supply as `expected_identity` to apply safely.
+    pub preview_identity: String,
+    /// Decomposed parent task id.
+    pub target: String,
+    /// Owning cut id, or `null` for `cross-cutting` work.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cut: Option<String>,
+    /// Parent transition summary (status, effort, edges, retained body/criteria).
+    pub parent: Map<String, Value>,
+    /// Created or predicted child increment summaries.
+    pub children: Vec<Map<String, Value>>,
+    /// Effort reconciliation summary.
+    pub effort: Map<String, Value>,
+    /// Child task ids added to the owning cut milestone.
+    #[serde(default)]
+    pub cut_memberships_added: Vec<String>,
+    /// Created and rewritten plan files.
+    #[serde(default)]
+    pub files: Vec<String>,
+    /// Non-blocking warning notes.
+    #[serde(default)]
+    pub notes: Vec<String>,
 }
 
 /// Structured payload for `aplan_show`.
@@ -753,6 +855,7 @@ pub fn input_schema_for_tool(name: &str) -> Value {
             generate_object_schema::<TaskIdInput>()
         }
         "aplan_dep" => generate_object_schema::<DepInput>(),
+        "aplan_split" => generate_object_schema::<SplitInput>(),
         "aplan_close" => generate_object_schema::<CloseInput>(),
         "aplan_claim" => generate_object_schema::<ClaimInput>(),
         other => panic!("unknown MCP tool `{other}` in input_schema_for_tool"),
@@ -775,6 +878,7 @@ pub fn output_schema_for_tool(name: &str) -> Value {
             generate_object_schema::<ToolResultEnvelope<ValidationPayload>>()
         }
         "aplan_add" => generate_object_schema::<ToolResultEnvelope<AddPayload>>(),
+        "aplan_split" => generate_object_schema::<ToolResultEnvelope<SplitPayload>>(),
         "aplan_show" => generate_object_schema::<ToolResultEnvelope<ShowPayload>>(),
         "aplan_dep" => generate_object_schema::<ToolResultEnvelope<DepPayload>>(),
         "aplan_close" => generate_object_schema::<ToolResultEnvelope<ClosePayload>>(),
@@ -806,6 +910,7 @@ pub fn validate_tool_arguments(name: &str, args: &Value) -> Result<(), String> {
         "aplan_ready" | "aplan_check" | "aplan_verify" => check::<RootOnlyInput>(name, args),
         "aplan_why" => check::<WhyInput>(name, args),
         "aplan_add" => check::<AddInput>(name, args),
+        "aplan_split" => check::<SplitInput>(name, args),
         "aplan_show" | "aplan_release" | "aplan_start" | "aplan_stop" | "aplan_review" => {
             check::<TaskIdInput>(name, args)
         }
@@ -926,8 +1031,8 @@ pub fn mcp_read_surface_inventory() -> Vec<aplan_output::stream::ReadSurfaceEntr
     for spec in TOOLS {
         let (potentially_unbounded, latency_class) = match spec.name {
             // Mutating tools are excluded from the read-surface inventory.
-            "aplan_add" | "aplan_dep" | "aplan_close" | "aplan_claim" | "aplan_release"
-            | "aplan_start" | "aplan_stop" | "aplan_review" => continue,
+            "aplan_add" | "aplan_split" | "aplan_dep" | "aplan_close" | "aplan_claim"
+            | "aplan_release" | "aplan_start" | "aplan_stop" | "aplan_review" => continue,
             // Read tools classified by latency and work contract.
             "aplan_identity" | "aplan_why" => (false, ReadLatencyClass::LocalBoundedRead),
             "aplan_ready" => (true, ReadLatencyClass::OutputDominatedRead),

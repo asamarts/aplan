@@ -98,6 +98,17 @@ pub const TOOLS: &[ToolSpec] = &[
                       warn about is named in `notes` instead.",
     },
     ToolSpec {
+        name: "aplan_split",
+        description: "Atomically decompose one live non-milestone work task into two or more \
+                      bounded child increments wired through parent-side `integrates` and \
+                      `blocked_by` in the same cut. Supports `dry_run: true` to preview every \
+                      child, parent edit, effort reconciliation and `preview_identity` without \
+                      reserving ids or writing files, and `expected_identity` to refuse stale \
+                      previews before atomic publication. Preserves parent YAML comments, body \
+                      and checked criteria verbatim; refuses empty, duplicate, cyclic, cross-cut, \
+                      terminal, already-decomposed, ambiguous or policy-violating splits.",
+    },
+    ToolSpec {
         name: "aplan_show",
         description: "One task whole: its `paths`, `traces` and `evidence`, which no other tool \
                       returns, plus what the graph resolves (its cut, whether it is ready, what \
@@ -384,6 +395,11 @@ pub const MCP_COMMAND_POLICY: &[McpCommandPolicy] = &[
         "add",
         &["aplan_add"],
         "the tool authors one live task or one cut around existing work; bulk input, terminal ledger correction, previews and output overrides remain on the CLI",
+    ),
+    McpCommandPolicy::projected(
+        "split",
+        &["aplan_split"],
+        "the tool previews or atomically applies one typed split with optional dry_run and expected_identity; CLI spec files (--from), stdin and human rendering remain on the CLI",
     ),
     McpCommandPolicy::excluded("mcp", CliOnlyReason::HostOperation),
     McpCommandPolicy::excluded("init", CliOnlyReason::HostOperation),
@@ -2118,7 +2134,7 @@ mod tests {
     /// status is fine, which is true of an actor with an editor and false of
     /// one reaching aplan through this server.
     #[test]
-    fn the_tool_surface_is_exactly_these_fourteen() {
+    fn the_tool_surface_is_exactly_these_fifteen() {
         let names: Vec<&str> = TOOLS.iter().map(|t| t.name).collect();
         assert_eq!(
             names,
@@ -2129,6 +2145,7 @@ mod tests {
                 "aplan_check",
                 "aplan_verify",
                 "aplan_add",
+                "aplan_split",
                 "aplan_show",
                 "aplan_dep",
                 "aplan_close",
@@ -3724,6 +3741,153 @@ pub fn add(
     }
     publish_add(&context, preview, &report.id)?;
     Ok(report.into_value())
+}
+
+/// One child increment passed to [`split`].
+#[derive(Debug, Clone, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct SplitChildArgs {
+    pub title: String,
+    #[serde(default)]
+    pub id: Option<String>,
+    #[serde(default)]
+    pub key: Option<String>,
+    #[serde(default)]
+    pub effort_days: Option<f64>,
+    #[serde(default)]
+    pub owner: Option<String>,
+    #[serde(default)]
+    pub tags: Option<Vec<String>>,
+    #[serde(default)]
+    pub paths: Option<Vec<String>>,
+    #[serde(default)]
+    pub traces: Option<Vec<String>>,
+    #[serde(default)]
+    pub blocked_by: Vec<String>,
+    #[serde(default)]
+    pub prefer_after: Vec<String>,
+    #[serde(default)]
+    pub body: Option<String>,
+}
+
+/// What `aplan_split` was asked to preview or atomically apply (`A2-150`).
+#[derive(Debug, Clone, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct SplitArgs {
+    pub target: String,
+    pub children: Vec<SplitChildArgs>,
+    #[serde(default)]
+    pub parent_effort_days: Option<f64>,
+    #[serde(default)]
+    pub reestimate: bool,
+    #[serde(default)]
+    pub cut: Option<String>,
+    #[serde(default)]
+    pub expected_identity: Option<String>,
+    #[serde(default)]
+    pub dry_run: bool,
+}
+
+fn mcp_authoring_context(
+    root: &Path,
+    policy: &crate::Policy,
+) -> Result<aplan_app::PlanContext, ToolError> {
+    let base_context = aplan_app::PlanContext::new(
+        aplan_core::load_plan_identified(root),
+        aplan_app::ContextInputs {
+            repository_root: policy.repo_root.clone(),
+            configuration_file: policy.verify.config_file.clone(),
+            trust: aplan_app::Trust::Hermetic,
+            options: policy.options.clone(),
+            verdict: policy.verdict.clone(),
+        },
+    );
+    if let Some(path) = policy.verify.config_file.as_deref()
+        && let Ok(bytes) = std::fs::read(path)
+        && let Ok(parsed_cfg) = aplan_config::parse_config_bytes(&bytes, path)
+    {
+        base_context
+            .with_captured_report_config(parsed_cfg)
+            .map_err(|e| ToolError::Plan(e.to_string()))
+    } else {
+        Ok(base_context.with_report_config(aplan_config::Config {
+            id_strategy: Some(policy.id_strategy),
+            ..aplan_config::Config::default()
+        }))
+    }
+}
+
+/// Preview or atomically apply a work-task split through the shared application engine (`A2-150`).
+pub fn split(
+    root: &Path,
+    args: &SplitArgs,
+    policy: &crate::Policy,
+) -> Result<serde_json::Value, ToolError> {
+    let context = mcp_authoring_context(root, policy)?;
+    let request = aplan_app::SplitRequest {
+        target: args.target.clone(),
+        children: args
+            .children
+            .iter()
+            .map(|c| aplan_app::SplitChildRequest {
+                title: c.title.clone(),
+                id: c.id.clone(),
+                key: c.key.clone(),
+                effort_days: c.effort_days,
+                owner: c.owner.clone(),
+                tags: c.tags.clone(),
+                paths: c.paths.clone(),
+                traces: c.traces.clone(),
+                blocked_by: c.blocked_by.clone(),
+                prefer_after: c.prefer_after.clone(),
+                body: c.body.clone(),
+            })
+            .collect(),
+        parent_effort: args.parent_effort_days.map_or(
+            aplan_app::SplitParentEffort::Omit,
+            aplan_app::SplitParentEffort::Keep,
+        ),
+        reestimate: args.reestimate,
+        cut: args.cut.clone(),
+        expected_identity: args.expected_identity.clone(),
+    };
+    let preview = aplan_app::preview_split(&context, &request).map_err(|error| match error {
+        aplan_app::AuthoringError::Arguments(message) => ToolError::Args(message),
+        other => ToolError::Refused(other.to_string()),
+    })?;
+    if preview.change_set().disposition() == aplan_app::ChangeDisposition::Denied {
+        return Err(ToolError::Refused(format!(
+            "cannot split `{}`: it would leave {} blocking finding(s): {}",
+            args.target,
+            preview.change_set().diagnostics().added.len(),
+            preview.change_set().diagnostics().lines().join("; ")
+        )));
+    }
+    if args.dry_run {
+        return serde_json::to_value(preview.machine_result(false))
+            .map_err(|e| ToolError::Plan(e.to_string()));
+    }
+    let applied_machine = preview.machine_result(true);
+    match aplan_app::commit_split(&context, preview) {
+        aplan_app::CommitOutcome::Applied(_) => {
+            serde_json::to_value(applied_machine).map_err(|e| ToolError::Plan(e.to_string()))
+        }
+        aplan_app::CommitOutcome::Denied(_) => Err(ToolError::Refused(format!(
+            "cannot split `{}` under this plan's policy",
+            args.target
+        ))),
+        aplan_app::CommitOutcome::NoOp(_) => Err(ToolError::Plan(format!(
+            "split `{}` unexpectedly produced no change",
+            args.target
+        ))),
+        aplan_app::CommitOutcome::Stale { change, actual } => Err(ToolError::Plan(format!(
+            "the plan changed while aplan_split was preparing its batch ({}); nothing was written; re-run preview and apply again",
+            describe_stale_mismatch(change.input(), &actual)
+        ))),
+        aplan_app::CommitOutcome::PublicationFailed { error, .. } => Err(ToolError::Plan(
+            aplan_core::save::advice(&error, "aplan_split"),
+        )),
+    }
 }
 
 #[cfg(test)]

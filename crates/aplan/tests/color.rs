@@ -901,6 +901,17 @@ fn a_styled_refusal_folds_like_an_unstyled_one() {
 /// A census over `COMMAND_SURFACES`, for the same reason the machine half is
 /// one: a hand-written list stops covering the tool the moment a command is
 /// added, and says nothing about it while going on passing.
+fn split_render_args() -> Vec<&'static str> {
+    vec![
+        "T-003",
+        "--child",
+        "One=0.5",
+        "--child",
+        "Two=0.5",
+        "--dry-run",
+    ]
+}
+
 #[test]
 fn stripping_a_forced_colour_gives_the_refused_one() {
     let dir = tempfile::Builder::new()
@@ -917,6 +928,7 @@ fn stripping_a_forced_colour_gives_the_refused_one() {
             "test" => vec!["list"],
             "check-docs" => vec!["DOC.md"],
             "rekey" => vec!["T-001", "T-900"],
+            "split" => split_render_args(),
             "blueprint" => blueprint_render_args(),
             "dep" => dependency_render_args(),
             "capture" => vec!["An open capture", "--source", "colour:census"],
@@ -1010,6 +1022,7 @@ fn the_machine_formats_carry_no_colour_when_it_is_forced() {
             "test" => vec!["list"],
             "check-docs" => vec!["DOC.md"],
             "rekey" => vec!["T-001", "T-900"],
+            "split" => split_render_args(),
             "blueprint" => blueprint_render_args(),
             "dep" => dependency_render_args(),
             "capture" => vec!["An open capture", "--source", "colour:census"],
@@ -1533,6 +1546,19 @@ const UNSTYLED: &[(&str, &str, Option<&[&str]>)] = &[
         "supersede",
         "needs a closed task whose traced outcome no longer holds before it has a successor to write; `supersede.rs` is what exercises it",
         Some(&["supersede", "T-001", "a successor"]),
+    ),
+    (
+        "split",
+        "reports the plain-text atomic decomposition summary of parent, children, effort reconciliation and written files; `split.rs` exercises every surface",
+        Some(&[
+            "split",
+            "T-001",
+            "--child",
+            "One=0.5",
+            "--child",
+            "Two=0.5",
+            "--dry-run",
+        ]),
     ),
 ];
 

@@ -61,7 +61,25 @@ hierarchy. Repositories that want to bound reviewable task size can opt into `ma
 `.aplan.yml` (`APLAN067`): this is a local review-size policy, not a duration forecast or a
 universal productivity claim, refusing live non-milestone tasks above the declared limit across
 validation and every authoring/import path while pointing authors to `integrates` decomposition
-(leaving milestones, `done`/`dropped` history, and non-opting repositories silent). Whole-plan read tables,
+(leaving milestones, `done`/`dropped` history, and non-opting repositories silent). To decompose
+an oversized live task atomically without hand-editing multiple files, run `aplan split` (or MCP
+`aplan_split` / TUI `Split task into increments`): `--dry-run` previews every child, parent edit,
+effort reconciliation, cut membership update, and snapshot `preview_identity` without reserving
+IDs or touching disk, and `--if-match <SHA256>` refuses stale previews before atomic publication.
+Parent YAML comments, body, and checked acceptance criteria stay verbatim while an `in_progress`
+parent transitions cleanly to `todo` waiting on its new `integrates` children. For example,
+migrating a flat 8.0-day `in_progress` task `A1-01` under `max_effort_days: 3`:
+
+```sh
+# 1. Preview the split (reconciles 2.5 + 2.5 + 2.5 + 0.5 parent integration = 8.0d; writes nothing)
+aplan split A1-01 --keep-effort 0.5 --sequential --child "Core slice=2.5" --child "Surface wiring=2.5" --child "Docs and tests=2.5" --dry-run --format json
+
+# 2. Apply atomically against the previewed snapshot identity, then check the plan
+aplan split A1-01 --keep-effort 0.5 --sequential --child "Core slice=2.5" --child "Surface wiring=2.5" --child "Docs and tests=2.5" --if-match <PREVIEW_IDENTITY>
+aplan check
+```
+
+Whole-plan read tables,
 graphs, roadmaps, and diagnostic reports stream with bounded 16 KiB output buffering and stop
 promptly when downstream pipes close. Use the built-in command help and `aplan facts` for the
 complete current surface.

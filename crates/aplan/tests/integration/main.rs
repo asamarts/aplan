@@ -328,6 +328,8 @@ mod spawn_recording;
 #[cfg(unix)]
 #[path = "../spec_kit_import.rs"]
 mod spec_kit_import;
+#[path = "../split.rs"]
+mod split;
 #[cfg(unix)]
 #[path = "../stale.rs"]
 mod stale;

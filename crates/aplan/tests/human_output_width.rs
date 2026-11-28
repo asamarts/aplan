@@ -290,6 +290,10 @@ const NOT_PROSE: &[(&str, &str)] = &[
         "writes tasks and prints a migration confirmation plus unbreakable path-and-line review locations",
     ),
     ("schema", "a machine format"),
+    (
+        "split",
+        "writes split tasks and prints a folded split summary",
+    ),
     ("supersede", "writes a task and prints its path"),
     (
         "unpark",

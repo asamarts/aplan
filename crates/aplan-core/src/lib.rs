@@ -102,7 +102,8 @@ pub use claim::{
 pub use close::trace_fingerprints;
 pub use close::{
     CloseError, add_evidence, apply_repair, close, close_at, remove_evidence, replace_evidence,
-    restamp, retarget_path, review, set_evidence_fingerprints, set_integrates, set_paths,
+    restamp, retarget_path, review, set_effort_days, set_evidence_fingerprints, set_integrates,
+    set_paths,
 };
 pub use completion::{
     AppliedCompletedRequest, AppliedCompletedSelector, CompletedResponse, CompletedTaskRow,

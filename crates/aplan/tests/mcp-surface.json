@@ -1294,6 +1294,394 @@
     }
   },
   {
+    "description": "Atomically decompose one live non-milestone work task into two or more bounded child increments wired through parent-side `integrates` and `blocked_by` in the same cut. Supports `dry_run: true` to preview every child, parent edit, effort reconciliation and `preview_identity` without reserving ids or writing files, and `expected_identity` to refuse stale previews before atomic publication. Preserves parent YAML comments, body and checked criteria verbatim; refuses empty, duplicate, cyclic, cross-cut, terminal, already-decomposed, ambiguous or policy-violating splits.",
+    "inputSchema": {
+      "$defs": {
+        "SplitChildInput": {
+          "additionalProperties": false,
+          "description": "One child increment proposed to `aplan_split`.",
+          "properties": {
+            "blocked_by": {
+              "default": null,
+              "description": "Hard prerequisite ids (existing task ids, sibling ids, or `local:<key>`).",
+              "items": {
+                "type": "string"
+              },
+              "type": [
+                "array",
+                "null"
+              ]
+            },
+            "body": {
+              "default": null,
+              "description": "Optional Markdown body for the child; omit for a clean scaffold noting the parent.",
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "effort_days": {
+              "default": null,
+              "description": "Positive finite effort estimate in days.",
+              "format": "double",
+              "type": [
+                "number",
+                "null"
+              ]
+            },
+            "id": {
+              "default": null,
+              "description": "Explicit task id; omit to mint from the plan's configured id convention.",
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "key": {
+              "default": null,
+              "description": "Optional local reference key (`local:<key>`) for sibling dependency wiring.",
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "owner": {
+              "default": null,
+              "description": "Optional owner override; omit to inherit the parent's `owner`.",
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "paths": {
+              "default": null,
+              "description": "Optional replacement `paths`; omit to inherit the parent's `paths`.",
+              "items": {
+                "type": "string"
+              },
+              "type": [
+                "array",
+                "null"
+              ]
+            },
+            "prefer_after": {
+              "default": null,
+              "description": "Advisory preference ids (existing task ids, sibling ids, or `local:<key>`).",
+              "items": {
+                "type": "string"
+              },
+              "type": [
+                "array",
+                "null"
+              ]
+            },
+            "tags": {
+              "default": null,
+              "description": "Optional replacement tags; omit to inherit the parent's `tags`. Required\ntag families and `cross-cutting` posture remain inherited unless overridden.",
+              "items": {
+                "type": "string"
+              },
+              "type": [
+                "array",
+                "null"
+              ]
+            },
+            "title": {
+              "description": "Required one-line title for this child increment.",
+              "type": "string"
+            },
+            "traces": {
+              "default": null,
+              "description": "Optional replacement `traces`; omit to inherit, or pass `[]` to clear.",
+              "items": {
+                "type": "string"
+              },
+              "type": [
+                "array",
+                "null"
+              ]
+            }
+          },
+          "required": [
+            "title"
+          ],
+          "type": "object"
+        }
+      },
+      "additionalProperties": false,
+      "description": "Input for `aplan_split`.",
+      "properties": {
+        "children": {
+          "description": "Two or more bounded child increments to create under `target`'s `integrates`.",
+          "items": {
+            "$ref": "#/$defs/SplitChildInput"
+          },
+          "type": "array"
+        },
+        "cut": {
+          "default": null,
+          "description": "Optional cut id or label assertion (must match the parent's owning cut).",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "dry_run": {
+          "default": null,
+          "description": "When `true`, preview every child, parent edit, effort reconciliation, and\n`preview_identity` without reserving ids or modifying files.",
+          "type": [
+            "boolean",
+            "null"
+          ]
+        },
+        "expected_identity": {
+          "default": null,
+          "description": "Optional snapshot digest (`preview_identity` from a prior `dry_run: true`\ncall) required to match before applying; refuses stale previews.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "parent_effort_days": {
+          "default": null,
+          "description": "Optional positive finite integration effort retained on the parent task;\nomit to clear parent `effort_days` via the decomposed-parent `APLAN009` exemption.",
+          "format": "double",
+          "type": [
+            "number",
+            "null"
+          ]
+        },
+        "reestimate": {
+          "default": null,
+          "description": "Allow post-split total effort to differ from the parent's prior `effort_days`.",
+          "type": [
+            "boolean",
+            "null"
+          ]
+        },
+        "root": {
+          "default": null,
+          "description": "Repository root containing `.aplan.yml`, or that repository's configured\nplan directory. Omit to use the server's launch context.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "target": {
+          "description": "Live non-milestone work task id to decompose into bounded child increments.",
+          "type": "string"
+        }
+      },
+      "required": [
+        "target",
+        "children"
+      ],
+      "title": "SplitInput",
+      "type": "object"
+    },
+    "name": "aplan_split",
+    "outputSchema": {
+      "$defs": {
+        "ContextProvenance": {
+          "description": "Resolved repository/plan selection provenance when a caller supplies an\nexplicit `root` argument.",
+          "properties": {
+            "configuration": {
+              "description": "Selected configuration file relative to the repository, if present.",
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "plan_root": {
+              "description": "Plan root relative to the selected repository.",
+              "type": "string"
+            },
+            "repository_root": {
+              "description": "Relative repository root marker (always `\".\"` to avoid leaking host paths).",
+              "type": "string"
+            },
+            "resolved_symlink": {
+              "description": "Whether resolving `root` followed a symbolic link.",
+              "type": "boolean"
+            },
+            "selection": {
+              "description": "How the explicit `root` path resolved (`repository_root` or `plan_root`).",
+              "type": "string"
+            }
+          },
+          "required": [
+            "selection",
+            "repository_root",
+            "plan_root",
+            "resolved_symlink"
+          ],
+          "type": "object"
+        },
+        "SplitPayload": {
+          "description": "Structured payload for `aplan_split`.",
+          "properties": {
+            "applied": {
+              "description": "`false` for dry-run previews; `true` after atomic publication.",
+              "type": "boolean"
+            },
+            "children": {
+              "description": "Created or predicted child increment summaries.",
+              "items": {
+                "additionalProperties": true,
+                "type": "object"
+              },
+              "type": "array"
+            },
+            "cut": {
+              "description": "Owning cut id, or `null` for `cross-cutting` work.",
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "cut_memberships_added": {
+              "default": [],
+              "description": "Child task ids added to the owning cut milestone.",
+              "items": {
+                "type": "string"
+              },
+              "type": "array"
+            },
+            "effort": {
+              "additionalProperties": true,
+              "description": "Effort reconciliation summary.",
+              "type": "object"
+            },
+            "files": {
+              "default": [],
+              "description": "Created and rewritten plan files.",
+              "items": {
+                "type": "string"
+              },
+              "type": "array"
+            },
+            "notes": {
+              "default": [],
+              "description": "Non-blocking warning notes.",
+              "items": {
+                "type": "string"
+              },
+              "type": "array"
+            },
+            "parent": {
+              "additionalProperties": true,
+              "description": "Parent transition summary (status, effort, edges, retained body/criteria).",
+              "type": "object"
+            },
+            "preview_identity": {
+              "description": "Snapshot digest bound to this preview; supply as `expected_identity` to apply safely.",
+              "type": "string"
+            },
+            "schema": {
+              "description": "Machine schema identifier (`aplan/split/v1`).",
+              "type": "string"
+            },
+            "target": {
+              "description": "Decomposed parent task id.",
+              "type": "string"
+            }
+          },
+          "required": [
+            "schema",
+            "applied",
+            "preview_identity",
+            "target",
+            "parent",
+            "children",
+            "effort"
+          ],
+          "type": "object"
+        },
+        "ToolEffect": {
+          "description": "Semantic effect produced by one MCP tool invocation.",
+          "oneOf": [
+            {
+              "const": "read_only",
+              "description": "Observed the plan, repository, or server identity without writing files.",
+              "type": "string"
+            },
+            {
+              "const": "mutated",
+              "description": "Wrote or updated repository plan/claim state through the guarded engine.",
+              "type": "string"
+            },
+            {
+              "const": "refused",
+              "description": "Refused before writing because arguments, policy, or evidence failed.",
+              "type": "string"
+            }
+          ]
+        }
+      },
+      "description": "Object-enveloped structured result returned in `structuredContent` by every\nMCP tool.\n\nUsing an explicit object envelope guarantees compatibility with both\nhandshake-era object-only structured-content clients (`2025-06-18` /\n`2025-11-25`) and `2026-07-28` clients, while exposing `denied`, `effect`,\nand `subject` without requiring callers to parse human compatibility text.",
+      "properties": {
+        "context": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/ContextProvenance"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "description": "Resolved repository context when the caller passed an explicit `root`."
+        },
+        "contract_version": {
+          "description": "Explicit contract version (`aplan/mcp/v2`).",
+          "type": "string"
+        },
+        "data": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/SplitPayload"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "description": "Typed concrete tool payload when the tool completed (even when a check or\nverify verdict is `denied: true`)."
+        },
+        "denied": {
+          "description": "Whether the plan verdict or tool gate denied the request.",
+          "type": "boolean"
+        },
+        "effect": {
+          "$ref": "#/$defs/ToolEffect",
+          "description": "Semantic effect of the call (`read_only`, `mutated`, or `refused`)."
+        },
+        "error": {
+          "description": "Sanitized refusal reason when the tool refused (`effect == refused`).",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "subject": {
+          "description": "Primary subject of the invocation (task id, `\"plan\"`, or `\"server\"`).",
+          "type": "string"
+        },
+        "tool": {
+          "description": "Name of the invoked MCP tool.",
+          "type": "string"
+        }
+      },
+      "required": [
+        "contract_version",
+        "tool",
+        "subject",
+        "denied",
+        "effect"
+      ],
+      "title": "ToolResultEnvelope",
+      "type": "object"
+    }
+  },
+  {
     "description": "One task whole: its `paths`, `traces` and `evidence`, which no other tool returns, plus what the graph resolves (its cut, whether it is ready, what it waits on and what it releases) and every finding attached to it. Reads repository-backed evidence and retained typed provider observations without starting configured processes; `aplan_verify` explicitly refreshes providers.",
     "inputSchema": {
       "additionalProperties": false,

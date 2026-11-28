@@ -233,6 +233,11 @@ fn fixture(dir: &Path, plan: Plan) {
     std::fs::write(dir.join("edges.yml"), "- id: D-6\n  add: [D-3]\n")
         .expect("dependency manifest");
     std::fs::write(
+        dir.join("split.yml"),
+        "- title: Split from spec one\n  effort: 1.5\n- title: Split from spec two\n  effort: 1.5\n",
+    )
+    .expect("split spec");
+    std::fs::write(
         dir.join("feature.blueprint.yml"),
         concat!(
             "schema: aplan/blueprint/v1\n",
@@ -530,6 +535,7 @@ fn writes(command: &str) -> bool {
             | "release"
             | "retarget-path"
             | "review"
+            | "split"
             | "start"
             | "stop"
             | "supersede"
@@ -1563,6 +1569,104 @@ const PROBES: &[Probe] = &[
     p("stale", "--owner", Some("ada"), &[]),
     p("stale", "--unclaimed", None, &[]),
     p("stale", "--status", Some("in_progress"), &[]),
+    p(
+        "split",
+        "--child",
+        Some("Second part=1.5"),
+        &["D-3", "--child", "First part=1.5", "--dry-run"],
+    ),
+    p("split", "--from", Some("split.yml"), &["D-3", "--dry-run"]),
+    p(
+        "split",
+        "--sequential",
+        None,
+        &[
+            "D-3",
+            "--child",
+            "First part=1.5",
+            "--child",
+            "Second part=1.5",
+            "--dry-run",
+        ],
+    ),
+    p(
+        "split",
+        "--keep-effort",
+        Some("0.5"),
+        &[
+            "D-3",
+            "--child",
+            "First part=1.5",
+            "--child",
+            "Second part=1",
+            "--reestimate",
+            "--dry-run",
+        ],
+    ),
+    p(
+        "split",
+        "--reestimate",
+        None,
+        &[
+            "D-3",
+            "--child",
+            "First part=1",
+            "--child",
+            "Second part=1",
+            "--dry-run",
+        ],
+    ),
+    p(
+        "split",
+        "--cut",
+        Some("M-a"),
+        &[
+            "D-3",
+            "--child",
+            "First part=1.5",
+            "--child",
+            "Second part=1.5",
+            "--dry-run",
+        ],
+    ),
+    p(
+        "split",
+        "--if-match",
+        Some("0000000000000000"),
+        &[
+            "D-3",
+            "--child",
+            "First part=1.5",
+            "--child",
+            "Second part=1.5",
+            "--dry-run",
+        ],
+    ),
+    p(
+        "split",
+        "--dry-run",
+        None,
+        &[
+            "D-3",
+            "--child",
+            "First part=1.5",
+            "--child",
+            "Second part=1.5",
+        ],
+    ),
+    p(
+        "split",
+        "--format",
+        Some("json"),
+        &[
+            "D-3",
+            "--child",
+            "First part=1.5",
+            "--child",
+            "Second part=1.5",
+            "--dry-run",
+        ],
+    ),
     p("summary", "--format", Some("json"), &[]),
     p("summary", "--at", Some("HEAD"), &[]),
     p("summary", "--cut", Some("M-b"), &[]),

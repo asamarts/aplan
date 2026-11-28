@@ -1490,6 +1490,10 @@ fn affected_tasks(change: &ChangeSet) -> Vec<String> {
             | SemanticEffect::CutMembershipRemoved { tasks: renamed, .. } => {
                 tasks.extend(renamed.iter().cloned());
             }
+            SemanticEffect::TaskSplit { parent, children } => {
+                tasks.insert(parent.clone());
+                tasks.extend(children.iter().cloned());
+            }
             SemanticEffect::TaskRekeyed { old, new } => {
                 tasks.insert(format!("{old} -> {new}"));
             }
@@ -1659,6 +1663,9 @@ fn append_effects(rows: &mut Vec<String>, change: &ChangeSet) {
             }
             SemanticEffect::TaskCreated { task, title } => {
                 format!("create task: {task} ({title})")
+            }
+            SemanticEffect::TaskSplit { parent, children } => {
+                format!("split {parent} into: {}", children.join(", "))
             }
             SemanticEffect::CutMembershipAdded { cut, tasks } => {
                 format!("add to cut {cut}: {}", tasks.join(", "))

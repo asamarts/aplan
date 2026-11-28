@@ -1339,6 +1339,16 @@
       "name": "supersede"
     },
     {
+      "about": "Atomically decompose one live non-milestone work task into bounded child increments wired through `integrates` and `blocked_by` in the same cut",
+      "default_format": "human",
+      "formats": [
+        "human",
+        "json",
+        "agent"
+      ],
+      "name": "split"
+    },
+    {
       "about": "Add or remove dependency edges: repeat `--after`, or use `dep apply` for mixed multi-target additions and removals against one final graph",
       "default_format": "human",
       "formats": [
@@ -1377,7 +1387,7 @@
       "name": "add"
     },
     {
-      "about": "Run an MCP server over stdio, exposing a deliberately small tool set (`identity`, `ready`, `why`, `check`, `verify`, `add`, `show`, `dep`, `close`, `claim`, `release`, `start`, `stop`, `review`) to an agent. `close` goes through the same evidence gate as the CLI, in both directions: an agent cannot close through MCP what it could not close here, and is not refused what this command records",
+      "about": "Run an MCP server over stdio, exposing a deliberately small tool set (`identity`, `ready`, `why`, `check`, `verify`, `add`, `split`, `show`, `dep`, `close`, `claim`, `release`, `start`, `stop`, `review`) to an agent. `close` goes through the same evidence gate as the CLI, in both directions: an agent cannot close through MCP what it could not close here, and is not refused what this command records",
       "default_format": null,
       "formats": [],
       "name": "mcp"
@@ -1543,11 +1553,11 @@
   "counts": {
     "behaviours": 250,
     "build_capabilities": 1,
-    "commands": 51,
+    "commands": 52,
     "config_keys": 137,
     "evidence_kinds": 5,
     "formats": 9,
-    "mcp_tools": 14,
+    "mcp_tools": 15,
     "rules": 67
   },
   "evidence_kinds": [
@@ -1599,6 +1609,10 @@
     {
       "description": "Create a task with an explicit id and phase, or mint the next id in this plan's own convention (including its configured ULID strategy) and derive the phase from its cut. It accepts live initial states, every creation-time relationship, revisit scheduling and version impact; terminal history uses the CLI's evidence-resolving manifest ledger. With `members`, both identity fields are required: create that milestone and move existing live work from its source cuts in one guarded batch. Refuses before writing what `check` would reject after, by running the rules on the plan this would produce; what it would only warn about is named in `notes` instead.",
       "name": "aplan_add"
+    },
+    {
+      "description": "Atomically decompose one live non-milestone work task into two or more bounded child increments wired through parent-side `integrates` and `blocked_by` in the same cut. Supports `dry_run: true` to preview every child, parent edit, effort reconciliation and `preview_identity` without reserving ids or writing files, and `expected_identity` to refuse stale previews before atomic publication. Preserves parent YAML comments, body and checked criteria verbatim; refuses empty, duplicate, cyclic, cross-cut, terminal, already-decomposed, ambiguous or policy-violating splits.",
+      "name": "aplan_split"
     },
     {
       "description": "One task whole: its `paths`, `traces` and `evidence`, which no other tool returns, plus what the graph resolves (its cut, whether it is ready, what it waits on and what it releases) and every finding attached to it. Reads repository-backed evidence and retained typed provider observations without starting configured processes; `aplan_verify` explicitly refreshes providers.",

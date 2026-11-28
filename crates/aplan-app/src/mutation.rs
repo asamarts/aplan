@@ -261,6 +261,11 @@ pub enum SemanticEffect {
     },
     /// One task file is created.
     TaskCreated { task: String, title: String },
+    /// One live work task is atomically decomposed into bounded child increments.
+    TaskSplit {
+        parent: String,
+        children: Vec<String>,
+    },
     /// Existing or newly created cut membership gains tasks.
     CutMembershipAdded { cut: String, tasks: Vec<String> },
     /// Existing cut membership loses tasks.

@@ -615,3 +615,31 @@ resource templates and paginated list requests. Current upstream documents `2026
 but protocol-version-sensitive result serialization has changed within the 3.x line. `A1-520`
 therefore starts as an application and compatibility migration, not an assumed SDK replacement;
 it retains the lock when local wire tests pass and measures any upgrade before shipping.
+
+## 4. Atomic work-task splitting (`A2-150`)
+
+Built directly on `ADR-0076` (`integrates`, `A2-148`), `max_effort_days` (`APLAN067`, `A2-149`),
+and the shared `ChangeSet` publication boundary (`commit_change_set`), `aplan split` / MCP
+`aplan_split` / TUI `Split task into increments` provide one guarded, atomic workflow for turning
+an oversized flat work task into bounded child increments:
+
+- **Preview without side effects:** `preview_split` binds to the loaded `PlanContext` identity
+  (`preview_identity`), mints predicted child IDs in memory without reserving IDs or writing files,
+  and computes the exact `aplan/split/v1` result and post-state diagnostic delta. Stale previews
+  are refused via `ChangeSet` snapshot checks and explicit `--if-match` / `expected_identity`.
+- **Explicit field disposition:** Parent YAML trivia, body, traces, `trace_fingerprints`, and
+  checked acceptance criteria remain verbatim on the parent integration task; an `in_progress`
+  parent transitions to `todo` waiting on its new `integrates` + `blocked_by` children. Children
+  inherit the parent's cut, owner, paths, traces, and required `tag_families` under explicit
+  override rules, never inheriting checked criteria or evidence.
+- **Effort reconciliation:** By default, child efforts plus optional parent integration effort
+  (`--keep-effort` / `parent_effort_days`, or omitted under `A2-148`'s `APLAN009` parent exemption)
+  must reconcile exactly to the parent's prior `effort_days`; `--reestimate` explicitly opts into a
+  revised total while still enforcing `max_effort_days` (`APLAN067`) on every live task.
+- **Complete migration example (flat 8.0d `in_progress` task under `max_effort_days: 3`):**
+
+```sh
+aplan split A1-01 --keep-effort 0.5 --sequential --child "Core slice=2.5" --child "Surface wiring=2.5" --child "Docs and tests=2.5" --dry-run --format json
+aplan split A1-01 --keep-effort 0.5 --sequential --child "Core slice=2.5" --child "Surface wiring=2.5" --child "Docs and tests=2.5" --if-match <PREVIEW_IDENTITY>
+aplan ready
+```

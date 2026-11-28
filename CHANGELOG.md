@@ -8,6 +8,20 @@ to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Added
 
+- **Atomic work-task split workflow `aplan split` / MCP `aplan_split` / TUI `Split task into
+  increments` (`A2-150`, `ADR-0076`)**. Added a shared typed split engine (`aplan-app::split`,
+  `aplan/split/v1` deterministic machine contract) and source-preserving `aplan_core::set_effort_days`
+  rewriter to decompose an oversized live non-milestone work task into two or more bounded child
+  increments wired via parent-side `integrates` and `blocked_by` inside one guarded snapshot and
+  atomic publication. Supports `--dry-run` preview without reserving IDs or writing files,
+  `--if-match` / `expected_identity` stale-preview refusal, exact effort reconciliation by default
+  (with `--keep-effort` / `parent_effort_days` for partial parent integration effort, omitted parent
+  effort via `A2-148`'s `APLAN009` exemption, or explicit `--reestimate`), cut and required
+  `tag_families` inheritance under explicit child override rules, `in_progress -> todo` migration
+  with verbatim parent YAML comments/body/checked-criteria preservation (never copying checked
+  criteria or proof onto children), and fail-closed refusals with zero side effects on empty,
+  single-child, duplicate, cyclic, cross-cut, terminal, milestone, already-decomposed, ambiguous,
+  or policy-violating splits.
 - **Repository-declared maximum live task effort `max_effort_days` (`A2-149`, `APLAN067`)**. Added
   optional top-level `.aplan.yml` key `max_effort_days` (positive finite float; omitted or `null`
   explicitly disables the policy; zero, negative, non-finite, or non-numeric values fail

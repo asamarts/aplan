@@ -191,6 +191,7 @@ fn the_server_initializes_and_lists_exactly_its_tools() {
             "aplan_check",
             "aplan_verify",
             "aplan_add",
+            "aplan_split",
             "aplan_show",
             "aplan_dep",
             "aplan_close",
@@ -1278,6 +1279,16 @@ fn structured_outputs_bounded_resources_and_protocol_matrix() {
         (
             "aplan_add",
             serde_json::json!({ "id": "A-6", "title": "Added task", "phase": 1, "effort_days": 1, "paths": ["proof.txt"] }),
+        ),
+        (
+            "aplan_split",
+            serde_json::json!({
+                "target": "A-6",
+                "children": [
+                    { "title": "Split part one", "effort_days": 0.5 },
+                    { "title": "Split part two", "effort_days": 0.5 }
+                ]
+            }),
         ),
         (
             "aplan_dep",
