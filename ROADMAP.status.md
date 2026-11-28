@@ -10,7 +10,7 @@
 | --- | --- | --- | --- | --- | --- | --- | --- |
 | v0.7 | done | 30/30 | 0 | 0 | 22.8d | 0.8 (0.0 left) | 3.5d |
 | v0.8 | done | 36/36 | 0 | 0 | 49.2d | 1.8 (0.0 left) | 4.5d |
-| adoption | todo | 7/81 | 66 | 8 | 105.8d | 3.9 (3.6 left) | 10.0d |
+| adoption | todo | 8/81 | 66 | 7 | 105.8d | 3.9 (3.5 left) | 10.0d |
 | backlog | todo | 0/1 | 1 | 0 | 1.0d | <0.1 (<0.1 left) | 1.0d |
 | hardening | todo | 1/16 | 15 | 0 | 15.8d | 0.6 (0.5 left) | 3.0d |
 | qualification | todo | 0/1 | 0 | 1 | 8.0d | 0.3 (0.3 left) | 8.0d |
@@ -165,7 +165,7 @@
 | A2-144 | Apply multiple evidence repairs in one atomic amendment | todo | - | - |
 | A2-146 | Distinguish duplicate cut declarations from membership in different cuts | todo | - | - |
 | A2-148 | Define a first-class decomposition relation for multi-increment work | done | - | commit:2da971d3c383, test:decomposition::parent_effort_exemption_and_single_counted_cut_rollups, test:decomposition::flat_one_level_nested_and_partial_completion_across_all_surfaces, test:decomposition::all_aplan066_refusal_boundaries_fail_closed_and_name_offending_subjects, test:decomposition::mutations_interop_and_cli_mcp_parity_for_decomposition, test:validate::tests::integrates_unusable_reports_every_structural_and_lifecycle_refusal_with_subjects, test:graph::ranking::decomposition_progress_tracks_in_progress_next_ready_and_integration_boundary, test:authoring::tests::add_manifest_and_rekey_preserve_and_rewrite_integrates, test:model::tests::inspector_surfaces_parent_progress_boundary_and_integrated_relationships, test:authoring::tests::add_form_decodes_and_previews_integrates_relation |
-| A2-149 | Enforce a repository-declared maximum task effort and require decomposition | todo | A2-148 | - |
+| A2-149 | Enforce a repository-declared maximum task effort and require decomposition | done | A2-148 | commit:5b91b8f99eb1, test:max_effort::boundary_fractional_exemptions_and_decomposition_rollups, test:max_effort::disabled_malformed_and_migrated_legacy_configuration_postures, test:max_effort::cli_mcp_and_tui_creation_paths_judge_the_same_max_effort_post_state, test:validate::tests::effort_exceeds_max_enforces_limit_exemptions_and_decomposition_rollups, test:max_effort_tests::max_effort_days_accepts_omitted_null_and_positive_and_refuses_malformed, test:authoring::tests::authoring_previews_refuse_over_limit_effort_and_allow_at_limit_or_decomposed, test:agents_tests::nothing_declared_means_nothing_asserted, test:id_race::refuse_bad_import_effort_enforces_configured_limit_and_honors_advisory, test:switches::every_options_field_a_rule_reads_is_a_switch_or_is_explained |
 | A2-150 | Add an atomic split workflow for oversized tasks | todo | A2-148, A2-149 | - |
 | A2-151 | Give ready work a bounded explicit way to be promoted next | todo | - | - |
 | A2-154 | A trace cannot select a heading's own body without all of its subsections | todo | - | - |
