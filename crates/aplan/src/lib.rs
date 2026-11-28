@@ -10392,6 +10392,66 @@ fn unmet_families(root: &std::path::Path, tasks: &[aplan_core::task::Task]) -> R
         .collect())
 }
 
+fn refuse_bad_import_effort(
+    root: &std::path::Path,
+    before: &aplan_core::load::Plan,
+    tasks: &[aplan_core::Task],
+    cut: Option<&str>,
+    out_dir: &std::path::Path,
+) -> Result<()> {
+    let (config, config_dir) = config_at(root)?;
+    if config.max_effort_days.is_none() {
+        return Ok(());
+    }
+    let opts = resolve_check_options(
+        &config,
+        config_dir.as_deref(),
+        false,
+        None,
+        false,
+        Some(plan_repository(root)),
+    );
+    let policy = verdict_policy(&config, false, false);
+    if policy
+        .advisory
+        .iter()
+        .any(|c| c == aplan_core::code::EFFORT_EXCEEDS_MAX)
+    {
+        return Ok(());
+    }
+    let mut after = aplan_core::mutation::clone_of(before);
+    let mut ids = Vec::with_capacity(tasks.len());
+    for task in tasks {
+        let path = aplan_interop::emit::task_path(out_dir, &task.id);
+        ids.push(task.id.clone());
+        after = aplan_core::mutation::with_added(&after, path, task.clone());
+    }
+    if let Some(cut_id) = cut
+        && let Some(ms) = after.tasks.iter_mut().find(|lt| lt.task.id == cut_id)
+    {
+        for id in &ids {
+            if !ms.task.blocked_by.iter().any(|b| b == id) {
+                ms.task.blocked_by.push(id.clone());
+            }
+        }
+    }
+    let delta = aplan_core::mutation::delta(before, &after, &opts);
+    let oversized: Vec<String> = delta
+        .added
+        .iter()
+        .filter(|d| d.code == aplan_core::code::EFFORT_EXCEEDS_MAX)
+        .map(|d| format!("{}: {}", d.code, d.message))
+        .collect();
+    if !oversized.is_empty() {
+        anyhow::bail!(
+            "refusing to import: it would add {} finding(s) `check` reports:\n  {}",
+            oversized.len(),
+            oversized.join("\n  ")
+        );
+    }
+    Ok(())
+}
+
 fn cmd_import(root: &std::path::Path, args: &ImportArgs) -> Result<u8> {
     use aplan_interop::{cut, emit, report};
 
@@ -10450,6 +10510,11 @@ fn cmd_import(root: &std::path::Path, args: &ImportArgs) -> Result<u8> {
     if let Some(cut_id) = cut.as_deref() {
         cut::check_target(&plan, cut_id)?;
     }
+
+    // Judge the proposed post-state against `max_effort_days` (`APLAN067`)
+    // before writing anything (including under `--dry-run`), matching `add`,
+    // `add --from`, and `aplan_app::authoring::preview_import` (`A2-149`).
+    refuse_bad_import_effort(root, &plan, &imported.tasks, cut.as_deref(), &out_dir)?;
 
     let ids: Vec<String> = imported.tasks.iter().map(|t| t.id.clone()).collect();
 
@@ -25086,5 +25151,92 @@ mod id_race {
             findings: Vec::new(),
         };
         assert!(format_test_catalogue_human(&no_match).contains("no names match `nope`"));
+    }
+
+    #[test]
+    fn refuse_bad_import_effort_enforces_configured_limit_and_honors_advisory() {
+        let dir = tempfile::Builder::new()
+            .prefix("import-max-effort-")
+            .tempdir_in(aplan_core::fixture::fixture_root())
+            .expect("tempdir");
+        let plan_root = dir.path().join("aplan");
+        let tasks_dir = plan_root.join("tasks");
+        std::fs::create_dir_all(&tasks_dir).expect("tasks dir");
+        std::fs::write(
+            tasks_dir.join("M-1.md"),
+            "---\nid: M-1\ntitle: Cut 1\nphase: 1\nstatus: todo\ntags: [milestone]\n---\n",
+        )
+        .expect("cut");
+        std::fs::write(
+            dir.path().join(".aplan.yml"),
+            "root: aplan\nmax_effort_days: 2.0\n",
+        )
+        .expect("config");
+
+        let before = aplan_core::load_plan(&plan_root);
+        let make = |id: &str, effort: Option<f64>| aplan_core::Task {
+            id: id.to_string(),
+            title: id.to_string(),
+            phase: 1,
+            status: aplan_core::Status::Todo,
+            owner: None,
+            effort_days: effort,
+            blocked_by: Vec::new(),
+            prefer_after: Vec::new(),
+            ratified_by: Vec::new(),
+            contains: Vec::new(),
+            integrates: Vec::new(),
+            evidence: Vec::new(),
+            paths: vec!["src/a.rs".to_string()],
+            traces: Vec::new(),
+            trace_fingerprints: std::collections::BTreeMap::new(),
+            evidence_fingerprints: std::collections::BTreeMap::new(),
+            tags: Vec::new(),
+            revisit_at: None,
+            version_impact: None,
+            version_impact_reason: None,
+            version: None,
+            closed_at: None,
+            closed_at_source: None,
+        };
+
+        // At-limit task passes cleanly.
+        refuse_bad_import_effort(
+            &plan_root,
+            &before,
+            &[make("T-1", Some(2.0))],
+            Some("M-1"),
+            &tasks_dir,
+        )
+        .expect("at-limit import must pass");
+
+        // Over-limit task is refused with APLAN067 before writing.
+        let err = refuse_bad_import_effort(
+            &plan_root,
+            &before,
+            &[make("T-2", Some(3.5))],
+            Some("M-1"),
+            &tasks_dir,
+        )
+        .expect_err("over-limit import must be refused");
+        assert!(
+            err.to_string().contains("APLAN067") && err.to_string().contains("3.5d"),
+            "{err}"
+        );
+
+        // Downgrading APLAN067 via `advisory` allows observation without blocking.
+        std::fs::write(
+            dir.path().join(".aplan.yml"),
+            "root: aplan\nmax_effort_days: 2.0\nadvisory: [APLAN067]\n",
+        )
+        .expect("advisory config");
+        refuse_bad_import_effort(
+            &plan_root,
+            &before,
+            &[make("T-2", Some(3.5))],
+            Some("M-1"),
+            &tasks_dir,
+        )
+        .expect("advisory APLAN067 must not block import");
     }
 }

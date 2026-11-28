@@ -222,6 +222,9 @@ mod machine_readable;
 #[path = "../markdown_cli.rs"]
 mod markdown_cli;
 #[cfg(unix)]
+#[path = "../max_effort.rs"]
+mod max_effort;
+#[cfg(unix)]
 #[path = "../mcp.rs"]
 mod mcp;
 #[cfg(unix)]

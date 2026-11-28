@@ -8,6 +8,20 @@ to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Added
 
+- **Repository-declared maximum live task effort `max_effort_days` (`A2-149`, `APLAN067`)**. Added
+  optional top-level `.aplan.yml` key `max_effort_days` (positive finite float; omitted or `null`
+  explicitly disables the policy; zero, negative, non-finite, or non-numeric values fail
+  configuration load) and opt-in error rule `APLAN067` (`EffortExceedsMax`, `points_at:
+  effort_days`) enforcing a repository-local review-size policy -- not a duration forecast or a
+  universal productivity claim -- on live non-milestone tasks. Tasks strictly above
+  `max_effort_days` (or carrying zero-effort `0` under an active limit) report their measured
+  effort, configured limit, and decomposition remedy pointing to `integrates` + `blocked_by`, while
+  exactly-at-limit tasks, milestones, `done`/`dropped` tasks, decomposition subtree rollups, and
+  repositories that do not opt in remain silent. Enforced identically on proposed post-states
+  before writing across `add`, `add --from`, `import`, `blueprint apply`, `supersede`, `inbox
+  promote`, `aplan mcp`, and `aplan tui`, included in `PlanStore` structural report cache digests
+  and `export-agents-md` guidance when configured, and documented across `schemas/v1/config.json`,
+  `docs/rule-catalogue.md`, `README.md`, `HLD.md`, and `docs/upgrading.md`.
 - **First-class work-task decomposition relation `integrates` (`A2-148`, `ADR-0076`, `APLAN066`,
   `--require effort.exempts_decomposed_parents`)**. Added optional parent-side `integrates`
   frontmatter on non-milestone work tasks to model multi-increment work converging on an explicit,

@@ -3880,4 +3880,85 @@ mod tests {
             "{parent_md}"
         );
     }
+
+    #[test]
+    fn authoring_previews_refuse_over_limit_effort_and_allow_at_limit_or_decomposed() {
+        let dir = fixture();
+        let opts = aplan_core::Options {
+            max_effort_days: Some(2.5),
+            ..aplan_core::Options::default()
+        };
+        let ctx = context(dir.path(), opts);
+
+        let over_req = AddRequest {
+            title: "oversized task".to_string(),
+            id: Some("A-3".to_string()),
+            phase: Some(1),
+            cut: Some("M-v1".to_string()),
+            effort_days: Some(3.0),
+            owner: None,
+            status: None,
+            blocked_by: Vec::new(),
+            prefer_after: Vec::new(),
+            ratified_by: Vec::new(),
+            contains: Vec::new(),
+            integrates: Vec::new(),
+            members: Vec::new(),
+            tags: Vec::new(),
+            paths: vec!["src/big.rs".to_string()],
+            traces: Vec::new(),
+            revisit_at: None,
+            version_impact: None,
+            version_impact_reason: None,
+            evidence: Vec::new(),
+            body: None,
+        };
+        let over_preview = preview_add(&ctx, &over_req).expect("preview builds");
+        assert_eq!(
+            over_preview.change_set().disposition(),
+            ChangeDisposition::Denied,
+            "over-limit must deny"
+        );
+        assert!(
+            over_preview
+                .change_set()
+                .diagnostics()
+                .added
+                .iter()
+                .any(|d| d.code == aplan_core::code::EFFORT_EXCEEDS_MAX),
+            "{:?}",
+            over_preview.change_set().diagnostics().added
+        );
+
+        let exact_req = AddRequest {
+            effort_days: Some(2.5),
+            ..over_req
+        };
+        let exact_preview = preview_add(&ctx, &exact_req).expect("at-limit preview");
+        assert_eq!(
+            exact_preview.change_set().disposition(),
+            ChangeDisposition::Ready,
+            "at-limit must pass"
+        );
+
+        let manifest_over = ManifestRequest {
+            source_name: "batch.yml".to_string(),
+            contents:
+                "- id: A-4\n  title: Too big\n  cut: M-v1\n  effort: 4\n  paths: [src/b.rs]\n"
+                    .to_string(),
+        };
+        let batch_preview = preview_manifest(&ctx, &manifest_over).expect("manifest preview");
+        assert_eq!(
+            batch_preview.change_set().disposition(),
+            ChangeDisposition::Denied
+        );
+        assert!(
+            batch_preview
+                .change_set()
+                .diagnostics()
+                .added
+                .iter()
+                .any(|d| d.code == aplan_core::code::EFFORT_EXCEEDS_MAX)
+        );
+    }
 }

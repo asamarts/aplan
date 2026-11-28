@@ -56,6 +56,30 @@ binary accepts.
 So: stage the new binary, confirm `aplan check` still passes on your existing config, and only then
 add the new keys.
 
+## Repository-declared maximum task effort (`max_effort_days`, `APLAN067`, `A2-149`)
+
+Repositories can now declare an optional positive maximum for a single live non-milestone task's own
+`effort_days` via `max_effort_days` in `.aplan.yml`. Omitting the key or setting
+`max_effort_days: null` explicitly leaves the rule disabled, so existing repositories see no change
+until they opt in. Zero, negative, infinite, or non-numeric values fail configuration load with an
+actionable error naming `max_effort_days`.
+
+- **Local review-size policy, not a duration forecast or universal productivity claim.** Choose a
+  limit that matches your team's reviewable increment size (for example `2` or `3.5`). Because
+  `APLAN067` evaluates each live task's own `effort_days` rather than a decomposition subtree
+  rollup, decomposing an oversized task into bounded increments connected through `integrates` and
+  `blocked_by` (`A2-148`) satisfies the rule cleanly.
+- **Opt-in error rule `APLAN067`.** Live (`todo`, `in_progress`, `blocked`) non-milestone tasks
+  strictly above `max_effort_days` -- or carrying zero-effort fiction (`effort_days: 0`) under an
+  active limit -- are refused across `check`, `verify`, `add`, `add --from`, `import`,
+  `blueprint apply`, `supersede`, `inbox promote`, `aplan mcp`, and `aplan tui` before writing.
+  Exactly-at-limit tasks, milestones, `dropped` tasks, and historical `done` tasks remain silent.
+- **Migrating legacy plans.** Historical `done` tasks above the new limit stay silent automatically.
+  If live legacy tasks exceed your chosen limit, add `advisory: [APLAN067]` temporarily while
+  decomposing them into `integrates` increments, then remove `APLAN067` from `advisory`. Check
+  capability availability with `aplan facts --require max_effort_days --require APLAN067`, and
+  stage the new binary before adding `max_effort_days` to `.aplan.yml`.
+
 ## Work-task decomposition via `integrates` and `APLAN009` parent exemption (`A2-148`)
 
 Multi-increment work tasks can now declare child work tasks explicitly with `integrates` (paired
@@ -419,6 +443,7 @@ this tool does not read intent.
 | a `release` milestone (the `release` tag, ADR-0022) | ships several cuts together and is judged on the release rather than on the cut | has one cut per release, where the cut already is the delivery point |
 | `prefer_after` (ADR-0025) | has work the graph leaves free to order, and an order you want anyway | has an order that dependencies already force, or no opinion about what comes first |
 | `effort_days_per_week` (ADR-0023) | carries `effort_days` and you have *measured* how much of it a week absorbs | has not measured it. A borrowed multiplier makes every derived duration wrong at once |
+| `max_effort_days` (`APLAN067`, `A2-149`) | wants a local review-size ceiling on each live non-milestone task's own `effort_days` so oversized tasks must be decomposed into bounded `integrates` increments | does not estimate effort, has not settled on a local review-size threshold, or treats estimates as rough multi-week buckets rather than reviewable increments (the limit is a local review-size policy, never a duration forecast or a universal productivity claim) |
 | `test` runners with `covers` | has more than one test-listing scope (a workspace of crates, an umbrella of components) | runs one test command that lists everything, where a citation cannot be ambiguous |
 | `url.check` | cites `url` evidence you want resolved rather than trusted | cites no urls, or cites ones that need credentials your CI does not have |
 | `evidence.require_min_strength` | wants `done` to mean a machine could check it. **Which value is a stage, not a taste**: start at `[commit, test, file]` with one exempt tag you review, and narrow to `[test]` once a runner exists to point at. `aplan`'s own `[test]` is the far end of that arc, not the starting line | is still being written, where refusing weak evidence refuses the plan you are drafting |

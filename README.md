@@ -57,7 +57,11 @@ tasks can declare child increments explicitly via `integrates` (paired with `blo
 same cut, validated under `APLAN066`), exposing subtree progress, current increment, remaining
 children, and the integration boundary across `show`, `why`, `tree`, `ready`, `graph`, `roadmap`,
 `summary`, `tasks`, MCP, and TUI without double-counting effort or adding a second grouping
-hierarchy. Whole-plan read tables,
+hierarchy. Repositories that want to bound reviewable task size can opt into `max_effort_days` in
+`.aplan.yml` (`APLAN067`): this is a local review-size policy, not a duration forecast or a
+universal productivity claim, refusing live non-milestone tasks above the declared limit across
+validation and every authoring/import path while pointing authors to `integrates` decomposition
+(leaving milestones, `done`/`dropped` history, and non-opting repositories silent). Whole-plan read tables,
 graphs, roadmaps, and diagnostic reports stream with bounded 16 KiB output buffering and stop
 promptly when downstream pipes close. Use the built-in command help and `aplan facts` for the
 complete current surface.

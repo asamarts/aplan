@@ -7477,6 +7477,9 @@ pub struct AgentContract {
     /// advisory tier* is false for a repository running both, which is a
     /// supported migration posture with a test of its own (`A1-272`'s audit).
     pub advisory: Vec<String>,
+    /// Optional positive maximum `effort_days` for a single live non-milestone
+    /// task (`max_effort_days`, `APLAN067`, `A2-149`).
+    pub max_effort_days: Option<f64>,
     /// Configured test runner *names*, which is what a `test` citation resolves
     /// against. A repository with one runner may leave it unnamed, so this can
     /// be empty while [`runner_count`](Self::runner_count) is not.
@@ -8027,6 +8030,18 @@ fn rule_lines(c: &AgentContract, cmd: &str) -> String {
             )
         );
     }
+    if let Some(limit) = c.max_effort_days {
+        let _ = writeln!(
+            s,
+            "{}",
+            bullet(&format!(
+                "Every live non-milestone task's own `effort_days` must be positive and at most \
+                 `{limit}` (`max_effort_days`, `APLAN067`, a local review-size policy rather than \
+                 a duration forecast); decompose larger work into bounded increments via \
+                 `integrates` and `blocked_by`."
+            ))
+        );
+    }
     let _ = writeln!(
         s,
         "{}",
@@ -8103,6 +8118,7 @@ mod agents_tests {
             exempt_tags: vec!["untestable".into()],
             scoped_evidence: Vec::new(),
             advisory: Vec::new(),
+            max_effort_days: None,
             switches: [
                 Switch::DenyWarnings,
                 Switch::DetectDrift,
@@ -8361,6 +8377,25 @@ mod agents_tests {
         assert!(
             !out.contains("Through MCP"),
             "no tools in this build: {out}"
+        );
+        assert!(
+            !out.contains("`APLAN067`"),
+            "no max_effort_days was declared: {out}"
+        );
+
+        let bounded = AgentContract {
+            max_effort_days: Some(2.5),
+            ..bare
+        };
+        let bounded_out = render_agents_md(&bounded, None);
+        let flat = bounded_out.split_whitespace().collect::<Vec<_>>().join(" ");
+        assert!(
+            flat.contains("`2.5`")
+                && flat.contains("`max_effort_days`")
+                && flat.contains("`APLAN067`")
+                && flat.contains("local review-size policy")
+                && flat.contains("`integrates`"),
+            "{bounded_out}"
         );
         assert!(
             out.contains("live at the repository root,"),

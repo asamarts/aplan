@@ -1694,6 +1694,13 @@ define_rules! {
         "an `integrates` relation forms a same-cut single-parent acyclic decomposition paired with `blocked_by`",
         points_at: Some("integrates"),
         switch: SwitchDisposition::Unconditional;
+    /// A live non-milestone task's own `effort_days` exceeds the repository's
+    /// declared `max_effort_days` review-size limit (or declares a non-positive
+    /// zero estimate under that policy) (`A2-149`).
+    EffortExceedsMax => EFFORT_EXCEEDS_MAX = "APLAN067", Error,
+        "live task effort stays within the repository's configured maximum",
+        points_at: Some("effort_days"),
+        switch: SwitchDisposition::Unconditional;
 }
 
 /// A repository's verdict policy: what makes a report fail its build.
@@ -2121,7 +2128,7 @@ mod tests {
         // Every rule's `code()` is one of the module constants and vice versa is
         // structurally guaranteed by the macro; this pins the count so dropping
         // a row is a visible change.
-        assert_eq!(Rule::ALL.len(), 66);
+        assert_eq!(Rule::ALL.len(), 67);
     }
 
     /// Severity is declared per rule in the macro. Pin the warnings so a

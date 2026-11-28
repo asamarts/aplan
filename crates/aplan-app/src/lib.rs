@@ -3408,6 +3408,17 @@ fn validation_policy_digest(options: &Options, verdict: &Verdict) -> String {
         b"require_effort",
         &[u8::from(options.require_effort)],
     );
+    match options.max_effort_days {
+        Some(limit) => {
+            hash_part(&mut digest, b"max_effort_days_state", b"present");
+            hash_part(
+                &mut digest,
+                b"max_effort_days",
+                &limit.to_bits().to_le_bytes(),
+            );
+        }
+        None => hash_part(&mut digest, b"max_effort_days_state", b"absent"),
+    }
     hash_json_part(&mut digest, b"require_impact", &options.require_impact);
     hash_optional_path(&mut digest, b"traces_root", options.traces_root.as_deref());
     hash_optional_path(
@@ -3451,6 +3462,7 @@ fn validation_policy_digest(options: &Options, verdict: &Verdict) -> String {
     );
     hash_json_part(&mut digest, b"tag_families", &options.tag_families);
     hash_json_part(&mut digest, b"owners", &options.owners);
+    hash_json_part(&mut digest, b"id_families", &options.id_families);
     match &options.agents_block {
         Some(block) => {
             hash_part(&mut digest, b"agents_block_state", b"present");
@@ -4001,6 +4013,12 @@ mod tests {
         );
 
         second.require_effort = false;
+        assert_ne!(
+            validation_policy_digest(&first, &verdict),
+            validation_policy_digest(&second, &verdict)
+        );
+        second.require_effort = true;
+        second.max_effort_days = Some(2.5);
         assert_ne!(
             validation_policy_digest(&first, &verdict),
             validation_policy_digest(&second, &verdict)

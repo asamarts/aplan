@@ -1428,6 +1428,7 @@
     "id_families.default.prefix",
     "id_families.default.strategy",
     "id_strategy",
+    "max_effort_days",
     "no_traces",
     "owners",
     "policy",
@@ -1543,11 +1544,11 @@
     "behaviours": 250,
     "build_capabilities": 1,
     "commands": 51,
-    "config_keys": 136,
+    "config_keys": 137,
     "evidence_kinds": 5,
     "formats": 9,
     "mcp_tools": 14,
-    "rules": 66
+    "rules": 67
   },
   "evidence_kinds": [
     "commit",
@@ -1962,6 +1963,11 @@
       "code": "APLAN066",
       "severity": "error",
       "title": "an `integrates` relation forms a same-cut single-parent acyclic decomposition paired with `blocked_by`"
+    },
+    {
+      "code": "APLAN067",
+      "severity": "error",
+      "title": "live task effort stays within the repository's configured maximum"
     }
   ],
   "schema_version": "v1",

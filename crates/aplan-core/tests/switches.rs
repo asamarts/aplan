@@ -63,6 +63,12 @@ const NOT_A_SWITCH: &[(&str, &str)] = &[
          mapping for a plan that treats ids as opaque would fabricate `APLAN064` mismatches",
     ),
     (
+        "max_effort_days",
+        "a repository-declared numeric review-size limit rather than an on/off switch. Turning \
+         it `on` would mean inventing a universal task-size limit the repository never declared, \
+         fabricating `APLAN067` findings across plans that did not opt in (`A2-149`)",
+    ),
+    (
         "config_file",
         "where the configuration was read from, which no rule's predicate consults",
     ),
