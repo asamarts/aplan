@@ -423,6 +423,87 @@
       "name": "ready_tasks_page",
       "schema": {
         "$defs": {
+          "DecompositionProgress": {
+            "description": "Derived decomposition progress and effort rollup for a work task declaring\n`integrates`.\n\nComputed from the graph rather than persisted in task files so child counts,\nactive increment selection, integration-boundary readiness, and effort totals\nstay derived and single-counted.",
+            "properties": {
+              "children_done": {
+                "description": "Count of direct integrated children currently `done`.",
+                "format": "uint",
+                "minimum": 0,
+                "type": "integer"
+              },
+              "children_done_effort_days": {
+                "description": "Sum of `effort_days` over `done` descendants.",
+                "format": "double",
+                "type": "number"
+              },
+              "children_effort_days": {
+                "description": "Sum of `effort_days` over all live descendants (excluding the parent's\nown integration effort).",
+                "format": "double",
+                "type": "number"
+              },
+              "children_total": {
+                "description": "Count of direct live (non-dropped) integrated children.",
+                "format": "uint",
+                "minimum": 0,
+                "type": "integer"
+              },
+              "current_increment": {
+                "description": "Active (`in_progress`) or next ready increment in this subtree, if any.",
+                "type": [
+                  "string",
+                  "null"
+                ]
+              },
+              "descendants_done": {
+                "description": "Completed (`done`) descendants across all nesting depths.",
+                "format": "uint",
+                "minimum": 0,
+                "type": "integer"
+              },
+              "descendants_remaining": {
+                "description": "Unfinished live descendants across all nesting depths.",
+                "format": "uint",
+                "minimum": 0,
+                "type": "integer"
+              },
+              "descendants_total": {
+                "description": "Total live (non-dropped) descendants across all nesting depths.",
+                "format": "uint",
+                "minimum": 0,
+                "type": "integer"
+              },
+              "integration_ready": {
+                "description": "Whether all integrated children are `done` and this parent is ready at\nits integration boundary.",
+                "type": "boolean"
+              },
+              "remaining_children": {
+                "description": "Direct unfinished live integrated child IDs, in declaration order.",
+                "items": {
+                  "type": "string"
+                },
+                "type": "array"
+              },
+              "total_effort_days": {
+                "description": "Parent's own `effort_days` (0 when omitted) plus `children_effort_days`.",
+                "format": "double",
+                "type": "number"
+              }
+            },
+            "required": [
+              "children_total",
+              "children_done",
+              "remaining_children",
+              "descendants_total",
+              "descendants_done",
+              "descendants_remaining",
+              "integration_ready",
+              "children_effort_days",
+              "children_done_effort_days",
+              "total_effort_days"
+            ],
+            "type": "object"
+          },
           "InputIdentity": {
             "description": "Cryptographic identity of the plan and configuration inputs backing a\nbounded MCP resource response.",
             "properties": {
@@ -461,6 +542,17 @@
                   "null"
                 ]
               },
+              "decomposition": {
+                "anyOf": [
+                  {
+                    "$ref": "#/$defs/DecompositionProgress"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ],
+                "description": "Derived decomposition progress when this ready task is an integration\nboundary declaring `integrates`."
+              },
               "effort_days": {
                 "description": "Effort estimate in days, if present.",
                 "format": "double",
@@ -482,6 +574,13 @@
               },
               "owner": {
                 "description": "Durable owner, if any.",
+                "type": [
+                  "string",
+                  "null"
+                ]
+              },
+              "parent": {
+                "description": "Parent work task integrating this task, if any (`A2-148`, ADR-0076).",
                 "type": [
                   "string",
                   "null"

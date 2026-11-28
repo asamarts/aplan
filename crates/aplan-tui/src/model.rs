@@ -7629,6 +7629,11 @@ fn summary_planning(show: &aplan_app::Show) -> Vec<InspectorItem> {
             InspectorTone::Accent,
         ));
     }
+    push_decomposition_planning(&mut items, show);
+    items
+}
+
+fn push_decomposition_planning(items: &mut Vec<InspectorItem>, show: &aplan_app::Show) {
     if let Some(parent) = &show.parent {
         let label = format!("{} ({})", parent.id, parent.status);
         items.push(InspectorItem::task(
@@ -7659,24 +7664,31 @@ fn summary_planning(show: &aplan_app::Show) -> Vec<InspectorItem> {
                 d.children_effort_days, d.children_done_effort_days, d.total_effort_days
             )),
         ));
-        items.push(InspectorItem::badge(
-            "DECOMPOSITION",
-            "Integration boundary",
-            if d.integration_ready {
-                "ready to integrate".to_string()
-            } else if d.remaining_children.is_empty() {
-                "all children done".to_string()
-            } else {
-                format!(
-                    "waiting on {} remaining child(ren)",
-                    d.remaining_children.len()
-                )
-            },
-            if d.integration_ready {
+        let (boundary_label, boundary_tone) = if d.children_total == 0 {
+            ("no live children".to_string(), InspectorTone::Muted)
+        } else if d.integration_ready {
+            ("ready to integrate".to_string(), InspectorTone::Good)
+        } else if d.remaining_children.is_empty() {
+            let tone = if show.status == "done" {
                 InspectorTone::Good
             } else {
                 InspectorTone::Warning
-            },
+            };
+            ("all children done".to_string(), tone)
+        } else {
+            (
+                format!(
+                    "waiting on {} remaining child(ren)",
+                    d.remaining_children.len()
+                ),
+                InspectorTone::Warning,
+            )
+        };
+        items.push(InspectorItem::badge(
+            "DECOMPOSITION",
+            "Integration boundary",
+            boundary_label,
+            boundary_tone,
         ));
         if let Some(cur) = &d.current_increment {
             items.push(InspectorItem::task(
@@ -7694,7 +7706,6 @@ fn summary_planning(show: &aplan_app::Show) -> Vec<InspectorItem> {
             ));
         }
     }
-    items
 }
 
 fn summary_detail_links(show: &aplan_app::Show) -> [InspectorItem; 7] {
@@ -12876,5 +12887,57 @@ mod tests {
         assert!(has(&child_rels, "Parent", "P-1"), "{child_rels:?}");
         let links = summary_detail_links(&child);
         assert!(has(&links, "Relationships", "1"), "{links:?}");
+    }
+
+    #[test]
+    fn inspector_renders_dropped_and_done_decomposition_boundary_tones() {
+        let has = |items: &[InspectorItem], a: &str, b: &str| {
+            items.iter().any(|item| {
+                let text = format!("{:?}", item.presentation);
+                text.contains(a) && text.contains(b)
+            })
+        };
+        let mut dropped =
+            crate::testing::task_inspector(&crate::testing::task_row("P-1", "Parent"));
+        dropped.status = "dropped".to_string();
+        dropped.decomposition = Some(aplan_core::DecompositionProgress {
+            children_total: 0,
+            children_done: 0,
+            remaining_children: Vec::new(),
+            descendants_total: 0,
+            descendants_done: 0,
+            descendants_remaining: 0,
+            current_increment: None,
+            integration_ready: false,
+            children_effort_days: 0.0,
+            children_done_effort_days: 0.0,
+            total_effort_days: 0.0,
+        });
+        let dropped_planning = summary_planning(&dropped);
+        assert!(
+            has(&dropped_planning, "no live children", "Muted"),
+            "{dropped_planning:?}"
+        );
+
+        let mut done = dropped;
+        done.status = "done".to_string();
+        done.decomposition = Some(aplan_core::DecompositionProgress {
+            children_total: 1,
+            children_done: 1,
+            remaining_children: Vec::new(),
+            descendants_total: 1,
+            descendants_done: 1,
+            descendants_remaining: 0,
+            current_increment: None,
+            integration_ready: false,
+            children_effort_days: 2.0,
+            children_done_effort_days: 2.0,
+            total_effort_days: 2.0,
+        });
+        let done_planning = summary_planning(&done);
+        assert!(
+            has(&done_planning, "all children done", "Good"),
+            "{done_planning:?}"
+        );
     }
 }

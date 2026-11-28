@@ -4147,4 +4147,58 @@ mod ranking {
         assert_eq!(prog2.children_done_effort_days, 5.0);
         assert_eq!(prog2.total_effort_days, 5.0);
     }
+
+    #[test]
+    fn decomposition_handles_cycles_external_blockers_dropped_parents_and_increment_priority() {
+        // 3-node integrates cycle terminates deterministically without looping.
+        let mut a = task_e("CYC-A", &["CYC-B"], 1.0);
+        a.integrates = vec!["CYC-B".into()];
+        let mut b = task_e("CYC-B", &["CYC-C"], 2.0);
+        b.integrates = vec!["CYC-C".into()];
+        let mut c = task_e("CYC-C", &["CYC-A"], 3.0);
+        c.integrates = vec!["CYC-A".into()];
+        let g_cyc = Graph::new([&a, &b, &c]);
+        let prog_a = g_cyc.decomposition_of("CYC-A").expect("cycle progress");
+        assert_eq!(prog_a.children_total, 1);
+        assert_eq!(prog_a.descendants_total, 2);
+        assert_eq!(prog_a.children_effort_days, 5.0);
+        assert_eq!(prog_a.total_effort_days, 6.0);
+
+        // Nested in_progress leaf grandchild wins over in_progress intermediate parent.
+        let mut root = task_e("R-1", &["MID-1", "SIB-1"], 0.5);
+        root.integrates = vec!["MID-1".into(), "SIB-1".into()];
+        let mut mid = task_e("MID-1", &["LEAF-1"], 0.5);
+        mid.status = Status::InProgress;
+        mid.integrates = vec!["LEAF-1".into()];
+        let mut leaf = task_e("LEAF-1", &[], 1.0);
+        leaf.status = Status::InProgress;
+        let sib = task_e("SIB-1", &[], 2.0);
+        let g_nested = Graph::new([&root, &mid, &leaf, &sib]);
+        let prog_root = g_nested.decomposition_of("R-1").expect("nested progress");
+        assert_eq!(prog_root.current_increment.as_deref(), Some("LEAF-1"));
+
+        // Parent with all children done plus an unfinished external blocker is NOT integration_ready.
+        let ext = task_e("EXT-1", &[], 1.0);
+        let child_done = done("CH-1", &[], 2.0);
+        let mut p_ext = task_e("P-EXT", &["CH-1", "EXT-1"], 1.0);
+        p_ext.integrates = vec!["CH-1".into()];
+        let g_ext = Graph::new([&ext, &child_done, &p_ext]);
+        let prog_ext = g_ext.decomposition_of("P-EXT").expect("ext progress");
+        assert_eq!(prog_ext.children_done, 1);
+        assert!(prog_ext.remaining_children.is_empty());
+        assert!(!prog_ext.integration_ready);
+        assert_eq!(prog_ext.current_increment, None);
+
+        // Dropped parent with dropped children reports zero live children and zero total effort.
+        let mut p_drop = task_e("P-DROP", &["C-DROP"], 2.0);
+        p_drop.status = Status::Dropped;
+        p_drop.integrates = vec!["C-DROP".into()];
+        let mut c_drop = task_e("C-DROP", &[], 3.0);
+        c_drop.status = Status::Dropped;
+        let g_drop = Graph::new([&p_drop, &c_drop]);
+        let prog_drop = g_drop.decomposition_of("P-DROP").expect("drop progress");
+        assert_eq!(prog_drop.children_total, 0);
+        assert!(!prog_drop.integration_ready);
+        assert_eq!(prog_drop.total_effort_days, 0.0);
+    }
 }

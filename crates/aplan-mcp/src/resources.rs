@@ -1117,6 +1117,8 @@ mod tests {
                 cut: None,
                 owner: None,
                 held_by: None,
+                parent: None,
+                decomposition: None,
             })
             .collect();
 
@@ -1182,6 +1184,8 @@ mod tests {
                 cut: None,
                 owner: None,
                 held_by: None,
+                parent: None,
+                decomposition: None,
             })
             .collect();
 
