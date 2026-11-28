@@ -410,6 +410,7 @@ pub fn configured_agent_contract(
             .cloned()
             .unwrap_or_default(),
         advisory: config.advisory.clone().unwrap_or_default(),
+        max_effort_days: config.max_effort_days,
         switches: [
             (
                 aplan_output::Switch::DenyWarnings,
@@ -567,6 +568,7 @@ pub fn configured_options(config: &Config, inputs: ConfigurationInputs<'_>) -> O
 
     Options {
         require_effort,
+        max_effort_days: config.max_effort_days,
         require_impact: config
             .version
             .as_ref()

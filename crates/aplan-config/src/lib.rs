@@ -86,6 +86,10 @@ pub enum Error {
     /// printed the message next to the input.
     #[error("invalid `effort_days_per_week` in `.aplan.yml`: {0}")]
     BadThroughput(String),
+    /// A `max_effort_days` threshold that cannot bound live task effort
+    /// (`A2-149`).
+    #[error("invalid `max_effort_days` in `.aplan.yml`: {0}")]
+    BadMaxEffort(String),
     /// A `docs.membership` entry the check could not be run from. Its own
     /// variant for the reason [`BadUrlCheck`](Self::BadUrlCheck) has one.
     #[error("invalid `docs.membership` in `.aplan.yml`: {0}")]
@@ -494,6 +498,20 @@ pub struct Config {
     /// `true`. The `--no-require-effort` flag overrides this to `false`.
     #[serde(default)]
     pub require_effort: Option<bool>,
+    /// Optional positive maximum `effort_days` permitted on a single live
+    /// non-milestone task (`APLAN067`, `A2-149`).
+    ///
+    /// This is a repository-local review-size policy, never a duration forecast
+    /// or a universal productivity claim: when a live work task's own estimate
+    /// exceeds this limit, `APLAN067` reports the measured effort and limit and
+    /// directs the author to decompose the work into bounded increments via
+    /// parent-side `integrates` paired with `blocked_by`.
+    ///
+    /// Absent or explicitly `null` disables the rule cleanly so repositories
+    /// that do not opt in remain silent.
+    #[serde(default)]
+    #[schemars(extend("exclusiveMinimum" = 0.0))]
+    pub max_effort_days: Option<f64>,
     /// Resolve `traces` anchors (`APLAN008`) against this root. Default: the
     /// current directory. The `--traces-root` flag overrides it.
     #[serde(default)]
@@ -3309,6 +3327,7 @@ fn validate_all(config: &Config) -> Result<(), Error> {
     config.validate_tag_families()?;
     config.validate_owners()?;
     config.validate_throughput()?;
+    config.validate_max_effort()?;
     config.validate_docs()?;
     config.validate_grouping()
 }
@@ -3770,6 +3789,13 @@ pub const SCAFFOLD: &str = r#"# .aplan.yml, this repository's `aplan` policy.
 
 # Warn when an active task has no `effort_days` estimate (APLAN009).
 # require_effort: true
+
+# Optional positive maximum `effort_days` for a single live non-milestone task
+# (APLAN067). This is a local review-size policy, not a duration forecast or a
+# universal productivity claim: tasks above it should be decomposed into bounded
+# increments via parent-side `integrates` paired with `blocked_by`. Omit or set
+# `null` to leave the maximum disabled.
+# max_effort_days: null
 
 # How long a live task may sit unchanged in git before `aplan stale` names it,
 # in days. A window rather than a threshold for failing anything: `stale` reports
@@ -4438,6 +4464,24 @@ impl Config {
         }
     }
 
+    /// Reject a maximum task effort bound that is zero, negative, or non-finite
+    /// (`A2-149`).
+    ///
+    /// Absent or `null` explicitly disables the policy; any present number must
+    /// be strictly positive and finite so `APLAN067` has a meaningful boundary.
+    ///
+    /// # Errors
+    /// When `max_effort_days` is present and not a positive finite number.
+    pub fn validate_max_effort(&self) -> Result<(), Error> {
+        match self.max_effort_days {
+            Some(limit) if !limit.is_finite() || limit <= 0.0 => Err(Error::BadMaxEffort(format!(
+                "it is `{limit}`; it must be a positive finite number of days (e.g. `2` or \
+                 `3.5`), or omit / set `null` to disable the maximum"
+            ))),
+            _ => Ok(()),
+        }
+    }
+
     /// Reject a tag vocabulary the tool cannot act on.
     ///
     /// # Errors
@@ -4932,6 +4976,7 @@ capture:
     triage:
       kind: question
 require_effort: true
+max_effort_days: 3
 policy:
   - when:
       cut: [M-v0.9]
@@ -5300,7 +5345,7 @@ stale_after_days: 30
         let keys = accepted_keys();
         assert_eq!(
             keys.len(),
-            136,
+            137,
             "config keys changed; teach the fixture above, then update this count: {keys:?}"
         );
         for key in keys {
@@ -6678,6 +6723,47 @@ mod throughput_tests {
         declared
             .validate_throughput()
             .expect("a positive number is fine");
+    }
+}
+
+#[cfg(test)]
+mod max_effort_tests {
+    use super::*;
+
+    #[test]
+    fn max_effort_days_accepts_omitted_null_and_positive_and_refuses_malformed() {
+        for yaml in ["", "max_effort_days: null\n", "max_effort_days: ~\n"] {
+            let cfg = parse_config(yaml, Path::new(".aplan.yml")).expect("disabled loads");
+            assert_eq!(cfg.max_effort_days, None, "{yaml:?}");
+        }
+        for (yaml, expected) in [
+            ("max_effort_days: 3\n", 3.0),
+            ("max_effort_days: 1.5\n", 1.5),
+            ("max_effort_days: 0.25\n", 0.25),
+        ] {
+            let cfg = parse_config(yaml, Path::new(".aplan.yml")).expect("positive loads");
+            assert_eq!(cfg.max_effort_days, Some(expected), "{yaml:?}");
+        }
+        for bad in ["0", "0.0", "-1", "-0.25", ".inf", "-.inf", ".nan"] {
+            let text = format!("max_effort_days: {bad}\n");
+            let err = parse_config(&text, Path::new(".aplan.yml"))
+                .expect_err(&format!("`{bad}` must fail"))
+                .to_string();
+            assert!(
+                err.contains("`max_effort_days` in `.aplan.yml`")
+                    && err.contains("positive finite"),
+                "{bad}: {err}"
+            );
+        }
+        for wrong_type in ["\"three\"", "true", "[]", "{}"] {
+            let text = format!("max_effort_days: {wrong_type}\n");
+            let err = parse_config(&text, Path::new(".aplan.yml"))
+                .expect_err(&format!("`{wrong_type}` must fail"));
+            assert!(
+                matches!(err, Error::Parse(_)),
+                "expected parse error for {wrong_type}, got {err:?}"
+            );
+        }
     }
 }
 

@@ -590,3 +590,12 @@ an `integrates` relation forms a same-cut single-parent acyclic decomposition pa
 - **says:** terminal parent `P-1` is `done` while integrated child `C-1` is `todo`
   - **fix:** Complete `C-1` before closing `P-1`, or remove `C-1` from `integrates` and `blocked_by` if it is no longer part of `P-1`.
 
+## APLAN067 (error)
+
+live task effort stays within the repository's configured maximum
+
+- **says:** `effort_days` is 0d under configured `max_effort_days` (3d): a live task must declare a positive estimate rather than zero-effort fiction
+  - **fix:** Set `A-1`'s `effort_days` to a positive estimate <= 3d, or omit `effort_days` if `A-1` is a decomposed parent declaring `integrates`.
+- **says:** `effort_days` is 4d, exceeding configured `max_effort_days` (3d): decompose work above the repository's review-size limit into bounded increments
+  - **fix:** Decompose `A-1` into smaller work tasks each <= 3d and connect them via parent-side `integrates` paired with `blocked_by` in the same cut (for example `aplan add ... --blocked-by <child> --integrates <child>`), keeping `A-1`'s own integration `effort_days` <= 3d or omitting it while integrating children.
+

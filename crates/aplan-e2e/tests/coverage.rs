@@ -51,6 +51,9 @@ struct Scenario {
     traces_root: bool,
     /// Require an `effort_days` estimate (enables `APLAN009`).
     require_effort: bool,
+    /// Optional positive maximum `effort_days` on a single live non-milestone
+    /// task (enables `APLAN067`).
+    max_effort_days: Option<f64>,
     /// Require commit/test/file evidence on `done` tasks (enables `APLAN017`).
     require_strong: bool,
     /// Detect stale-`done` drift (enables `APLAN018`; also enables `traces_root`).
@@ -89,6 +92,10 @@ impl Scenario {
     }
     fn effort(mut self) -> Self {
         self.require_effort = true;
+        self
+    }
+    fn max_effort(mut self, limit: f64) -> Self {
+        self.max_effort_days = Some(limit);
         self
     }
     fn strong(mut self) -> Self {
@@ -166,6 +173,7 @@ fn scen(name: &'static str, rule: Rule, expect: Expect, files: Vec<(String, Stri
         require_impact: false,
         traces_root: false,
         require_effort: false,
+        max_effort_days: None,
         require_strong: false,
         detect_drift: false,
         require_cut_membership: false,
@@ -553,6 +561,7 @@ fn corpus() -> Vec<Scenario> {
     all.extend(evidence_and_trace_rules());
     all.extend(ratification_rules());
     all.extend(decomposition_rules());
+    all.extend(max_effort_rules());
     all.extend(structured_trace_rules());
     all.extend(effort_note_and_deadlock_rules());
     all.extend(external_trace_rules());
@@ -1622,6 +1631,68 @@ fn decomposition_rules() -> Vec<Scenario> {
     ]
 }
 
+/// `APLAN067`: optional repository-declared maximum `effort_days` for live
+/// non-milestone tasks (`A2-149`).
+fn max_effort_rules() -> Vec<Scenario> {
+    vec![
+        scen(
+            "effort-exceeds-max-fires",
+            Rule::EffortExceedsMax,
+            Fires,
+            vec![tf(
+                "a",
+                "id: A-1\ntitle: Oversized live task\nphase: 1\nstatus: todo\neffort_days: 4",
+            )],
+        )
+        .max_effort(3.0),
+        scen(
+            "effort-exceeds-max-zero-fires",
+            Rule::EffortExceedsMax,
+            Fires,
+            vec![tf(
+                "a",
+                "id: A-1\ntitle: Zero-effort live task\nphase: 1\nstatus: todo\neffort_days: 0",
+            )],
+        )
+        .max_effort(3.0),
+        scen(
+            "effort-exceeds-max-at-limit-and-exempt-silent",
+            Rule::EffortExceedsMax,
+            Silent,
+            vec![
+                tf(
+                    "m",
+                    "id: M-1\ntitle: Cut\nphase: 1\nstatus: todo\ntags:\n  - milestone\n\
+                     blocked_by:\n  - P-1\n  - C-1\n  - C-2\n  - D-1\n  - X-1",
+                ),
+                tf(
+                    "p",
+                    "id: P-1\ntitle: Decomposed parent\nphase: 1\nstatus: todo\n\
+                     blocked_by:\n  - C-1\n  - C-2\nintegrates:\n  - C-1\n  - C-2",
+                ),
+                tf(
+                    "c1",
+                    "id: C-1\ntitle: Exactly-at-limit child\nphase: 1\nstatus: todo\neffort_days: 3",
+                ),
+                tf(
+                    "c2",
+                    "id: C-2\ntitle: Fractional child\nphase: 1\nstatus: todo\neffort_days: 1.5",
+                ),
+                tf(
+                    "d",
+                    "id: D-1\ntitle: Historical done task\nphase: 1\nstatus: done\neffort_days: 8\n\
+                     evidence:\n  - kind: note\n    ref: legacy\n    captured: 2026-10-01",
+                ),
+                tf(
+                    "x",
+                    "id: X-1\ntitle: Dropped oversized task\nphase: 1\nstatus: dropped\neffort_days: 10",
+                ),
+            ],
+        )
+        .max_effort(3.0),
+    ]
+}
+
 /// `APLAN005`, `APLAN007`, `APLAN008`: evidence-gated `done` and trace anchors.
 fn evidence_and_trace_rules() -> Vec<Scenario> {
     vec![
@@ -2501,6 +2572,7 @@ fn cancelled_cut_rules() -> Vec<Scenario> {
 fn options_for(s: &Scenario, dir: &std::path::Path) -> Options {
     Options {
         require_effort: s.require_effort,
+        max_effort_days: s.max_effort_days,
         // The shipped defaults: a unit of work owes a fix, a cut a feature, a
         // release nothing of its own (ADR-0034).
         require_impact: s.require_impact.then_some(aplan_core::task::VersionFloors {
@@ -4939,7 +5011,7 @@ fn the_rule_catalogue_is_committed_and_current() {
 }
 
 /// Wordings the corpus currently reaches. Raise it when a branch is added.
-const WORDINGS: usize = 123;
+const WORDINGS: usize = 125;
 
 #[test]
 fn the_catalogue_pins_every_rule_and_is_not_vacuous() {

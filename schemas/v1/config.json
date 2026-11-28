@@ -1377,6 +1377,16 @@
       "default": null,
       "description": "How `aplan add` mints an id when the caller does not pass `--id`\n(`A1-047`). Default: `sequential`, the derivation every existing plan\nalready gets.\n\n`ulid` is for a repository with authors working offline in parallel,\nwhere two of them derive the same next id and find out at the merge.\nIt costs readability -- a ULID is 26 characters nobody types from memory\n-- so it is a trade a repository makes once, knowingly, rather than a\ndefault that arrives with an upgrade."
     },
+    "max_effort_days": {
+      "default": null,
+      "description": "Optional positive maximum `effort_days` permitted on a single live\nnon-milestone task (`APLAN067`, `A2-149`).\n\nThis is a repository-local review-size policy, never a duration forecast\nor a universal productivity claim: when a live work task's own estimate\nexceeds this limit, `APLAN067` reports the measured effort and limit and\ndirects the author to decompose the work into bounded increments via\nparent-side `integrates` paired with `blocked_by`.\n\nAbsent or explicitly `null` disables the rule cleanly so repositories\nthat do not opt in remain silent.",
+      "exclusiveMinimum": 0.0,
+      "format": "double",
+      "type": [
+        "number",
+        "null"
+      ]
+    },
     "no_traces": {
       "default": null,
       "description": "Skip `traces` checking entirely. Default: `false`. The `--no-traces` flag\noverrides it.",

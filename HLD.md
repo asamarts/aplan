@@ -757,6 +757,7 @@ empty cut must be surfaced, not swallowed.
 | `APLAN064` | A task's id matches the id family declared for its cut | warning | L0 | done (`A2-097`, opt-in) |
 | `APLAN065` | A `closed_at` record is valid canonical UTC and only appears on a `done` task | error | L0 | done (`A2-109`, ADR-0074) |
 | `APLAN066` | Every `integrates` edge forms a valid same-cut single-parent acyclic decomposition of work tasks paired with `blocked_by` | error | L0 | done (`A2-148`, ADR-0076) |
+| `APLAN067` | Live non-milestone task `effort_days` is positive and stays within the repository's configured `max_effort_days` review-size limit | error | L0 | done (`A2-149`, opt-in) |
 | `APLAN044` | A closed task claims less of the released version than its level implies, without saying why | warning | L0 | done (`A1-312`) |
 
 Every diagnostic carries a stable code, a severity, an optional task id, an optional
@@ -1051,6 +1052,7 @@ The shipped shape, every key optional:
 
 ```yaml
 require_effort: true                            # APLAN009, default true
+max_effort_days: 3                              # APLAN067, optional local review-size limit; omit/null disables
 traces_root: .                                  # APLAN008 root, default the cwd
 no_traces: false                                # or switch trace checking off
 test:                                           # the runner for `verify --execute`
@@ -1079,6 +1081,18 @@ deterministically as shell-safe Markdown data in `export-agents-md` and gated by
 running `aplan` executable or spawns a subprocess. Empty lists, blank tokens, scalar strings,
 control/directional characters, and over-budget declarations fail configuration rather than
 falling back.
+
+**Maximum live task effort (`max_effort_days`, `APLAN067`, shipped in `A2-149`).** An optional
+positive finite bound on a single live non-milestone task's own `effort_days` (explicitly disabled
+when omitted or `null`; zero, negative, infinite, or non-numeric values fail configuration load).
+This is a repository-local review-size policy, not a duration forecast or a universal productivity
+claim: exactly-at-limit tasks pass, while over-limit (or zero-effort) live tasks are refused under
+`APLAN067` across `check`, `verify`, `add`, `add --from`, `import`, `blueprint apply`, `supersede`,
+`inbox promote`, MCP, and TUI before writing, directing authors to decompose work into bounded
+increments connected through parent-side `integrates` and `blocked_by`. Milestones, terminal
+(`done`/`dropped`) tasks, and repositories that do not opt in remain silent; decomposition subtree
+rollups (`total_effort_days`) may exceed `max_effort_days` so long as each individual live task's
+own estimate stays within the limit.
 
 **The trust boundary lives here** (§5.5). The `test` runner, `url.check`, `version.current`
 and `version.check` are the only places a command may be named, and all are top-level config

@@ -534,6 +534,10 @@ pub struct AgentsBlock {
 pub struct Options {
     /// Require an `effort_days` estimate on non-terminal, non-milestone tasks.
     pub require_effort: bool,
+    /// Optional repository-declared positive maximum `effort_days` permitted on
+    /// a single live non-milestone task (`APLAN067`, `A2-149`). `None` leaves
+    /// the rule silent.
+    pub max_effort_days: Option<f64>,
     /// Whether a closed task has to account for what it does to the released
     /// version, and the per-level floors it is held to (`A1-312`, ADR-0034).
     ///
@@ -619,6 +623,7 @@ impl Default for Options {
     fn default() -> Self {
         Self {
             require_effort: true,
+            max_effort_days: None,
             require_impact: None,
             traces_root: None,
             traces_repository: None,
@@ -1161,6 +1166,7 @@ fn check_task(
     check_version_impact(lt, context, out);
     check_version_record(lt, out);
     check_effort(lt, graph, context, out);
+    check_max_effort(lt, context.opts, out);
     check_milestone_shape(lt, graph, out);
     check_task_traces(lt, context, out);
 }
@@ -1196,6 +1202,68 @@ fn check_effort(
         }
     } else {
         context.record_disabled(Rule::MissingEffort, missing);
+    }
+}
+
+/// `APLAN067`: when `.aplan.yml` declares `max_effort_days`, every live
+/// non-milestone task carrying `effort_days` must have a positive estimate not
+/// exceeding that local review-size limit (`A2-149`).
+///
+/// Judges each task's own `effort_days`, never a derived decomposition subtree
+/// rollup: decomposing an oversized task into bounded child increments under an
+/// integration-boundary parent (`integrates` + `blocked_by`) satisfies the
+/// policy without double-counting effort or forcing zero-effort fiction.
+fn check_max_effort(lt: &LoadedTask, opts: &Options, out: &mut Vec<Diagnostic>) {
+    let Some(limit) = opts.max_effort_days else {
+        return;
+    };
+    if !limit.is_finite() || limit <= 0.0 {
+        return;
+    }
+    let t = &lt.task;
+    if t.status.is_terminal() || t.is_milestone() {
+        return;
+    }
+    let Some(days) = t.effort_days else {
+        return;
+    };
+    if days <= 0.0 {
+        out.push(
+            Diagnostic::error(
+                code::EFFORT_EXCEEDS_MAX,
+                format!(
+                    "`effort_days` is {days}d under configured `max_effort_days` ({limit}d): a \
+                     live task must declare a positive estimate rather than zero-effort fiction"
+                ),
+            )
+            .with_task(&t.id)
+            .with_file(&lt.path)
+            .with_agent_instruction(format!(
+                "Set `{}`'s `effort_days` to a positive estimate <= {limit}d, or omit \
+                 `effort_days` if `{}` is a decomposed parent declaring `integrates`.",
+                t.id, t.id
+            )),
+        );
+    } else if days > limit {
+        out.push(
+            Diagnostic::error(
+                code::EFFORT_EXCEEDS_MAX,
+                format!(
+                    "`effort_days` is {days}d, exceeding configured `max_effort_days` ({limit}d): \
+                     decompose work above the repository's review-size limit into bounded \
+                     increments"
+                ),
+            )
+            .with_task(&t.id)
+            .with_file(&lt.path)
+            .with_agent_instruction(format!(
+                "Decompose `{}` into smaller work tasks each <= {limit}d and connect them via \
+                 parent-side `integrates` paired with `blocked_by` in the same cut (for example \
+                 `aplan add ... --blocked-by <child> --integrates <child>`), keeping `{}`'s own \
+                 integration `effort_days` <= {limit}d or omitting it while integrating children.",
+                t.id, t.id
+            )),
+        );
     }
 }
 
@@ -10899,5 +10967,94 @@ mod tests {
                 "expected APLAN066 message containing `{needle}`, got:\n{messages:#?}"
             );
         }
+    }
+
+    #[test]
+    fn effort_exceeds_max_enforces_limit_exemptions_and_decomposition_rollups() {
+        let mut over = t("T-over", Status::Todo);
+        over.effort_days = Some(3.5);
+        let mut zero = t("T-zero", Status::InProgress);
+        zero.effort_days = Some(0.0);
+        let mut exact = t("T-exact", Status::Todo);
+        exact.effort_days = Some(2.5);
+        let mut frac = t("T-frac", Status::Blocked);
+        frac.effort_days = Some(1.25);
+        let mut done_big = t("T-done", Status::Done);
+        done_big.effort_days = Some(8.0);
+        let mut dropped_big = t("T-drop", Status::Dropped);
+        dropped_big.effort_days = Some(9.0);
+        let mut ms = t("M-1", Status::Todo);
+        ms.tags = vec!["milestone".to_string()];
+        ms.effort_days = Some(10.0);
+        let mut parent = t("P-1", Status::Todo);
+        parent.effort_days = None;
+        parent.blocked_by = vec!["T-exact".into(), "T-frac".into()];
+        parent.integrates = vec!["T-exact".into(), "T-frac".into()];
+        let mut big_parent = t("P-big", Status::Todo);
+        big_parent.effort_days = Some(4.0);
+        big_parent.blocked_by = vec!["T-exact".into()];
+        big_parent.integrates = vec!["T-exact".into()];
+
+        let plan = plan_of(vec![
+            over,
+            zero,
+            exact,
+            frac,
+            done_big,
+            dropped_big,
+            ms,
+            parent,
+            big_parent,
+        ]);
+
+        // Disabled by default (`max_effort_days: None`) stays completely silent on APLAN067.
+        let off = validate(&plan, &Options::default());
+        assert!(
+            !off.diagnostics
+                .iter()
+                .any(|d| d.code == code::EFFORT_EXCEEDS_MAX),
+            "{:?}",
+            off.diagnostics
+        );
+
+        let opts = Options {
+            max_effort_days: Some(2.5),
+            ..Options::default()
+        };
+        let on = validate(&plan, &opts);
+        let a067: Vec<&Diagnostic> = on
+            .diagnostics
+            .iter()
+            .filter(|d| d.code == code::EFFORT_EXCEEDS_MAX)
+            .collect();
+        let tasks: Vec<Option<&str>> = a067.iter().map(|d| d.task.as_deref()).collect();
+        assert_eq!(tasks, vec![Some("P-big"), Some("T-over"), Some("T-zero")]);
+
+        let over_diag = a067
+            .iter()
+            .find(|d| d.task.as_deref() == Some("T-over"))
+            .expect("T-over");
+        assert!(
+            over_diag.message.contains("3.5d")
+                && over_diag.message.contains("2.5d")
+                && over_diag.message.contains("review-size limit"),
+            "{}",
+            over_diag.message
+        );
+        let instr = over_diag.agent_instruction.as_deref().unwrap_or_default();
+        assert!(
+            instr.contains("integrates") && instr.contains("blocked_by") && instr.contains("2.5d"),
+            "{instr}"
+        );
+
+        let zero_diag = a067
+            .iter()
+            .find(|d| d.task.as_deref() == Some("T-zero"))
+            .expect("T-zero");
+        assert!(
+            zero_diag.message.contains("0d") && zero_diag.message.contains("positive estimate"),
+            "{}",
+            zero_diag.message
+        );
     }
 }
