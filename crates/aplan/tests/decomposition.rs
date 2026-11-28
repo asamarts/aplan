@@ -1235,3 +1235,229 @@ fn assert_export_drop_and_supersede_lifecycle(dir: &Path) {
         check_sup.stdout, check_sup.stderr
     );
 }
+
+#[test]
+fn cyclic_integrates_plan_reads_safely_and_cross_cutting_decomposition_passes() {
+    // 1. 3-node integrates cycle: check reports APLAN066 and every read surface terminates cleanly.
+    let cyc = tempdir("decomp-cycle-reads-");
+    write(&cyc.path().join(".aplan.yml"), "root: aplan\n");
+    for (id, next) in [("CYC-1", "CYC-2"), ("CYC-2", "CYC-3"), ("CYC-3", "CYC-1")] {
+        write(
+            &cyc.path().join(format!("aplan/tasks/{id}.md")),
+            &task_md(&format!(
+                "id: {id}\ntitle: Cycle node {id}\nphase: 1\nstatus: todo\neffort_days: 1\n\
+                 blocked_by: [{next}]\nintegrates: [{next}]"
+            )),
+        );
+    }
+    let findings = check_codes(cyc.path());
+    assert!(
+        findings
+            .iter()
+            .any(|(c, m)| c == "APLAN066" && m.contains("CYC-1") && m.contains("CYC-3")),
+        "expected 3-node APLAN066 cycle, got {findings:?}"
+    );
+    for args in [
+        &["show", "CYC-1", "--no-resolve"][..],
+        &["show", "CYC-1", "--format", "json", "--no-resolve"][..],
+        &["why", "CYC-1"][..],
+        &["why", "CYC-1", "--format", "json"][..],
+        &["tree", "CYC-1"][..],
+        &["ready"][..],
+        &["ready", "--format", "json"][..],
+        &["graph", "--format", "mermaid"][..],
+        &["graph", "--format", "dot"][..],
+        &["graph", "--format", "json"][..],
+        &["roadmap"][..],
+        &["roadmap", "--format", "json"][..],
+        &["roadmap", "--format", "markdown"][..],
+        &["summary"][..],
+        &["summary", "--format", "json"][..],
+        &["tasks"][..],
+        &["tasks", "--format", "json"][..],
+    ] {
+        let out = common::run(cyc.path(), args);
+        assert_eq!(
+            out.code, 0,
+            "read `{args:?}` failed on cycle: {}",
+            out.stderr
+        );
+    }
+
+    // 2. Cross-cutting parent and child (both tagged `cross-cutting`, no cut) pass cleanly.
+    let xc = tempdir("decomp-cross-cutting-");
+    write(
+        &xc.path().join(".aplan.yml"),
+        "root: aplan\nrequire_effort: true\nrequire_cut_membership: true\ndeny_warnings: true\n",
+    );
+    write(
+        &xc.path().join("aplan/tasks/XC-1.md"),
+        &task_md(
+            "id: XC-1\ntitle: Cross-cutting parent\nphase: 1\nstatus: todo\n\
+             tags: [cross-cutting]\npaths: [src/xc.rs]\nblocked_by: [XC-2]\nintegrates: [XC-2]",
+        ),
+    );
+    write(
+        &xc.path().join("aplan/tasks/XC-2.md"),
+        &task_md(
+            "id: XC-2\ntitle: Cross-cutting child\nphase: 1\nstatus: todo\neffort_days: 1\n\
+             tags: [cross-cutting]\npaths: [src/xc_child.rs]",
+        ),
+    );
+    let xc_check = common::run(xc.path(), &["check"]);
+    assert_eq!(xc_check.code, 0, "cross-cutting check: {}", xc_check.stderr);
+    let rm = common::run(xc.path(), &["roadmap", "--format", "json"]);
+    assert_eq!(rm.code, 0);
+    let rm_doc: serde_json::Value = serde_json::from_str(&rm.stdout).expect("roadmap json");
+    let loose = rm_doc["cross_cutting"].as_array().expect("cross_cutting");
+    assert!(
+        loose
+            .iter()
+            .any(|t| t["id"] == "XC-1" && t["decomposition"]["current_increment"] == "XC-2"),
+        "{loose:?}"
+    );
+    assert!(
+        loose
+            .iter()
+            .any(|t| t["id"] == "XC-2" && t["parent"] == "XC-1"),
+        "{loose:?}"
+    );
+}
+
+fn assert_dropped_parent_renders_no_live_children(dir: &Path, parent_id: &str) {
+    for args in [
+        &["show", parent_id, "--no-resolve"][..],
+        &["why", parent_id][..],
+        &["tree", parent_id][..],
+        &["summary"][..],
+    ] {
+        let out = common::run(dir, args);
+        assert_eq!(out.code, 0, "`{args:?}` on dropped parent: {}", out.stderr);
+        assert!(
+            out.stdout.contains("no live children") && !out.stdout.contains("all children done"),
+            "`{args:?}` output:\n{}",
+            out.stdout
+        );
+    }
+}
+
+fn init_git_repo(dir: &Path) {
+    let status = std::process::Command::new("git")
+        .args(["init", "-q"])
+        .current_dir(dir)
+        .status()
+        .expect("git init");
+    assert!(status.success(), "git init failed");
+}
+
+#[test]
+fn lifecycle_mutations_preserve_integrates_and_plan_store_epoch6_round_trips() {
+    let dir = tempdir("decomp-preserve-");
+    init_git_repo(dir.path());
+    init_lifecycle_plan(dir.path());
+
+    // Refuse `--integrates` on a milestone before writing anything.
+    let bad_ms = common::run(
+        dir.path(),
+        &[
+            "add",
+            "Bad milestone",
+            "--id",
+            "M-9",
+            "--phase",
+            "1",
+            "--tag",
+            "milestone",
+            "--blocked-by",
+            "A1-01",
+            "--integrates",
+            "A1-01",
+        ],
+    );
+    assert_ne!(bad_ms.code, 0, "milestone with --integrates must fail");
+    assert!(!dir.path().join("aplan/tasks/M-9.md").exists());
+
+    // `blueprint apply` with `task:<existing>` inside `integrates` and `blocked_by`.
+    let bp = dir.path().join("existing.blueprint.yml");
+    write(
+        &bp,
+        concat!(
+            "schema: aplan/blueprint/v1\n",
+            "name: wrap\n",
+            "title: Wrap existing child\n",
+            "description: Integrates an existing task reference.\n",
+            "tasks:\n",
+            "  - key: parent\n",
+            "    title: Wrapper boundary\n",
+            "    blocked_by: [task:A1-01]\n",
+            "    integrates: [task:A1-01]\n",
+            "    paths: [src/wrap.rs]\n",
+            "    body: Wrapper integration boundary.\n",
+        ),
+    );
+    let bp_out = common::run(
+        dir.path(),
+        &[
+            "blueprint",
+            "apply",
+            "--file",
+            bp.to_str().expect("utf8"),
+            "--cut",
+            "M-1",
+        ],
+    );
+    assert_eq!(bp_out.code, 0, "blueprint task: ref: {}", bp_out.stderr);
+    let parent_id = "A1-100";
+    assert!(bp_out.stdout.contains(parent_id), "{}", bp_out.stdout);
+
+    // Lifecycle mutations (`start`, `stop`, `park`, `unpark`, `tag`) preserve `integrates`.
+    for args in [
+        &["start", "A1-01"][..],
+        &["stop", "A1-01"][..],
+        &["park", parent_id, "--reason", "waiting on review"][..],
+        &["unpark", parent_id][..],
+        &["tag", "add", parent_id, "tracked"][..],
+        &["tag", "rm", parent_id, "tracked"][..],
+    ] {
+        let out = common::run(dir.path(), args);
+        assert_eq!(out.code, 0, "mutation `{args:?}` failed: {}", out.stderr);
+    }
+    let parent_source =
+        std::fs::read_to_string(dir.path().join("aplan/tasks/A1-100.md")).expect("parent md");
+    assert!(
+        parent_source.contains("integrates:") && parent_source.contains("A1-01"),
+        "lifecycle mutations must preserve integrates: {parent_source}"
+    );
+
+    // PlanStore epoch-6 warm cache round-trips `integrates` identically.
+    let cache_dir = tempdir("decomp-store-cache-");
+    let opts = aplan_app::PlanStoreOptions {
+        mode: aplan_app::CacheMode::Auto,
+        cache_root: Some(cache_dir.path().to_path_buf()),
+        writer_identity: Some("decomp-test".to_string()),
+        ..aplan_app::PlanStoreOptions::default()
+    };
+    let cold = aplan_app::PlanStore::open(&dir.path().join("aplan"), &opts).expect("cold open");
+    let warm = aplan_app::PlanStore::open(&dir.path().join("aplan"), &opts).expect("warm open");
+    let cold_p = cold
+        .snapshot()
+        .plan
+        .tasks
+        .iter()
+        .find(|t| t.task.id == parent_id)
+        .expect("cold P");
+    let warm_p = warm
+        .snapshot()
+        .plan
+        .tasks
+        .iter()
+        .find(|t| t.task.id == parent_id)
+        .expect("warm P");
+    assert_eq!(cold_p.task.integrates, vec!["A1-01"]);
+    assert_eq!(warm_p.task.integrates, cold_p.task.integrates);
+
+    // Dropped parent with dropped child says `no live children`, never `all children done`.
+    let dropped = common::run(dir.path(), &["drop", parent_id, "A1-01"]);
+    assert_eq!(dropped.code, 0, "drop pair: {}", dropped.stderr);
+    assert_dropped_parent_renders_no_live_children(dir.path(), parent_id);
+}

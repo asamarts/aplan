@@ -607,6 +607,13 @@ pub struct ReadyCollectionItem {
     /// Active local claim holder, if any.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub held_by: Option<String>,
+    /// Parent work task integrating this task, if any (`A2-148`, ADR-0076).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub parent: Option<String>,
+    /// Derived decomposition progress when this ready task is an integration
+    /// boundary declaring `integrates`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub decomposition: Option<aplan_core::DecompositionProgress>,
 }
 
 /// Bounded summary resource returned by `aplan://plan/summary`.

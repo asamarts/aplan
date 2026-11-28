@@ -16578,7 +16578,9 @@ fn write_why_decomposition_context(out: &mut String, graph: &aplan_core::Graph<'
             .current_increment
             .as_deref()
             .map_or_else(String::new, |cur| format!("; current increment: {cur}"));
-        let boundary = if d.integration_ready {
+        let boundary = if d.children_total == 0 {
+            "; no live children".to_string()
+        } else if d.integration_ready {
             "; integration boundary ready".to_string()
         } else if d.remaining_children.is_empty() {
             "; all children done".to_string()

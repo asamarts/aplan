@@ -781,6 +781,8 @@ impl AplanServer {
                             cut,
                             owner: row.owner.clone(),
                             held_by: row.held_by.clone(),
+                            parent: row.parent.clone(),
+                            decomposition: row.decomposition.clone(),
                         }
                     })
                     .collect();
@@ -2076,5 +2078,132 @@ mod tests {
             .expect_err("in-flight cancellation must return error");
         let _ = tx.send(());
         assert!(mid_err.message.contains("during unit"));
+    }
+
+    fn integrates_test_server(prefix: &str) -> (tempfile::TempDir, AplanServer) {
+        let dir = tempfile::Builder::new()
+            .prefix(prefix)
+            .tempdir_in(aplan_core::fixture::fixture_root())
+            .expect("tempdir");
+        let root = dir.path().join("aplan");
+        std::fs::create_dir_all(root.join("tasks")).expect("tasks dir");
+        std::fs::write(
+            root.join("tasks/M-1.md"),
+            "---\nid: M-1\ntitle: Cut 1\nphase: 1\nstatus: todo\ntags: [milestone, v1]\nblocked_by: [A-1]\n---\n",
+        )
+        .expect("M-1");
+        std::fs::write(
+            root.join("tasks/A-1.md"),
+            "---\nid: A-1\ntitle: First increment\nphase: 1\nstatus: todo\neffort_days: 1\npaths: [src/a.rs]\n---\n",
+        )
+        .expect("A-1");
+        let policy = crate::Policy {
+            options: aplan_core::validate::Options {
+                require_cut_membership: true,
+                ..aplan_core::validate::Options::default()
+            },
+            repo_root: dir.path().to_path_buf(),
+            ..crate::Policy::default()
+        };
+        let server = AplanServer::new(
+            root,
+            policy,
+            serde_json::json!({}),
+            aplan_app::CacheMode::Off,
+            "mcp-integrates-test".to_string(),
+            ("0.8.0-dev".to_string(), "0123456789ab".to_string()),
+            None,
+        );
+        (dir, server)
+    }
+
+    #[test]
+    fn wire_tools_and_resources_expose_and_validate_integrates_decomposition() {
+        let (_dir, server) = integrates_test_server("mcp-integrates-wire-");
+
+        // Unpaired `integrates` without `blocked_by` fails closed at wire dispatch.
+        let bad = server.dispatch_structured(
+            "aplan_add",
+            &serde_json::json!({
+                "id": "A-2",
+                "title": "Bad parent",
+                "cut": "M-1",
+                "integrates": ["A-1"],
+                "paths": ["src/p.rs"]
+            }),
+        );
+        assert!(bad.is_error, "{bad:?}");
+        assert!(
+            bad.concise_text.contains("APLAN066"),
+            "{}",
+            bad.concise_text
+        );
+
+        // Paired `blocked_by` + `integrates` succeeds via wire dispatch.
+        let ok = server.dispatch_structured(
+            "aplan_add",
+            &serde_json::json!({
+                "id": "A-2",
+                "title": "Good parent",
+                "cut": "M-1",
+                "blocked_by": ["A-1"],
+                "integrates": ["A-1"],
+                "paths": ["src/p.rs"]
+            }),
+        );
+        assert!(!ok.is_error, "{ok:?}");
+
+        // Wire `aplan_dep` refuses removing a `blocked_by` edge that would orphan `integrates`.
+        let bad_dep = server.dispatch_structured(
+            "aplan_dep",
+            &serde_json::json!({"id": "A-2", "after": "A-1", "add": false}),
+        );
+        assert!(bad_dep.is_error, "{bad_dep:?}");
+        assert!(
+            bad_dep.concise_text.contains("APLAN066"),
+            "{}",
+            bad_dep.concise_text
+        );
+
+        // Wire `aplan_show`, `aplan_why`, `aplan://tasks/A-2`, and `aplan://collections/ready` agree.
+        let show = server.dispatch_structured("aplan_show", &serde_json::json!({"id": "A-2"}));
+        assert!(!show.is_error, "{show:?}");
+        assert_eq!(
+            show.structured["data"]["decomposition"]["current_increment"],
+            "A-1"
+        );
+        let why = server.dispatch_structured("aplan_why", &serde_json::json!({"id": "A-2"}));
+        assert!(!why.is_error, "{why:?}");
+        assert_eq!(
+            why.structured["data"]["blocked_by"][0]["integrated_child"],
+            true
+        );
+
+        let (_, detail, _, _) = server
+            .read_resource_payload("aplan://tasks/A-2")
+            .expect("task detail resource");
+        assert_eq!(detail["task"]["integrates"][0]["id"], "A-1");
+        assert_eq!(detail["task"]["decomposition"]["children_total"], 1);
+
+        let (_, ready_page, _, _) = server
+            .read_resource_payload("aplan://collections/ready")
+            .expect("ready collection resource");
+        assert_eq!(ready_page["items"][0]["id"], "A-1");
+        assert_eq!(ready_page["items"][0]["parent"], "A-2");
+
+        // Close A-1 so A-2 reaches its integration boundary on `aplan://collections/ready`.
+        let close = server.dispatch_structured(
+            "aplan_close",
+            &serde_json::json!({"id": "A-1", "evidence": ["url:https://example.invalid/a-1"]}),
+        );
+        assert!(!close.is_error, "{close:?}");
+        let (_, ready_after, _, _) = server
+            .read_resource_payload("aplan://collections/ready")
+            .expect("ready after child close");
+        assert_eq!(ready_after["items"][0]["id"], "A-2");
+        assert_eq!(
+            ready_after["items"][0]["decomposition"]["integration_ready"],
+            true
+        );
     }
 }

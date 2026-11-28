@@ -4939,7 +4939,7 @@ fn the_rule_catalogue_is_committed_and_current() {
 }
 
 /// Wordings the corpus currently reaches. Raise it when a branch is added.
-const WORDINGS: usize = 36;
+const WORDINGS: usize = 123;
 
 #[test]
 fn the_catalogue_pins_every_rule_and_is_not_vacuous() {

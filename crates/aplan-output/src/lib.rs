@@ -2017,7 +2017,9 @@ fn render_decompositions_human(
     writeln!(out, "\ndecompositions:")?;
     for parent in decompositions {
         let p = &parent.progress;
-        let state = if p.integration_ready {
+        let state = if p.children_total == 0 {
+            "no live children".to_string()
+        } else if p.integration_ready {
             "integration boundary ready".to_string()
         } else if let Some(cur) = &p.current_increment {
             format!("current {cur}")
@@ -2929,7 +2931,9 @@ fn show_decomposition(s: &mut String, show: &Show) {
     } else {
         String::new()
     };
-    let boundary = if d.integration_ready {
+    let boundary = if d.children_total == 0 {
+        "no live children"
+    } else if d.integration_ready {
         "ready to integrate"
     } else if d.remaining_children.is_empty() {
         "all children done"
@@ -4030,7 +4034,9 @@ fn write_tree_decomposition_header(s: &mut String, graph: &Graph<'_>, id: &str) 
             .current_increment
             .as_deref()
             .map_or_else(String::new, |cur| format!("; current increment: {cur}"));
-        let remaining = if d.remaining_children.is_empty() {
+        let remaining = if d.children_total == 0 {
+            "; no live children".to_string()
+        } else if d.remaining_children.is_empty() {
             if d.integration_ready {
                 "; integration boundary ready".to_string()
             } else {
@@ -10794,5 +10800,69 @@ mod format_table_tests {
         assert!(tasks_str.contains("\"integrates\""), "{tasks_str}");
         assert!(tasks_str.contains("\"parent\": \"P-1\""), "{tasks_str}");
         render_tasks(&export, Format::Human).expect("tasks human");
+    }
+
+    #[test]
+    fn dropped_decomposition_renders_no_live_children_across_show_tree_and_summary() {
+        use aplan_core::task::{Status, Task};
+        let strip = |s: &str| anstream::adapter::strip_str(s).to_string();
+        let make = |id: &str, blocked: &[&str], integrates: &[&str]| Task {
+            id: id.into(),
+            title: format!("task {id}"),
+            phase: 0,
+            status: Status::Dropped,
+            owner: None,
+            effort_days: Some(1.0),
+            blocked_by: blocked.iter().map(|s| (*s).to_string()).collect(),
+            prefer_after: Vec::new(),
+            ratified_by: Vec::new(),
+            contains: Vec::new(),
+            integrates: integrates.iter().map(|s| (*s).to_string()).collect(),
+            evidence: Vec::new(),
+            paths: Vec::new(),
+            traces: Vec::new(),
+            trace_fingerprints: std::collections::BTreeMap::new(),
+            evidence_fingerprints: std::collections::BTreeMap::new(),
+            tags: Vec::new(),
+            revisit_at: None,
+            version_impact: None,
+            version_impact_reason: None,
+            version: None,
+            closed_at: None,
+            closed_at_source: None,
+        };
+        let p_drop = make("P-D", &["C-D"], &["C-D"]);
+        let c_drop = make("C-D", &[], &[]);
+        let g_drop = Graph::new([&p_drop, &c_drop]);
+        let claims = aplan_core::ClaimSnapshot::unavailable(0, "unit");
+        let show_drop = aplan_core::Show::assemble_for_task(
+            &g_drop,
+            &[],
+            &std::collections::BTreeMap::new(),
+            &claims,
+            "P-D",
+            false,
+            None,
+        )
+        .expect("show dropped parent");
+        let show_text = strip(&render_show(&show_drop));
+        assert!(
+            show_text.contains("no live children") && !show_text.contains("all children done"),
+            "{show_text}"
+        );
+        let tree_text = strip(&tree(&g_drop, "P-D", Some(4), false).expect("tree dropped"));
+        assert!(
+            tree_text.contains("no live children") && !tree_text.contains("all children done"),
+            "{tree_text}"
+        );
+        let sum_drop = g_drop.summary();
+        let mut drop_buf = Vec::new();
+        render_decompositions_human(&mut drop_buf, &sum_drop.decompositions)
+            .expect("drop decompositions");
+        let sum_text = String::from_utf8(drop_buf).expect("utf8");
+        assert!(
+            sum_text.contains("no live children") && !sum_text.contains("all children done"),
+            "{sum_text}"
+        );
     }
 }
